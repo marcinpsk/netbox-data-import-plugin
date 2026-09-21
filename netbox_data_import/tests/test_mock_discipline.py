@@ -240,13 +240,14 @@ def test_baseline_budget_allows_grandfathered_but_not_excess(tmp_path):
     """A site with N grandfathered mocks tolerates N but flags the N+1-th."""
     pkg = tmp_path / "tests"
     pkg.mkdir()
-    (pkg / "__init__.py").write_text("")
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
     (pkg / "test_thing.py").write_text(
         "from unittest.mock import MagicMock\n\n"
         "def test_x():\n"
         "    a = MagicMock()\n"
         "    b = MagicMock()\n"
-        "    return a, b\n"
+        "    return a, b\n",
+        encoding="utf-8",
     )
     # Budget of 1 for the two-mock site → exactly one excess is reported.
     extra = unapproved(root=pkg, baseline={"test_thing.py::test_x": 1})
@@ -657,7 +658,7 @@ def test_scan_tree_exempts_only_the_guard_at_the_tests_root(tmp_path):
     nested = tmp_path / "nested"
     nested.mkdir()
     (nested / "mock_discipline.py").write_text(
-        "from unittest.mock import MagicMock\n\n\ndef test_x():\n    return MagicMock()\n"
+        "from unittest.mock import MagicMock\n\n\ndef test_x():\n    return MagicMock()\n", encoding="utf-8"
     )
 
     assert {v.path for v in scan_tree(tmp_path)} == {"nested/mock_discipline.py"}
@@ -689,7 +690,7 @@ def test_save_and_load_baseline_roundtrip(tmp_path):
     counts = {"b.py::g": 1, "a.py::f": 2}
     path = tmp_path / "baseline.txt"
     save_baseline(counts, path)
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     assert "Mock-discipline baseline" in text  # explanatory header written (incl. SPDX tags)
     assert not text.endswith("\n\n")  # exactly one trailing newline
     assert load_baseline(path) == counts
@@ -698,7 +699,9 @@ def test_save_and_load_baseline_roundtrip(tmp_path):
 def test_main_update_baseline_writes_and_reports(capsys, tmp_path):
     """`--update-baseline` writes a baseline that a later scan honors."""
     bad_file = tmp_path / "_tmp_mockcheck_cov.py"
-    bad_file.write_text("from unittest.mock import MagicMock\n\ndef test_x():\n    return MagicMock()\n")
+    bad_file.write_text(
+        "from unittest.mock import MagicMock\n\ndef test_x():\n    return MagicMock()\n", encoding="utf-8"
+    )
     baseline_path = tmp_path / "baseline.txt"
 
     rc = md._main(["--update-baseline"], root=tmp_path, baseline_path=baseline_path)
@@ -715,7 +718,9 @@ def test_main_update_baseline_writes_and_reports(capsys, tmp_path):
 def test_main_reports_and_exits_nonzero_on_violation(capsys, tmp_path):
     """`_main([])` prints each unapproved mock and returns 1 when the tree has one."""
     bad_file = tmp_path / "_tmp_mockcheck_cov.py"
-    bad_file.write_text("from unittest.mock import MagicMock\n\ndef test_x():\n    return MagicMock()\n")
+    bad_file.write_text(
+        "from unittest.mock import MagicMock\n\ndef test_x():\n    return MagicMock()\n", encoding="utf-8"
+    )
     rc = md._main([], root=tmp_path, baseline_path=tmp_path / "baseline.txt")
     out = capsys.readouterr().out
     assert rc == 1

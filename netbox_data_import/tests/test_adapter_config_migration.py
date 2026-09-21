@@ -116,7 +116,7 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
             name="Legacy Full",
             sheet_name="Inventory",
             source_id_column="Source ID",
-            custom_field_name="cans_id",
+            custom_field_name="external_id",
             update_existing=False,
             create_missing_device_types=False,
             capture_extra_data=True,
@@ -142,7 +142,7 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
             {
                 "sheet_name": "Inventory",
                 "source_id_column": "Source ID",
-                "custom_field_name": "cans_id",
+                "custom_field_name": "external_id",
                 "update_existing": False,
                 "create_missing_device_types": False,
                 "capture_extra_data": True,

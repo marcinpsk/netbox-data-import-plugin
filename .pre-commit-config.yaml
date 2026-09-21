@@ -47,13 +47,13 @@ repos:
     hooks:
       - id: reuse-lint
         name: REUSE Compliance (SPDX headers)
-        entry: uv run --no-sync --native-tls python3 -m reuse lint
+        entry: uv run --no-sync --system-certs python3 -m reuse lint
         language: system
         pass_filenames: false
 
       - id: mypy
         name: mypy (the type gate CI runs inside format-and-lint)
-        entry: uv run --no-sync --native-tls mypy
+        entry: uv run --no-sync --system-certs mypy
         language: system
         pass_filenames: false
         files: \.py$

@@ -64,13 +64,38 @@
     ModalClass.getOrCreateInstance(target).show(trigger);
   });
 
+  function selectedRackValues(rackSelect) {
+    var chosen = [];
+    if (!rackSelect) return chosen;
+    for (var index = 0; index < rackSelect.options.length; index++) {
+      if (!rackSelect.options[index].selected) continue;
+      chosen.push(rackSelect.options[index].value);
+    }
+    return chosen;
+  }
+
+  /* The chosen racks, read from the options rather than the control, so an enhanced select
+   * and a plain one answer alike. */
+  function selectedRacks() {
+    var rackSelect = document.getElementById('previewRackFilter');
+    var chosen = selectedRackValues(rackSelect);
+    if (!rackSelect) return chosen;
+    // Tom Select drops an option whose value is empty, so the page names that option instead.
+    var noRackValue = rackSelect.dataset.noRackValue;
+    for (var index = 0; index < chosen.length; index++) {
+      if (chosen[index] === noRackValue) chosen[index] = '';
+    }
+    return chosen;
+  }
+
   function applyFilters() {
     var filterInput = document.getElementById('previewRowFilter');
     var actionSelect = document.getElementById('previewActionFilter');
     var text = (filterInput ? filterInput.value : '').toLowerCase().trim();
     var action = (actionSelect ? actionSelect.value : '').toLowerCase();
+    var racks = selectedRacks();
     var clearButton = document.getElementById('previewRowFilterClear');
-    if (clearButton) clearButton.style.display = (text || action) ? '' : 'none';
+    if (clearButton) clearButton.style.display = (text || action || racks.length) ? '' : 'none';
 
     // Source rows only: field-difference rows hold sub-tables with rows of their own, and the
     // empty-state rows belong to the table rather than to the file.
@@ -80,7 +105,9 @@
     rows.forEach(function (row) {
       var textMatch = !text || row.textContent.toLowerCase().includes(text);
       var rowAction = (row.dataset.action || '').toLowerCase();
-      var visible = textMatch && (!action || rowAction === action);
+      // An empty option value is the rows that name no rack, as the rack view groups them.
+      var rackMatch = !racks.length || racks.indexOf(row.dataset.rackName || '') !== -1;
+      var visible = textMatch && (!action || rowAction === action) && rackMatch;
       row.style.display = visible ? '' : 'none';
       if (visible) shown++;
       else if (rowAction === 'error') hiddenErrors++;
@@ -101,14 +128,22 @@
     }
   }
 
-  function setFilters(text, action) {
+  function setFilters(text, action, racks) {
     var filterInput = document.getElementById('previewRowFilter');
     var actionSelect = document.getElementById('previewActionFilter');
+    var rackSelect = document.getElementById('previewRackFilter');
+    var chosen = racks || [];
     if (filterInput) filterInput.value = text;
     if (actionSelect) {
       actionSelect.value = action;
       // NetBox replaces the select with a Tom Select control that reads its own value.
       if (actionSelect.tomselect) actionSelect.tomselect.setValue(action, true);
+    }
+    if (rackSelect) {
+      for (var index = 0; index < rackSelect.options.length; index++) {
+        rackSelect.options[index].selected = chosen.indexOf(rackSelect.options[index].value) !== -1;
+      }
+      if (rackSelect.tomselect) rackSelect.tomselect.setValue(chosen, true);
     }
     applyFilters();
   }
@@ -118,7 +153,7 @@
   });
 
   document.addEventListener('change', function (event) {
-    if (event.target.id === 'previewActionFilter') applyFilters();
+    if (event.target.id === 'previewActionFilter' || event.target.id === 'previewRackFilter') applyFilters();
   });
 
   document.addEventListener('keydown', function (event) {
@@ -133,4 +168,91 @@
       setFilters('', 'error');
     }
   });
+
+  /* A recalculation reloads the whole page, so the filters and the place the operator was reading
+   * are carried across it. The entry is consumed on arrival, so only that reload is moved. */
+  var VIEW_KEY = 'ndi-preview-view';
+
+  /* The first row still on screen. A recalculated preview can hold a different number of rows,
+   * so an offset alone would land somewhere else. */
+  function rowInView() {
+    var rows = document.querySelectorAll('#previewRowsBody > tr[data-action]');
+    for (var index = 0; index < rows.length; index++) {
+      if (rows[index].style.display === 'none') continue;
+      var rect = rows[index].getBoundingClientRect();
+      // Both edges, so a table entirely below the fold does not answer with its first row.
+      if (rect.bottom > 0 && rect.top < (window.innerHeight || 0)) {
+        return {row: rows[index].dataset.rowNumber || '', type: rows[index].dataset.objectType || ''};
+      }
+    }
+    return null;
+  }
+
+  function findRow(anchor) {
+    if (!anchor) return null;
+    var rows = document.querySelectorAll('#previewRowsBody > tr[data-action]');
+    for (var index = 0; index < rows.length; index++) {
+      if (rows[index].dataset.rowNumber === anchor.row && rows[index].dataset.objectType === anchor.type) {
+        return rows[index];
+      }
+    }
+    return null;
+  }
+
+  function rememberView() {
+    var filterInput = document.getElementById('previewRowFilter');
+    var actionSelect = document.getElementById('previewActionFilter');
+    var rackSelect = document.getElementById('previewRackFilter');
+    try {
+      window.sessionStorage.setItem(VIEW_KEY, JSON.stringify({
+        text: filterInput ? filterInput.value : '',
+        action: actionSelect ? actionSelect.value : '',
+        racks: selectedRackValues(rackSelect),
+        scrollY: window.scrollY || 0,
+        anchor: rowInView()
+      }));
+    } catch (error) {
+      /* The recalculation still runs. Only the restore is lost. */
+    }
+  }
+
+  function restoreView() {
+    var stored = null;
+    try {
+      stored = window.sessionStorage.getItem(VIEW_KEY);
+      window.sessionStorage.removeItem(VIEW_KEY);
+    } catch (error) {
+      return;
+    }
+    if (!stored) return;
+    var view;
+    try {
+      view = JSON.parse(stored);
+    } catch (error) {
+      return;
+    }
+    if (view.text || view.action || (view.racks && view.racks.length)) {
+      setFilters(view.text || '', view.action || '', view.racks || []);
+    }
+    var target = findRow(view.anchor);
+    if (target && target.style.display !== 'none') {
+      target.scrollIntoView();
+      return;
+    }
+    if (view.scrollY) window.scrollTo(0, view.scrollY);
+  }
+
+  window.ndiRememberPreviewView = rememberView;
+  window.ndiRestorePreviewView = restoreView;
+
+  // A direct press navigates without the row-action script, so the view is stored here too.
+  document.addEventListener('click', function (event) {
+    if (event.target.closest('.ndi-recalculate-preview')) rememberView();
+  });
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', restoreView);
+  } else {
+    restoreView();
+  }
 }());

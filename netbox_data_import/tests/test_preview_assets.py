@@ -13,6 +13,7 @@ from pathlib import Path
 from django.test import SimpleTestCase
 from django.urls import reverse
 
+from netbox_data_import import device_field_review
 from netbox_data_import.catalog import CATALOG
 from netbox_data_import.tests.test_views import BaseViewTestCase, PreviewSessionMixin
 
@@ -28,7 +29,7 @@ class HeadBlockCarriesNoPageAssetsTest(SimpleTestCase):
         """One offending template silently loses its styling and its behavior after a boost."""
         offenders = []
         for template in sorted(TEMPLATE_DIR.glob("*.html")):
-            for block in HEAD_BLOCK.findall(template.read_text()):
+            for block in HEAD_BLOCK.findall(template.read_text(encoding="utf-8")):
                 for tag in ("<script", "<style"):
                     if tag in block:
                         offenders.append(f"{template.name}: {tag}")
@@ -48,10 +49,350 @@ class DeferredFormsReadTheirActionAttributeTest(SimpleTestCase):
         offenders = [
             f"{source.name}:{number}"
             for source in sources
-            for number, line in enumerate(source.read_text().splitlines(), start=1)
+            for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1)
             if re.search(r"\bform\.action\b", line)
         ]
         self.assertEqual(offenders, [], "Read the posted URL with form.getAttribute('action').")
+
+
+class PreviewFilterStateIsRememberedTest(SimpleTestCase):
+    """Every filter that changes row visibility must survive preview recalculation."""
+
+    def test_every_applied_filter_is_stored_in_the_view_payload(self):
+        """A new filter must extend the recalculation payload in the same change."""
+        source = (STATIC_JS_DIR / "preview_row_controls.js").read_text(encoding="utf-8")
+
+        def function_body(name):
+            start = source.index(f"function {name}(")
+            opening = source.index("{", start)
+            depth = 1
+            cursor = opening + 1
+            while depth:
+                depth += (source[cursor] == "{") - (source[cursor] == "}")
+                cursor += 1
+            return source[opening + 1 : cursor - 1]
+
+        applied = function_body("applyFilters")
+        control_variables = set(re.findall(r"var (\w+) = document\.getElementById\('[^']*Filter'\);", applied))
+        helper_calls = set(re.findall(r"(?<![.\w])(\w+)\(\)", applied))
+        filter_helpers = {
+            name for name in helper_calls if re.search(r"getElementById\('[^']*Filter'\)", function_body(name))
+        }
+        applied_state = {
+            name
+            for name, expression in re.findall(r"var (\w+) = ([^;]+);", applied)
+            if "getElementById" not in expression
+            and (
+                any(re.search(rf"\b{variable}\b", expression) for variable in control_variables)
+                or any(re.search(rf"\b{helper}\(", expression) for helper in filter_helpers)
+            )
+        }
+
+        remembered = function_body("rememberView")
+        payload = re.search(r"JSON\.stringify\(\{(.*?)\}\)\)", remembered, re.DOTALL)
+        self.assertIsNotNone(payload, "rememberView must store one JSON object")
+        stored_state = set(re.findall(r"^\s+(\w+):", payload.group(1), re.MULTILINE))
+
+        self.assertTrue(applied_state, "applyFilters must read at least one filter control")
+        self.assertEqual(applied_state - stored_state, set(), "store every applied filter before recalculation")
+
+
+class SyncStateLabelsMatchTheServerTest(SimpleTestCase):
+    """Every server sync state needs an explicit label in the confirmation modal."""
+
+    def test_every_server_sync_state_has_a_modal_label(self):
+        """A missing label makes the browser call an unknown write state unchanged."""
+        source = (STATIC_JS_DIR / "sync_row_modal.js").read_text(encoding="utf-8")
+        labels_match = re.search(r"var STATE_LABELS = \{(.*?)\n    \};", source, re.DOTALL)
+        self.assertIsNotNone(labels_match, "the sync modal must declare STATE_LABELS")
+        label_keys = set(re.findall(r"^\s+([a-z_]+):", labels_match.group(1), re.MULTILINE))
+        server_states = {
+            value
+            for name, value in vars(device_field_review).items()
+            if name.startswith("SYNC_STATE_") and isinstance(value, str)
+        }
+
+        self.assertEqual(server_states - label_keys, set(), "add a modal label for every server sync state")
+
+
+class SyncPendingWritesReachTheModalTest(SimpleTestCase):
+    """Every pending write the planner names must reach the modal summary."""
+
+    def test_every_server_pending_write_flag_reaches_the_summary_builder(self):
+        """A new write category must be projected and summarized in the same change."""
+        server_source = (Path(__file__).resolve().parents[1] / "target_modules.py").read_text(encoding="utf-8")
+        server_flags = set(re.findall(r'"(pending_write_[a-z_]+)"\s*:', server_source))
+        # A scan that matches nothing would pass this guard while the feature is renamed away.
+        self.assertTrue(server_flags, "target_modules must name the pending writes it plans")
+
+        template = (TEMPLATE_DIR / "import_preview.html").read_text(encoding="utf-8")
+        projected_flags = {
+            attribute.replace("-", "_") for attribute in re.findall(r"data-(pending-write-[a-z-]+)=", template)
+        }
+
+        modal_source = (STATIC_JS_DIR / "sync_row_modal.js").read_text(encoding="utf-8")
+        start = modal_source.index("function pendingWriteSummary(")
+        opening = modal_source.index("{", start)
+        depth = 1
+        cursor = opening + 1
+        while depth:
+            depth += (modal_source[cursor] == "{") - (modal_source[cursor] == "}")
+            cursor += 1
+        summary_builder = modal_source[opening + 1 : cursor - 1]
+        read_flags = {
+            re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+            for name in re.findall(r"btn\.dataset\.(pendingWrite[A-Za-z0-9]+)", summary_builder)
+        }
+
+        self.assertEqual(server_flags - projected_flags, set(), "project every pending-write flag onto the trigger")
+        self.assertEqual(server_flags - read_flags, set(), "summarize every server pending-write flag")
+
+
+class PendingContactWritePreviewTest(BaseViewTestCase):
+    """The rendered sync trigger names work outside reviewed Device fields."""
+
+    def test_matching_reviewed_fields_carry_the_pending_contact_write(self):
+        """Plan and render an update whose only pending write is its Contact assignment."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+        from tenancy.models import ContactRole
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.models import ColumnMapping, DeviceExistingMatch
+        from netbox_data_import.plan import Disposition
+        from netbox_data_import.preview_row_actions import start_new_preview
+        from netbox_data_import.tests.helpers import set_import_source, store_workbook_document
+        from netbox_data_import.tests.test_views import _make_profile
+
+        site = Site.objects.create(name="Pending Contact Site", slug="pending-contact-site")
+        rack = Rack.objects.create(name="Pending Contact Rack", site=site, u_height=42)
+        manufacturer = Manufacturer.objects.create(name="Pending Contact Vendor", slug="pending-contact-vendor")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Pending Contact Model",
+            slug="pending-contact-vendor-pending-contact-model",
+            u_height=1,
+        )
+        role = DeviceRole.objects.create(name="Pending Contact Server", slug="server")
+        contact_role = ContactRole.objects.create(name="Pending Contact Primary", slug="pending-contact-primary")
+        profile = _make_profile("Pending Contact Profile")
+        profile.adapter_config = {
+            **profile.adapter_config,
+            "primary_contact_role": contact_role.name,
+            "primary_contact_lookup_field": "email",
+        }
+        profile.save(update_fields=["adapter_config"])
+        ColumnMapping.objects.create(
+            profile=profile,
+            source_column="Primary Contact",
+            target_field="primary_contact",
+        )
+        headers = [
+            "Id",
+            "Rack",
+            "Name",
+            "Class",
+            "Make",
+            "Model",
+            "UHeight",
+            "UPosition",
+            "Side",
+            "Airflow",
+            "Serial Number",
+            "Asset Tag",
+            "Status",
+            "Primary Contact",
+        ]
+        source_id = "pending-contact-1"
+        document = store_workbook_document(
+            profile,
+            headers,
+            [
+                [
+                    source_id,
+                    rack.name,
+                    "pending-contact-device",
+                    "Server",
+                    manufacturer.name,
+                    device_type.model,
+                    "1",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "active",
+                    "owner@example.invalid",
+                ]
+            ],
+            self.user,
+            "pending-contact.xlsx",
+        )
+        planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
+        initial_plan = ImportEngine.plan(profile, document, self.user, planning_context)
+        initial_unit = initial_plan.unit(f"device:source:{source_id}")
+        self.assertTrue(initial_unit.changes, initial_unit.diagnostics)
+        payload = initial_unit.changes[-1].payload
+        device = Device.objects.create(
+            name=payload["name"],
+            serial=payload["serial"],
+            asset_tag=payload["asset_tag"] or None,
+            device_type_id=payload["device_type_id"],
+            role_id=role.pk,
+            site_id=payload["site_id"],
+            location_id=payload["location_id"],
+            rack_id=payload["rack_id"],
+            position=payload["u_position"],
+            face=payload["face"],
+            airflow=payload["airflow"],
+            status=payload["status"],
+            tenant_id=payload["tenant_id"],
+        )
+        set_import_source(device, profile, source_id, extra_columns=payload["extra_columns"])
+        DeviceExistingMatch.objects.create(
+            profile=profile,
+            source_id=source_id,
+            source_asset_tag=payload["asset_tag"],
+            netbox_device_id=device.pk,
+            device_name=device.name,
+        )
+
+        plan = ImportEngine.plan(profile, document, self.user, planning_context)
+        session = self.client.session
+        start_new_preview(session, plan)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": document.filename,
+            "source_document_id": document.pk,
+        }
+        session["import_preview_pending"] = True
+        session.save()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertEqual(response.status_code, 200)
+        unit = next(unit for unit in response.context["result"].units if unit.identity == f"device:source:{source_id}")
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(unit.extra_data["field_diff"], {})
+        self.assertTrue(unit.extra_data["field_matching"])
+        self.assertTrue(unit.extra_data["pending_write_contact"])
+        self.assertFalse(unit.extra_data["pending_write_provenance"])
+        trigger = next(
+            button
+            for button in re.findall(r'<button[^>]*class="[^"]*ndi-sync-row-btn[^"]*"[^>]*>', response.content.decode())
+            if f'data-source-id="{source_id}"' in button
+        )
+        self.assertIn('data-pending-write-contact="true"', trigger)
+        self.assertIn('data-pending-write-provenance="false"', trigger)
+
+
+class CreatedDevicePendingWritePreviewTest(BaseViewTestCase):
+    """A created Device writes its Contact and its provenance, so the trigger must say so."""
+
+    def test_a_created_device_carries_both_pending_writes(self):
+        """Plan and render a create: nothing is stored yet, so both writes are still pending."""
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Rack, Site
+        from tenancy.models import ContactRole
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.models import ColumnMapping
+        from netbox_data_import.plan import Disposition
+        from netbox_data_import.preview_row_actions import start_new_preview
+        from netbox_data_import.tests.helpers import store_workbook_document
+        from netbox_data_import.tests.test_views import _make_profile
+
+        site = Site.objects.create(name="Created Pending Site", slug="created-pending-site")
+        rack = Rack.objects.create(name="Created Pending Rack", site=site, u_height=42)
+        manufacturer = Manufacturer.objects.create(name="Created Pending Vendor", slug="created-pending-vendor")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Created Pending Model",
+            slug="created-pending-vendor-created-pending-model",
+            u_height=1,
+        )
+        DeviceRole.objects.create(name="Created Pending Server", slug="server")
+        contact_role = ContactRole.objects.create(name="Created Pending Primary", slug="created-pending-primary")
+        profile = _make_profile("Created Pending Profile")
+        profile.adapter_config = {
+            **profile.adapter_config,
+            "primary_contact_role": contact_role.name,
+            "primary_contact_lookup_field": "email",
+        }
+        profile.save(update_fields=["adapter_config"])
+        ColumnMapping.objects.create(profile=profile, source_column="Primary Contact", target_field="primary_contact")
+        headers = [
+            "Id",
+            "Rack",
+            "Name",
+            "Class",
+            "Make",
+            "Model",
+            "UHeight",
+            "UPosition",
+            "Side",
+            "Airflow",
+            "Serial Number",
+            "Asset Tag",
+            "Status",
+            "Primary Contact",
+        ]
+        source_id = "created-pending-1"
+        document = store_workbook_document(
+            profile,
+            headers,
+            [
+                [
+                    source_id,
+                    rack.name,
+                    "created-pending-device",
+                    "Server",
+                    manufacturer.name,
+                    device_type.model,
+                    "1",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "active",
+                    "owner@example.invalid",
+                ]
+            ],
+            self.user,
+            "created-pending.xlsx",
+        )
+        planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
+
+        plan = ImportEngine.plan(profile, document, self.user, planning_context)
+        session = self.client.session
+        start_new_preview(session, plan)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": document.filename,
+            "source_document_id": document.pk,
+        }
+        session["import_preview_pending"] = True
+        session.save()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertEqual(response.status_code, 200)
+        unit = next(unit for unit in response.context["result"].units if unit.identity == f"device:source:{source_id}")
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertTrue(unit.extra_data["pending_write_contact"])
+        self.assertTrue(unit.extra_data["pending_write_provenance"])
+        trigger = next(
+            button
+            for button in re.findall(r'<button[^>]*class="[^"]*ndi-sync-row-btn[^"]*"[^>]*>', response.content.decode())
+            if f'data-source-id="{source_id}"' in button
+        )
+        self.assertIn('data-pending-write-contact="true"', trigger)
+        self.assertIn('data-pending-write-provenance="true"', trigger)
 
 
 class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
@@ -59,7 +400,7 @@ class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
 
     def test_every_class_mapping_trigger_declares_its_initial_action(self):
         """Without it the editor reopens on Ignore and a save discards the stored role."""
-        html = (TEMPLATE_DIR / "import_preview.html").read_text()
+        html = (TEMPLATE_DIR / "import_preview.html").read_text(encoding="utf-8")
         triggers = re.findall(r'<button[^>]*data-ndi-modal="#classMappingModal"[^>]*>', html)
 
         self.assertTrue(triggers, "the preview must offer the class editor")
@@ -68,7 +409,7 @@ class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
 
     def test_the_device_class_trigger_carries_the_stored_role_slug(self):
         """The handler reads this attribute, so losing it silently reopens the editor with no role."""
-        html = (TEMPLATE_DIR / "import_preview.html").read_text()
+        html = (TEMPLATE_DIR / "import_preview.html").read_text(encoding="utf-8")
         triggers = re.findall(r'<button[^>]*data-ndi-modal="#classMappingModal"[^>]*>', html)
         device_triggers = [trigger for trigger in triggers if 'data-initial-action="rack"' not in trigger]
 
@@ -78,7 +419,7 @@ class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
 
     def test_the_class_editor_restores_the_role_slug_it_is_given(self):
         """A handler that clears the field instead would pass the trigger checks above."""
-        html = (TEMPLATE_DIR / "import_preview.html").read_text()
+        html = (TEMPLATE_DIR / "import_preview.html").read_text(encoding="utf-8")
 
         self.assertIn("document.getElementById('cm_role_slug').value = btn.dataset.currentRoleSlug", html)
 
@@ -201,12 +542,122 @@ class DetailRowIdsAreUniqueTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertTrue(all("tabindex=" not in attrs for attrs in rows), rows[:2])
 
 
+class PreviewMapsNameTheirObjectTypeTest(PreviewSessionMixin, BaseViewTestCase):
+    """Preview maps must distinguish rows that share a number across object types."""
+
+    ROW_NUMBER = 12
+
+    def _preview_with_repeated_row_number(self):
+        """Render a materialized preview with one Device and one Rack on the same source row."""
+        from dataclasses import replace
+
+        from netbox_data_import.plan import Disposition, ImportPlan, SynchronizationUnit
+        from netbox_data_import.preview_row_actions import (
+            PREVIEW_PLAN_SESSION_KEY,
+            PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
+            start_new_preview,
+        )
+
+        self._setup_session()
+        session = self.client.session
+        stored_plan = ImportPlan.from_dict(session[PREVIEW_PLAN_SESSION_KEY])
+
+        def unit(object_type, marker, suggestion_id):
+            email = f"{marker}@example.invalid"
+            return SynchronizationUnit(
+                identity=f"{object_type}:source:{marker}",
+                disposition=Disposition.NO_OP,
+                display={
+                    "row_number": self.ROW_NUMBER,
+                    "source_id": marker,
+                    "name": f"{marker} name",
+                    "rack_name": f"{marker} rack",
+                    "source_row": {"_row_number": self.ROW_NUMBER, "source_id": marker},
+                    "extra_data": {
+                        "conflicts": {"device_name": {"Name": f"{marker} conflict"}},
+                        "candidate_values": {"contact": {"Contact Email": email}},
+                        "contact_suggestion": {
+                            "id": suggestion_id,
+                            "name": f"{marker} suggestion",
+                            "email": email,
+                            "phone": "",
+                        },
+                        "extra_columns": {"Unmapped": marker},
+                        "field_diff": {"device_name": {"netbox": f"old {marker}", "file": f"new {marker}"}},
+                    },
+                },
+            )
+
+        plan = replace(
+            stored_plan,
+            units=(
+                unit("device", "device-row", 41),
+                unit("rack", "rack-row", 52),
+            ),
+        )
+        start_new_preview(session, plan)
+        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
+        session.save()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        self.assertEqual(response.status_code, 200)
+        return response
+
+    def test_each_repeated_row_keeps_its_own_modal_data(self):
+        """A row-only key lets the Rack replace the Device in every modal data map."""
+        response = self._preview_with_repeated_row_number()
+        expected_keys = {"device:12", "rack:12"}
+
+        conflicts = response.context["conflicts_by_row"]
+        self.assertEqual(set(conflicts), expected_keys)
+        self.assertEqual(conflicts["device:12"]["device_name"]["Name"], "device-row conflict")
+        self.assertEqual(conflicts["rack:12"]["device_name"]["Name"], "rack-row conflict")
+
+        candidates = response.context["candidate_values_by_row"]
+        self.assertEqual(set(candidates), expected_keys)
+        self.assertEqual(candidates["device:12"]["contact"]["Contact Email"], "device-row@example.invalid")
+        self.assertEqual(candidates["rack:12"]["contact"]["Contact Email"], "rack-row@example.invalid")
+
+        suggestions = response.context["contact_suggestions_by_row"]
+        self.assertEqual(set(suggestions), expected_keys)
+        self.assertEqual(suggestions["device:12"]["name"], "device-row suggestion")
+        self.assertEqual(suggestions["rack:12"]["name"], "rack-row suggestion")
+
+    def test_every_by_row_context_map_uses_composite_keys(self):
+        """A new row map must name the object type or extend this real preview fixture."""
+        response = self._preview_with_repeated_row_number()
+        context_names = sorted(filter(lambda name: name.endswith("_by_row"), response.context.keys()))
+        object_types = {unit.object_type for unit in response.context["result"].units}
+
+        self.assertTrue(context_names, "the preview must publish row-keyed context")
+        for context_name in context_names:
+            with self.subTest(context=context_name):
+                row_map = response.context[context_name]
+                self.assertTrue(row_map, f"extend the fixture to exercise {context_name}")
+                for key in row_map:
+                    object_type, separator, row_number = key.rpartition(":")
+                    self.assertEqual(separator, ":", key)
+                    self.assertIn(object_type, object_types, key)
+                    self.assertTrue(row_number.isdigit(), key)
+
+    def test_every_composite_row_modal_trigger_names_its_object_type(self):
+        """A trigger without the type builds a key that cannot match its row data."""
+        html = self._preview_with_repeated_row_number().content.decode()
+        triggers = re.findall(
+            r'<button\b[^>]*data-ndi-modal="#(?:conflictModal|contactCandidateModal)"[^>]*>',
+            html,
+        )
+
+        self.assertTrue(triggers, "the fixture must render a conflict or contact modal trigger")
+        self.assertEqual([trigger for trigger in triggers if "data-object-type=" not in trigger], [])
+
+
 class SplitModalMarkupMatchesItsScriptTest(PreviewSessionMixin, BaseViewTestCase):
     """The split modal's script reaches every element by id, so a renamed id fails in silence."""
 
     def _script_source(self):
         """Return the shipped split-modal asset."""
-        return (STATIC_JS_DIR / "split_name_modal.js").read_text()
+        return (STATIC_JS_DIR / "split_name_modal.js").read_text(encoding="utf-8")
 
     def test_the_preview_loads_the_split_modal_script(self):
         """The rendered modal needs the script that controls it."""
@@ -394,6 +845,28 @@ class ConfiguredClassRowIsMarkedTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertIn("Configure class", unresolved)
 
 
+class ContactPickerMatchesItsEndpointTest(SimpleTestCase):
+    """The picker and the suggestion endpoint must agree on which rows carry a Contact."""
+
+    def test_the_contact_picker_is_offered_only_on_a_row_type_the_endpoint_serves(self):
+        """A picker on a row the endpoint filters out answers the operator with a 400."""
+        template = (TEMPLATE_DIR / "import_preview.html").read_text(encoding="utf-8")
+        offered = set(
+            re.findall(
+                r"row\.object_type == '(\w+)' and row\.extra_data\.candidate_values\.contact",
+                template,
+            )
+        )
+        self.assertTrue(offered, "the Contact picker must stay gated on a row object type")
+
+        views = (Path(__file__).resolve().parents[1] / "views.py").read_text(encoding="utf-8")
+        context = re.search(r"def _contact_candidate_context\(.*?(?=\ndef |\nclass )", views, re.DOTALL)
+        self.assertIsNotNone(context, "views must define _contact_candidate_context")
+        served = set(re.findall(r'row\.object_type == "(\w+)"', context.group(0)))
+
+        self.assertEqual(offered, served, "the Contact picker is offered on a row its endpoint refuses")
+
+
 class ConflictJumpTargetsOneRowTest(SimpleTestCase):
     """The conflict jump has to name the row it means, not a row number several rows share."""
 
@@ -401,7 +874,7 @@ class ConflictJumpTargetsOneRowTest(SimpleTestCase):
 
     def test_the_jump_control_carries_the_object_type_with_the_row_number(self):
         """`getElementById('row-N')` returned the first match, which was often the rack row."""
-        source = self.TEMPLATE.read_text()
+        source = self.TEMPLATE.read_text(encoding="utf-8")
         jump = re.search(r"<button[^>]*ndi-jump-to-row.*?</button>", source, re.DOTALL)
         self.assertIsNotNone(jump, "the preview must render the conflict jump control")
         self.assertIn("data-target-row=", jump.group(0))
@@ -409,7 +882,7 @@ class ConflictJumpTargetsOneRowTest(SimpleTestCase):
 
     def test_the_jump_handler_matches_on_both_attributes(self):
         """A handler that still resolves an id would reintroduce the wrong-row jump."""
-        source = self.TEMPLATE.read_text()
+        source = self.TEMPLATE.read_text(encoding="utf-8")
         self.assertNotIn("getElementById('row-' + ", source)
         self.assertIn('tr[data-object-type="', source)
 
@@ -423,7 +896,7 @@ class FieldRowIdsFollowTheDetailRowTest(SimpleTestCase):
 
     def test_both_field_id_families_use_the_detail_row_index(self):
         """`ignored-field-*` used the source row number, which is a different number entirely."""
-        source = (TEMPLATE_DIR / "import_preview.html").read_text()
+        source = (TEMPLATE_DIR / "import_preview.html").read_text(encoding="utf-8")
         for family in ("diff-field", "ignored-field"):
             match = re.search(rf'id="{family}-{{{{ ([^}}]+) }}}}-', source)
             self.assertIsNotNone(match, f"the preview must render the {family} rows")
@@ -630,7 +1103,7 @@ class SplitNameSkipsAnIgnoredRowTest(SimpleTestCase):
 
     def test_the_split_control_still_excludes_an_ignored_row(self):
         """Widening this condition to reach matched rows must not also reach ignored ones."""
-        source = self.TEMPLATE.read_text()
+        source = self.TEMPLATE.read_text(encoding="utf-8")
         self.assertIn("#splitNameModal", source, "the preview must render the split control")
         # The guard is the last `{% if %}` before the control, whatever else the markup grows.
         head = source[: source.index("#splitNameModal")]

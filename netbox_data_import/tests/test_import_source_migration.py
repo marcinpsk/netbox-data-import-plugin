@@ -112,9 +112,9 @@ class MigrateImportSourceCustomFieldTest(TestCase):
         """The per-profile custom field an operator configured is left alone."""
         from dcim.models import Device
 
-        self.device.custom_field_data["cans_id"] = "CANS-9"
+        self.device.custom_field_data["external_id"] = "EXT-9"
         self._seed(self.device, {"source_id": "SRC-1", "profile_id": self.profile.pk})
 
         self._run_migration()
 
-        self.assertEqual(Device.objects.get(pk=self.device.pk).custom_field_data["cans_id"], "CANS-9")
+        self.assertEqual(Device.objects.get(pk=self.device.pk).custom_field_data["external_id"], "EXT-9")

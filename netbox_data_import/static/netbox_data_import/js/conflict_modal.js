@@ -35,7 +35,9 @@
     var sourceId = trigger.dataset.sourceId || '';
     document.getElementById('conf_source_id').value = sourceId;
 
-    var conflicts = CONFLICTS_BY_ROW[trigger.dataset.rowNumber] || {};
+    // Row numbers repeat across object types, so the key names the type as well as the number.
+    var conflictKey = (trigger.dataset.objectType || '') + ':' + trigger.dataset.rowNumber;
+    var conflicts = CONFLICTS_BY_ROW[conflictKey] || {};
     var body = document.getElementById('conflictModalBody');
     body.innerHTML = '';
 

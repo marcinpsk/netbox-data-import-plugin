@@ -30,7 +30,7 @@ def _operator(username="audit-operator"):
     return user
 
 
-def _document(profile, *, content=WORKBOOK, filename="cans.xlsx", uploaded_by=None):
+def _document(profile, *, content=WORKBOOK, filename="sample.xlsx", uploaded_by=None):
     """Store one uploaded workbook for *profile*."""
     return SourceDocument.store(
         profile=profile, content=content, filename=filename, uploaded_by=uploaded_by or _operator()

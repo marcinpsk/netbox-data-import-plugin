@@ -34,7 +34,7 @@ def _is_banner(text):
 
 def _own_line_comments(path):
     """Map each line number carrying a whole-line explanatory comment to its text."""
-    lines = path.read_text().splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     found = {}
     with path.open("rb") as handle:
         for token in tokenize.tokenize(handle.readline):
@@ -83,7 +83,7 @@ class CommentBlocksStayOnOneLineTest(SimpleTestCase):
 
     def test_no_new_comment_block_runs_past_one_line(self):
         """A block absent from the record is new debt, whoever wrote it."""
-        recorded = {path: Counter(texts) for path, texts in json.loads(BASELINE.read_text()).items()}
+        recorded = {path: Counter(texts) for path, texts in json.loads(BASELINE.read_text(encoding="utf-8")).items()}
         found = _blocks_in_package()
 
         added = [

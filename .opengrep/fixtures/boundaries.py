@@ -2,6 +2,15 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Every call shape the rules must catch, and the shapes they must not."""
 
+import os
+import signal
+import sys
+import unittest.mock as mock
+
+from signal import SIGALRM, SIG_DFL, SIG_IGN
+
+from unittest.mock import patch
+
 from netbox_data_import.import_engine import ImportEngine
 from netbox_data_import.inference_transport import request_to_resolved_address
 from netbox_data_import import import_engine as ie
@@ -165,3 +174,68 @@ def missed_explicit_none_keyword(session, url, address):
 def missed_explicit_none_by_position(session, url, address):
     # ruleid: nbdi-bounded-response-body
     return request_to_resolved_address(session, "GET", url, address, None)
+
+
+def missed_patched_stdin():
+    # ruleid: nbdi-no-interpreter-stream-patch
+    return patch.object(sys, "stdin", None)
+
+
+def missed_patched_stdout():
+    # ruleid: nbdi-no-interpreter-stream-patch
+    return patch.object(sys, "stdout", None)
+
+
+def missed_patched_stdout_by_name():
+    # ruleid: nbdi-no-interpreter-stream-patch
+    return patch("sys.stdout", None)
+
+
+def missed_patched_stderr_through_the_module():
+    # ruleid: nbdi-no-interpreter-stream-patch
+    return mock.patch.object(sys, "stderr", None)
+
+
+def patching_the_environment_is_fine():
+    # ok: nbdi-no-interpreter-stream-patch
+    return patch.dict(os.environ, {"VAULT_TOKEN": "secret"})
+
+
+def missed_alarm_handler():
+    # ruleid: nbdi-deadline-alarm-keeps-its-default-action
+    signal.signal(signal.SIGALRM, lambda number, frame: None)
+
+
+def arming_the_alarm_is_fine():
+    # ok: nbdi-deadline-alarm-keeps-its-default-action
+    signal.setitimer(signal.ITIMER_REAL, 1.0)
+
+
+def handling_another_signal_is_fine():
+    # ok: nbdi-deadline-alarm-keeps-its-default-action
+    signal.signal(signal.SIGTERM, lambda number, frame: None)
+
+
+def missed_alarm_handler_from_the_imported_constant():
+    # ruleid: nbdi-deadline-alarm-keeps-its-default-action
+    signal.signal(SIGALRM, lambda number, frame: None)
+
+
+def ignoring_the_alarm_is_still_refused():
+    # ruleid: nbdi-deadline-alarm-keeps-its-default-action
+    signal.signal(signal.SIGALRM, signal.SIG_IGN)
+
+
+def ignoring_the_alarm_by_imported_constant_is_still_refused():
+    # ruleid: nbdi-deadline-alarm-keeps-its-default-action
+    signal.signal(SIGALRM, SIG_IGN)
+
+
+def restoring_the_default_action_is_fine():
+    # ok: nbdi-deadline-alarm-keeps-its-default-action
+    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+
+
+def restoring_the_default_action_by_imported_constant_is_fine():
+    # ok: nbdi-deadline-alarm-keeps-its-default-action
+    signal.signal(SIGALRM, SIG_DFL)

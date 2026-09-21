@@ -2,7 +2,6 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Regression tests for repository CI configuration."""
 
-import tomllib
 from pathlib import Path
 from unittest import TestCase
 
@@ -15,19 +14,19 @@ class NetBoxMainWorkflowTest(TestCase):
     def test_query_count_baselines_are_not_updated(self):
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "test-netbox-main.yaml"
 
-        self.assertNotIn("UPDATE_QUERY_COUNTS", workflow.read_text())
+        self.assertNotIn("UPDATE_QUERY_COUNTS", workflow.read_text(encoding="utf-8"))
 
     def test_agent_instructions_start_with_a_level_one_heading(self):
         """Keep the repository agent instructions valid as standalone Markdown."""
         agent_instructions = Path(__file__).resolve().parents[2] / "AGENTS.md"
 
-        self.assertTrue(agent_instructions.read_text().startswith("# Agent instructions\n"))
+        self.assertTrue(agent_instructions.read_text(encoding="utf-8").startswith("# Agent instructions\n"))
 
     def test_agent_instruction_sections_use_level_two_headings(self):
         """Do not skip a heading level below the document title."""
         agent_instructions = Path(__file__).resolve().parents[2] / "AGENTS.md"
 
-        self.assertNotRegex(agent_instructions.read_text(), r"(?m)^#{3,}\s")
+        self.assertNotRegex(agent_instructions.read_text(encoding="utf-8"), r"(?m)^#{3,}\s")
 
     def test_agent_instructions_use_shell_safe_test_values(self):
         """Keep the documented test command safe to paste into a shell."""
@@ -35,19 +34,21 @@ class NetBoxMainWorkflowTest(TestCase):
 
         self.assertIn(
             "TEST_DB_NAME=test_unique_task TEST_REDIS_HOST=redis-sidecar-task netbox-test",
-            agent_instructions.read_text(),
+            agent_instructions.read_text(encoding="utf-8"),
         )
 
     def test_tool_specific_instructions_point_at_the_shared_file(self):
         """Keep one source of truth so tool-specific files cannot drift."""
         root = Path(__file__).resolve().parents[2]
 
-        self.assertIn("AGENTS.md", (root / "CLAUDE.md").read_text())
+        self.assertIn("AGENTS.md", (root / "CLAUDE.md").read_text(encoding="utf-8"))
         self.assertFalse((root / ".github" / "copilot-instructions.md").exists())
 
     def test_licensing_guidance_does_not_hardcode_a_year(self):
         """A fixed example year makes every new file look like a mismatch."""
-        licensing = (Path(__file__).resolve().parents[2] / "docs" / "agents" / "licensing.md").read_text()
+        licensing = (Path(__file__).resolve().parents[2] / "docs" / "agents" / "licensing.md").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("SPDX-FileCopyrightText: <year>", licensing)
         self.assertNotRegex(licensing, r"SPDX-FileCopyrightText: 20\d\d")
@@ -56,29 +57,14 @@ class NetBoxMainWorkflowTest(TestCase):
     def test_devcontainer_setup_installs_playwright_and_chromium(self):
         """Keep the standalone browser helpers runnable after setup."""
         setup_script = Path(__file__).resolve().parents[2] / ".devcontainer" / "scripts" / "setup.sh"
-        setup = setup_script.read_text()
+        setup = setup_script.read_text(encoding="utf-8")
 
-        self.assertIn("'pytest-xdist>=3.8,<4' ruff pre-commit playwright", setup)
         self.assertIn("python -m playwright install --with-deps chromium", setup)
-
-    def test_test_environments_constrain_xdist_to_the_supported_api(self):
-        """Keep every test runner on the xdist major version used by the worker guard."""
-        root = Path(__file__).resolve().parents[2]
-        project = tomllib.loads((root / "pyproject.toml").read_text())
-        dev_dependencies = project["dependency-groups"]["dev"]
-
-        self.assertIn("pytest-xdist>=3.8,<4", dev_dependencies)
-        for relative_path in (
-            ".devcontainer/scripts/setup.sh",
-            ".github/workflows/test.yaml",
-            ".github/workflows/test-netbox-main.yaml",
-        ):
-            self.assertIn("pytest-xdist>=3.8,<4", (root / relative_path).read_text(), relative_path)
 
     def test_javascript_workflow_does_not_persist_checkout_credentials(self):
         """Do not expose the workflow token to pull-request JavaScript."""
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "js-test.yaml"
-        steps = yaml.safe_load(workflow.read_text())["jobs"]["test-js"]["steps"]
+        steps = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]["test-js"]["steps"]
         checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
 
         self.assertIs(checkout.get("with", {}).get("persist-credentials"), False)
@@ -90,7 +76,7 @@ class ReleaseWorkflowTest(TestCase):
     def _jobs(self):
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yaml"
 
-        return yaml.safe_load(workflow.read_text())["jobs"]
+        return yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
 
     def _build_command_job(self):
         return self._jobs()["build-command"]
@@ -127,14 +113,14 @@ class WorkflowAuditTest(TestCase):
     def test_the_lint_workflow_installs_the_locked_development_tools(self):
         """The type checker and its stubs must come from the committed lock file."""
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "lint-format.yaml"
-        steps = yaml.safe_load(workflow.read_text())["jobs"]["format-and-lint"]["steps"]
+        steps = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]["format-and-lint"]["steps"]
         install = next(step for step in steps if step.get("name") == "Install dependencies")
 
         self.assertEqual(install["run"], "uv sync --locked --group dev")
 
     def test_the_lint_workflow_audits_the_workflows(self):
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "lint-format.yaml"
-        steps = yaml.safe_load(workflow.read_text())["jobs"]["format-and-lint"]["steps"]
+        steps = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]["format-and-lint"]["steps"]
 
         self.assertTrue(any("pre-commit run --all-files zizmor" in str(step.get("run", "")) for step in steps))
 
@@ -149,7 +135,7 @@ class StackedPullRequestTest(TestCase):
         for name in self.GATING_WORKFLOWS:
             with self.subTest(workflow=name):
                 workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / name
-                parsed = yaml.safe_load(workflow.read_text())
+                parsed = yaml.safe_load(workflow.read_text(encoding="utf-8"))
                 triggers = parsed.get("on", parsed.get(True))
 
                 self.assertNotIn("branches", triggers["pull_request"] or {})

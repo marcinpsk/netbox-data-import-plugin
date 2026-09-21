@@ -108,6 +108,20 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         session["import_preview_pending"] = True
         session.save()
 
+    def test_the_row_reports_the_fields_netbox_already_holds(self):
+        """The preview states what stays the same, so a sync is not read as rewriting every field."""
+        workspace = plan_source_rows(self.rows, self.profile, self.site, actor=self.actor)
+        device_unit = next(unit for unit in workspace.units if unit.object_type == "device")
+
+        matching = device_unit.extra_data["field_matching"]
+
+        self.assertEqual(matching["serial"], {"netbox": self.device.serial, "file": self.device.serial})
+        self.assertEqual(matching["rack_name"], {"netbox": self.rack.name, "file": self.rack.name})
+        self.assertEqual(matching["face"], {"netbox": "front", "file": "front"})
+        # The one real difference stays out of the matching map.
+        self.assertNotIn("u_position", matching)
+        self.assertEqual(device_unit.extra_data["field_diff"]["u_position"], {"netbox": "5", "file": "7"})
+
     def _post(self, view_name, target_field="u_position"):
         """Post one JSON row action against the current preview revision."""
         return self.client.post(

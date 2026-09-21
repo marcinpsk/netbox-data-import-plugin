@@ -1544,12 +1544,16 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
         )
 
     def test_the_proposed_panel_names_the_netbox_objects_the_segments_join(self):
-        """The proposed panel shows NetBox's own names, which the source words need not match."""
+        """The proposed panel shows each NetBox Device and port, which the source words need not match."""
         workspace = self.workspace(self.unit(patched_path()))
 
         self.assertEqual(
             [(segment["left"], segment["right"]) for segment in workspace["segments"]],
-            [("eth0", "F1"), ("R1", "R1"), ("F1", "eth1")],
+            [
+                ("DEV-A eth0", "PANEL-1 F1"),
+                ("PANEL-1 R1", "PANEL-2 R1"),
+                ("PANEL-2 F1", "DEV-B eth1"),
+            ],
         )
         self.assertEqual([segment["substituted"] for segment in workspace["segments"]], [False, False, False])
 
@@ -1571,7 +1575,7 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
         substituted = claims[0]
         self.assertEqual(substituted["source_left"], "PANEL-1 R1")
         # The source re-entered the rear port it left, so planning claimed its mapped front port.
-        self.assertEqual(substituted["left"], "F1")
+        self.assertEqual(substituted["left"], "PANEL-1 F1")
         self.assertTrue(substituted["substituted"])
         self.assertFalse(claims[1]["substituted"])
 

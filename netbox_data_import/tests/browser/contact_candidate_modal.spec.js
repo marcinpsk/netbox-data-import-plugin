@@ -25,7 +25,8 @@ const previewFixture = `
   <div id="ndi-preview-stale" hidden>Saved changes are pending.</div>
   <button type="button" id="ndi-run-import">Run Import</button>
   <button type="button" class="btn btn-outline-warning" data-ndi-modal="#contactCandidateModal"
-          data-source-id="source-first" data-row-number="first-row">Resolve contact fields</button>
+          data-source-id="source-first" data-object-type="device"
+          data-row-number="first-row">Resolve contact fields</button>
   <div id="contactCandidateModal">
     <form id="contactCandidateForm" action="/save-resolution/"
           data-contact-lookup-field="email" data-contact-lookup-url="/contact-lookup/">
@@ -78,19 +79,19 @@ const previewFixture = `
     };
   </script>
   <script id="ndi-candidate-values-by-row" type="application/json">
-    {"first-row":{"contact":{
+    {"device:first-row":{"contact":{
        "Primary Contact":"grace.hopper@example.invalid",
        "Owner":"Lab Ops",
        "Contact":"Grace Hopper",
        "Contact Number":"+44 20 7946 0102"}},
-     "saved-row":{"contact":{
+     "device:saved-row":{"contact":{
        "Primary Contact":"ada@example.invalid",
        "Owner":"Ada Lovelace"}}}
   </script>
   <script id="ndi-contact-suggestions-by-row" type="application/json">{}</script>
   <script id="ndi-contact-role-suggestions-by-row" type="application/json">
-    {"first-row":{"email":"Primary Contact","phone":"Contact Number","name":"Contact"},
-     "saved-row":{"email":"Primary Contact"}}
+    {"device:first-row":{"email":"Primary Contact","phone":"Contact Number","name":"Contact"},
+     "device:saved-row":{"email":"Primary Contact"}}
   </script>
 `;
 
@@ -106,17 +107,18 @@ async function initNetBoxSelects(page) {
   });
 }
 
-async function openRow(page, rowNumber, sourceId) {
+async function openRow(page, rowNumber, sourceId, objectType = "device") {
   await page.evaluate(
-    ({ rowNumber: row, sourceId: source }) => {
+    ({ rowNumber: row, sourceId: source, objectType: type }) => {
       const button = document.createElement("button");
       button.dataset.rowNumber = row;
+      button.dataset.objectType = type;
       button.dataset.sourceId = source;
       const event = new Event("show.bs.modal");
       Object.defineProperty(event, "relatedTarget", { value: button });
       document.getElementById("contactCandidateModal").dispatchEvent(event);
     },
-    { rowNumber, sourceId },
+    { rowNumber, sourceId, objectType },
   );
 }
 
@@ -232,7 +234,7 @@ test("a saved source column can supply more than one Contact field", async ({ pa
 
 test("a source column matching an inherited object property still opens", async ({ page }) => {
   await setUp(page, previewFixture, {
-    "reserved-row": {contact: {constructor: "reserved@example.invalid"}},
+    "device:reserved-row": {contact: {constructor: "reserved@example.invalid"}},
   });
   await page.evaluate(() => {
     window.EXISTING_RESOLUTIONS["source-reserved"] = {
@@ -345,7 +347,7 @@ test("a detected NetBox Contact is offered without being applied silently", asyn
   const fixture = previewFixture.replace(
     '<script id="ndi-contact-suggestions-by-row" type="application/json">{}</script>',
     `<script id="ndi-contact-suggestions-by-row" type="application/json">
-      {"first-row":{"id":83,"name":"Proposed Contact","email":"grace.hopper@example.invalid","phone":"+1 202-555-0106"}}
+      {"device:first-row":{"id":83,"name":"Proposed Contact","email":"grace.hopper@example.invalid","phone":"+1 202-555-0106"}}
     </script>`,
   );
   await setUp(page, fixture);

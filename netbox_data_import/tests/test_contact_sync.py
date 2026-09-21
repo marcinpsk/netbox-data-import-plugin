@@ -117,7 +117,7 @@ class LocalExamplePrivacyTest(SimpleTestCase):
             str(value).strip().casefold() for author in project_metadata.get("authors", []) for value in author.values()
         )
         synthetic_workbook = openpyxl.load_workbook(
-            Path(__file__).resolve().parent / "fixtures" / "sample_cans.xlsx",
+            Path(__file__).resolve().parent / "fixtures" / "sample_workbook.xlsx",
             read_only=True,
             data_only=True,
         )
@@ -162,7 +162,7 @@ class LocalExamplePrivacyTest(SimpleTestCase):
                 continue
             path = repository_root / relative_path
             try:
-                lines = path.read_text().splitlines()
+                lines = path.read_text(encoding="utf-8").splitlines()
             except (OSError, UnicodeDecodeError):
                 continue
             for line_number, line in enumerate(lines, 1):

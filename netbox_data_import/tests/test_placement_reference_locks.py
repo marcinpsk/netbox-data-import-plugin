@@ -81,7 +81,7 @@ def _chain_takes_lock(call, parents) -> bool:
 
 def _unlocked_loads(path: Path) -> list[str]:
     """Return one report line per primary-key load of a guarded model that takes no lock."""
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     parents = _parents_of(tree)
     unlocked = []
     for node in ast.walk(tree):
