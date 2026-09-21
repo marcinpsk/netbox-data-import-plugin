@@ -10,6 +10,7 @@ from django.db import connection
 from django.test import TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from django.utils.html import escape
 
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
 from netbox_data_import import adapters as adapter_registry
@@ -38,7 +39,7 @@ from netbox_data_import.tests.helpers import (
     trace_workbook_bytes,
 )
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
-from netbox_data_import.views import _review_workspace_url
+from netbox_data_import.views import _review_workspace_url, _trace_workspace_url
 
 
 class _MixedOutputTestAdapter(TraceWorkbookAdapter):
@@ -364,6 +365,53 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(response.context["selected_trace"].identity, wanted.identity)
 
+    def test_a_re_read_returns_to_the_trace_it_was_issued_from(self):
+        """The re-read is issued from one trace's page, so it must not move the operator."""
+        Interface.objects.create(device=self.make_device("SEL-G"), name="eth0", type="1000base-t")
+        Interface.objects.create(device=self.make_device("SEL-H"), name="eth0", type="1000base-t")
+        second = direct_path(
+            from_end=trace_termination("SEL-G", "", "eth0", "Port"),
+            to_end=trace_termination("SEL-H", "", "eth0", "Port"),
+        )
+        opened = self.open_workspace(patched_path(), second)
+        wanted = opened.context["traces"][1]
+        self.assertNotEqual(opened.context["selected_trace"].identity, wanted.identity)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": opened.context["preview_revision"], "trace": wanted.identity},
+            follow=True,
+        )
+
+        self.assertEqual(response.context["selected_trace"].identity, wanted.identity)
+
+    def test_every_workspace_command_form_names_the_trace_it_was_issued_from(self):
+        """Each command replans and returns to the workspace, so each has to name its own trace."""
+        opened = self.open_workspace(patched_path())
+        page = opened.content.decode()
+        identity = escape(opened.context["selected_trace"].identity)
+        commands = [form for form in re.findall(r"<form\b.*?</form>", page, re.DOTALL) if "/trace-workspace/" in form]
+
+        self.assertEqual(len(commands), 4, commands)
+        for form in commands:
+            action = re.search(r'action="([^"]+)"', form).group(1)
+            with self.subTest(action=action):
+                # The sync command already names the trace it synchronizes.
+                field = "identity" if action.endswith("/sync/") else "trace"
+                self.assertIn(f'name="{field}" value="{identity}"', form)
+
+    def test_a_workspace_command_swaps_the_page_content_in_place(self):
+        """A full page load loses the scroll position the operator was reading at."""
+        page = self.open_workspace(patched_path()).content.decode()
+
+        for form_id in ("traceWorkspaceRereadForm", "traceDeviceForm", "traceTerminationForm"):
+            with self.subTest(form=form_id):
+                tag = re.search(rf'<form[^>]*id="{form_id}"[^>]*>', page)
+                self.assertIsNotNone(tag)
+                self.assertIn('hx-target="#page-content"', tag.group(0))
+                self.assertIn('hx-select="#page-content"', tag.group(0))
+                self.assertIn('hx-swap="outerHTML"', tag.group(0))
+
     def test_the_summary_states_the_saved_decisions_and_the_preview_state(self):
         """Section 10.2 names both, and neither can be read off the plan alone."""
         response = self.open_workspace(patched_path())
@@ -494,6 +542,28 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         self.assertTrue(response.context["drift"])
 
+    def test_a_refused_sync_returns_to_the_trace_it_was_issued_from(self):
+        """A refusal has to leave the operator on the trace whose button they pressed."""
+        Interface.objects.create(device=self.make_device("SEL-K"), name="eth0", type="1000base-t")
+        Interface.objects.create(device=self.make_device("SEL-L"), name="eth0", type="1000base-t")
+        second = direct_path(
+            from_end=trace_termination("SEL-K", "", "eth0", "Port"),
+            to_end=trace_termination("SEL-L", "", "eth0", "Port"),
+        )
+        opened = self.open_workspace(patched_path(), second)
+        wanted = opened.context["traces"][1]
+        self.assertNotEqual(opened.context["selected_trace"].identity, wanted.identity)
+        # A live topology change under the reviewed plan is what the sync command refuses.
+        self.connect(self.panel_1_rear, self.panel_2_rear)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {"identity": wanted.identity, "preview_revision": opened.context["preview_revision"]},
+            follow=True,
+        )
+
+        self.assertEqual(response.context["selected_trace"].identity, wanted.identity)
+
     def test_sync_refuses_topology_drift_after_the_workspace_was_rendered(self):
         """A live topology change requires another review before a trace can be queued."""
         from core.models import Job
@@ -509,7 +579,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         )
 
         self.assertFalse(Job.objects.filter(data__job_type="netbox_data_import.import").exists())
-        self.assertRedirects(refused, reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertRedirects(refused, _trace_workspace_url(chosen.identity))
         self.assertContains(refused, "NetBox has changed. Re-read the preview before synchronizing.")
 
     def test_topology_drift_disables_the_sync_button_with_its_reason(self):
@@ -1441,6 +1511,43 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         self.assertEqual(trace.disposition, "actionable")
         states = {item["label"]: item["state"] for item in trace.terminations}
         self.assertEqual(states["DEV-A absent-port"], "manually resolved")
+
+    def test_a_termination_decision_returns_to_the_trace_it_was_made_on(self):
+        """The picker is opened from one trace, so the page after the save has to show that trace."""
+        Interface.objects.create(device=self.make_device("SEL-I"), name="eth0", type="1000base-t")
+        Interface.objects.create(device=self.make_device("SEL-J"), name="eth0", type="1000base-t")
+        self.open_workspace(
+            direct_path(
+                from_end=trace_termination("SEL-I", "", "eth0", "Port"),
+                to_end=trace_termination("SEL-J", "", "eth0", "Port"),
+            ),
+            direct_path(
+                from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
+                to_end=trace_termination("DEV-B", "", "eth1", "Port"),
+            ),
+        )
+        field_key = termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface")
+        opened = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        wanted = next(
+            trace
+            for trace in opened.context["traces"]
+            if any(item["field_key"] == field_key for item in trace.terminations)
+        )
+        self.assertNotEqual(opened.context["selected_trace"].identity, wanted.identity)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_termination"),
+            {
+                "field_key": field_key,
+                "object_type": "dcim.interface",
+                "object_id": self.eth0.pk,
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+                "trace": wanted.identity,
+            },
+            follow=True,
+        )
+
+        self.assertEqual(response.context["selected_trace"].identity, wanted.identity)
 
     def test_a_decision_is_refused_while_a_queued_synchronization_still_runs(self):
         """The replan a decision makes reads NetBox, which the queued job is about to write."""

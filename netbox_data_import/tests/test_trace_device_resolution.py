@@ -383,13 +383,13 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         cls.build_topology()
         cls.alias_port = Interface.objects.create(device=cls.device_a, name="eth9", type="1000base-t")
 
-    def start_alias_preview(self, source_label="Source Alias", port_name=None):
+    def start_alias_preview(self, source_label="Source Alias", port_name=None, leading_blocks=()):
         self.client.force_login(self.actor)
         block = direct_path(
             from_end=trace_termination(source_label, "", port_name or self.alias_port.name, "Port"),
             to_end=trace_termination("DEV-B", "", "eth1", "Port"),
         )
-        upload = BytesIO(trace_workbook_bytes(path_blocks=(block,)))
+        upload = BytesIO(trace_workbook_bytes(path_blocks=(*leading_blocks, block)))
         upload.name = "trace-alias.xlsx"
         return self.client.post(
             reverse("plugins:netbox_data_import:import_setup"),
@@ -444,6 +444,36 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
             self.device_a.pk,
         )
         self.assertContains(saved, "manually resolved")
+
+    def test_saving_a_device_choice_returns_to_the_trace_it_was_made_on(self):
+        """The picker is opened from one trace, so the page after the save has to show that trace."""
+        Interface.objects.create(device=self.make_device("SEL-G"), name="eth0", type="1000base-t")
+        Interface.objects.create(device=self.make_device("SEL-H"), name="eth0", type="1000base-t")
+        settled = direct_path(
+            from_end=trace_termination("SEL-G", "", "eth0", "Port"),
+            to_end=trace_termination("SEL-H", "", "eth0", "Port"),
+        )
+        response = self.start_alias_preview(leading_blocks=(settled,))
+        wanted = next(
+            trace
+            for trace in response.context["traces"]
+            if any(item["key"] == "source alias" for item in trace.devices)
+        )
+        self.assertNotEqual(response.context["selected_trace"].identity, wanted.identity)
+
+        saved = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {
+                "device_key": "source alias",
+                "device_id": self.device_a.pk,
+                "search": "DEV-A",
+                "preview_revision": response.context["preview_revision"],
+                "trace": wanted.identity,
+            },
+            follow=True,
+        )
+
+        self.assertEqual(saved.context["selected_trace"].identity, wanted.identity)
 
     def test_a_saved_device_choice_survives_a_later_load_and_re_read(self):
         def assert_saved_choice_is_rendered(result):
