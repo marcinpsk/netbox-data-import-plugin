@@ -7,6 +7,8 @@ import signal
 import sys
 import unittest.mock as mock
 
+from signal import SIGALRM, SIG_DFL, SIG_IGN
+
 from unittest.mock import patch
 
 from netbox_data_import.import_engine import ImportEngine
@@ -212,3 +214,28 @@ def arming_the_alarm_is_fine():
 def handling_another_signal_is_fine():
     # ok: nbdi-deadline-alarm-keeps-its-default-action
     signal.signal(signal.SIGTERM, lambda number, frame: None)
+
+
+def missed_alarm_handler_from_the_imported_constant():
+    # ruleid: nbdi-deadline-alarm-keeps-its-default-action
+    signal.signal(SIGALRM, lambda number, frame: None)
+
+
+def ignoring_the_alarm_is_still_refused():
+    # ruleid: nbdi-deadline-alarm-keeps-its-default-action
+    signal.signal(signal.SIGALRM, signal.SIG_IGN)
+
+
+def ignoring_the_alarm_by_imported_constant_is_still_refused():
+    # ruleid: nbdi-deadline-alarm-keeps-its-default-action
+    signal.signal(SIGALRM, SIG_IGN)
+
+
+def restoring_the_default_action_is_fine():
+    # ok: nbdi-deadline-alarm-keeps-its-default-action
+    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+
+
+def restoring_the_default_action_by_imported_constant_is_fine():
+    # ok: nbdi-deadline-alarm-keeps-its-default-action
+    signal.signal(SIGALRM, SIG_DFL)

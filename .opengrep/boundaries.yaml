@@ -84,6 +84,14 @@ rules:
       Leave SIGALRM at its default action. A Python-level handler runs only once the interpreter
       regains control, so a worker blocked in getaddrinfo outlives its deadline (measured 20.04s
       against a 1.00s alarm); the default action terminates it at the alarm.
+    # SIG_DFL restores the default action, which is what the rule asks for. SIG_IGN stays refused:
+    # an ignored SIGALRM removes the deadline altogether.
     pattern-either:
-      - pattern: signal.signal(signal.SIGALRM, ...)
-      - pattern: signal.signal(SIGALRM, ...)
+      - patterns:
+          - pattern: signal.signal(signal.SIGALRM, ...)
+          - pattern-not: signal.signal(signal.SIGALRM, signal.SIG_DFL)
+          - pattern-not: signal.signal(signal.SIGALRM, SIG_DFL)
+      - patterns:
+          - pattern: signal.signal(SIGALRM, ...)
+          - pattern-not: signal.signal(SIGALRM, signal.SIG_DFL)
+          - pattern-not: signal.signal(SIGALRM, SIG_DFL)
