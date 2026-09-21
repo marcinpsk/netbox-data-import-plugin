@@ -18,6 +18,7 @@ from .inference_settings import (
     FILE_FALLBACK_SETTING,
     ORIGIN_ALLOWLIST_SETTING,
     PROPOSAL_CANDIDATE_LIMIT_DEFAULT,
+    PROPOSAL_CANDIDATE_LIMIT_MAX,
     PROPOSAL_CANDIDATE_LIMIT_SETTING,
     validate_credential_reference,
     validate_file_fallback,
@@ -43,11 +44,24 @@ def plugin_settings() -> dict[str, Any]:
 
 
 def proposal_candidate_limit() -> int:
-    """Return the deployment's candidate bound, defaulted only when the key is omitted."""
+    """Return how many candidates one request offers the backend, its page size.
+
+    Defaulted only when the key is omitted. A denser Device is searched a page at a time, so this
+    holds prompt cost down without bounding what the Device may have.
+    """
     config = plugin_settings()
     if PROPOSAL_CANDIDATE_LIMIT_SETTING not in config:
         return PROPOSAL_CANDIDATE_LIMIT_DEFAULT
     return validate_proposal_candidate_limit(config[PROPOSAL_CANDIDATE_LIMIT_SETTING])
+
+
+def proposal_eligible_set_limit() -> int:
+    """Return the ceiling on the eligible set one proposal may freeze, however it is paged.
+
+    The set is stored, not prompted, so the bound here is the row and the retrieval, not the
+    prompt. Past it the answer is authoritative pre-filtering, not more pages.
+    """
+    return PROPOSAL_CANDIDATE_LIMIT_MAX
 
 
 def origin_allowlist() -> tuple[str, ...]:
@@ -186,6 +200,7 @@ __all__ = (
     "origin_allowlist",
     "plugin_settings",
     "proposal_candidate_limit",
+    "proposal_eligible_set_limit",
     "resolve_active_backend",
     "resolve_backend_by_id",
     "validate_backend_fields",

@@ -6,6 +6,12 @@
     <span data-proposal-progress {% if not termination.proposal.pending %}hidden{% endif %}>
       <i class="mdi mdi-loading mdi-spin" aria-hidden="true"></i> Waiting for the backend...
     </span>
+    <div class="text-secondary small" data-proposal-job
+         {% if not termination.proposal.job_status %}hidden{% endif %}>{{ termination.proposal.job_status }}</div>
+    <div class="text-danger small" data-proposal-job-note
+         {% if not termination.proposal.job_note %}hidden{% endif %}>{{ termination.proposal.job_note }}</div>
+    <div class="text-secondary small" data-proposal-page
+         {% if not termination.proposal.page_status %}hidden{% endif %}>{{ termination.proposal.page_status }}</div>
   </div>
   <p class="fw-bold mt-2 mb-1" data-proposal-candidate>{{ termination.proposal.candidate }}</p>
   <p class="mb-2" data-proposal-explanation>{{ termination.proposal.explanation }}</p>

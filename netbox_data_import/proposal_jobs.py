@@ -73,8 +73,12 @@ def _request(proposal, response_mode):
     if proposal.response_schema_version != RESPONSE_SCHEMA_VERSION:
         raise InvalidBackendConfiguration("The stored response schema version is not supported.")
     snapshot = CandidateSnapshot.from_json(proposal.candidate_snapshot)
+    # Only the recorded page reaches the backend. The whole set stays behind, for freshness alone.
+    page = snapshot.page
+    if not page:
+        raise InvalidBackendConfiguration("The stored candidate page offers no candidate.")
     try:
-        validate_candidate_ids(snapshot.candidate_ids)
+        validate_candidate_ids(entry.candidate_id for entry in page)
     except ValueError as exc:
         raise InvalidBackendConfiguration(str(exc)) from exc
     return InferenceRequest(
@@ -84,7 +88,7 @@ def _request(proposal, response_mode):
                 "schema_version": proposal.response_schema_version,
                 "task": proposal.task_type,
                 "source_evidence": proposal.source_evidence,
-                "candidates": [entry.as_json() for entry in snapshot.entries],
+                "candidates": [entry.as_json() for entry in page],
             }
         ),
         requested_response_mode=response_mode,
@@ -193,15 +197,13 @@ def _run_claimed_proposal(proposal_id, metadata):
             try:
                 answer = validate_response(
                     completion.content_text,
-                    candidate_display_names={entry.candidate_id: entry.display_name for entry in snapshot.entries},
+                    candidate_display_names={entry.candidate_id: entry.display_name for entry in snapshot.page},
                     schema_version=proposal.response_schema_version,
                 )
             except InvalidProposalResponse:
                 reason = ProposalFailureReason.INVALID_RESPONSE
             else:
-                selected = next(
-                    (entry for entry in snapshot.entries if entry.candidate_id == answer.candidate_id), None
-                )
+                selected = next((entry for entry in snapshot.page if entry.candidate_id == answer.candidate_id), None)
                 object_type = None
                 if selected is not None:
                     app_label, model = selected.object_type.split(".", 1)

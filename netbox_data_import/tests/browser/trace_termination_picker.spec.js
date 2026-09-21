@@ -38,6 +38,7 @@ const fixture = `
   <script>
     /* Bootstrap's shape, so the fixture proves how the picker constructs and reuses a Modal. */
     window.ndiModalShows = [];
+    window.ndiModalHides = 0;
     window.ndiModalInstances = 0;
     window.Modal = function (element) {
       window.ndiModalInstances += 1;
@@ -47,6 +48,10 @@ const fixture = `
           trigger: trigger ? trigger.dataset.tracePicker : null,
         });
       };
+      this.hide = function () { window.ndiModalHides += 1; };
+    };
+    window.Modal.getInstance = function (element) {
+      return element.ndiModalInstance || null;
     };
     window.Modal.getOrCreateInstance = function (element) {
       if (!element.ndiModalInstance) element.ndiModalInstance = new window.Modal(element);
@@ -369,4 +374,21 @@ test("a search on a page whose picker the swap removed does not throw", async ({
   await page.waitForTimeout(400);
 
   expect(failures).toEqual([]);
+});
+
+test("saving closes the dialog before the swap takes it away", async ({ page }) => {
+  await serveCandidates(page, { ok: true, candidates: [], shown: 0, total: 0 });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
+  await page.addScriptTag({ content: controllerSource });
+  await page.locator("[data-trace-picker]").click();
+
+  // htmx swaps the content the dialog lives in, so a dialog left open strands its backdrop.
+  await page.evaluate(() => {
+    document
+      .getElementById("traceTerminationForm")
+      .dispatchEvent(new Event("htmx:beforeRequest", { bubbles: true }));
+  });
+
+  expect(await page.evaluate(() => window.ndiModalHides)).toBe(1);
 });

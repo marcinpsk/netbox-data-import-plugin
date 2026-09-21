@@ -53,9 +53,13 @@
       <div class="ndi-trace-reason mt-1">{{ retained_sync_reason }}</div>
     {% endif %}
   </div>
-  <form method="post" action="{% url 'plugins:netbox_data_import:trace_workspace_reread' %}" class="ms-3">
+  <form id="traceWorkspaceRereadForm" method="post"
+        action="{% url 'plugins:netbox_data_import:trace_workspace_reread' %}" class="ms-3"
+        hx-post="{% url 'plugins:netbox_data_import:trace_workspace_reread' %}"
+        hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
     {% csrf_token %}
     <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+    <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
     <button type="submit" id="traceWorkspaceReread"
             class="btn {% if drift %}btn-warning{% else %}btn-outline-secondary{% endif %}"
             {% if retained_sync_reason %}disabled title="{{ retained_sync_reason }}"{% endif %}>
@@ -452,9 +456,12 @@
     <div class="modal-content">
       <form id="traceDeviceForm" method="post"
             action="{% url 'plugins:netbox_data_import:trace_resolve_device' %}"
-            data-candidates-url="{% url 'plugins:netbox_data_import:trace_device_candidates' %}">
+            data-candidates-url="{% url 'plugins:netbox_data_import:trace_device_candidates' %}"
+            hx-post="{% url 'plugins:netbox_data_import:trace_resolve_device' %}"
+            hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
         {% csrf_token %}
         <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+        <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
         <input type="hidden" name="search" id="traceDeviceOfferedSearch">
         <input type="hidden" name="device_key" id="traceDeviceKey">
         <input type="hidden" name="device_id" id="traceDeviceId">
@@ -484,9 +491,12 @@
     <div class="modal-content">
       <form id="traceTerminationForm" method="post"
             action="{% url 'plugins:netbox_data_import:trace_resolve_termination' %}"
-            data-candidates-url="{% url 'plugins:netbox_data_import:trace_termination_candidates' %}">
+            data-candidates-url="{% url 'plugins:netbox_data_import:trace_termination_candidates' %}"
+            hx-post="{% url 'plugins:netbox_data_import:trace_resolve_termination' %}"
+            hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
         {% csrf_token %}
         <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+        <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
         <input type="hidden" name="search" id="traceTerminationOfferedSearch">
         <input type="hidden" name="field_key" id="traceTerminationFieldKey">
         <input type="hidden" name="object_type" id="traceTerminationObjectType">

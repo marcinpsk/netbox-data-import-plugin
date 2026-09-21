@@ -287,6 +287,57 @@ pre-filtering or another selection mechanism, not a larger materialized prompt. 
 1,025 out of both validation paths. The existing proposal tests prove that an oversized eligible
 set returns `too_many_candidates` without persisting a partial snapshot.
 
+## Candidate paging revision, 2026-09-21
+
+Operators hit `120 eligible candidates exceed the configured bound of 64` on ordinary equipment. The
+2026-09-13 revision left one number doing two jobs: bounding the prompt and bounding the eligible
+set. A 120-port switch is not a resource-exhaustion risk, but it was refused as one.
+
+The two jobs are separated. `inference_proposal_candidate_limit` now bounds the **prompt**: it is the
+page size one request offers. The eligible set is bounded by `proposal_eligible_set_limit()`, which
+returns the existing 1,024 ceiling. A set between the two is searched a page at a time.
+
+**"A truncated result must never establish freshness" is preserved, not weakened.** The stored
+snapshot still holds the complete eligible set and `CandidateSnapshot.matches` still compares all of
+it, so a rename, an addition or a removal anywhere in the set is still stale. What the snapshot gains
+is `page_offset` and `page_size`, recording which slice reached the backend. The set establishes
+freshness; the page is only what the prompt carried. `matches` deliberately ignores the page, because
+two pages of one set describe the same world.
+
+The page also bounds the answer. The worker builds the prompt, the accepted display-name map and the
+selected entry from `snapshot.page`, so a response naming a candidate the backend never saw is
+`invalid_response`, not a silent selection.
+
+Paging is operator-driven, one page per request. A `no_match` on a page that is not the last is not a
+`no_match` on the Device: the card names the range it searched, Accept stays refused with that range,
+and Ask AI offers the next page.
+
+An attempt uses its page up in two ways, and `page_exhausted` is the one definition both the
+lifecycle and the card read. A `no_match` found nothing there. A **rejected** candidate was the wrong
+answer from there, which matters because a repeatable wrong answer on the first page would otherwise
+hide every later candidate for good. Any other last attempt, including an undecided one still
+awaiting a decision, leaves the page unfinished and does not advance.
+
+The next offset resets to the first candidate when the evidence has moved since or when the last
+page reached the end. "Moved" is `proposal_inventory_staleness`, the same read the card shows, so
+the offer and the request cannot disagree. Comparing the candidate snapshot alone was not enough: a
+Device replaced under its own name, with its ports moved across unchanged, leaves the snapshot
+matching while the resolved Device is a different row, and the request would have continued from an
+offset the card had already called a restart.
+
+`next_page_offset` reads the last attempt inside the profile policy lock, but a worker settles an
+attempt without taking that lock. The partial unique index therefore cannot close the window: it
+reads the world at insert time, and an attempt observed as active can be terminal by then, letting
+the next request repeat a page. The request refuses on what it **observed**, through
+`active_proposal_exists`, rather than on what the index sees later.
+
+The count the card advertises is one page, `min(remaining, page size)`, not the whole remainder: the
+next request sends a page. It reads the page size from the current configuration, because that is
+what the next request will use.
+
+Above 1,024 the 2026-09-13 conclusion stands unchanged: the answer is authoritative pre-filtering,
+not more pages, because the ceiling bounds the stored set and the retrieval, not only the prompt.
+
 ## First implementable increment
 
 The `ResolutionProposal` model, its generated schema migration, and the transition service.

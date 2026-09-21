@@ -4,6 +4,7 @@
 
 from threading import Event
 from time import monotonic, sleep
+from unittest.mock import patch
 
 from core.models import ObjectType
 from dcim.models import Device, Interface
@@ -166,10 +167,21 @@ class ProposalFreshnessTest(DecisionInventory, TestCase):
         Interface.objects.filter(device=self.device).delete()
         self.assert_candidates_stale(proposal)
 
-    def test_a_candidate_set_above_the_bound_is_stale(self):
+    def test_a_candidate_set_above_the_eligible_ceiling_is_stale(self):
+        """Past the ceiling the freshness read builds no snapshot, so nothing can be compared."""
+        from netbox_data_import import proposal_decisions
+
         proposal = self.proposal()
-        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 1}}):
+        # The freshness read binds the ceiling at import, so the patch belongs to its own module.
+        with patch.object(proposal_decisions, "proposal_eligible_set_limit", lambda: 1):
             self.assert_candidates_stale(proposal)
+
+    def test_a_candidate_set_above_the_page_size_stays_fresh(self):
+        """The page is only what the prompt carried; freshness is still the whole eligible set."""
+        proposal = self.proposal()
+
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 1}}):
+            self.assertFalse(self.stale(proposal).is_stale)
 
     def test_staleness_is_recomputed_without_changing_the_proposal(self):
         proposal = self.proposal()

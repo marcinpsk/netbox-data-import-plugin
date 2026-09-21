@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import NamedTuple
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
@@ -3755,6 +3755,13 @@ class _TraceWorkspaceMixin:
             return None
 
 
+def _trace_workspace_url(identity: str) -> str:
+    """Return the workspace URL that reopens one trace."""
+    url = reverse("plugins:netbox_data_import:trace_workspace")
+    # An identity the replan dropped selects nothing, and the page falls back to its first trace.
+    return f"{url}?{urlencode({'trace': identity.strip()})}" if identity.strip() else url
+
+
 class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     """Section 10.2: one review workspace page per preview, for the traces it planned."""
 
@@ -3892,7 +3899,7 @@ class TraceWorkspaceRereadView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
 
     def post(self, request):
         """Replace the reviewed preview with a freshly read one."""
-        next_url = reverse("plugins:netbox_data_import:trace_workspace")
+        next_url = _trace_workspace_url(request.POST.get("trace", ""))
         loaded = self.reviewed_preview(request)
         if loaded is None:
             messages.warning(request, "No import preview in progress. Start a new import.")
@@ -3928,7 +3935,7 @@ class TraceSyncView(_PermissionScopedWriteMixin, _TraceWorkspaceMixin, Permissio
 
     def post(self, request):
         """Queue the reviewed plan for one trace's own selection."""
-        next_url = reverse("plugins:netbox_data_import:trace_workspace")
+        next_url = _trace_workspace_url(request.POST.get("identity", ""))
         loaded = self.reviewed_preview(request)
         if loaded is None:
             messages.warning(request, "No import preview in progress. Start a new import.")
@@ -4089,7 +4096,7 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
 
     def post(self, request):
         """Recheck the offered Device, save it under the profile policy lock, and replan."""
-        next_url = reverse("plugins:netbox_data_import:trace_workspace")
+        next_url = _trace_workspace_url(request.POST.get("trace", ""))
         loaded = self.reviewed_preview(request)
         if loaded is None:
             messages.warning(request, "No import preview in progress. Start a new import.")
@@ -4164,7 +4171,7 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
 
     def post(self, request):
         """Save the selection the picker offered, then replan the preview against it."""
-        next_url = reverse("plugins:netbox_data_import:trace_workspace")
+        next_url = _trace_workspace_url(request.POST.get("trace", ""))
         loaded = self.reviewed_preview(request)
         if loaded is None:
             messages.warning(request, "No import preview in progress. Start a new import.")
@@ -4321,13 +4328,20 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
 
         from .cable_target import UNRESOLVED
         from .field_keys import parse_termination_field_key
-        from .inference_backend import proposal_candidate_limit
+        from .inference_backend import proposal_candidate_limit, proposal_eligible_set_limit
         from .jobs import ResolutionProposalJob
         from .models import ProposalFailureReason
         from .proposal_jobs import PROMPT_VERSION
         from .proposal_response import RESPONSE_SCHEMA_VERSION
         from .proposal_tasks import proposal_task
-        from .resolution_proposals import fail_proposal, request_proposal
+        from .resolution_proposals import (
+            ActiveProposalExists,
+            active_proposal_exists,
+            fail_proposal,
+            next_page_offset,
+            record_proposal_job,
+            request_proposal,
+        )
 
         profile, document, workspace, planning_context, reader = self.proposal_context(request)
         reason = self.unregistered_adapter_reason(profile)
@@ -4353,8 +4367,11 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
                 raise InvalidProposalTarget("This field is no longer in the preview.")
             if field["state"] != UNRESOLVED:
                 raise PreviewActionInvalid("This termination is already resolved.")
+            # Refuse on the observed predecessor, not on the index: see active_proposal_exists.
+            if active_proposal_exists(profile=profile, task_type=SELECT_TERMINATION_TASK, field_key=field_key):
+                raise ActiveProposalExists("This field already has an active Resolution Proposal.")
             inventory = task.inventory(
-                profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_candidate_limit()
+                profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_eligible_set_limit()
             )
             device = inventory.resolved_device
             if device is None:
@@ -4364,6 +4381,16 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             snapshot = inventory.candidate_snapshot
             if snapshot is None:
                 raise PreviewActionInvalid("The eligible candidates are no longer available.")
+            # A dense Device is searched in turns, from after the last page that used itself up.
+            snapshot = snapshot.with_page(
+                offset=next_page_offset(
+                    profile=profile,
+                    task_type=SELECT_TERMINATION_TASK,
+                    field_key=field_key,
+                    inventory=inventory,
+                ),
+                size=proposal_candidate_limit(),
+            )
             proposal = request_proposal(
                 profile=profile,
                 task_type=SELECT_TERMINATION_TASK,
@@ -4390,6 +4417,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
         except Exception:
             fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)
             raise
+        record_proposal_job(proposal.pk, job)
         return JsonResponse({"ok": True, "proposal_id": proposal.pk, "status": proposal.status, "job_id": job.pk})
 
 

@@ -136,6 +136,32 @@ the exact model id manually.
 The foreground test has one overall time limit. The limit is the backend connect timeout plus its read
 timeout. Credential resolution, model discovery, and the completion request share this time.
 
+## Ask AI candidates per request
+
+`inference_proposal_candidate_limit` sets how many candidates one Ask AI request sends to the
+backend. The default is 64. Valid values are 1 to 1024.
+
+```python
+PLUGINS_CONFIG = {
+    "netbox_data_import": {
+        "inference_proposal_candidate_limit": 128,
+    },
+}
+```
+
+A Device with more eligible ports than this is searched a page at a time. The first request offers
+the first page. The card says which candidates it searched. The Ask AI button offers the next page
+when the last request used its page up: the backend found no match in it, or you rejected the
+candidate it chose. Raise the setting to search more candidates per request, at a higher prompt
+cost per request.
+
+The search restarts at the first candidate when the eligible set changed since the last request,
+because adding or removing a port renumbers every page. The card says so instead of offering a next
+page. It also restarts once the last page is reached.
+
+A Device with more than 1024 eligible ports of one kind is refused. That ceiling bounds the stored
+candidate set, not the prompt. Above it, narrow the eligible set instead.
+
 ## Native primary contacts
 
 Map the source contact column to the `primary_contact` target field. Then configure these fields on the Import Profile:

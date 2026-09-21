@@ -110,6 +110,54 @@ class CandidateSnapshotTest(TestCase):
 
         self.assertFalse(snapshot.matches(renamed))
 
+    def test_a_snapshot_records_the_page_it_offered(self):
+        """The prompt carries one page, so the row has to say which one it carried."""
+        paged = self.snapshot(5).with_page(offset=0, size=2)
+
+        self.assertEqual([entry.display_name for entry in paged.page], ["Ethernet 1/1", "Ethernet 1/2"])
+        self.assertEqual(paged.page_end, 2)
+        self.assertTrue(paged.has_next_page)
+
+    def test_a_later_page_starts_where_the_last_one_ended(self):
+        paged = self.snapshot(5).with_page(offset=2, size=2)
+
+        self.assertEqual([entry.display_name for entry in paged.page], ["Ethernet 1/3", "Ethernet 1/4"])
+        self.assertEqual(paged.page_end, 4)
+        self.assertTrue(paged.has_next_page)
+
+    def test_the_final_page_is_short_and_offers_no_next(self):
+        paged = self.snapshot(5).with_page(offset=4, size=2)
+
+        self.assertEqual([entry.display_name for entry in paged.page], ["Ethernet 1/5"])
+        self.assertEqual(paged.page_end, 5)
+        self.assertFalse(paged.has_next_page)
+
+    def test_the_page_is_not_what_establishes_freshness(self):
+        """Freshness is the whole eligible set: two pages of one set describe the same world."""
+        first = self.snapshot(5).with_page(offset=0, size=2)
+        second = self.snapshot(5).with_page(offset=2, size=2)
+
+        self.assertTrue(first.matches(second))
+
+    def test_a_stored_page_survives_the_round_trip_through_the_row(self):
+        paged = self.snapshot(5).with_page(offset=2, size=2)
+
+        restored = CandidateSnapshot.from_json(paged.as_json())
+
+        self.assertEqual([entry.display_name for entry in restored.page], ["Ethernet 1/3", "Ethernet 1/4"])
+        self.assertTrue(restored.has_next_page)
+
+    def test_a_row_written_before_paging_reads_as_one_whole_page(self):
+        """Those rows offered every candidate they held, and none of them has a next page."""
+        stored = self.snapshot(5).as_json()
+        del stored["page_offset"]
+        del stored["page_size"]
+
+        restored = CandidateSnapshot.from_json(stored)
+
+        self.assertEqual(len(restored.page), 5)
+        self.assertFalse(restored.has_next_page)
+
     def test_a_changed_membership_no_longer_matches(self):
         self.assertFalse(self.snapshot(2).matches(self.snapshot(3)))
 

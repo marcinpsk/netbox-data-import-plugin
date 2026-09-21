@@ -24,6 +24,7 @@ _DEPENDENCY_COMMENT_EXCEPTIONS = frozenset(
         "0001_initial",
         "0022_migrate_profile_adapter_config",
         "0031_inferencebackend",
+        "0036_resolutionproposal_job",
     }
 )
 

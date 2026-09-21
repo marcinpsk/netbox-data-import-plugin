@@ -1399,6 +1399,10 @@ class ResolutionProposal(DigestIndexedMixin, models.Model):
     response_diagnostic = models.JSONField(null=True, blank=True)
 
     failure_reason = models.CharField(max_length=50, choices=ProposalFailureReason.CHOICES, blank=True, default="")
+    # Set after the row commits, because the enqueue needs the id the request writes.
+    job = models.OneToOneField(
+        "core.Job", on_delete=models.SET_NULL, null=True, blank=True, related_name="resolution_proposal"
+    )
 
     decision = models.CharField(max_length=20, choices=ProposalDecision.CHOICES, blank=True, default="")
     decided_by = models.ForeignKey(
