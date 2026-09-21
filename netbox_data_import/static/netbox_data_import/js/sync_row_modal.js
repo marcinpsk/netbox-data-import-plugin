@@ -208,9 +208,8 @@
     var pendingWrites = pendingWriteSummary(btn);
     if (!reviewed) {
       summary.className = 'small mb-2 text-muted';
-      summary.textContent = isUpdate
-        ? 'This row has no reviewed field differences.'
-        : 'Creates this ' + (btn.dataset.objectType || 'object') + ' in NetBox with the values below.';
+      summary.textContent = (isUpdate ? 'Updates this ' : 'Creates this ')
+        + (btn.dataset.objectType || 'object') + ' in NetBox with the values below.';
     } else if (counts.change === 0) {
       summary.className = 'small mb-2 text-muted';
       if (skippedPhrase) {

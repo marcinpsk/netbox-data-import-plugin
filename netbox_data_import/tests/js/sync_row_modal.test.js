@@ -151,6 +151,14 @@ describe("the update confirmation", () => {
       .toBe("Creates this device in NetBox with the values below. Sync will also write provenance data.");
   });
 
+  it("states that a rack update writes, because a rack carries no field review", () => {
+    openRow(REVIEWED, { action: "update", objectType: "rack", rackName: "rack-one" });
+
+    // Only a Device row is field-reviewed, so an empty preview here is a rack update, not a no-op.
+    expect(document.getElementById("syncRowSummary").textContent)
+      .toBe("Updates this rack in NetBox with the values below.");
+  });
+
   it("names each skipped state when nothing changes", () => {
     openRow(REVIEWED.filter((entry) => entry.state !== "change"), { action: "update" });
 
