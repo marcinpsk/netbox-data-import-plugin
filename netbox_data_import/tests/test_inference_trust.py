@@ -217,14 +217,13 @@ class DnsWorkerTest(SimpleTestCase):
 
     @staticmethod
     def _run_worker(request):
-        stdin, stdout = io.StringIO(request), io.StringIO()
-        with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
-            try:
-                status = _dns_worker.main()
-                armed = signal.getitimer(signal.ITIMER_REAL)[0]
-            finally:
-                # main() leaves the alarm running for a child that exits, so this process disarms it.
-                signal.setitimer(signal.ITIMER_REAL, 0)
+        stdout = io.StringIO()
+        try:
+            status = _dns_worker.main(io.StringIO(request), stdout)
+            armed = signal.getitimer(signal.ITIMER_REAL)[0]
+        finally:
+            # main() leaves the alarm running for a child that exits, so this process disarms it.
+            signal.setitimer(signal.ITIMER_REAL, 0)
         return status, stdout.getvalue(), armed
 
     def test_the_worker_arms_its_own_alarm_before_it_resolves(self):
@@ -237,10 +236,9 @@ class DnsWorkerTest(SimpleTestCase):
     def test_an_alarm_that_cannot_be_armed_is_not_reported_as_a_failed_resolution(self):
         """Without the alarm the worker has no deadline, so it must not exit as if DNS had failed."""
         # A negative interval makes the real setitimer refuse, so this needs no mock.
-        stdin, stdout = io.StringIO(json.dumps(("localhost", 80, -1))), io.StringIO()
-        with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
-            with self.assertRaises(signal.ItimerError):
-                _dns_worker.main()
+        stdout = io.StringIO()
+        with self.assertRaises(signal.ItimerError):
+            _dns_worker.main(io.StringIO(json.dumps(("localhost", 80, -1))), stdout)
 
         self.assertEqual(stdout.getvalue(), "")
 
