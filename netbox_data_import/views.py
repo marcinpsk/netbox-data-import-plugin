@@ -3701,6 +3701,9 @@ def _visible_row_ids(model, viewer, rows) -> set[int]:
     return set(model.objects.restrict(viewer, "view").filter(pk__in=row_ids).values_list("pk", flat=True))
 
 
+POLICY_SAVE_PERMISSION_REFUSED = "You do not have permission to save this CableClass policy."
+
+
 def _cable_policy_forms(profile, trace, viewer) -> list:
     """Return the Cable policy in force for each CableClass the selected trace states, once each.
 
@@ -3721,11 +3724,23 @@ def _cable_policy_forms(profile, trace, viewer) -> list:
         disclosed = row is not None and visible and policy_row_is_disclosed(decision, row)
         hidden = decision.get(POLICY_VISIBLE) is False or not visible
         moved = row is not None and visible and not disclosed
+        assessment = assess_permission_scoped_save_option(
+            viewer,
+            CableClassMapping,
+            {"profile": profile, "cable_class": cable_class},
+            {
+                "cable_type_resolved": False,
+                "cable_type": None,
+                "cable_profile_resolved": False,
+                "cable_profile": None,
+            },
+            unknown_fields={"cable_type_resolved", "cable_type", "cable_profile_resolved", "cable_profile"},
+        )
         form = CableClassMappingForm(
             instance=row if disclosed else CableClassMapping(profile=profile, cable_class=cable_class),
             auto_id=f"id_%s_{index}",
         )
-        if hidden or moved:
+        if hidden or moved or not assessment.allowed:
             _disable_policy_form(form)
         forms.append(
             {
@@ -3734,7 +3749,15 @@ def _cable_policy_forms(profile, trace, viewer) -> list:
                 "cable_profile": POLICY_HIDDEN if hidden else decision["cable_profile"],
                 "resolved": False if hidden else bool(decision["policy"]),
                 "form": form,
-                "reason": POLICY_WRITE_REFUSED if hidden else PROFILE_POLICY_MOVED if moved else "",
+                "reason": (
+                    POLICY_WRITE_REFUSED
+                    if hidden
+                    else PROFILE_POLICY_MOVED
+                    if moved
+                    else POLICY_SAVE_PERMISSION_REFUSED
+                    if not assessment.allowed
+                    else ""
+                ),
             }
         )
     return forms
@@ -3744,6 +3767,8 @@ RETAINED_SEGMENT_REASON = (
     "This plan keeps the Cable that already proves this segment, and an override cannot change it. "
     "Correct that Cable in NetBox, then re-read."
 )
+SEGMENT_FORCE_PERMISSION_REFUSED = "You do not have permission to force this segment policy."
+SEGMENT_CLEAR_PERMISSION_REFUSED = "You do not have permission to clear this segment policy."
 
 
 def _workspace_segment(workspace, unit_identity: str, position: str):
@@ -3783,6 +3808,18 @@ def _segment_policy_forms(profile, trace, viewer) -> list:
         disclosed = deciding is not None and visible and policy_row_is_disclosed(segment, deciding)
         hidden = segment.get(POLICY_VISIBLE) is False or not visible
         moved = deciding is not None and visible and not disclosed
+        force_assessment = assess_permission_scoped_save_option(
+            viewer,
+            CableSegmentOverride,
+            {"profile": profile, "segment_key": segment["segment_key"]},
+            {
+                "cable_type": None,
+                "cable_profile": None,
+                "source_trace_identity": trace.trace_identity,
+                "segment_index": segment["index"],
+            },
+            unknown_fields={"cable_type", "cable_profile"},
+        )
         form = CableSegmentOverrideForm(
             instance=(
                 stored
@@ -3792,7 +3829,17 @@ def _segment_policy_forms(profile, trace, viewer) -> list:
             initial={} if hidden or moved else cable_policy_form_initial(segment["policy"]),
             auto_id=f"id_%s_segment_{segment['index']}",
         )
-        if hidden or moved:
+        shared_reason = (
+            POLICY_WRITE_REFUSED if hidden else PROFILE_POLICY_MOVED if moved else _segment_override_reason(segment)
+        )
+        force_reason = shared_reason or ("" if force_assessment.allowed else SEGMENT_FORCE_PERMISSION_REFUSED)
+        delete_permission = get_permission_for_model(CableSegmentOverride, "delete")
+        clear_reason = shared_reason or (
+            SEGMENT_CLEAR_PERMISSION_REFUSED
+            if stored is not None and viewer is not None and not viewer.has_perm(delete_permission, stored)
+            else ""
+        )
+        if force_reason:
             _disable_policy_form(form)
         forms.append(
             {
@@ -3800,13 +3847,8 @@ def _segment_policy_forms(profile, trace, viewer) -> list:
                 "cable_type": POLICY_HIDDEN if hidden else segment["cable_type"],
                 "cable_profile": POLICY_HIDDEN if hidden else segment["cable_profile"],
                 "position": segment["index"] + 1,
-                "reason": (
-                    POLICY_WRITE_REFUSED
-                    if hidden
-                    else PROFILE_POLICY_MOVED
-                    if moved
-                    else _segment_override_reason(segment)
-                ),
+                "reason": force_reason,
+                "clear_reason": clear_reason,
                 "form": form,
             }
         )

@@ -275,10 +275,13 @@
                               {% if segment.reason %}disabled{% endif %}>Force</button>
                       {% if segment.overridden %}
                         <button type="submit" name="clear" value="1" class="btn btn-sm btn-outline-secondary"
-                                data-segment-policy-clear {% if segment.reason %}disabled{% endif %}>Clear</button>
+                                data-segment-policy-clear {% if segment.clear_reason %}disabled{% endif %}>Clear</button>
                       {% endif %}
                     </form>
                     {% if segment.reason %}<div class="ndi-trace-reason mt-1">{{ segment.reason }}</div>{% endif %}
+                    {% if segment.clear_reason and segment.clear_reason != segment.reason %}
+                      <div class="ndi-trace-reason mt-1">{{ segment.clear_reason }}</div>
+                    {% endif %}
                   </li>
                 {% empty %}
                   <li class="text-secondary">Planning stopped before it proposed a topology.</li>

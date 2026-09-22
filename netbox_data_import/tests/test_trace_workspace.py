@@ -2312,6 +2312,17 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
         permission.actions = ["view", "add", "change", "delete"]
         permission.save(update_fields=("actions",))
 
+    def set_mapping_actions(self, actions):
+        """Replace the live CableClass Mapping actions for this viewer."""
+        from users.models import ObjectPermission
+
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+
+        permission = ObjectPermission.objects.get(name__startswith="trace-policy-viewer CableClassMapping ")
+        permission.actions = actions
+        permission.save(update_fields=("actions",))
+        clear_user_permission_caches(self.viewer)
+
     def revoke_override_view(self):
         """Keep override writes permitted while removing the viewer's read grant."""
         from users.models import ObjectPermission
@@ -2319,6 +2330,17 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
         permission = ObjectPermission.objects.get(name__startswith="trace-policy-viewer CableSegmentOverride ")
         permission.actions = ["add", "change", "delete"]
         permission.save(update_fields=("actions",))
+
+    def set_override_actions(self, actions):
+        """Replace the live Cable Segment Override actions for this viewer."""
+        from users.models import ObjectPermission
+
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+
+        permission = ObjectPermission.objects.get(name__startswith="trace-policy-viewer CableSegmentOverride ")
+        permission.actions = actions
+        permission.save(update_fields=("actions",))
+        clear_user_permission_caches(self.viewer)
 
     def test_revoking_mapping_view_redacts_and_disables_all_policy_surfaces(self):
         """A cached decision cannot expose values or accept a blind overwrite after revocation."""
@@ -2668,6 +2690,69 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
 
         self.assertEqual(edit.status_code, 403)
         self.assertEqual(delete.status_code, 403)
+
+    def test_mapping_controls_distinguish_add_from_change_permission(self):
+        """Each policy row offers Save only for the write action that row needs."""
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").delete()
+        self.open_workspace()
+        refusal = "You do not have permission to save this CableClass policy."
+
+        self.set_mapping_actions(["view", "change"])
+        change_only = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        existing = next(item for item in change_only.context["cable_policy_forms"] if item["cable_class"] == "Patch")
+        missing = next(item for item in change_only.context["cable_policy_forms"] if item["cable_class"] == "Trunk")
+        self.assertFalse(existing["form"].fields["cable_type"].disabled)
+        self.assertEqual(existing["reason"], "")
+        self.assertTrue(missing["form"].fields["cable_type"].disabled)
+        self.assertEqual(missing["reason"], refusal)
+
+        self.set_mapping_actions(["view", "add"])
+        add_only = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        existing = next(item for item in add_only.context["cable_policy_forms"] if item["cable_class"] == "Patch")
+        missing = next(item for item in add_only.context["cable_policy_forms"] if item["cable_class"] == "Trunk")
+        self.assertTrue(existing["form"].fields["cable_type"].disabled)
+        self.assertEqual(existing["reason"], refusal)
+        self.assertFalse(missing["form"].fields["cable_type"].disabled)
+        self.assertEqual(missing["reason"], "")
+
+    def test_a_new_segment_override_requires_add_permission(self):
+        """The workspace does not offer Force when its child row cannot be created."""
+        self.set_override_actions(["view"])
+
+        response = self.open_workspace()
+
+        segment = response.context["segment_policy_forms"][0]
+        self.assertTrue(segment["form"].fields["cable_type"].disabled)
+        self.assertEqual(segment["reason"], "You do not have permission to force this segment policy.")
+
+    def test_existing_override_controls_distinguish_change_from_delete_permission(self):
+        """Force and Clear follow their independent child-row permissions."""
+        identity = self.identity_of(patched_path())
+        self.force(
+            self.eth0,
+            self.panel_1_fronts[0],
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            trace_identity=identity,
+        )
+        self.open_workspace()
+
+        self.set_override_actions(["view", "change"])
+        change_only = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        segment = change_only.context["segment_policy_forms"][0]
+        self.assertTrue(segment["overridden"])
+        self.assertFalse(segment["form"].fields["cable_type"].disabled)
+        self.assertEqual(segment["reason"], "")
+        self.assertEqual(segment["clear_reason"], "You do not have permission to clear this segment policy.")
+        self.assertContains(change_only, "data-segment-policy-clear disabled")
+
+        self.set_override_actions(["view", "delete"])
+        delete_only = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        segment = delete_only.context["segment_policy_forms"][0]
+        self.assertTrue(segment["form"].fields["cable_type"].disabled)
+        self.assertEqual(segment["reason"], "You do not have permission to force this segment policy.")
+        self.assertEqual(segment["clear_reason"], "")
+        self.assertNotContains(delete_only, "data-segment-policy-clear disabled")
 
 
 class TraceWorkspaceCablePolicyTest(CableTopologyMixin, TransactionTestCase):
