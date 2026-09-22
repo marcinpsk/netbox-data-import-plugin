@@ -217,6 +217,7 @@ class ProposalPresentation:
         if missing:
             # Acceptance refuses this row, so the card must not offer an action the writer declines.
             stale_reason = "The selected candidate is no longer in the request snapshot. Request a new proposal."
+        offered = self.offered_page(proposal)
         actions = self.actions(
             field,
             proposal,
@@ -226,7 +227,7 @@ class ProposalPresentation:
             stale_reason,
             selected_entry,
             inventory,
-            self.offered_page(proposal),
+            offered,
         )
         badge = proposal.get_status_display() if proposal is not None else "No proposal"
         if completed:
@@ -241,7 +242,6 @@ class ProposalPresentation:
             if proposal.status == ProposalStatus.FAILED:
                 state = ProposalStatus.FAILED
         metadata = (proposal.backend_metadata or {}) if proposal is not None else {}
-        offered = self.offered_page(proposal)
         return {
             "has_proposal": proposal is not None,
             "pending": pending,

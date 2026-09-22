@@ -15,6 +15,7 @@ from .models import (
     ProposalOutcome,
     ProposalStatus,
     ResolutionProposal,
+    index_digest,
 )
 from .proposal_tasks import CandidateSnapshot, proposal_inventory_staleness
 
@@ -88,6 +89,7 @@ def active_proposal_exists(*, profile, task_type, field_key) -> bool:
         profile=profile,
         task_type=task_type,
         field_key=field_key,
+        field_key_digest=index_digest(field_key),
         status__in=ProposalStatus.ACTIVE,
     ).exists()
 

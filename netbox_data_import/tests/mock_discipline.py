@@ -79,6 +79,8 @@ _FUNCTOOLS_PARTIAL = "functools.partial"
 _FIRST_PARTY = "netbox_data_import"
 # The canonical binding a first-party import gets, so a later local rebinding shadows it.
 _FIRST_PARTY_BINDING = "<first-party>"
+# Deterministic policies that tests must exercise with real inputs.
+_REAL_BEHAVIOR_PATCH_TARGETS = {"proposal_eligible_set_limit"}
 # Inline opt-out marker (in a comment): `# mock-ok` or `# mock-ok: reason`.
 _MARKER = "mock-ok"
 # Files the scanner never inspects (itself + its own test).
@@ -110,6 +112,8 @@ class Violation:
         return f"{self.path}::{self.qualname}"
 
     def __str__(self) -> str:
+        if self.kind == "policy-patch":
+            return f"{self.path}:{self.lineno}: patch of deterministic policy {self.mock} in {self.qualname}()"
         if self.kind == "patch":
             return f"{self.path}:{self.lineno}: unspecced patch of first-party {self.mock} in {self.qualname}()"
         return f"{self.path}:{self.lineno}: unapproved {self.mock}() in {self.qualname}()"
@@ -266,10 +270,41 @@ class _Scanner(ast.NodeVisitor):
         name = self._mock_class(node.func)
         if name and not self._is_bounded(node) and not self._is_marked(node):
             self.hits.append(Violation(self._rel, node.lineno, self._qual(), name))
-        target = self._unspecced_first_party_patch(node)
-        if target and not self._is_marked(node):
-            self.hits.append(Violation(self._rel, node.lineno, self._qual(), target, kind="patch"))
+        policy_target = self._patched_deterministic_policy(node)
+        if policy_target:
+            self.hits.append(Violation(self._rel, node.lineno, self._qual(), policy_target, kind="policy-patch"))
+        else:
+            target = self._unspecced_first_party_patch(node)
+            if target and not self._is_marked(node):
+                self.hits.append(Violation(self._rel, node.lineno, self._qual(), target, kind="patch"))
         self.generic_visit(node)
+
+    def _patched_deterministic_policy(self, node: ast.Call) -> str | None:
+        """Return a first-party policy target that tests must exercise with real inputs."""
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "object":
+            if not self._is_patch(func.value) or len(node.args) < 2:
+                return None
+            root = node.args[0]
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            member = node.args[1]
+            if (
+                self._canonical_binding(root) == _FIRST_PARTY_BINDING
+                and isinstance(member, ast.Constant)
+                and member.value in _REAL_BEHAVIOR_PATCH_TARGETS
+            ):
+                return f"{ast.unparse(node.args[0])}.{member.value}"
+            return None
+        target = node.args[0] if self._is_patch(func) and node.args else None
+        if (
+            isinstance(target, ast.Constant)
+            and isinstance(target.value, str)
+            and target.value.split(".")[0] == _FIRST_PARTY
+            and target.value.rsplit(".", 1)[-1] in _REAL_BEHAVIOR_PATCH_TARGETS
+        ):
+            return target.value
+        return None
 
     def _unspecced_first_party_patch(self, node: ast.Call) -> str | None:
         """Return the patched first-party target, or None if this call is fine.

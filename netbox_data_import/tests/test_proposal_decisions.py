@@ -4,7 +4,6 @@
 
 from threading import Event
 from time import monotonic, sleep
-from unittest.mock import patch
 
 from core.models import ObjectType
 from dcim.models import Device, Interface
@@ -14,6 +13,7 @@ from django.db import connection
 from django.test import TestCase, TransactionTestCase, override_settings
 
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, termination_field_key
+from netbox_data_import.inference_backend import proposal_eligible_set_limit
 from netbox_data_import.models import (
     ImportProfile,
     ProposalDecision,
@@ -169,12 +169,14 @@ class ProposalFreshnessTest(DecisionInventory, TestCase):
 
     def test_a_candidate_set_above_the_eligible_ceiling_is_stale(self):
         """Past the ceiling the freshness read builds no snapshot, so nothing can be compared."""
-        from netbox_data_import import proposal_decisions
-
         proposal = self.proposal()
-        # The freshness read binds the ceiling at import, so the patch belongs to its own module.
-        with patch.object(proposal_decisions, "proposal_eligible_set_limit", lambda: 1):
-            self.assert_candidates_stale(proposal)
+        existing = Interface.objects.filter(device=self.device).count()
+        Interface.objects.bulk_create(
+            Interface(device=self.device, name=f"Ethernet ceiling {number}")
+            for number in range(proposal_eligible_set_limit() + 1 - existing)
+        )
+
+        self.assert_candidates_stale(proposal)
 
     def test_a_candidate_set_above_the_page_size_stays_fresh(self):
         """The page is only what the prompt carried; freshness is still the whole eligible set."""

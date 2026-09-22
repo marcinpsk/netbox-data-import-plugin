@@ -6,8 +6,9 @@ from core.models import ObjectType
 from dcim.models import Device, Interface
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, termination_field_key
 from netbox_data_import.models import (
@@ -23,6 +24,7 @@ from netbox_data_import.models import (
 from netbox_data_import.proposal_tasks import CandidateSnapshot, CandidateSnapshotEntry
 from netbox_data_import.resolution_proposals import (
     ActiveProposalExists,
+    active_proposal_exists,
     cancel_proposal,
     claim_proposal,
     complete_proposal,
@@ -183,6 +185,22 @@ class OneActiveProposalTest(ProposalFixture):
 
         with self.assertRaises(ActiveProposalExists):
             self.make_proposal()
+
+    def test_active_lookup_constrains_the_digest_index_column(self):
+        self.make_proposal()
+
+        with CaptureQueriesContext(connection) as queries:
+            self.assertTrue(
+                active_proposal_exists(
+                    profile=self.profile,
+                    task_type=SELECT_TERMINATION_TASK,
+                    field_key=self.field_key,
+                )
+            )
+
+        query = queries.captured_queries[-1]["sql"]
+        self.assertIn('"field_key_digest" =', query)
+        self.assertIn(index_digest(self.field_key), query)
 
     def test_a_serialized_candidate_snapshot_is_refused_at_the_interface(self):
         snapshot = {

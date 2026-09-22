@@ -19,6 +19,7 @@ from django_rq import get_queue
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
+from netbox_data_import.inference_backend import proposal_eligible_set_limit
 from netbox_data_import.jobs import ImportJobRunner, ResolutionProposalJob
 from netbox_data_import.models import (
     ImportProfile,
@@ -405,6 +406,29 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
 
         self.assertEqual(self.card()["page_status"], "Searched candidates 1-2 of 3.")
 
+    def test_a_card_rebuilds_its_offered_page_once(self):
+        """Polling a card must not deserialize its complete candidate set twice."""
+        from netbox_data_import.cable_target import UNRESOLVED
+        from netbox_data_import.netbox_reader import NetBoxReader
+        from netbox_data_import.proposal_presentation import ProposalPresentation
+
+        class CountingPresentation(ProposalPresentation):
+            offered_page_calls = 0
+
+            def offered_page(self, proposal):
+                self.offered_page_calls += 1
+                return super().offered_page(proposal)
+
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.no_match(self.request_proposal())
+            reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
+            presentation = CountingPresentation(profile=self.profile, actor=self.actor, reader=reader)
+            payload = presentation.fields(({"field_key": self.field_key, "state": UNRESOLVED},))
+
+        self.assertEqual(payload[self.field_key]["presentation"]["page_status"], "Searched candidates 1-2 of 3.")
+        self.assertEqual(presentation.offered_page_calls, 1)
+
     def test_a_no_match_with_a_next_page_offers_the_next_one(self):
         """Nothing in this page is not nothing on the Device, and the card has to say which."""
         self.dense_device()
@@ -511,15 +535,24 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             self.assertTrue(claim_proposal(first.pk))
             settled = []
 
-            def settle_the_predecessor_before_the_insert(execute, sql, params, many, context):
-                if not settled and sql.startswith('INSERT INTO "netbox_data_import_resolutionproposal"'):
+            proposal_table = connection.ops.quote_name(ResolutionProposal._meta.db_table)
+
+            def settle_the_predecessor_after_the_active_read(execute, sql, params, many, context):
+                result = execute(sql, params, many, context)
+                if (
+                    not settled
+                    and sql.startswith("SELECT")
+                    and f"FROM {proposal_table}" in sql
+                    and '"status" IN' in sql
+                ):
                     settled.append(True)
                     complete_proposal(first.pk, outcome=ProposalOutcome.NO_MATCH, explanation="Nothing in this page.")
-                return execute(sql, params, many, context)
+                return result
 
-            with connection.execute_wrapper(settle_the_predecessor_before_the_insert):
+            with connection.execute_wrapper(settle_the_predecessor_after_the_active_read):
                 response = self.call("request_proposal", field_key=self.field_key)
 
+        self.assertEqual(settled, [True])
         self.assertEqual(response.status_code, 409, response.content)
         self.assertEqual(ResolutionProposal.objects.count(), 1)
 
@@ -659,11 +692,13 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
 
     def test_too_many_candidates_has_its_own_reason(self):
         """Past the eligible-set ceiling the answer is pre-filtering, not another page."""
-        from netbox_data_import import inference_backend
+        existing = Interface.objects.filter(device=self.device_a).count()
+        Interface.objects.bulk_create(
+            Interface(device=self.device_a, name=f"extra-{number}", type="1000base-t")
+            for number in range(proposal_eligible_set_limit() + 1 - existing)
+        )
 
-        Interface.objects.create(device=self.device_a, name="extra", type="1000base-t")
-        with patch.object(inference_backend, "proposal_eligible_set_limit", lambda: 1):
-            response = self.call("request_proposal", field_key=self.field_key)
+        response = self.call("request_proposal", field_key=self.field_key)
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["reason"], "too_many_candidates")
