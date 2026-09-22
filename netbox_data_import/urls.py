@@ -188,6 +188,11 @@ urlpatterns = [
         name="trace_cable_policy",
     ),
     path(
+        "trace-workspace/segment-policy/",
+        views.TraceCableSegmentPolicyView.as_view(),
+        name="trace_segment_policy",
+    ),
+    path(
         "trace-workspace/resolve-termination/",
         views.TraceResolveTerminationView.as_view(),
         name="trace_resolve_termination",

@@ -1,6 +1,6 @@
 # Trace Cable policy correction and media consistency
 
-Status: RATIFIED at r2 (design-blind, 2 rounds). Increment 1 built.
+Status: RATIFIED at r2 (design-blind, 2 rounds). Increments 1 and 2 built.
 
 ## 1. Brief
 
@@ -378,3 +378,49 @@ trace becomes `actionable`, then runs the real execution and asserts the persist
 nothing was written.
 
 Full suite 2700 passed. `ruff format --check`, `ruff check` and `mypy` clean.
+
+## 12. Increment 2, as built: the override slice
+
+Route `trace-workspace/segment-policy/`, view `TraceCableSegmentPolicyView`, workspace commands
+`save_cable_segment_override_and_replan` and `clear_cable_segment_override_and_replan`.
+
+- `CableSegmentOverride` is keyed `(Import Profile, segment key)`, where the segment key is
+  `_DesiredSegment.key`: the direction-independent pair of resolved termination identities. It is a
+  `CharField`, not a digest-indexed `TextField` like the other decision tables, because the planner
+  derives it from NetBox object types and ids rather than from unbounded source text.
+- The row decides both dimensions. Its presence is the resolution, so it carries no resolved flags.
+- `cable_policy.py` owns the runtime choices, `policy_choice_errors` (renamed from
+  `cable_class_mapping_choice_errors`) and `policy_in_force`. The originals are deleted from
+  `models.py`. `scripts/check_spec_diagnostics.py` reads the new module, or the two codes it emits
+  would read as spec rows no planner emits.
+- Precedence is one line in `policy_in_force`, and both rows answer `decided_policy()`.
+  `_attribute_drift` reads the same row, so a reused Cable is compared against the policy actually in
+  force rather than against the CableClass row alone.
+- `cable.resolved_segment_conflict` is `blocked` and compares effective Cable Type and Cable Profile
+  only. `cable_class` left the shared create payload, and the source-level label check left
+  `_cross_trace_conflicts`: two labels that resolve to one policy are no longer a source
+  disagreement.
+- `cable.cableclass_stale_mapping` is renamed `cable.policy_stale`, with no alias.
+- Override loss: the override records the Source Trace and the segment position it was decided from.
+  A replan that resolves that position to a different pair notes `cable.segment_override_lost`. Both
+  causes are covered: an operator re-pick, and a PortMapping edit that moves the unique mapped peer.
+
+**One design change made during the build.** The proposed-topology panel needs planner knowledge the
+display did not carry: the resolved pair, whether the plan retains that pair, and the policy in force.
+Adding those keys changes the plan shape, so `SCHEMA_VERSION` went to 3. That pulls r2 finding 3
+forward from the media slice: `_rebuild_schema_rejected_preview` rebuilds the preview from the stored
+Source Document when, and only when, the cached plan is rejected for its schema version. It preserves
+`import_context`, refuses while a retained sync holds the preview, refuses for an adapter this release
+cannot plan for, and rotates the preview revision, so a command posted against the old plan is refused
+rather than replayed. Without it every operator mid-review would have been sent back to setup by the
+upgrade, which is exactly what finding 3 described.
+
+The alternative, reading the new keys defensively, was rejected: it reproduces the cached-plan skew
+increment 1 had to correct, where a live page silently states less than the trace does.
+
+Tests: `CableSegmentOverrideTest` covers precedence, unblocking an unmapped CableClass, a stale
+override value, two labels agreeing through one override with one shared payload, and both causes of
+override loss. `TraceWorkspaceSegmentOverrideTest` runs the HTTP flow end to end: one CableClass
+writes two media after one segment is forced, clearing returns the segment to its CableClass policy, a
+retained segment refuses the override and names the NetBox remedy, an invented segment and a half-made
+decision are refused, and a cached plan this release cannot read is rebuilt rather than discarded.

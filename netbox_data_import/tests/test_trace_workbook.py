@@ -515,23 +515,15 @@ class TraceWorkbookTaxonomyTest(SimpleTestCase):
         self.assertIn("claimed by another Source Trace", batch.diagnostics[0].message)
         self.assertNotIn("CableClass", batch.diagnostics[0].message)
 
-    def test_one_segment_claimed_with_two_cable_classes_invalidates_both_traces(self):
-        """A shared segment stated with two labels cannot become one Cable."""
-        blocks = _two_traces_over_one_pair("Shared A", "Shared B")
+    def test_one_segment_stated_with_two_cable_classes_is_no_source_disagreement(self):
+        """Two labels can resolve to one Cable policy, so only the planner can call this a conflict."""
+        for first, second in (("Shared A", "Shared B"), ("Shared", "shared")):
+            with self.subTest(labels=(first, second)):
+                batch = _interpret(_workbook(path_blocks=_two_traces_over_one_pair(first, second)))
 
-        batch = _interpret(_workbook(path_blocks=blocks))
-
-        self.assertEqual(len(batch.rows), 2)
-        self.assertTrue(all(not trace.valid for trace in batch.rows))
-        self.assertEqual(_codes(batch), ["trace.cross_trace_conflict", "trace.cross_trace_conflict"])
-        self.assertIn("conflicting CableClass labels", batch.diagnostics[0].message)
-
-    def test_a_cable_class_that_differs_only_in_case_is_a_disagreement(self):
-        """A CableClass label keys its own mapping row, so it is not normalized like an identity."""
-        batch = _interpret(_workbook(path_blocks=_two_traces_over_one_pair("Shared", "shared")))
-
-        self.assertTrue(all(not trace.valid for trace in batch.rows))
-        self.assertIn("conflicting CableClass labels", batch.diagnostics[0].message)
+                self.assertEqual(len(batch.rows), 2)
+                self.assertTrue(all(trace.valid for trace in batch.rows))
+                self.assertNotIn("trace.cross_trace_conflict", _codes(batch))
 
     def test_two_unreadable_rows_each_report_their_own_location(self):
         """Issue #84 asks the diagnostics to name the malformed rows, not just the first."""

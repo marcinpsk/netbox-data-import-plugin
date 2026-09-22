@@ -260,8 +260,25 @@ Two block conditions are distinct and carry distinct diagnostic codes (section 6
 
 | Condition | Diagnostic code |
 | --- | --- |
-| The stored Cable Type or Cable Profile value is no longer offered by the running instance | `cable.cableclass_stale_mapping` |
+| The stored Cable Type or Cable Profile value is no longer offered by the running instance | `cable.policy_stale` |
 | The stored Cable Profile is still offered but is incompatible with one termination per side | `cable.profile_incompatible` |
+
+**Segment overrides.** A CableClass mapping decides a label, and one label names different media on
+different traces. The Import Profile therefore also holds an override per planned segment. Its key is
+the direction-independent pair of resolved termination identities, so two Source Traces that state one
+shared segment read one override. An override decides both dimensions at once: a per-dimension overlay
+would give one segment four precedence states for no stated requirement. Where an override exists it
+decides that segment, and the CableClass mapping keeps deciding every other segment its label names.
+Override values validate against the running instance and go stale exactly as mapping values do.
+
+An override changes what the import writes, so it cannot change a Cable the import retains. It is
+offered only while the reviewed plan states that pair as pending. Where the reviewed plan retains the
+pair, the workspace shows the action disabled and names the remedy: correct the Cable in NetBox, then
+re-read.
+
+An override records the Source Trace and the segment position it was decided from. A replan that
+resolves that segment to a different pair, whether from a new termination decision or from a
+PortMapping edit that moves the unique mapped peer, reports the override that no longer applies.
 
 ## 4. Target-neutral plan, safety, review, and execution contracts
 
@@ -672,8 +689,8 @@ Creation policy for a new segment:
 | Attribute | Value |
 | --- | --- |
 | Status | `connected` |
-| Type | From the Import Profile CableClass mapping |
-| Profile | From the Import Profile CableClass mapping |
+| Type | From the segment override, else from the Import Profile CableClass mapping |
+| Profile | From the segment override, else from the Import Profile CableClass mapping |
 | Termination connector and position data | None written |
 | Label, description, tenant | Empty |
 | Color | NetBox default |
@@ -719,15 +736,16 @@ inside the transaction as the accepted plan's operator.
 | A segment whose two ends resolve to one termination | `cable.segment_self_connection` | `blocked` |
 | A stored termination selection whose kind contradicts the stated PortClass | `cable.termination_kind_mismatch` | `blocked` |
 | A CableClass dimension is unresolved | `cable.cableclass_unmapped` | `blocked` |
-| A stored Cable Type or Cable Profile value is no longer offered by the running instance | `cable.cableclass_stale_mapping` | `blocked` |
+| A stored Cable Type or Cable Profile value is no longer offered by the running instance | `cable.policy_stale` | `blocked` |
 | A stored Cable Profile is offered but is incompatible with one termination per side | `cable.profile_incompatible` | `blocked` |
-| Source Traces resolve one shared segment to different Cable policies | `cable.resolved_segment_conflict` | `invalid` |
+| Source Traces resolve one shared segment to different Cable policies | `cable.resolved_segment_conflict` | `blocked` |
 | The operator lacks a required Cable or view permission | `cable.permission_denied` | `blocked` |
 | A dangling natural-key reference in `adapter_config` | `profile.dangling_reference` | `blocked` |
 | A PortMapping row proves the stated Pass-Through Claim | `cable.pass_through_verified` | `info` diagnostic, disposition unchanged |
 | A mapped peer substitutes a same-port continuation | `cable.same_port_continuation` | `info` diagnostic, disposition unchanged |
 | An existing Cable already proves a desired segment | `cable.segment_reused` | `info` diagnostic, disposition unchanged |
 | Attribute drift on a reused Cable | `cable.attribute_drift` | `info` diagnostic, disposition unchanged |
+| A segment resolves away from the pair its override was decided for | `cable.segment_override_lost` | `info` diagnostic, disposition unchanged |
 
 Diagnostic code strings are spec defaults; the conditions and dispositions are normative.
 
@@ -1137,6 +1155,7 @@ whose operations cannot be generated, and that migration contains data operation
 | `TraceDeviceResolution` | A trace source Device label selected as one NetBox Device | (Import Profile, normalized source Device key) unique | T6 |
 | `TerminationResolution` | The trace-side Row Resolution written by manual selection or proposal acceptance | (Import Profile, task type, field key) unique | T4 |
 | `CableClassMapping` | Cable target policy for one CableClass value | (Import Profile, CableClass value) unique | T4 |
+| `CableSegmentOverride` | Cable target policy forced on one planned segment | (Import Profile, resolved termination pair) unique | T4 |
 | `CableImportSource` | Provenance for one Cable and one contributing Source Trace | (Cable, Import Profile, trace identity) unique | T5 |
 | `InferenceBackend` | One named Inference Backend definition, at most one row enabled | Backend key unique | T7 |
 | `ResolutionProposal` | The Resolution Proposal request, attempt, and decision row | (Import Profile, task type, field key) with at most one active row | T8 |
@@ -1164,6 +1183,12 @@ selection for both the `termination` and `mapped_peer` roles. `SourceResolution`
 Device ID, and a display snapshot. The plain Device ID preserves a stale decision after Device
 deletion so the operator can replace it. The snapshot is never shown unless the Device is still in
 the actor's view scope. Installation-local Device IDs are not part of portable profile YAML.
+
+`CableSegmentOverride` stores the Import Profile, the resolved termination pair key, the forced Cable
+Type and Cable Profile, and the Source Trace identity and segment position the decision was made from.
+The pair key and the values it holds are installation-local, so overrides are not part of portable
+profile YAML. The provenance columns are not identity: they report the override a replan lost when the
+segment resolves to another pair.
 
 `CableImportSource` records the Import Profile, the Cable (a plain foreign key), the trace identity,
 the segment index, the original From/To text and direction, the workbook provenance (fingerprint,
@@ -1268,6 +1293,9 @@ The workspace is one page per preview. Layout:
 - **Three panels** for the selected trace: source evidence (From and To plus the ordered Segment
   Evidence with implied Pass-Through Claims), current NetBox topology, and proposed physical topology
   with a per-segment status of create, reuse existing, delete Logical Cable, or conflict.
+- **Cable policy** for the selected trace: the policy in force on each stated CableClass, editable
+  in place, and the policy in force on each resolved segment with the action that forces one segment
+  to its own Cable Type and Cable Profile.
 
 Termination field states render as badges: `unresolved`, `automatically resolved`, `manually
 resolved`, `proposed`, `accepted`, `stale`, `failed`. The `automatically resolved` state is distinct
@@ -1682,7 +1710,7 @@ ticket writes and validates decisions; it plans nothing.
   `ImportEngine.plan`; it never edits an Import Plan.
 - The `CableClassMapping` form offers only Cable Type and Cable Profile values the running instance
   reports, and only Cable Profiles compatible with one termination per side.
-- Validation distinguishes `cable.cableclass_stale_mapping` from `cable.profile_incompatible`.
+- Validation distinguishes `cable.policy_stale` from `cable.profile_incompatible`.
 - The CableClass mapping section appears only on a trace-adapter profile and is rejected on any other
   profile.
 - The change is independently mergeable with all tests passing.

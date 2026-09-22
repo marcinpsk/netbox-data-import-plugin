@@ -13,13 +13,14 @@ from .cable_target import UNRESOLVED
 from .import_engine import ImportEngine
 from .models import (
     CableClassMapping,
+    CableSegmentOverride,
     ImportProfile,
     TerminationResolution,
     TraceDeviceResolution,
     index_digest,
     locked_profile_policy,
 )
-from .object_permissions import save_permission_scoped_object
+from .object_permissions import delete_permission_scoped_objects, save_permission_scoped_object
 from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
     effective_device_name,
@@ -73,12 +74,17 @@ def save_termination_resolution_and_replan(
         return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
 
 
-class UnmappableCableClass(Exception):
-    """The submitted Cable policy does not validate for this CableClass."""
+class UnacceptableCablePolicy(Exception):
+    """The submitted Cable Type and Cable Profile do not validate as a policy decision."""
 
     def __init__(self, errors):
         self.errors = errors
         super().__init__("; ".join(errors))
+
+
+def _form_messages(form) -> list:
+    """Return every field and non-field message one refused policy form reports."""
+    return [message for messages in form.errors.values() for message in messages]
 
 
 def save_cable_class_mapping_and_replan(
@@ -100,7 +106,7 @@ def save_cable_class_mapping_and_replan(
         instance = CableClassMapping.objects.filter(**lookup).first() or CableClassMapping(**lookup)
         form = CableClassMappingForm({**data, "cable_class": cable_class}, instance=instance)
         if not form.is_valid():
-            raise UnmappableCableClass([message for messages in form.errors.values() for message in messages])
+            raise UnacceptableCablePolicy(_form_messages(form))
         save_permission_scoped_object(
             actor,
             CableClassMapping,
@@ -113,6 +119,64 @@ def save_cable_class_mapping_and_replan(
             },
         )
         # atomic-exit-safe: policy-saved-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+def save_cable_segment_override_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    segment_key,
+    trace_identity,
+    segment_index,
+    data,
+):
+    """Force one planned segment's Cable policy, then request a fresh Import Plan."""
+    from .forms import CableSegmentOverrideForm
+
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        lookup = {"profile": locked_profile, "segment_key": segment_key}
+        # The row is read under the lock, so the form validates what the write will replace.
+        instance = CableSegmentOverride.objects.filter(**lookup).first() or CableSegmentOverride(**lookup)
+        instance.source_trace_identity = trace_identity
+        instance.segment_index = segment_index
+        form = CableSegmentOverrideForm(data, instance=instance)
+        if not form.is_valid():
+            raise UnacceptableCablePolicy(_form_messages(form))
+        save_permission_scoped_object(
+            actor,
+            CableSegmentOverride,
+            lookup,
+            {
+                "cable_type": form.instance.cable_type,
+                "cable_profile": form.instance.cable_profile,
+                "source_trace_identity": trace_identity,
+                "segment_index": segment_index,
+            },
+        )
+        # atomic-exit-safe: segment-override-saved-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+def clear_cable_segment_override_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    segment_key,
+):
+    """Drop one segment override, so the CableClass policy decides that segment again."""
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        delete_permission_scoped_objects(
+            actor,
+            CableSegmentOverride.objects.filter(profile=locked_profile, segment_key=segment_key),
+        )
+        # atomic-exit-safe: segment-override-cleared-and-replanned
         return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
 
 
@@ -188,7 +252,11 @@ _DIAGNOSTIC_MESSAGES = {
         "Another Source Trace plans a Cable on this termination. Resolve this trace to a different termination."
     ),
     "cable.resolved_segment_conflict": (
-        "Two Source Traces give one shared segment different Cable policies. Make their CableClass values agree."
+        "Two Source Traces give one shared segment different Cable policies. "
+        "Force one policy on the segment, or make the CableClass policies agree."
+    ),
+    "cable.segment_override_lost": (
+        "This segment now resolves to different ports, so the Cable policy forced on it no longer applies."
     ),
     "cable.same_port_continuation": "A mapped peer port continues the path where the source repeats one port.",
     "cable.segment_reused": "An existing Cable already proves this segment, so the import keeps it.",

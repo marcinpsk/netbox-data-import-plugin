@@ -489,7 +489,7 @@ class TracePolicyModelTest(TestCase):
 
                 self.assertEqual(
                     caught.exception.error_dict[field_name][0].code,
-                    "cable.cableclass_stale_mapping",
+                    "cable.policy_stale",
                 )
 
     def test_offered_incompatible_profile_has_its_own_code(self):
@@ -858,7 +858,7 @@ class CableClassMappingFormTest(TestCase):
         # Keeping a retired value is refused, so the operator is told rather than losing the decision.
         self.assertFalse(bound.is_valid())
         self.assertEqual(len(bound.errors["cable_type"]), 1, bound.errors)
-        self.assertEqual(bound.errors.as_data()["cable_type"][0].code, "cable.cableclass_stale_mapping")
+        self.assertEqual(bound.errors.as_data()["cable_type"][0].code, "cable.policy_stale")
         mapping.refresh_from_db()
         self.assertTrue(mapping.cable_type_resolved)
         self.assertEqual(mapping.cable_type, "retired-cat3")

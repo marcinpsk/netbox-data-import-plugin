@@ -262,6 +262,7 @@ POLICY_SECTIONS: tuple[PolicySection, ...] = (
     PolicySection("trace_device_resolutions", "Trace Device Resolutions", _TRACE_ONLY),
     PolicySection("termination_resolutions", "Termination Resolutions", _TRACE_ONLY),
     PolicySection("cable_class_mappings", "CableClass Mappings", _TRACE_ONLY),
+    PolicySection("cable_segment_overrides", "Cable Segment Overrides", _TRACE_ONLY),
 )
 
 _SECTIONS_BY_KEY = {section.key: section for section in POLICY_SECTIONS}

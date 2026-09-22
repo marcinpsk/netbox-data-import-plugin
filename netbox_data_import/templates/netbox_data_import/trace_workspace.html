@@ -233,8 +233,8 @@
                 </div>
               {% endif %}
               <ol class="mb-0 ps-3">
-                {% for segment in trace.segments %}
-                  <li>
+                {% for segment in segment_policy_forms %}
+                  <li data-trace-segment="{{ segment.index }}">
                     {{ segment.left }} &rarr; {{ segment.right }}
                     {% if segment.status == "create" %}
                       <span class="badge ndi-trace-status-create">create</span>
@@ -248,6 +248,36 @@
                     {% if segment.pass_through %}
                       <div class="ndi-trace-claim">Pass-Through Claim: entered at {{ segment.left }}.</div>
                     {% endif %}
+                    {% if segment.segment_key %}
+                      <div class="text-secondary small" data-segment-policy>
+                        {{ segment.cable_type }} &middot; {{ segment.cable_profile }}
+                        {% if segment.overridden %}
+                          <span class="badge ndi-trace-state-manual">forced</span>
+                        {% endif %}
+                      </div>
+                    {% endif %}
+                    <form method="post" class="d-flex flex-wrap gap-2 mt-1"
+                          action="{% url 'plugins:netbox_data_import:trace_segment_policy' %}"
+                          hx-post="{% url 'plugins:netbox_data_import:trace_segment_policy' %}"
+                          hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
+                      {% csrf_token %}
+                      <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+                      <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
+                      <input type="hidden" name="segment" value="{{ segment.index }}">
+                      <label class="visually-hidden" for="{{ segment.form.cable_type.id_for_label }}">
+                        Cable Type for segment {{ segment.position }}</label>
+                      {{ segment.form.cable_type }}
+                      <label class="visually-hidden" for="{{ segment.form.cable_profile.id_for_label }}">
+                        Cable Profile for segment {{ segment.position }}</label>
+                      {{ segment.form.cable_profile }}
+                      <button type="submit" class="btn btn-sm btn-outline-primary" data-segment-policy-force
+                              {% if segment.reason %}disabled{% endif %}>Force</button>
+                      {% if segment.overridden %}
+                        <button type="submit" name="clear" value="1" class="btn btn-sm btn-outline-secondary"
+                                data-segment-policy-clear {% if segment.reason %}disabled{% endif %}>Clear</button>
+                      {% endif %}
+                    </form>
+                    {% if segment.reason %}<div class="ndi-trace-reason mt-1">{{ segment.reason }}</div>{% endif %}
                   </li>
                 {% empty %}
                   <li class="text-secondary">Planning stopped before it proposed a topology.</li>

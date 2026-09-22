@@ -12,6 +12,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils.html import escape
 
+from netbox_data_import.cable_policy import cable_type_label
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
 from netbox_data_import import adapters as adapter_registry
 from netbox_data_import.adapters import TraceWorkbookAdapter
@@ -409,6 +410,8 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
                     reverse("plugins:netbox_data_import:trace_resolve_termination"),
                     # This path states two CableClass values, and each offers its own policy form.
                     *[reverse("plugins:netbox_data_import:trace_cable_policy")] * 2,
+                    # It states three segments, and each offers its own override form.
+                    *[reverse("plugins:netbox_data_import:trace_segment_policy")] * 3,
                 ]
             ),
         )
@@ -2157,3 +2160,150 @@ class TraceWorkspaceCablePolicyTest(CableTopologyMixin, TransactionTestCase):
 
         self.assertEqual(refused.status_code, 200)
         self.assertFalse(CableClassMapping.objects.filter(cable_class="Fiber Cable").exists())
+
+
+class TraceWorkspaceSegmentOverrideTest(CableTopologyMixin, TransactionTestCase):
+    """Force one segment of a trace to its own Cable policy, from the trace under review."""
+
+    def setUp(self):
+        self.build_topology()
+        self.client.force_login(self.actor)
+
+    def open_workspace(self, *blocks):
+        """Upload the given path blocks and return the rendered workspace response."""
+        upload = BytesIO(trace_workbook_bytes(path_blocks=blocks))
+        upload.name = "traces.xlsx"
+        setup = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        self.assertEqual(setup.status_code, 200)
+        return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+    def force_segment(self, **data):
+        """Post one segment override through the workspace endpoint."""
+        data.setdefault("preview_revision", self.client.session[PREVIEW_REVISION_SESSION_KEY])
+        return self.client.post(reverse("plugins:netbox_data_import:trace_segment_policy"), data, follow=True)
+
+    def execute_selected(self):
+        """Run the real execution over every actionable unit of the reviewed plan."""
+        import uuid
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.models import SourceDocument
+
+        document = SourceDocument.objects.get(profile=self.profile)
+        plan = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        return ImportEngine.execute(
+            self.profile,
+            document,
+            plan.to_dict(),
+            [unit.identity for unit in plan.units if unit.disposition == Disposition.ACTIONABLE],
+            str(uuid.uuid4()),
+            self.actor,
+        )
+
+    def test_one_cableclass_writes_two_media_once_a_segment_is_forced(self):
+        """The reported case: one label names multimode on this path and something else elsewhere."""
+        opened = self.open_workspace(patched_path())
+        trace = opened.context["selected_trace"]
+        self.assertEqual([segment["policy"]["cable_type"] for segment in trace.segments], ["cat6"] * 3)
+
+        forced = self.force_segment(
+            trace=trace.identity,
+            segment=0,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+        )
+
+        self.assertEqual(forced.status_code, 200)
+        segments = forced.context["selected_trace"].segments
+        self.assertEqual([segment["policy"]["cable_type"] for segment in segments], ["mmf-om4", "cat6", "cat6"])
+        self.assertEqual([segment["overridden"] for segment in segments], [True, False, False])
+        # The panel names the policy the way the running instance does, never a value of our own.
+        self.assertEqual(segments[0]["cable_type"], cable_type_label("mmf-om4"))
+        self.assertEqual(forced.context["selected_trace"].disposition, Disposition.ACTIONABLE)
+
+        self.assertEqual(self.execute_selected().outcome, "succeeded")
+        self.assertEqual(cables_on(self.eth0, self.panel_1_fronts[0]).get().type, "mmf-om4")
+        self.assertEqual(cables_on(self.panel_2_fronts[0], self.eth1).get().type, "cat6")
+
+    def test_clearing_the_override_returns_the_segment_to_its_cableclass_policy(self):
+        """The override is a decision, so the operator can take it back without editing the profile."""
+        from netbox_data_import.models import CableSegmentOverride
+
+        trace = self.open_workspace(patched_path()).context["selected_trace"]
+        self.force_segment(trace=trace.identity, segment=0, cable_type="mmf-om4", cable_profile="single-1c1p")
+
+        cleared = self.force_segment(trace=trace.identity, segment=0, clear="1")
+
+        segments = cleared.context["selected_trace"].segments
+        self.assertEqual([segment["policy"]["cable_type"] for segment in segments], ["cat6"] * 3)
+        self.assertEqual([segment["overridden"] for segment in segments], [False, False, False])
+        self.assertFalse(CableSegmentOverride.objects.exists())
+
+    def test_a_retained_segment_says_the_override_cannot_change_its_cable(self):
+        """An override decides what the import writes, and this segment is one the import keeps."""
+        from netbox_data_import.models import CableSegmentOverride
+
+        self.connect(self.eth0, self.panel_1_fronts[0])
+
+        opened = self.open_workspace(patched_path())
+        trace = opened.context["selected_trace"]
+        self.assertTrue(trace.segments[0]["retained"])
+        self.assertContains(opened, "Correct that Cable in NetBox, then re-read.")
+
+        refused = self.force_segment(
+            trace=trace.identity,
+            segment=0,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+        )
+
+        self.assertContains(refused, "Correct that Cable in NetBox, then re-read.")
+        self.assertFalse(CableSegmentOverride.objects.exists())
+
+    def test_a_segment_this_preview_never_stated_is_refused(self):
+        """A review command answers a question the preview asked, never one the caller invented."""
+        from netbox_data_import.models import CableSegmentOverride
+
+        trace = self.open_workspace(patched_path()).context["selected_trace"]
+
+        refused = self.force_segment(
+            trace=trace.identity,
+            segment=9,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+        )
+
+        self.assertContains(refused, "This preview resolved no segment there.")
+        self.assertFalse(CableSegmentOverride.objects.exists())
+
+    def test_an_incomplete_override_is_refused_with_the_form_message(self):
+        """An override decides both dimensions, so a half-made decision cannot be stored."""
+        from netbox_data_import.models import CableSegmentOverride
+
+        trace = self.open_workspace(patched_path()).context["selected_trace"]
+
+        refused = self.force_segment(trace=trace.identity, segment=0, cable_type="mmf-om4", cable_profile="")
+
+        self.assertContains(refused, "This field is required.")
+        self.assertFalse(CableSegmentOverride.objects.exists())
+
+    def test_a_cached_plan_this_release_cannot_read_is_rebuilt_from_the_stored_source(self):
+        """A plan schema change must not send an operator mid-review back to setup."""
+        opened = self.open_workspace(patched_path())
+        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
+        session = self.client.session
+        session[PREVIEW_PLAN_SESSION_KEY] = {**session[PREVIEW_PLAN_SESSION_KEY], "schema_version": 1}
+        session.save()
+
+        reopened = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertEqual(reopened.status_code, 200)
+        self.assertEqual(
+            [trace.identity for trace in reopened.context["traces"]],
+            [trace.identity for trace in opened.context["traces"]],
+        )
+        self.assertNotEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], before)

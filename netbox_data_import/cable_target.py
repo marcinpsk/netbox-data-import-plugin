@@ -436,6 +436,8 @@ class _CableBatch:
         self._existing: dict[int, _ExistingCable] = {}
         self._occupied: dict[tuple[str, int], _ExistingCable] = {}
         self._mapping_rows: dict[str, Any] | None = None
+        self._overrides: dict[str, Any] = {}
+        self._overrides_by_origin: dict[tuple[str, int], Any] = {}
         self._stored = self._stored_resolutions()
         active_traces = (analysis.trace for analysis in self.analyses if not analysis.stopped)
         self._device_evidence = collect_trace_device_evidence(active_traces)
@@ -453,12 +455,13 @@ class _CableBatch:
         self._resolve_terminations()
         self._load_mappings()
         self._build_segments()
+        self._load_overrides()
         self._lock_segment_terminations()
         self._load_existing_cables()
         self._classify()
         self._decide()
         self._block_planned_termination_conflicts()
-        self._refuse_conflicting_creations()
+        self._block_conflicting_creations()
         self._deletes_by_segment = self._shared_deletes()
         self._sources_by_segment = self._shared_sources()
 
@@ -993,13 +996,13 @@ class _CableBatch:
 
     def _attribute_drift(self, segment: _DesiredSegment, cable) -> dict:
         """Return the reused Cable attributes that differ from what this import would have written."""
-        mapping = self._cable_class_mapping(segment.cable_class)
+        row = self._policy_row(segment)
         drift = {}
         if cable.status != CABLE_STATUS:
             drift["status"] = cable.status
-        if mapping is not None and mapping.cable_type_resolved and (cable.type or None) != mapping.cable_type:
+        if row is not None and row.cable_type_resolved and (cable.type or None) != row.cable_type:
             drift["type"] = cable.type or ""
-        if mapping is not None and mapping.cable_profile_resolved and (cable.profile or None) != mapping.cable_profile:
+        if row is not None and row.cable_profile_resolved and (cable.profile or None) != row.cable_profile:
             drift["profile"] = cable.profile or ""
         if cable.label:
             drift["label"] = cable.label
@@ -1031,11 +1034,48 @@ class _CableBatch:
             self._mapping_rows = {row.cable_class: row for row in rows}
         return self._mapping_rows.get(cable_class)
 
+    def _policy_row(self, segment: _DesiredSegment):
+        """Return the stored decision that governs one segment, or None while nothing decides it."""
+        from .cable_policy import policy_in_force
+
+        return policy_in_force(self._overrides.get(segment.key), self._cable_class_mapping(segment.cable_class))
+
+    def _load_overrides(self) -> None:
+        """Read every override this batch can apply, and every one its own traces may have lost."""
+        from django.db.models import Q
+
+        from .models import CableSegmentOverride
+
+        keys = {segment.key for analysis in self.analyses for segment in analysis.segments}
+        identities = {analysis.trace.identity for analysis in self.analyses}
+        rows = CableSegmentOverride.objects.filter(profile=self.profile).filter(
+            Q(segment_key__in=keys) | Q(source_trace_identity__in=identities)
+        )
+        self._overrides = {row.segment_key: row for row in rows}
+        self._overrides_by_origin = {(row.source_trace_identity, row.segment_index): row for row in rows}
+
+    def _report_lost_overrides(self, analysis: _TraceAnalysis) -> None:
+        """Report each segment whose resolved pair moved away from the override it was given."""
+        for segment in analysis.segments:
+            stored = self._overrides_by_origin.get((analysis.trace.identity, segment.index))
+            if stored is None or stored.segment_key == segment.key:
+                continue
+            analysis.note(
+                "cable.segment_override_lost",
+                {
+                    "segment_index": segment.index,
+                    "cable_type": stored.cable_type_display(),
+                    "cable_profile": stored.cable_profile_display(),
+                },
+                identities=(segment.left.identity, segment.right.identity),
+            )
+
     def _decide(self) -> None:
         """Settle the Cable policy and the write permissions every actionable trace needs."""
         for analysis in self.analyses:
             if analysis.stopped or not analysis.endpoints:
                 continue
+            self._report_lost_overrides(analysis)
             for segment in analysis.pending:
                 policy = self._cable_policy(analysis, segment)
                 if policy is not None:
@@ -1044,19 +1084,20 @@ class _CableBatch:
 
     def _cable_policy(self, analysis: _TraceAnalysis, segment: _DesiredSegment) -> dict | None:
         """Return the Cable Type and Cable Profile one new segment is written with."""
-        from .models import cable_class_mapping_choice_errors
+        from .cable_policy import policy_choice_errors
 
         display = {"segment_index": segment.index, "cable_class": segment.cable_class}
-        mapping = self._cable_class_mapping(segment.cable_class)
-        if mapping is None or not (mapping.cable_type_resolved and mapping.cable_profile_resolved):
+        row = self._policy_row(segment)
+        policy = None if row is None else row.decided_policy()
+        if policy is None:
             analysis.block("cable.cableclass_unmapped", display)
             return None
-        errors = cable_class_mapping_choice_errors(mapping.cable_type, mapping.cable_profile)
+        errors = policy_choice_errors(policy["cable_type"], policy["cable_profile"])
         for error in errors.values():
             analysis.block(error.code, {**display, "message": error.messages[0]})
         if errors:
             return None
-        return {"cable_type": mapping.cable_type, "cable_profile": mapping.cable_profile}
+        return policy
 
     def _check_permissions(self, analysis: _TraceAnalysis) -> None:
         """Block the trace when the actor may not make every Cable write it asks for."""
@@ -1099,8 +1140,8 @@ class _CableBatch:
                         identities=(termination.identity,),
                     )
 
-    def _refuse_conflicting_creations(self) -> None:
-        """Invalidate traces that resolve one shared segment to different Cable policies."""
+    def _block_conflicting_creations(self) -> None:
+        """Block traces that resolve one shared segment to different Cable policies."""
         contributors: dict[str, list] = {}
         for analysis in self.analyses:
             if analysis.invalid or not analysis.endpoints:
@@ -1110,18 +1151,15 @@ class _CableBatch:
                 if policy is not None:
                     contributors.setdefault(segment.key, []).append((analysis, segment, policy))
         for records in contributors.values():
-            policies = {
-                (segment.cable_class, policy["cable_type"], policy["cable_profile"])
-                for _analysis, segment, policy in records
-            }
+            # One shared Planned Change carries one payload, so only the effective policy may differ.
+            policies = {(policy["cable_type"], policy["cable_profile"]) for _analysis, _segment, policy in records}
             if len(policies) < 2:
                 continue
             for analysis, segment, policy in records:
-                analysis.refuse(
+                analysis.block(
                     "cable.resolved_segment_conflict",
                     {
                         "segment_index": segment.index,
-                        "cable_class": segment.cable_class,
                         "cable_type": policy["cable_type"],
                         "cable_profile": policy["cable_profile"],
                         "terminations": segment.as_json(),
@@ -1213,6 +1251,9 @@ class _CableBatch:
                     # Planning substituted the entry port only where the source re-used one port.
                     "substituted": self._entered_through_claim(planned, by_reference.get(stated.left.identity_key)),
                     "status": self._segment_status(analysis, index, conflicted, planned, writes),
+                    # An override cannot change a Cable this plan keeps, so the panel says which is which.
+                    "retained": index in analysis.proven,
+                    **self._policy_display(planned),
                 }
             )
         return {
@@ -1229,6 +1270,20 @@ class _CableBatch:
             "deletes_logical_cable": writes and analysis.deleted_logical_cable is not None,
             "devices": list(analysis.devices.values()),
             "terminations": list(analysis.terminations.values()),
+        }
+
+    def _policy_display(self, planned: _DesiredSegment | None) -> dict:
+        """Return the Cable policy in force for one resolved segment, and whether it is an override."""
+        if planned is None:
+            return {"segment_key": "", "overridden": False, "cable_type": "", "cable_profile": "", "policy": {}}
+        row = self._policy_row(planned)
+        return {
+            "segment_key": planned.key,
+            "overridden": planned.key in self._overrides,
+            "cable_type": "Unresolved" if row is None else row.cable_type_display(),
+            "cable_profile": "Unresolved" if row is None else row.cable_profile_display(),
+            # The stored values, not their labels, so the workspace can offer what is in force.
+            "policy": (None if row is None else row.decided_policy()) or {},
         }
 
     @staticmethod
@@ -1299,7 +1354,6 @@ class _CableBatch:
             payload={
                 "terminations": segment.as_json(),
                 "status": CABLE_STATUS,
-                "cable_class": segment.cable_class,
                 "sources": self._sources_by_segment.get(segment.key, []),
                 **policy,
             },
