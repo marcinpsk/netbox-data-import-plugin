@@ -178,7 +178,7 @@ def plan_source_rows(rows, profile, site, *, actor=None, location=None, tenant=N
             "tenant_id": tenant.pk if tenant is not None else None,
         },
     )
-    return ReviewWorkspace(plan)
+    return ReviewWorkspace(plan, actor)
 
 
 def apply_source_rows(rows, profile, site, *, actor=None, location=None, tenant=None):
@@ -376,7 +376,7 @@ def setup_preview_with_device_matches(client, profile):
         uploaded_by=actor,
     )
     planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
-    result = ReviewWorkspace(ImportEngine.plan(profile, document, actor, planning_context))
+    result = ReviewWorkspace(ImportEngine.plan(profile, document, actor, planning_context), actor)
 
     device_rows = [row for row in result.units if row.object_type == "device" and row.source_id]
     if len(device_rows) > 0:
@@ -397,7 +397,7 @@ def setup_preview_with_device_matches(client, profile):
         )
 
     plan = ImportEngine.plan(profile, document, actor, planning_context)
-    result = ReviewWorkspace(plan)
+    result = ReviewWorkspace(plan, actor)
     session = client.session
     start_new_preview(session, plan)
     session["import_rows"] = result.source_rows

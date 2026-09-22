@@ -712,14 +712,17 @@ class TraceWorkspaceUnit:
 class ReviewWorkspace:
     """Read-only presentation of the accepted Import Plan."""
 
-    def __init__(self, plan: ImportPlan):
+    def __init__(self, plan: ImportPlan, viewer):
+        from .cable_disclosure import present_units
+
         self.plan = plan
-        self.units = tuple(WorkspaceUnit.from_unit(unit) for unit in plan.units)
+        self._presentation_units = present_units(plan.units, viewer)
+        self.units = tuple(WorkspaceUnit.from_unit(unit) for unit in self._presentation_units)
 
     @classmethod
-    def from_dict(cls, data: dict) -> ReviewWorkspace:
+    def from_dict(cls, data: dict, viewer) -> ReviewWorkspace:
         """Restore a workspace from the session's serialized Import Plan."""
-        return cls(ImportPlan.from_dict(data))
+        return cls(ImportPlan.from_dict(data), viewer)
 
     @property
     def counts(self) -> MappingProxyType:
@@ -755,7 +758,7 @@ class ReviewWorkspace:
 
         Cached because one page reads it twice, and each build reserializes every change.
         """
-        return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self.plan.units if _states_a_trace(unit))
+        return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self._presentation_units if _states_a_trace(unit))
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:
         """Return the unit and every unit owning a change it depends on, transitively.
@@ -972,6 +975,7 @@ class ReviewWorkspace:
         """Return a presentation-only copy with replaced units."""
         workspace = object.__new__(type(self))
         workspace.plan = self.plan
+        workspace._presentation_units = self._presentation_units
         workspace.units = tuple(units)
         return workspace
 

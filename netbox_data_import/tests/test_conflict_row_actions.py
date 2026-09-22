@@ -84,7 +84,7 @@ class RackPositionConflictActionTest(IsolatedRQQueueTestMixin, TransactionTestCa
         from netbox_data_import.views import _preview_rows_with_conflict_comparisons
 
         plan = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
-        workspace = ReviewWorkspace(plan)
+        workspace = ReviewWorkspace(plan, self.actor)
         source_rows = [
             {"_row_number": 2, "source_id": "S-1", "u_position": 5, "face": "Front", "rack_name": "rack-a"},
             {"_row_number": 3, "source_id": "S-2", "u_position": 5, "face": "Front", "rack_name": "rack-a"},

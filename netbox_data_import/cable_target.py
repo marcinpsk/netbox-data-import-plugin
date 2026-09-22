@@ -938,8 +938,10 @@ class _CableBatch:
         cable_visible = self.actor is None or self.actor.has_perm("dcim.view_cable", cable)
         if not cable_visible:
             return {"cable_visible": False}, ()
+        from .cable_disclosure import disclosed_cable
+
         return (
-            {"cable_visible": True, "cable": str(cable)},
+            disclosed_cable(cable),
             (_object_identity("dcim.cable", cable.pk),),
         )
 
@@ -1137,9 +1139,12 @@ class _CableBatch:
 
         proven = analysis.proven.get(segment.index)
         visible = True
+        source = None
         if proven is not None:
             cable_type, cable_profile = proven.cable.type or "", proven.cable.profile or ""
-            visible = self._cable_diagnostic_disclosure(proven.cable)[0]["cable_visible"]
+            disclosure = self._cable_diagnostic_disclosure(proven.cable)[0]
+            visible = disclosure["cable_visible"]
+            source = disclosure.get("disclosure_source")
         else:
             policy = analysis.policies.get(segment.index) or {}
             cable_type, cable_profile = policy.get("cable_type") or "", ""
@@ -1150,6 +1155,7 @@ class _CableBatch:
             "retained": proven is not None,
             "visible": visible,
             "splits": cable_profile_splits_a_span(cable_profile),
+            "disclosure_source": source,
         }
 
     @staticmethod
@@ -1175,21 +1181,9 @@ class _CableBatch:
             return
         resolved = {segment.index: segment for segment in analysis.segments}
         # A hidden Cable still decides the run, and still states nothing about itself.
-        disclosed = [item for item in decided if item["visible"]]
-        # An override decides what the import writes, so it cannot settle a run of retained Cables.
-        remedy = (
-            "Correct those Cables in NetBox, then re-read."
-            if all(item["retained"] for item in decided)
-            else "Force the segment that states the wrong medium, or correct the source."
-        )
-        stated = "; ".join(self._media_sentence(item) for item in decided)
         analysis.warn(
             "cable.media_family_mismatch",
-            {
-                "message": f"Verified pass-throughs join these segments, and {stated}. {remedy}",
-                "families": sorted({self._media_family_label(item["family"]) for item in disclosed}),
-                "segments": [self._media_display(item) for item in decided],
-            },
+            {"segments": [self._media_display(item, include_source=True) for item in decided]},
             identities=tuple(
                 identity
                 for item in decided
@@ -1198,35 +1192,12 @@ class _CableBatch:
                     resolved[item["segment_index"]].right.identity,
                 )
             ),
-            evidence={"segments": [self._media_display(item, labelled=False) for item in decided]},
+            evidence={"segments": [self._media_display(item) for item in decided]},
         )
 
     @staticmethod
-    def _media_family_label(family: str) -> str:
-        """Return the reader's own name for one media family."""
-        from .cable_policy import cable_media_family_label
-
-        return cable_media_family_label(family)
-
-    @classmethod
-    def _media_sentence(cls, observation: dict) -> str:
-        """Return what one segment of a mismatched run says, as far as the actor may be told."""
-        from .cable_policy import cable_type_label
-
-        position = observation["segment_index"] + 1
-        if not observation["visible"]:
-            return f"segment {position} is a Cable you cannot view"
-        family = cls._media_family_label(observation["family"])
-        stated = f"segment {position} is {cable_type_label(observation['cable_type'])} ({family})"
-        return stated + (", on the Cable this import keeps" if observation["retained"] else "")
-
-    @classmethod
-    def _media_display(cls, observation: dict, *, labelled: bool = True) -> dict:
-        """Return one observation as the plan records it, with a hidden Cable stating nothing.
-
-        `labelled` names the family the way the reader does, which only the display may carry: a
-        group label is a translation, and the evidence is fingerprint input.
-        """
+    def _media_display(observation: dict, *, include_source: bool = False) -> dict:
+        """Return stable media facts, with row identity only in presentation data."""
         record = {
             "segment_index": observation["segment_index"],
             "retained": observation["retained"],
@@ -1234,8 +1205,10 @@ class _CableBatch:
         }
         if not observation["visible"]:
             return record
-        family = cls._media_family_label(observation["family"]) if labelled else observation["family"]
-        return {**record, "cable_type": observation["cable_type"], "family": family}
+        record.update(cable_type=observation["cable_type"], family=observation["family"])
+        if include_source and observation["disclosure_source"] is not None:
+            record["disclosure_source"] = observation["disclosure_source"]
+        return record
 
     def _check_permissions(self, analysis: _TraceAnalysis) -> None:
         """Block the trace when the actor may not make every Cable write it asks for."""
@@ -1455,6 +1428,7 @@ class _CableBatch:
             "display": disclosure["cable"],
             "description": cable.description,
             "tags": sorted(cable.tags.values_list("name", flat=True)),
+            "disclosure_source": disclosure["disclosure_source"],
         }
 
     def _changes(self, analysis: _TraceAnalysis) -> tuple[PlannedChange, ...]:

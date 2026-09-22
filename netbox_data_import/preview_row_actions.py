@@ -139,7 +139,7 @@ def load_cached_preview(request, *, profile_action="change", require_revision=Fa
     if profile is None:
         return None
     try:
-        workspace = ReviewWorkspace.from_dict(plan_data)
+        workspace = ReviewWorkspace.from_dict(plan_data, request.user)
     except PlanError:
         return None
     return profile, workspace

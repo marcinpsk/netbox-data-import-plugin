@@ -57,6 +57,7 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.plan import Disposition, PlannedChange, Severity, canonical_json, fingerprint_of
+from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.tests.helpers import (
     make_dcim_objects,
@@ -1440,7 +1441,8 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
         """A wrong CableClass writes a Cable of the wrong type, and nothing checked that before."""
         self.force_first_segment("mmf-om4")
 
-        unit = self.unit(patched_path())
+        plan = self.plan(patched_path())
+        unit = plan.units[0]
 
         (warning,) = self.mismatches(unit)
         self.assertEqual(warning.severity, Severity.WARNING)
@@ -1455,9 +1457,11 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
             if isinstance(group, (tuple, list))
             for value, _item_label in group
         }
-        self.assertEqual(sorted(warning.display["families"]), sorted({groups["cat6"], groups["mmf-om4"]}))
-        self.assertIn(f"segment 1 is {cable_type_label('mmf-om4')}", warning.display["message"])
-        self.assertIn("Force the segment that states the wrong medium", warning.display["message"])
+        message = ReviewWorkspace(plan, self.actor).traces[0].findings[-1]["message"]
+        self.assertIn(groups["cat6"], message)
+        self.assertIn(groups["mmf-om4"], message)
+        self.assertIn(f"segment 1 is {cable_type_label('mmf-om4')}", message)
+        self.assertIn("Force the segment that states the wrong medium", message)
 
     def test_an_indeterminate_family_neither_agrees_nor_contradicts(self):
         """An active optical assembly states no terminated medium, so it decides nothing."""
@@ -1492,12 +1496,14 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
         self.connect(self.panel_1_rear, self.panel_2_rear, type="cat6")
         self.connect(self.panel_2_fronts[0], self.eth1, type="cat6")
 
-        unit = self.unit(patched_path())
+        plan = self.plan(patched_path())
+        unit = plan.units[0]
 
-        (warning,) = self.mismatches(unit)
+        self.assertEqual(len(self.mismatches(unit)), 1)
         self.assertEqual(unit.disposition, Disposition.NO_OP)
-        self.assertIn("on the Cable this import keeps", warning.display["message"])
-        self.assertIn("Correct those Cables in NetBox, then re-read.", warning.display["message"])
+        message = ReviewWorkspace(plan, self.actor).traces[0].findings[-1]["message"]
+        self.assertIn("on the Cable this import keeps", message)
+        self.assertIn("Correct those Cables in NetBox, then re-read.", message)
 
     def test_the_media_facts_alone_change_the_unit_fingerprint(self):
         """A live Cable could otherwise change medium under an accepted plan without a trace of it."""
@@ -1512,8 +1518,8 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(self.codes(before), self.codes(after))
         self.assertNotEqual(
-            [item.display["families"] for item in self.mismatches(before)],
-            [item.display["families"] for item in self.mismatches(after)],
+            [[segment["family"] for segment in item.display["segments"]] for item in self.mismatches(before)],
+            [[segment["family"] for segment in item.display["segments"]] for item in self.mismatches(after)],
         )
         self.assertNotEqual(fingerprint_of(before.fingerprint_data), fingerprint_of(after.fingerprint_data))
 
@@ -1532,10 +1538,12 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
             ],
         )
 
-        unit = self.unit(patched_path(), actor=actor)
+        plan = self.plan(patched_path(), actor=actor)
+        unit = plan.units[0]
 
         (warning,) = self.mismatches(unit)
-        self.assertIn("a Cable you cannot view", warning.display["message"])
+        message = ReviewWorkspace(plan, actor).traces[0].findings[-1]["message"]
+        self.assertIn("a Cable you cannot view", message)
         # Neither the value nor the family it decides may reach the message, the display or the evidence.
         self.assertNotIn("mmf", canonical_json(warning.to_dict()))
         self.assertNotIn(str(cable_type_label("mmf-om4")), canonical_json(warning.to_dict()))

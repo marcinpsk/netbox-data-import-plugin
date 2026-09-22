@@ -230,7 +230,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         from netbox_data_import.plan import ImportPlan
         from netbox_data_import.review_workspace import ReviewWorkspace
 
-        workspace = ReviewWorkspace(ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY]))
+        workspace = ReviewWorkspace(ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY]), self.actor)
         return next(unit.action for unit in workspace.units if unit.row_number == row_number)
 
     def _job(self, *, status="pending", data=None, user=True, queue_name="default"):

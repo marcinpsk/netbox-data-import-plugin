@@ -5,7 +5,7 @@
 import re
 from io import BytesIO
 
-from dcim.models import Device, Interface
+from dcim.models import Cable, Device, FrontPort, Interface, RearPort, Site
 from django.db import connection
 from django.test import TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
@@ -38,6 +38,7 @@ from netbox_data_import.tests.helpers import (
     trace_segment,
     trace_termination,
     trace_workbook_bytes,
+    user_with_object_permission,
 )
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.views import _review_workspace_url, _trace_workspace_url
@@ -75,7 +76,7 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
 
     def traces(self, *blocks):
         """Return the workspace trace entries one set of path blocks produces."""
-        return ReviewWorkspace(self.plan(*blocks)).traces
+        return ReviewWorkspace(self.plan(*blocks), self.actor).traces
 
     def action(self, trace, key):
         """Return one named action from a workspace trace entry."""
@@ -164,15 +165,15 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
 
     def test_the_workspace_answers_whether_it_holds_a_trace_without_building_one(self):
         """The preview page asks this on every render, so it must not serialize the whole plan."""
-        workspace = ReviewWorkspace(self.plan(patched_path()))
+        workspace = ReviewWorkspace(self.plan(patched_path()), self.actor)
 
         self.assertTrue(workspace.has_traces)
         self.assertEqual(len(workspace.traces), 1)
-        self.assertFalse(ReviewWorkspace(ImportPlan(units=())).has_traces)
+        self.assertFalse(ReviewWorkspace(ImportPlan(units=()), self.actor).has_traces)
 
     def test_the_workspace_builds_its_trace_entries_once_per_instance(self):
         """One page reads `traces` and `trace_summary`, and each build reserializes every change."""
-        workspace = ReviewWorkspace(self.plan(patched_path()))
+        workspace = ReviewWorkspace(self.plan(patched_path()), self.actor)
 
         first = workspace.traces
         workspace.trace_summary
@@ -181,7 +182,7 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
 
     def test_a_units_copy_builds_its_own_trace_entries(self):
         """`with_units` bypasses `__init__`, so the copy must carry its own cache, not share one."""
-        workspace = ReviewWorkspace(self.plan(patched_path()))
+        workspace = ReviewWorkspace(self.plan(patched_path()), self.actor)
         original = workspace.traces
 
         copy = workspace.with_units(workspace.units)
@@ -192,7 +193,7 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
 
     def test_the_summary_strip_counts_terminations_and_dispositions(self):
         """The strip states what the reviewer has to work through, not one number."""
-        summary = ReviewWorkspace(self.plan(patched_path(), self.separate_blocked_path("S"))).trace_summary
+        summary = ReviewWorkspace(self.plan(patched_path(), self.separate_blocked_path("S")), self.actor).trace_summary
 
         self.assertEqual(summary["traces"], 2)
         self.assertEqual(summary["blocked"], 1)
@@ -202,7 +203,7 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
 
     def test_every_trace_is_counted_under_exactly_one_disposition(self):
         """A disposition absent from `_SUMMARY_KEYS` would drop its traces from the strip silently."""
-        summary = ReviewWorkspace(self.plan(patched_path(), self.separate_blocked_path("S"))).trace_summary
+        summary = ReviewWorkspace(self.plan(patched_path(), self.separate_blocked_path("S")), self.actor).trace_summary
 
         self.assertEqual(sum(summary[key] for key in _SUMMARY_KEYS.values()), summary["traces"])
 
@@ -215,7 +216,7 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
         terminations = data["units"][0]["display"]["trace"]["terminations"]
         del terminations[0]["state"]
 
-        summary = ReviewWorkspace.from_dict(data).trace_summary
+        summary = ReviewWorkspace.from_dict(data, self.actor).trace_summary
 
         self.assertEqual(summary["traces"], 1)
         self.assertEqual(summary["unresolved_terminations"], 1)
@@ -1751,7 +1752,7 @@ class TraceSyncSelectionTest(CableTopologyMixin, TestCase):
 
     def test_a_trace_that_depends_on_nothing_selects_itself(self):
         """A self-contained trace needs no other unit, and must not drag one in."""
-        workspace = ReviewWorkspace(self.plan(patched_path()))
+        workspace = ReviewWorkspace(self.plan(patched_path()), self.actor)
 
         selection = workspace.sync_selection(workspace.traces[0].identity)
 
@@ -1791,7 +1792,7 @@ class TraceSyncSelectionTest(CableTopologyMixin, TestCase):
             )
         )
 
-        selection = ReviewWorkspace(plan).sync_selection("cable:trace:first")
+        selection = ReviewWorkspace(plan, self.actor).sync_selection("cable:trace:first")
 
         self.assertEqual(sorted(selection), ["cable:trace:first", "cable:trace:second"])
 
@@ -1803,7 +1804,7 @@ class TraceSyncSelectionTest(CableTopologyMixin, TestCase):
             from_end=trace_termination("SRC-Y", "", "absent-port", "Port"),
             to_end=trace_termination("DST-Y", "", "eth0", "Port"),
         )
-        workspace = ReviewWorkspace(self.plan(blocked))
+        workspace = ReviewWorkspace(self.plan(blocked), self.actor)
 
         self.assertEqual(workspace.sync_selection(workspace.traces[0].identity), ())
 
@@ -2043,6 +2044,160 @@ class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
         self.assertContains(response, "The saved import target is no longer available.")
         self.assertFalse(self.client.session["import_preview_pending"])
+
+
+class TraceWorkspaceCableDisclosureTest(CableTopologyMixin, TransactionTestCase):
+    """Recheck cached Cable display values against the viewer of each workspace render."""
+
+    def setUp(self):
+        self.build_topology()
+        self.viewer = user_with_object_permission(
+            "trace-cable-viewer",
+            [
+                (ImportProfile, ("view", "change"), {}),
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (Cable, ("view", "add", "delete"), {}),
+            ],
+        )
+        self.client.force_login(self.viewer)
+
+    def open_workspace(self, *blocks):
+        """Upload the path blocks through the real setup flow and render the workspace."""
+        upload = BytesIO(trace_workbook_bytes(path_blocks=blocks))
+        upload.name = "traces.xlsx"
+        setup = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        self.assertEqual(setup.status_code, 200)
+        return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+    def revoke_cable_view(self):
+        """Keep Cable writes permitted while removing the viewer's Cable read grant."""
+        from users.models import ObjectPermission
+
+        permission = ObjectPermission.objects.get(name__startswith="trace-cable-viewer Cable ")
+        permission.actions = ["add", "delete"]
+        permission.save(update_fields=("actions",))
+
+    def grant_cable_view(self):
+        """Restore the Cable read grant without changing the accepted cached plan."""
+        from users.models import ObjectPermission
+
+        permission = ObjectPermission.objects.get(name__startswith="trace-cable-viewer Cable ")
+        permission.actions = ["view", "add", "delete"]
+        permission.save(update_fields=("actions",))
+
+    def test_revoking_cable_view_makes_the_cached_page_match_a_fresh_hidden_plan(self):
+        """A cached Cable name must disappear on the first render after its view grant is revoked."""
+        logical = self.connect(self.eth0, self.eth1, label="Reviewed link")
+        visible = self.open_workspace(patched_path())
+        self.assertContains(visible, str(logical))
+        self.revoke_cable_view()
+
+        cached = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertNotContains(cached, str(logical))
+        self.assertContains(cached, "A Logical Cable exists that you may not view.")
+        cached_trace = cached.context["selected_trace"]
+        reread = self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
+        )
+        fresh = self.client.get(reread.url)
+        self.assertNotContains(fresh, str(logical))
+        self.assertContains(fresh, "A Logical Cable exists that you may not view.")
+        self.assertEqual(cached_trace, fresh.context["selected_trace"])
+
+    def test_a_later_cable_view_grant_does_not_reveal_a_planner_redaction(self):
+        """A plan with no Cable row identity has no cached value a later grant can reveal."""
+        logical = self.connect(self.eth0, self.eth1, label="Initially hidden link")
+        self.revoke_cable_view()
+        hidden = self.open_workspace(patched_path())
+        self.assertNotContains(hidden, str(logical))
+        self.grant_cable_view()
+
+        cached = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertNotContains(cached, str(logical))
+        self.assertContains(cached, "A Logical Cable exists that you may not view.")
+
+    def test_a_deleted_cable_redacts_instead_of_falling_back_to_cached_text(self):
+        """A row that no longer exists cannot authorize its cached display value."""
+        logical = self.connect(self.eth0, self.eth1, label="Deleted reviewed link")
+        self.open_workspace(patched_path())
+        logical.delete()
+
+        cached = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertNotContains(cached, "Deleted reviewed link")
+        self.assertContains(cached, "A Logical Cable exists that you may not view.")
+
+    def test_cached_media_wording_matches_a_fresh_plan_after_cable_view_is_revoked(self):
+        """The renderer recomposes a media warning after it removes one retained Cable's facts."""
+        self.connect(self.eth0, self.panel_1_fronts[0], type="cat6")
+        self.connect(self.panel_1_rear, self.panel_2_rear, type="mmf-om4")
+        self.connect(self.panel_2_fronts[0], self.eth1, type="cat6")
+        visible = self.open_workspace(patched_path())
+        visible_message = visible.context["selected_trace"].findings[-1]["message"]
+        self.assertIn(cable_type_label("mmf-om4"), visible_message)
+        self.revoke_cable_view()
+
+        cached = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        cached_finding = cached.context["selected_trace"].findings[-1]
+        self.assertIn("a Cable you cannot view", cached_finding["message"])
+        self.assertNotIn(cable_type_label("mmf-om4"), cached_finding["message"])
+        reread = self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
+        )
+        fresh = self.client.get(reread.url)
+        self.assertEqual(cached_finding, fresh.context["selected_trace"].findings[-1])
+
+    def test_one_query_resolves_every_referenced_cable_for_one_workspace(self):
+        """Presentation batches Cable visibility for the whole accepted plan."""
+        self.connect(self.eth0, self.panel_1_fronts[0], label="First retained link")
+        self.connect(self.panel_1_rear, self.panel_2_rear, label="Middle retained link", type="mmf-om4")
+        self.connect(self.panel_2_fronts[0], self.eth1, label="Last retained link")
+        plan = self.plan(patched_path(), actor=self.viewer)
+
+        with CaptureQueriesContext(connection) as queries:
+            workspace = ReviewWorkspace(plan, self.viewer)
+            tuple(workspace.traces)
+
+        cable_queries = [query["sql"] for query in queries if 'FROM "dcim_cable"' in query["sql"]]
+        self.assertEqual(len(cable_queries), 1, cable_queries)
+
+    def test_rendering_under_different_live_permissions_does_not_change_the_accepted_fingerprint(self):
+        """Live presentation removes text without mutating any accepted decision input."""
+        self.connect(self.eth0, self.eth1, label="Fingerprint link")
+        plan = self.plan(patched_path(), actor=self.viewer)
+        accepted = plan.fingerprint
+        without_sources = plan.to_dict()
+
+        def remove_sources(value):
+            if isinstance(value, dict):
+                value.pop("disclosure_source", None)
+                for child in value.values():
+                    remove_sources(child)
+            elif isinstance(value, list):
+                for child in value:
+                    remove_sources(child)
+
+        remove_sources(without_sources)
+        ReviewWorkspace(plan, self.viewer)
+        self.revoke_cable_view()
+
+        ReviewWorkspace(plan, self.viewer)
+
+        self.assertEqual(plan.fingerprint, accepted)
+        self.assertEqual(ImportPlan.from_dict(without_sources).fingerprint, accepted)
 
 
 class TraceWorkspaceCablePolicyTest(CableTopologyMixin, TransactionTestCase):
@@ -2346,7 +2501,7 @@ class TraceWorkspaceSegmentOverrideTest(CableTopologyMixin, TransactionTestCase)
         """The recovery reads a Source Document its profile no longer owns, so it cannot assume one."""
         self.open_workspace(patched_path())
         session = self.client.session
-        session[PREVIEW_PLAN_SESSION_KEY] = {**session[PREVIEW_PLAN_SESSION_KEY], "schema_version": 1}
+        session[PREVIEW_PLAN_SESSION_KEY] = {**session[PREVIEW_PLAN_SESSION_KEY], "schema_version": 3}
         session.save()
         self.profile.delete()
 
@@ -2403,7 +2558,7 @@ class TraceWorkspaceSegmentOverrideTest(CableTopologyMixin, TransactionTestCase)
         opened = self.open_workspace(patched_path())
         before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
         session = self.client.session
-        session[PREVIEW_PLAN_SESSION_KEY] = {**session[PREVIEW_PLAN_SESSION_KEY], "schema_version": 1}
+        session[PREVIEW_PLAN_SESSION_KEY] = {**session[PREVIEW_PLAN_SESSION_KEY], "schema_version": 3}
         session.save()
 
         reopened = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))

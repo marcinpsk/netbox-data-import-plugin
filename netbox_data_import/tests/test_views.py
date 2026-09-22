@@ -706,7 +706,7 @@ class PreviewSessionMixin:
         )
         planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
         plan = ImportEngine.plan(profile, document, self.user, planning_context)
-        workspace = ReviewWorkspace(plan)
+        workspace = ReviewWorkspace(plan, self.user)
 
         session = self.client.session
         start_new_preview(session, plan)

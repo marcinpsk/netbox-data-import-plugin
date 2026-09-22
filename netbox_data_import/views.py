@@ -228,7 +228,7 @@ def _contact_candidate_context(request, profile_id, source_id):
     """Return Contact candidates and row state for one active preview row."""
     plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY) or {}
     try:
-        workspace = ReviewWorkspace.from_dict(plan_data)
+        workspace = ReviewWorkspace.from_dict(plan_data, request.user)
     except PlanError as exc:
         raise ValidationError("The active Import Plan is no longer readable.") from exc
     result_rows = [
@@ -1006,7 +1006,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
             messages.error(request, f"Failed to parse file: {exc}")
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
-        workspace = ReviewWorkspace(plan)
+        workspace = ReviewWorkspace(plan, request.user)
         start_new_preview(request.session, plan)
         request.session["import_rows"] = workspace.source_rows
         request.session["import_context"] = context_data
@@ -1227,7 +1227,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             if not isinstance(planned, ImportPlan):
                 return planned
             plan = planned
-        result = ReviewWorkspace(plan)
+        result = ReviewWorkspace(plan, request.user)
         rows = result.source_rows
         request.session["import_rows"] = rows
 
@@ -1647,7 +1647,7 @@ class ImportRunView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
             _discard_import_preview(request)
             messages.error(request, str(exc))
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        if ReviewWorkspace(accepted).has_errors:
+        if ReviewWorkspace(accepted, request.user).has_errors:
             messages.warning(request, "Resolve every preview error before importing.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
         selection = [unit.identity for unit in accepted.units if unit.disposition == "actionable"]
@@ -3030,7 +3030,8 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
                                 "location_id": ctx_data.get("location_id"),
                                 "tenant_id": ctx_data.get("tenant_id"),
                             },
-                        )
+                        ),
+                        request.user,
                     )
                     if _duplicate_serial_shown(current.units, row_number) != shown_serial:
                         refusal = f"No other row this import creates still claims serial '{shown_serial}'."
@@ -4626,7 +4627,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             field = next(
                 (
                     item
-                    for trace in ReviewWorkspace(live).traces
+                    for trace in ReviewWorkspace(live, request.user).traces
                     for item in trace.terminations
                     if item["field_key"] == field_key
                 ),
@@ -5487,7 +5488,7 @@ class SyncSingleRowView(_AjaxPermissionView):
             accepted = ImportPlan.from_dict(plan_data)
         except PlanError as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=409)
-        workspace = ReviewWorkspace(accepted)
+        workspace = ReviewWorkspace(accepted, request.user)
         preview_unit = next(
             (
                 unit
