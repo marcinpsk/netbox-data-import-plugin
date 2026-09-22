@@ -202,7 +202,8 @@ class ProposalPresentation:
         pending = proposal is not None and proposal.status in ProposalStatus.ACTIVE
         completed = proposal is not None and proposal.status == ProposalStatus.COMPLETED
         state = field["state"]
-        if proposal is not None and proposal.decision == ProposalDecision.ACCEPTED:
+        # The plan owns whether a field is resolved; acceptance only renames a state it already set.
+        if state != UNRESOLVED and proposal is not None and proposal.decision == ProposalDecision.ACCEPTED:
             resolution = proposal.written_resolution
             if resolution is not None and (
                 resolution.selected_object_type_id == proposal.selected_object_type_id
