@@ -78,6 +78,11 @@ class ProfilePolicyMoved(Exception):
     """Another operator changed this profile's policy after the reviewed preview was planned."""
 
 
+PROFILE_POLICY_MOVED = (
+    "This profile's policy changed since this preview was planned. Re-read from NetBox, then make the decision again."
+)
+
+
 class UnacceptableCablePolicy(Exception):
     """The submitted Cable Type and Cable Profile do not validate as a policy decision."""
 
@@ -86,16 +91,22 @@ class UnacceptableCablePolicy(Exception):
         super().__init__("; ".join(errors))
 
 
+def _refuse_hidden_policy(actor, row) -> None:
+    """Refuse a blind policy write against a row this actor cannot read."""
+    if row is None or row.__class__.objects.restrict(actor, "view").filter(pk=row.pk).exists():
+        return
+    from .cable_disclosure import POLICY_WRITE_REFUSED
+
+    raise UnacceptableCablePolicy([POLICY_WRITE_REFUSED])
+
+
 def _refuse_moved_policy(locked_profile, reviewed_fingerprint) -> None:
     """Refuse a decision made against a policy that has already moved under this preview.
 
     A preview revision is per session, so it cannot see another operator's profile edit.
     """
     if locked_profile.planning_fingerprint != reviewed_fingerprint:
-        raise ProfilePolicyMoved(
-            "This profile's policy changed since this preview was planned. "
-            "Re-read from NetBox, then make the decision again."
-        )
+        raise ProfilePolicyMoved(PROFILE_POLICY_MOVED)
 
 
 def _form_messages(form) -> list:
@@ -118,14 +129,11 @@ def save_cable_class_mapping_and_replan(
 
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
-        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         lookup = {"profile": locked_profile, "cable_class": cable_class}
         # The row is read under the lock, so the form validates what the write will replace.
         stored = CableClassMapping.objects.filter(**lookup).first()
-        if stored is not None and not actor.has_perm("netbox_data_import.view_cableclassmapping", stored):
-            from .cable_disclosure import POLICY_HIDDEN
-
-            raise UnacceptableCablePolicy([POLICY_HIDDEN])
+        _refuse_hidden_policy(actor, stored)
+        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         instance = stored or CableClassMapping(**lookup)
         form = CableClassMappingForm({**data, "cable_class": cable_class}, instance=instance)
         if not form.is_valid():
@@ -163,17 +171,12 @@ def save_cable_segment_override_and_replan(
 
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
-        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         lookup = {"profile": locked_profile, "segment_key": segment_key}
         # The row is read under the lock, so the form validates what the write will replace.
         stored = CableSegmentOverride.objects.filter(**lookup).first()
         deciding = stored or CableClassMapping.objects.filter(profile=locked_profile, cable_class=cable_class).first()
-        if deciding is not None:
-            permission = f"netbox_data_import.view_{deciding._meta.model_name}"
-            if not actor.has_perm(permission, deciding):
-                from .cable_disclosure import POLICY_HIDDEN
-
-                raise UnacceptableCablePolicy([POLICY_HIDDEN])
+        _refuse_hidden_policy(actor, deciding)
+        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         instance = stored or CableSegmentOverride(**lookup)
         instance.source_trace_identity = trace_identity
         instance.segment_index = segment_index
@@ -207,12 +210,9 @@ def clear_cable_segment_override_and_replan(
     """Drop one segment override, so the CableClass policy decides that segment again."""
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
-        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         stored = CableSegmentOverride.objects.filter(profile=locked_profile, segment_key=segment_key).first()
-        if stored is not None and not actor.has_perm("netbox_data_import.view_cablesegmentoverride", stored):
-            from .cable_disclosure import POLICY_HIDDEN
-
-            raise UnacceptableCablePolicy([POLICY_HIDDEN])
+        _refuse_hidden_policy(actor, stored)
+        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         if stored is not None:
             delete_permission_scoped_objects(actor, CableSegmentOverride.objects.filter(pk=stored.pk))
         # atomic-exit-safe: segment-override-cleared-and-replanned
@@ -294,6 +294,8 @@ _DIAGNOSTIC_MESSAGES = {
     "cable.planned_termination_conflict": (
         "Another Source Trace plans a Cable on this termination. Resolve this trace to a different termination."
     ),
+    "cable.policy_stale": "The selected Cable policy value is no longer offered by this NetBox instance.",
+    "cable.profile_incompatible": "The selected Cable Profile does not permit one termination on each side.",
     "cable.resolved_segment_conflict": (
         "Two Source Traces give one shared segment different Cable policies. "
         "Force one policy on the segment, or make the CableClass policies agree."

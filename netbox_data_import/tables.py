@@ -129,14 +129,10 @@ class CableClassMappingTable(tables.Table):
 
     def __init__(self, data, *, viewer):
         rows = list(data)
-        self.visible_ids = (
-            {row.pk for row in rows}
-            if viewer.is_superuser
-            else set(
-                CableClassMapping.objects.restrict(viewer, "view")
-                .filter(pk__in=[row.pk for row in rows])
-                .values_list("pk", flat=True)
-            )
+        self.visible_ids = set(
+            CableClassMapping.objects.restrict(viewer, "view")
+            .filter(pk__in=[row.pk for row in rows])
+            .values_list("pk", flat=True)
         )
         for row in rows:
             row.policy_viewable = row.pk in self.visible_ids  # type: ignore[attr-defined]

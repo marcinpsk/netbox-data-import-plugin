@@ -34,7 +34,7 @@ from .field_keys import (
     termination_field_key,
 )
 from .object_permissions import enforce_saved_object_permission
-from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
+from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit, fingerprint_of
 from .target_runtime import DeletedObject, PreconditionFailed
 from .trace_device_resolution import (
     STALE as DEVICE_STALE,
@@ -203,6 +203,17 @@ def _delete_identity(cable_pk: int) -> str:
     return f"cable:delete:{cable_pk}"
 
 
+def _deleted_cable_review_fingerprint(cable) -> str:
+    """Hash the review metadata whose plaintext must not survive Cable deletion."""
+    return fingerprint_of(
+        {
+            "display": str(cable),
+            "description": cable.description,
+            "tags": sorted(cable.tags.values_list("name", flat=True)),
+        }
+    )
+
+
 @dataclass
 class _TraceAnalysis:
     """What one Source Trace contributes, built in planning order."""
@@ -249,18 +260,27 @@ class _TraceAnalysis:
 
     def error(self, code: str, display: dict, identities=()) -> None:
         """Record one blocking or invalidating finding."""
+        from .cable_disclosure import validate_diagnostic_disclosures
+
+        validate_diagnostic_disclosures(code, display)
         self.diagnostics.append(
             Diagnostic(code=code, severity=Severity.ERROR, identities=tuple(identities), display=display)
         )
 
     def note(self, code: str, display: dict, identities=()) -> None:
         """Record one review note whose identities keep the unit honest about live state."""
+        from .cable_disclosure import validate_diagnostic_disclosures
+
+        validate_diagnostic_disclosures(code, display)
         self.diagnostics.append(
             Diagnostic(code=code, severity=Severity.INFO, identities=tuple(identities), display=display)
         )
 
     def warn(self, code: str, display: dict, identities=(), evidence=None) -> None:
         """Record a finding the operator has to see, which changes no disposition."""
+        from .cable_disclosure import validate_diagnostic_disclosures
+
+        validate_diagnostic_disclosures(code, display)
         self.diagnostics.append(
             Diagnostic(
                 code=code,
@@ -1125,7 +1145,7 @@ class _CableBatch:
             return None
         errors = policy_choice_errors(policy["cable_type"], policy["cable_profile"])
         for error in errors.values():
-            analysis.block(error.code, {**display, "message": error.messages[0]})
+            analysis.block(error.code, display)
         if errors:
             return None
         return policy
@@ -1463,7 +1483,6 @@ class _CableBatch:
         disclosure, _identities = self._cable_diagnostic_disclosure(cable)
         if not disclosure["cable_visible"]:
             return {"visible": False, "display": "", "description": "", "tags": []}
-        # Section 6.3 reviews what the deletion removes, which the deletion payload also carries.
         return {
             "visible": True,
             "display": disclosure["cable"],
@@ -1489,13 +1508,12 @@ class _CableBatch:
             identity=_delete_identity(logical.cable.pk),
             target_module=CableModule.key,
             operation="delete",
-            payload={
+            payload={"cable_id": logical.cable.pk},
+            preconditions={
                 "cable_id": logical.cable.pk,
-                "display": str(logical.cable),
-                "description": logical.cable.description,
-                "tags": sorted(logical.cable.tags.values_list("name", flat=True)),
+                "terminations": logical.terminations,
+                "review_fingerprint": _deleted_cable_review_fingerprint(logical.cable),
             },
-            preconditions={"cable_id": logical.cable.pk, "terminations": logical.terminations},
         )
 
     def _create_change(self, segment: _DesiredSegment, policy: dict) -> PlannedChange:
@@ -1573,17 +1591,12 @@ class CableModule:
         current = _cable_terminations(cable_id)
         if current != [list(item) for item in planned_change.preconditions["terminations"]]:
             raise PreconditionFailed(f"Cable {cable_id} was re-terminated after the plan was made.")
+        if _deleted_cable_review_fingerprint(cable) != planned_change.preconditions["review_fingerprint"]:
+            raise PreconditionFailed(f"Cable {cable_id} changed after the plan was made.")
         enforce_saved_object_permission(cable, execution_context.actor, "delete")
-        # The audit row is the only record left of this Cable, so it keeps what the row carried.
         snapshot = DeletedObject(
             object_type="dcim.cable",
             object_id=cable_id,
-            display=str(cable),
-            detail={
-                "terminations": current,
-                "description": cable.description,
-                "tags": sorted(cable.tags.values_list("name", flat=True)),
-            },
         )
         cable.delete()
         return snapshot

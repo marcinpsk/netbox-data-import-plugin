@@ -118,12 +118,17 @@ def trace_workbook_bytes(
     export_timestamp="2026-08-31 12:00:00+00:00",
 ) -> bytes:
     """Build trace workbook bytes with the fixed trace sheet names."""
+    from datetime import UTC, datetime
     from io import BytesIO
+    from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
     import openpyxl
     from openpyxl.worksheet.worksheet import Worksheet
 
     book = openpyxl.Workbook()
+    fixed_time = datetime(2000, 1, 1, tzinfo=UTC)
+    book.properties.created = fixed_time
+    book.properties.modified = fixed_time
     active = book.active
     if isinstance(active, Worksheet):
         book.remove(active)
@@ -133,7 +138,22 @@ def trace_workbook_bytes(
         add_trace_sheet(book, "Trace List", TRACE_LIST_HEADER, list_blocks, export_timestamp)
     buffer = BytesIO()
     book.save(buffer)
-    return buffer.getvalue()
+    stable = BytesIO()
+    with ZipFile(BytesIO(buffer.getvalue())) as source, ZipFile(stable, "w", compression=ZIP_DEFLATED) as target:
+        for original in source.infolist():
+            item = ZipInfo(original.filename, (1980, 1, 1, 0, 0, 0))
+            item.compress_type = original.compress_type
+            item.external_attr = original.external_attr
+            item.create_system = original.create_system
+            content = source.read(original.filename)
+            if original.filename == "docProps/core.xml":
+                content = re.sub(
+                    rb"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)",
+                    rb"\g<1>2000-01-01T00:00:00Z\g<2>",
+                    content,
+                )
+            target.writestr(item, content)
+    return stable.getvalue()
 
 
 def store_workbook_document(profile, headers, rows, uploaded_by, filename, *, sheet_name="Data"):

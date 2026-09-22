@@ -1277,9 +1277,12 @@ submission mints a new idempotency key, so an abandoned attempt consumes no key 
 operator can always resubmit.
 
 **Deleted-object snapshot.** For each deleted object the applied-changes field records the object
-type, the database id, the display value, and, for a Cable, its termination set at deletion time. This
-is where a removed Logical Cable is recorded, which satisfies the audit requirement stated in sections
-5.7 and 10.7. Provenance rows never record a deletion.
+type and database id. A deleted row can no longer authorize its former display data for a later audit
+reader, so the snapshot stores no display value or Cable metadata. The Cable delete precondition
+stores its termination set and an opaque fingerprint of the reviewed display, description, and tags.
+This detects drift without disclosing the values. The snapshot is where a removed Logical Cable is
+recorded, which satisfies the audit requirement stated in sections 5.7 and 10.7. Provenance rows never
+record a deletion.
 
 Every new field is nullable at the database level so retained `ImportJob` rows can keep their
 historical columns. The cutover drops `dry_run` and the stored result rows, backfills nothing, and
@@ -1421,8 +1424,8 @@ Synchronization Units and Planned Changes.
 | Resolution Proposal row | Created by the request, completed or failed by the inference job, decided once by an operator |
 
 The Logical Cable removal is recorded only in the `ImportExecution` deleted-object snapshot
-(section 9.2), which stores the Cable's object type, id, display value, and termination set at
-deletion time.
+(section 9.2), which stores the Cable's object type and id. Its delete precondition protects the
+reviewed metadata and termination set without copying readable values into the audit record.
 
 ## 11. Cutover plan
 
@@ -1672,7 +1675,8 @@ view or job into private engine behavior.
 - The request inserts a `pending` `ImportExecution` row and commits it before the target transaction
   opens; a duplicate submission returns the existing row in any outcome, including `pending`.
 - The applied-changes field records every applied Planned Change identity, and every deleted object
-  with its type, id, display, and, for a Cable, its terminations.
+  with its type and id. A Cable delete precondition fingerprints its reviewed metadata and records
+  its terminations, but the audit record stores neither.
 - A background execution links the native NetBox Job to its `ImportExecution` row.
 - A `SourceDocument` referenced by an `ImportExecution` is never deleted; an unreferenced one is
   deleted by housekeeping 30 days after creation and never sooner; reading one requires Import

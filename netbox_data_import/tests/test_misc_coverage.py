@@ -208,6 +208,7 @@ class CableClassMappingTableTest(TestCase):
                 table.order_by = column
 
                 self.assertEqual(len(list(table.rows)), 2)
+                self.assertEqual(table.visible_ids, set(CableClassMapping.objects.values_list("pk", flat=True)))
 
 
 class SourceTextTests(TestCase):

@@ -25,7 +25,7 @@ from utilities.permissions import get_permission_for_model
 from utilities.views import ConditionalLoginRequiredMixin
 
 from .filters import ImportProfileFilterSet
-from .cable_disclosure import POLICY_HIDDEN
+from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, POLICY_WRITE_REFUSED, policy_row_is_disclosed
 from .forms import (
     CableClassMappingForm,
     CableSegmentOverrideForm,
@@ -126,6 +126,7 @@ from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .plan import ImportPlan, PlanError, PlanSchemaMismatch, fingerprint_of
 from .review_workspace import (
     IneligibleDeviceSelection,
+    PROFILE_POLICY_MOVED,
     ProfilePolicyMoved,
     ReviewWorkspace,
     UnacceptableCablePolicy,
@@ -1542,6 +1543,9 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
     else:
         idempotency_key = request.session.get("import_idempotency_key") or uuid.uuid4().hex
         request.session["import_idempotency_key"] = idempotency_key
+    from .cable_disclosure import redact_deleted_cables
+
+    execution_plan_data = redact_deleted_cables(plan_data)
     _clear_restored_import_job(request)
     job = None
     try:
@@ -1556,7 +1560,7 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
                 job_timeout=3600,
                 profile_id=profile.pk,
                 source_document_id=document.pk,
-                accepted_plan=plan_data,
+                accepted_plan=execution_plan_data,
                 selection=selection,
                 idempotency_key=idempotency_key,
             )
@@ -1569,7 +1573,7 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
                 "profile_id": profile.pk,
                 "profile_name": profile.name,
                 "source_document_id": document.pk,
-                "accepted_plan": plan_data,
+                "accepted_plan": execution_plan_data,
                 "context_data": ctx_data,
                 # What makes this Job hold the preview, so the guard finds it without the session.
                 "keeps_preview": keep_preview,
@@ -3691,7 +3695,13 @@ def _disable_policy_form(form) -> None:
         field.disabled = True
 
 
-def _cable_policy_forms(profile, trace) -> list:
+def _visible_row_ids(model, viewer, rows) -> set[int]:
+    """Return the supplied row IDs this live viewer may read."""
+    row_ids = [row.pk for row in rows]
+    return set(model.objects.restrict(viewer, "view").filter(pk__in=row_ids).values_list("pk", flat=True))
+
+
+def _cable_policy_forms(profile, trace, viewer) -> list:
     """Return the Cable policy in force for each CableClass the selected trace states, once each.
 
     The CableClass values come from the plan's own segments, so a cached plan needs no new key.
@@ -3700,28 +3710,31 @@ def _cable_policy_forms(profile, trace) -> list:
         return []
     planned = {policy["cable_class"]: policy for policy in trace.cable_policies}
     stated = list(planned)
-    rows = {row.cable_class: row for row in CableClassMapping.objects.filter(profile=profile, cable_class__in=stated)}
+    stored_rows = list(CableClassMapping.objects.filter(profile=profile, cable_class__in=stated))
+    rows = {row.cable_class: row for row in stored_rows}
+    visible_ids = _visible_row_ids(CableClassMapping, viewer, stored_rows)
     forms = []
     for index, cable_class in enumerate(stated):
         row = rows.get(cable_class)
         decision = planned[cable_class]
-        visible = decision["cable_type"] != POLICY_HIDDEN
+        visible = row is None or row.pk in visible_ids
+        disclosed = row is not None and visible and policy_row_is_disclosed(decision, row)
+        hidden = decision.get(POLICY_VISIBLE) is False or not visible
+        moved = row is not None and visible and not disclosed
         form = CableClassMappingForm(
-            instance=row
-            if visible and row is not None
-            else CableClassMapping(profile=profile, cable_class=cable_class),
+            instance=row if disclosed else CableClassMapping(profile=profile, cable_class=cable_class),
             auto_id=f"id_%s_{index}",
         )
-        if not visible:
+        if hidden or moved:
             _disable_policy_form(form)
         forms.append(
             {
                 "cable_class": cable_class,
-                "cable_type": decision["cable_type"],
-                "cable_profile": decision["cable_profile"],
-                "resolved": bool(decision["policy"]),
+                "cable_type": POLICY_HIDDEN if hidden else decision["cable_type"],
+                "cable_profile": POLICY_HIDDEN if hidden else decision["cable_profile"],
+                "resolved": False if hidden else bool(decision["policy"]),
                 "form": form,
-                "reason": "" if visible else POLICY_HIDDEN,
+                "reason": POLICY_WRITE_REFUSED if hidden else PROFILE_POLICY_MOVED if moved else "",
             }
         )
     return forms
@@ -3745,32 +3758,55 @@ def _workspace_segment(workspace, unit_identity: str, position: str):
     return trace, next((segment for segment in trace.segments if segment["index"] == index), None)
 
 
-def _segment_policy_forms(profile, trace) -> list:
+def _segment_policy_forms(profile, trace, viewer) -> list:
     """Return each segment of the selected trace with the control that forces its Cable policy."""
     if trace is None:
         return []
     keys = [segment["segment_key"] for segment in trace.segments if segment["segment_key"]]
-    rows = {row.segment_key: row for row in CableSegmentOverride.objects.filter(profile=profile, segment_key__in=keys)}
+    stored_rows = list(CableSegmentOverride.objects.filter(profile=profile, segment_key__in=keys))
+    rows = {row.segment_key: row for row in stored_rows}
+    mappings = list(
+        CableClassMapping.objects.filter(
+            profile=profile,
+            cable_class__in={segment["cable_class"] for segment in trace.segments},
+        )
+    )
+    mappings_by_class = {row.cable_class: row for row in mappings}
+    visible_overrides = _visible_row_ids(CableSegmentOverride, viewer, stored_rows)
+    visible_mappings = _visible_row_ids(CableClassMapping, viewer, mappings)
     forms = []
     for segment in trace.segments:
         stored = rows.get(segment["segment_key"])
-        hidden = segment["cable_type"] == POLICY_HIDDEN
+        deciding = stored or mappings_by_class.get(segment["cable_class"])
+        visible_ids = visible_overrides if stored is not None else visible_mappings
+        visible = deciding is None or deciding.pk in visible_ids
+        disclosed = deciding is not None and visible and policy_row_is_disclosed(segment, deciding)
+        hidden = segment.get(POLICY_VISIBLE) is False or not visible
+        moved = deciding is not None and visible and not disclosed
         form = CableSegmentOverrideForm(
             instance=(
                 stored
-                if stored is not None and not hidden
+                if stored is not None and disclosed
                 else CableSegmentOverride(profile=profile, segment_key=segment["segment_key"])
             ),
-            initial={} if hidden else cable_policy_form_initial(segment["policy"]),
+            initial={} if hidden or moved else cable_policy_form_initial(segment["policy"]),
             auto_id=f"id_%s_segment_{segment['index']}",
         )
-        if hidden:
+        if hidden or moved:
             _disable_policy_form(form)
         forms.append(
             {
                 **segment,
+                "cable_type": POLICY_HIDDEN if hidden else segment["cable_type"],
+                "cable_profile": POLICY_HIDDEN if hidden else segment["cable_profile"],
                 "position": segment["index"] + 1,
-                "reason": POLICY_HIDDEN if hidden else _segment_override_reason(segment),
+                "reason": (
+                    POLICY_WRITE_REFUSED
+                    if hidden
+                    else PROFILE_POLICY_MOVED
+                    if moved
+                    else _segment_override_reason(segment)
+                ),
                 "form": form,
             }
         )
@@ -4005,8 +4041,8 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                     for field in selected.terminations
                 ],
             )
-        cable_policy_forms = _cable_policy_forms(profile, selected)
-        segment_policy_forms = _segment_policy_forms(profile, selected)
+        cable_policy_forms = _cable_policy_forms(profile, selected, request.user)
+        segment_policy_forms = _segment_policy_forms(profile, selected, request.user)
         attention, settled = group_terminations(selected.terminations if selected else [])
         selected_devices = _with_device_resolution_permissions(
             profile,

@@ -347,8 +347,10 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         unit = self.unit(patched_path())
 
         deletion = unit.changes[0]
-        self.assertEqual(deletion.payload["description"], "Temporary logical path")
-        self.assertEqual(list(deletion.payload["tags"]), ["Earlier", "Later"])
+        review = unit.display["trace"]["logical_cable"]
+        self.assertEqual(review["description"], "Temporary logical path")
+        self.assertEqual(list(review["tags"]), ["Earlier", "Later"])
+        self.assertEqual(deletion.payload, {"cable_id": logical.pk})
 
     def test_a_trace_with_no_direct_cable_is_a_creation_only_replacement(self):
         """With nothing to remove the unit carries creations alone, and they wait on nothing."""
@@ -1409,21 +1411,86 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
         self.assertEqual(self.creations(unit)[1].payload["cable_type"], "cat6")
 
 
-class CablePolicyDisclosureRegistryTest(TestCase):
+class CablePolicyDisclosureRegistryTest(CableTopologyMixin, TestCase):
     """Pin every diagnostic display field that can come from a Cable policy row."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
 
     def test_every_policy_derived_diagnostic_display_is_registered(self):
         """A new policy disclosure must declare its redaction keys in the shared vocabulary."""
         from netbox_data_import.cable_disclosure import POLICY_DIAGNOSTIC_DISCLOSURES
 
-        self.assertEqual(
-            dict(POLICY_DIAGNOSTIC_DISCLOSURES),
-            {
-                "cable.media_family_mismatch": frozenset({"segments"}),
-                "cable.resolved_segment_conflict": frozenset({"cable_type", "cable_profile"}),
-                "cable.segment_override_lost": frozenset({"cable_type", "cable_profile"}),
-            },
+        self.force(
+            self.eth0,
+            self.eth1,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            trace_identity=self.identity_of(patched_path()),
         )
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(cable_type="mmf-om4")
+        plans = [self.plan(patched_path())]
+
+        CableSegmentOverride.objects.filter(profile=self.profile).delete()
+        alias_a = trace_termination("DEV-A", "", "source-port-a", "Port")
+        alias_b = trace_termination("DEV-B", "", "source-port-b", "NIC")
+        aliased = (
+            trace_endpoint_line(alias_a),
+            trace_endpoint_line(alias_b),
+            (trace_segment(alias_a, "Patch", alias_b),),
+        )
+        conflicting = (
+            trace_endpoint_line(DEVICE_A),
+            trace_endpoint_line(DEVICE_B),
+            (trace_segment(DEVICE_A, "Trunk", DEVICE_B),),
+        )
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(
+            cable_type=None,
+            cable_profile=None,
+        )
+        self.save_resolution(alias_a, self.eth0)
+        self.save_resolution(alias_b, self.eth1)
+        plans.append(self.plan(aliased, conflicting))
+
+        def carries_policy_source(value):
+            if isinstance(value, dict):
+                source = value.get("disclosure_source")
+                if isinstance(source, dict) and source.get("kind", "").startswith("netbox_data_import.cable"):
+                    return True
+                return any(carries_policy_source(child) for child in value.values())
+            if isinstance(value, (list, tuple)):
+                return any(carries_policy_source(child) for child in value)
+            return False
+
+        emitted = {
+            diagnostic.code
+            for plan in plans
+            for unit in plan.units
+            for diagnostic in unit.diagnostics
+            if carries_policy_source(diagnostic.display)
+        }
+        self.assertEqual(emitted, set(POLICY_DIAGNOSTIC_DISCLOSURES))
+
+    def test_every_cable_diagnostic_producer_has_a_registered_display_schema(self):
+        """A new Cable diagnostic must register its display fields before it can be emitted."""
+        import ast
+        from pathlib import Path
+
+        from netbox_data_import import cable_target
+        from netbox_data_import.cable_disclosure import CABLE_DIAGNOSTIC_FIELDS
+        from netbox_data_import.cable_policy import policy_choice_errors
+
+        source = Path(cable_target.__file__).read_text(encoding="utf-8")
+        produced = {
+            node.value
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("cable.")
+        }
+        produced.update(error.code for error in policy_choice_errors("removed-type", "removed-profile").values())
+        produced.update(error.code for error in policy_choice_errors("cat6", "trunk-2c1p").values())
+
+        self.assertEqual(set(CABLE_DIAGNOSTIC_FIELDS), produced)
 
 
 class CableMediaFamilyTest(CableTopologyMixin, TestCase):
@@ -1577,17 +1644,23 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
     def test_the_active_language_does_not_change_the_unit_fingerprint(self):
         """Two operators reading NetBox in two languages must not disagree about the plan."""
         self.force_first_segment("mmf-om4")
-        english = self.unit(patched_path())
+        self.connect(self.eth0, self.eth1, label="Logical cable under review")
+        document = SourceDocument.store(
+            profile=self.profile,
+            content=trace_workbook_bytes(path_blocks=(patched_path(),)),
+        )
+        english = ImportEngine.plan(self.profile, document, self.actor, self.planning_context).units[0]
 
         with translation.override("de"):
-            german = self.unit(patched_path())
+            self.assertEqual(translation.gettext("Connected"), "Verbunden")
+            german = ImportEngine.plan(self.profile, document, self.actor, self.planning_context).units[0]
 
         self.assertEqual(len(self.mismatches(german)), 1)
-        # The evidence is what the fingerprint carries, so a difference shows up here first.
         self.assertEqual(
             [dict(item) for item in self.mismatches(english)[0].evidence["segments"]],
             [dict(item) for item in self.mismatches(german)[0].evidence["segments"]],
         )
+        self.assertEqual(english.fingerprint_data, german.fingerprint_data)
         self.assertEqual(fingerprint_of(english.fingerprint_data), fingerprint_of(german.fingerprint_data))
 
     def test_two_segments_no_mapping_joins_are_two_runs(self):
@@ -2160,7 +2233,7 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
     def setUp(self):
         self.build_topology()
 
-    def execute(self, plan, identities=None):
+    def execute(self, plan, identities=None, actor=None):
         """Run one selection through the public coordinator seam."""
         return ImportEngine.execute(
             self.profile,
@@ -2168,7 +2241,7 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
             plan.to_dict(),
             identities or [unit.identity for unit in plan.units if unit.disposition == Disposition.ACTIONABLE],
             str(uuid.uuid4()),
-            self.actor,
+            actor or self.actor,
         )
 
     def assert_competing_write_is_blocked(self, plan, competing_write, signal):
@@ -2252,6 +2325,80 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
         self.assertEqual([item["object_id"] for item in deleted], [logical.pk])
         self.assertEqual(deleted[0]["object_type"], "dcim.cable")
         self.assertFalse(CableImportSource.objects.filter(cable_id=logical.pk).exists())
+
+    def test_execution_readers_receive_only_the_deleted_cable_audit_identity(self):
+        """A deleted row cannot authorize its former metadata for a later execution reader."""
+        from rest_framework.test import APIClient
+
+        from netbox_data_import.models import ImportExecution
+
+        logical = self.connect(self.eth0, self.eth1, label="Hidden execution cable", description="Hidden detail")
+        logical.tags.add(Tag.objects.create(name="Hidden audit tag", slug="hidden-audit-tag"))
+        reader = user_with_object_permission(
+            "cable-execution-reader",
+            [
+                (ImportProfile, ("view",), {}),
+                (ImportExecution, ("view",), {}),
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (Cable, ("add", "delete"), {}),
+            ],
+        )
+        plan = self.plan(patched_path(), actor=reader)
+        execution = self.execute(plan, actor=reader)
+        client = APIClient()
+        client.force_authenticate(reader)
+
+        response = client.get(
+            f"/api/plugins/data-import/executions/{execution.pk}/",
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(
+            response.json()["applied_changes"]["deleted"],
+            [{"object_type": "dcim.cable", "object_id": logical.pk}],
+        )
+        serialized = canonical_json(response.json())
+        self.assertNotIn("Hidden execution cable", serialized)
+        self.assertNotIn("Hidden detail", serialized)
+        self.assertNotIn("Hidden audit tag", serialized)
+        self.assertNotIn("Hidden execution cable", canonical_json(plan.to_dict()))
+        self.assertNotIn("Hidden detail", canonical_json(plan.to_dict()))
+        self.assertNotIn("Hidden audit tag", canonical_json(plan.to_dict()))
+
+    def test_deleted_cable_metadata_drift_invalidates_the_accepted_plan_without_disclosing_it(self):
+        """An opaque precondition detects review metadata drift without retaining its text."""
+        from netbox_data_import.import_engine import StalePlan
+
+        logical = self.connect(self.eth0, self.eth1, label="Initial label", description="Initial detail")
+        actor = user_with_object_permission(
+            "cable-deletion-drift",
+            [
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (Cable, ("add", "delete"), {}),
+            ],
+        )
+        accepted = self.plan(patched_path(), actor=actor)
+        logical.label = "Changed label"
+        logical.description = "Changed detail"
+        logical.save(update_fields=("label", "description"))
+
+        current = self.plan(patched_path(), actor=actor)
+
+        self.assertNotEqual(accepted.fingerprint, current.fingerprint)
+        self.assertNotIn("Initial label", canonical_json(accepted.to_dict()))
+        self.assertNotIn("Initial detail", canonical_json(accepted.to_dict()))
+        with self.assertRaises(StalePlan):
+            self.execute(accepted, actor=actor)
+        self.assertTrue(Cable.objects.filter(pk=logical.pk).exists())
 
     def test_two_traces_sharing_one_segment_create_one_cable_and_two_rows(self):
         """ADR 0001 identity sharing writes the trunk once and credits both Source Traces."""
@@ -2566,8 +2713,8 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
         self.assertTrue(PortMapping.objects.filter(pk=mapping.pk).exists())
         self.assertEqual(Cable.objects.count(), 3)
 
-    def test_the_deleted_object_snapshot_records_what_the_cable_carried(self):
-        """The audit row is the only record left of a Logical Cable, so it keeps its metadata."""
+    def test_the_deleted_object_snapshot_records_only_the_stable_audit_identity(self):
+        """The audit row identifies the deleted Cable without retaining its protected metadata."""
         logical = self.connect(self.eth0, self.eth1, description="Temporary logical path")
         later = Tag.objects.create(name="Later", slug="later")
         earlier = Tag.objects.create(name="Earlier", slug="earlier")
@@ -2576,9 +2723,7 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
         execution = self.execute(self.plan(patched_path()))
 
         deleted = execution.applied_changes["deleted"]
-        self.assertEqual(len(deleted), 1, deleted)
-        self.assertEqual(deleted[0]["detail"]["description"], "Temporary logical path")
-        self.assertEqual(deleted[0]["detail"]["tags"], ["Earlier", "Later"])
+        self.assertEqual(deleted, [{"object_type": "dcim.cable", "object_id": logical.pk}])
 
     def test_deletion_holds_its_termination_rows_through_the_snapshot(self):
         """A Logical Cable termination cannot move after deletion records its reviewed state."""

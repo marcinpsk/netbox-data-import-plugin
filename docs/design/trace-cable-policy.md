@@ -594,3 +594,72 @@ access could open the edit or delete page and read the row. Both child views now
 in addition to their existing write scope. The workspace commands also needed an explicit view
 check to prevent a blind overwrite. Thus the statement that the write path was already scoped was
 true for write authority, but incomplete for the disclosure and blind-write rule.
+
+## 17. Review round 4 closure
+
+The adversarial review of section 16 found seven defects or incomplete guards. The revised design was
+ratified after the registry, form binding, and deletion fingerprint received a second review.
+
+### 17.1 Live policy rows and explicit presentation state
+
+The workspace now authorizes the live policy row that a form would bind. A row created after planning
+cannot borrow disclosure authority from a cached `Unresolved` value or from a different deciding row.
+An invisible row produces the shared hidden display and refusal reason. A visible row whose identity
+does not match the cached disclosure produces a blank, disabled form with the same stale-policy reason
+that the POST command returns.
+
+`policy_visible` carries the presentation fact. `_redact_policy` sets it to false, and every form
+builder reads it. No reader compares policy prose to decide whether a control is safe. The table-cell
+text remains `a policy you cannot view`. The write refusal is the sentence `You cannot change a policy
+you cannot view.` These values have different grammatical roles and no longer share one string.
+
+### 17.2 Deleted Cable audit data
+
+A deleted Cable has no live row against which a later execution reader can receive view permission.
+Delete permission authorizes the deletion, not future disclosure. `ImportExecution.applied_changes`
+therefore records only the deleted object's type and database id. The API returns that identity. The
+results page reads only the applied-change count. The execution list reads no applied-change data.
+The native Job receives a presentation copy of the accepted plan with deleted Cable display removed.
+
+The former delete payload also protected the accepted plan against changes to the reviewed Cable
+metadata. Removing it without replacement would weaken the stale-plan check. The delete precondition
+now carries a digest of the Cable display, description, and sorted tag names. Planning and execution
+use one helper. Execution recomputes the digest under the Cable row lock. The readable values do not
+enter the queued plan or execution audit, but a metadata change still moves the plan fingerprint and
+blocks the accepted plan. Sections 9.2 and 10.7 of the architecture specification now state this
+identity-only audit contract. Their earlier requirement to retain readable deleted-row metadata was
+wrong because no surviving row could authorize it.
+
+### 17.3 Fail-closed disclosure schemas
+
+The renderer treats a visible claim as untrusted unless it carries a well-formed source of the row
+kind that produced it and that row is live and viewable. Missing, null, string, unknown-kind, and
+wrong-kind sources all redact. A policy row cannot authorize a Cable observation.
+
+The disclosure module now registers the complete display schema of every `cable.*` diagnostic, not
+only the diagnostics already known to disclose rows. Every Cable diagnostic passes through that
+validator. Cable and policy fields require their visibility flag and a matching source when visible.
+The media diagnostic also validates every nested segment field and source. The producer test derives
+its expected diagnostic codes from `cable_target.py` and from `policy_choice_errors`, so a new producer
+cannot remain unregistered. Policy validation diagnostics no longer store a generic `message` field;
+the presentation layer owns their wording.
+
+### 17.4 CableClass table query
+
+`CableClassMappingTable` always uses `restrict(viewer, "view")`. NetBox already returns all rows for a
+superuser, so the separate superuser branch was dead and made this table disagree with the other
+permission-scoped presentation paths.
+
+### 17.5 Fingerprint determinism
+
+The intermittent language test did not expose translated plan data. It planned from two workbooks
+that the test helper generated separately. OpenPyXL wrote the current time into ZIP entry timestamps
+and `docProps/core.xml`, and the source workbook fingerprint reaches every Cable creation payload.
+Two calls in one timestamp interval passed; calls across an interval failed. Worker placement changed
+that timing and made the failure look language-dependent.
+
+The helper now fixes workbook properties, every ZIP entry timestamp, and the core modified value. The
+language test stores one Source Document, forces the German catalog to load by checking a known NetBox
+translation, and compares the complete fingerprint structures under English and German. No production
+fingerprint code changed. This defect predates the three implementation commits and existed only in
+the generated test workbook.

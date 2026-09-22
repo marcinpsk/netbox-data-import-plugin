@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The Trace Review Workspace: its summary strip, its trace list, and its per-trace actions."""
 
+import copy
 import re
 from io import BytesIO
 
@@ -11,6 +12,7 @@ from django.test import TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils.html import escape
+from extras.models import Tag
 
 from netbox_data_import.cable_policy import cable_type_label
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
@@ -19,7 +21,7 @@ from netbox_data_import.adapters import TraceWorkbookAdapter
 from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import termination_field_key
 from netbox_data_import.models import CableClassMapping, CableSegmentOverride, ImportProfile, TerminationResolution
-from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
+from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit, canonical_json
 from netbox_data_import.preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
@@ -2199,6 +2201,57 @@ class TraceWorkspaceCableDisclosureTest(CableTopologyMixin, TransactionTestCase)
         self.assertEqual(plan.fingerprint, accepted)
         self.assertEqual(ImportPlan.from_dict(without_sources).fingerprint, accepted)
 
+    def test_a_visible_cable_claim_without_an_authorizable_source_redacts_on_render(self):
+        """The workspace does not trust cached Cable text whose source shape is invalid."""
+        logical = self.connect(self.eth0, self.eth1, label="Malformed source cable")
+        self.open_workspace(patched_path())
+        original = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        invalid_sources = (None, "1", {"kind": "unknown.row", "pk": logical.pk})
+
+        for source in invalid_sources:
+            with self.subTest(source=source):
+                data = copy.deepcopy(original)
+                logical_display = data["units"][0]["display"]["trace"]["logical_cable"]
+                logical_display["disclosure_source"] = source
+                session = self.client.session
+                session[PREVIEW_PLAN_SESSION_KEY] = data
+                session.save()
+
+                response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+                self.assertNotContains(response, "Malformed source cable")
+
+        data = copy.deepcopy(original)
+        data["units"][0]["display"]["trace"]["logical_cable"].pop("disclosure_source")
+        session = self.client.session
+        session[PREVIEW_PLAN_SESSION_KEY] = data
+        session.save()
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertNotContains(response, "Malformed source cable")
+
+    def test_the_queued_execution_plan_does_not_store_deleted_cable_metadata(self):
+        """Native Job readers receive no metadata that only the deleted Cable could authorize."""
+        from core.models import Job
+
+        logical = self.connect(self.eth0, self.eth1, label="Hidden job cable", description="Hidden job detail")
+        logical.tags.add(Tag.objects.create(name="Hidden job tag", slug="hidden-job-tag"))
+        opened = self.open_workspace(patched_path())
+        trace = opened.context["selected_trace"]
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {
+                "identity": trace.identity,
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        stored = canonical_json(Job.objects.latest("pk").data["accepted_plan"])
+        self.assertNotIn("Hidden job cable", stored)
+        self.assertNotIn("Hidden job detail", stored)
+        self.assertNotIn("Hidden job tag", stored)
+
 
 class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase):
     """Recheck cached policy display values against the viewer of each render."""
@@ -2265,6 +2318,7 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
 
         cached = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         hidden = "a policy you cannot view"
+        refusal = "You cannot change a policy you cannot view."
         self.assertContains(cached, hidden)
         policy = next(item for item in cached.context["cable_policy_forms"] if item["cable_class"] == "Patch")
         segment = cached.context["segment_policy_forms"][0]
@@ -2274,8 +2328,8 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
         self.assertFalse(segment["form"].initial.get("cable_type"))
         self.assertTrue(policy["form"].fields["cable_type"].disabled)
         self.assertTrue(segment["form"].fields["cable_type"].disabled)
-        self.assertEqual(policy["reason"], hidden)
-        self.assertEqual(segment["reason"], hidden)
+        self.assertEqual(policy["reason"], refusal)
+        self.assertEqual(segment["reason"], refusal)
 
         detail = self.client.get(reverse("plugins:netbox_data_import:importprofile", kwargs={"pk": self.profile.pk}))
         self.assertContains(detail, hidden)
@@ -2293,7 +2347,7 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
             },
             follow=True,
         )
-        self.assertContains(refused, hidden)
+        self.assertContains(refused, refusal)
         mapping.refresh_from_db()
         self.assertEqual(mapping.cable_type, "cat6")
 
@@ -2319,10 +2373,11 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
         cached = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         segment = cached.context["segment_policy_forms"][0]
         hidden = "a policy you cannot view"
+        refusal = "You cannot change a policy you cannot view."
         self.assertEqual((segment["cable_type"], segment["cable_profile"]), (hidden, hidden))
         self.assertFalse(segment["form"].initial.get("cable_type"))
         self.assertTrue(segment["form"].fields["cable_type"].disabled)
-        self.assertEqual(segment["reason"], hidden)
+        self.assertEqual(segment["reason"], refusal)
 
         common = {
             "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
@@ -2332,16 +2387,199 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
         cleared = self.client.post(
             reverse("plugins:netbox_data_import:trace_segment_policy"), {**common, "clear": "1"}, follow=True
         )
-        self.assertContains(cleared, hidden)
+        self.assertContains(cleared, refusal)
         self.assertTrue(CableSegmentOverride.objects.filter(pk=override.pk).exists())
         overwritten = self.client.post(
             reverse("plugins:netbox_data_import:trace_segment_policy"),
             {**common, "cable_type": "cat6", "cable_profile": "single-1c1p"},
             follow=True,
         )
-        self.assertContains(overwritten, hidden)
+        self.assertContains(overwritten, refusal)
         override.refresh_from_db()
         self.assertEqual(override.cable_type, "mmf-om4")
+
+    def test_a_hidden_mapping_created_after_preview_cannot_populate_or_accept_the_form(self):
+        """A live row absent from the cached plan cannot borrow authority from Unresolved text."""
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Patch").delete()
+        self.open_workspace()
+        self.revoke_mapping_view()
+        mapping = CableClassMapping.objects.create(
+            profile=self.profile,
+            cable_class="Patch",
+            cable_type_resolved=True,
+            cable_type="mmf-om4",
+            cable_profile_resolved=True,
+            cable_profile="single-1c1p",
+        )
+
+        cached = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        policy = next(item for item in cached.context["cable_policy_forms"] if item["cable_class"] == "Patch")
+        segment = cached.context["segment_policy_forms"][0]
+        refusal = "You cannot change a policy you cannot view."
+        self.assertEqual((policy["cable_type"], policy["cable_profile"]), ("a policy you cannot view",) * 2)
+        self.assertEqual((segment["cable_type"], segment["cable_profile"]), ("a policy you cannot view",) * 2)
+        self.assertFalse(policy["form"].initial.get("cable_type"))
+        self.assertFalse(segment["form"].initial.get("cable_type"))
+        self.assertTrue(policy["form"].fields["cable_type"].disabled)
+        self.assertTrue(segment["form"].fields["cable_type"].disabled)
+        self.assertEqual(policy["reason"], refusal)
+        self.assertEqual(segment["reason"], refusal)
+
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_cable_policy"),
+            {
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+                "trace": cached.context["selected_trace"].identity,
+                "cable_class": "Patch",
+                "cable_type": "cat6",
+                "cable_profile": "single-1c1p",
+            },
+            follow=True,
+        )
+        self.assertContains(refused, refusal)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.cable_type, "mmf-om4")
+
+    def test_a_hidden_override_created_after_preview_cannot_populate_or_accept_the_form(self):
+        """A live override absent from the cached plan cannot borrow authority from its mapping."""
+        opened = self.open_workspace()
+        trace = opened.context["selected_trace"]
+        segment = trace.segments[0]
+        self.revoke_override_view()
+        override = CableSegmentOverride.objects.create(
+            profile=self.profile,
+            segment_key=segment["segment_key"],
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            source_trace_identity=trace.trace_identity,
+            segment_index=segment["index"],
+        )
+
+        cached = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        form_row = cached.context["segment_policy_forms"][0]
+        refusal = "You cannot change a policy you cannot view."
+        self.assertEqual((form_row["cable_type"], form_row["cable_profile"]), ("a policy you cannot view",) * 2)
+        self.assertFalse(form_row["form"].initial.get("cable_type"))
+        self.assertTrue(form_row["form"].fields["cable_type"].disabled)
+        self.assertEqual(form_row["reason"], refusal)
+
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_segment_policy"),
+            {
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+                "trace": trace.identity,
+                "segment": segment["index"],
+                "cable_type": "cat6",
+                "cable_profile": "single-1c1p",
+            },
+            follow=True,
+        )
+        self.assertContains(refused, refusal)
+        override.refresh_from_db()
+        self.assertEqual(override.cable_type, "mmf-om4")
+
+    def test_a_visible_override_created_after_preview_cannot_bind_the_cached_mapping(self):
+        """A new deciding row cannot borrow the cached mapping's disclosure or form values."""
+        opened = self.open_workspace()
+        trace = opened.context["selected_trace"]
+        segment = trace.segments[0]
+        CableSegmentOverride.objects.create(
+            profile=self.profile,
+            segment_key=segment["segment_key"],
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            source_trace_identity=trace.trace_identity,
+            segment_index=segment["index"],
+        )
+
+        cached = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        form_row = cached.context["segment_policy_forms"][0]
+        moved = (
+            "This profile's policy changed since this preview was planned. "
+            "Re-read from NetBox, then make the decision again."
+        )
+        self.assertFalse(form_row["form"].initial.get("cable_type"))
+        self.assertTrue(form_row["form"].fields["cable_type"].disabled)
+        self.assertEqual(form_row["reason"], moved)
+
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_segment_policy"),
+            {
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+                "trace": trace.identity,
+                "segment": segment["index"],
+                "cable_type": "cat6",
+                "cable_profile": "single-1c1p",
+            },
+            follow=True,
+        )
+        from django.contrib.messages import get_messages
+
+        self.assertIn(moved, [str(message) for message in get_messages(refused.wsgi_request)])
+
+    def test_a_visible_policy_claim_without_an_authorizable_source_redacts_on_render(self):
+        """The workspace does not trust cached policy text whose source shape is invalid."""
+        self.open_workspace()
+        original = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        invalid_sources = (None, "1", {"kind": "unknown.row", "pk": 1})
+
+        for source in invalid_sources:
+            with self.subTest(source=source):
+                data = copy.deepcopy(original)
+                policy = data["units"][0]["display"]["trace"]["cable_policies"][0]
+                policy["disclosure_source"] = source
+                session = self.client.session
+                session[PREVIEW_PLAN_SESSION_KEY] = data
+                session.save()
+
+                response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+                policy_form = response.context["cable_policy_forms"][0]
+                self.assertEqual(policy_form["cable_type"], "a policy you cannot view")
+                self.assertTrue(policy_form["form"].fields["cable_type"].disabled)
+                self.assertEqual(policy_form["reason"], "You cannot change a policy you cannot view.")
+
+        data = copy.deepcopy(original)
+        data["units"][0]["display"]["trace"]["cable_policies"][0].pop("disclosure_source")
+        session = self.client.session
+        session[PREVIEW_PLAN_SESSION_KEY] = data
+        session.save()
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        policy_form = response.context["cable_policy_forms"][0]
+        self.assertEqual(policy_form["cable_type"], "a policy you cannot view")
+        self.assertTrue(policy_form["form"].fields["cable_type"].disabled)
+        self.assertEqual(policy_form["reason"], "You cannot change a policy you cannot view.")
+
+    def test_a_cable_media_observation_cannot_use_a_policy_row_as_its_source(self):
+        """A viewable row of the wrong kind cannot authorize a retained Cable's cached type."""
+        self.connect(self.panel_1_rear, self.panel_2_rear, type="mmf-om4")
+        self.open_workspace()
+        data = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        diagnostic = next(
+            item for item in data["units"][0]["diagnostics"] if item["code"] == "cable.media_family_mismatch"
+        )
+        cable_segment = next(item for item in diagnostic["display"]["segments"] if item["origin"] == "cable")
+        mapping = CableClassMapping.objects.get(profile=self.profile, cable_class="Trunk")
+        cable_segment["disclosure_source"] = {
+            "kind": "netbox_data_import.cableclassmapping",
+            "pk": mapping.pk,
+        }
+        session = self.client.session
+        session[PREVIEW_PLAN_SESSION_KEY] = data
+        session.save()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        finding = next(
+            item
+            for item in response.context["selected_trace"].findings
+            if item["code"] == "cable.media_family_mismatch"
+        )
+        self.assertIn("a Cable you cannot view", finding["message"])
+        self.assertNotIn(cable_type_label("mmf-om4"), finding["message"])
 
     def test_policy_view_changes_only_presentation_not_the_plan_decision(self):
         """The unrestricted policy decision and fingerprint do not depend on policy view access."""

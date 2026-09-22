@@ -6,6 +6,7 @@ from collections import Counter
 from io import BytesIO
 import json
 from pathlib import Path
+from zipfile import ZipFile
 
 from django.test import SimpleTestCase
 import openpyxl
@@ -63,6 +64,15 @@ def _codes(batch):
 
 class TraceWorkbookFixtureTest(SimpleTestCase):
     """The committed workbooks define the real trace format."""
+
+    def test_generated_workbooks_have_stable_archive_metadata(self):
+        """Fixture fingerprints must not depend on the wall clock of each OpenPyXL save."""
+        with ZipFile(BytesIO(_workbook())) as archive:
+            timestamps = {item.date_time for item in archive.infolist()}
+            core_properties = archive.read("docProps/core.xml")
+
+        self.assertEqual(timestamps, {(1980, 1, 1, 0, 0, 0)})
+        self.assertIn(b">2000-01-01T00:00:00Z</dcterms:modified>", core_properties)
 
     def test_copper_fixture_collapses_duplicate_blocks(self):
         """The copper corpus produces ten valid three-segment Source Traces."""
