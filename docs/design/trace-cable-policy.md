@@ -494,3 +494,38 @@ absence of a route from a stale override to a Cable write, `_attribute_drift` re
 row, the shared payload and preconditions, the consequences of removing the label check, the endpoint
 scope rules, successful schema recovery, the verified-join and fan-out boundaries, and the query
 counts.
+
+## 15. Review round 2
+
+Same reviewer, read-only, scope the round 1 fixes plus a fresh pass over the branch. It confirmed
+that all six edits are present and reported three more. One was a real defect and is fixed; two are
+recorded here instead, with their reasons.
+
+**Fixed. Two overrides decided at one position hid one another.** The loss index was keyed by
+`(trace identity, segment position)`, but uniqueness is by pair, so one trace and one position can
+own several overrides at once. The later row displaced the earlier one and its loss went unreported.
+Overrides are now grouped by originating trace, and every one of them is compared against the pairs
+the trace states. `test_two_overrides_decided_at_one_position_each_report_their_own_loss` fails
+against the previous fix.
+
+**Recorded, not fixed: a cached plan keeps a redaction made under the permissions of its own
+planning.** Revoking Cable view permission after a preview leaves the cached finding as it was
+rendered. This is a property of the cached preview rather than of the media warning: a
+`cable.segment_reused` note carries the Cable's display name under exactly the same conditions. The
+workspace does not let that stale plan be synchronized, because the live plan's fingerprint differs
+from the reviewed one, and it differs precisely because the media evidence is fingerprinted. Fixing
+it properly means re-deriving every display from live permissions on each render, which is a change
+to the review workspace rather than to this design.
+
+**Recorded, not fixed: policy rows are read without an object-permission restriction.** Planning
+reads the whole profile policy whatever the actor may view, or two operators would plan two different
+imports from one profile. Restricting only the page would make it state "Unresolved" for a segment
+the plan decided, and the Import Plan is the authority on state. The honest fix says "a policy you
+cannot view" in place of the values, on the profile page, the CableClass table and the segment panel
+alike. That is a follow-up across three surfaces, and the write path is already permission scoped.
+
+The reviewer's "checked and clean" list for this round covers the fingerprint comparison against the
+operator's own consecutive saves and a no-op replan, the empty-fingerprint default failing closed,
+the freshly planned hidden-Cable redaction including identities, the family keys across the 4.6.10
+and 4.7.0 choice tables including singleton groups, pair-membership loss for a lone renumbered
+override, and the recovery route's single revision rotation.

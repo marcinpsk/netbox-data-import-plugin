@@ -451,7 +451,7 @@ class _CableBatch:
         self._occupied: dict[tuple[str, int], _ExistingCable] = {}
         self._mapping_rows: dict[str, Any] | None = None
         self._overrides: dict[str, Any] = {}
-        self._overrides_by_origin: dict[tuple[str, int], Any] = {}
+        self._overrides_by_trace: dict[str, list] = {}
         self._stored = self._stored_resolutions()
         active_traces = (analysis.trace for analysis in self.analyses if not analysis.stopped)
         self._device_evidence = collect_trace_device_evidence(active_traces)
@@ -1068,7 +1068,10 @@ class _CableBatch:
             Q(segment_key__in=keys) | Q(source_trace_identity__in=identities)
         )
         self._overrides = {row.segment_key: row for row in rows}
-        self._overrides_by_origin = {(row.source_trace_identity, row.segment_index): row for row in rows}
+        # Uniqueness is by pair, so one trace and one position can own several overrides at once.
+        self._overrides_by_trace = {}
+        for row in rows:
+            self._overrides_by_trace.setdefault(row.source_trace_identity, []).append(row)
 
     def _report_lost_overrides(self, analysis: _TraceAnalysis) -> None:
         """Report each override of this trace that no longer governs any segment it states.
@@ -1077,13 +1080,13 @@ class _CableBatch:
         revised path renumbers every segment after the one it inserts without losing anything.
         """
         stated = {segment.key for segment in analysis.segments}
-        for (identity, index), stored in self._overrides_by_origin.items():
-            if identity != analysis.trace.identity or stored.segment_key in stated:
+        for stored in self._overrides_by_trace.get(analysis.trace.identity, ()):
+            if stored.segment_key in stated:
                 continue
             analysis.note(
                 "cable.segment_override_lost",
                 {
-                    "segment_index": index,
+                    "segment_index": stored.segment_index,
                     "cable_type": stored.cable_type_display(),
                     "cable_profile": stored.cable_profile_display(),
                 },

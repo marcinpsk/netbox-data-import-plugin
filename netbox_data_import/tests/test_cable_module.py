@@ -1279,6 +1279,35 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
         moved = self.creations(unit)[2]
         self.assertEqual(moved.payload["cable_type"], "mmf-om4")
 
+    def test_two_overrides_decided_at_one_position_each_report_their_own_loss(self):
+        """Uniqueness is by pair, so one trace and one position can hold two overrides at once."""
+        identity = self.identity_of(patched_path())
+        self.force(
+            self.panel_1_rear,
+            self.panel_2_rear,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            trace_identity=identity,
+            segment_index=1,
+        )
+        self.force(
+            self.eth0,
+            self.panel_1_fronts[0],
+            cable_type="smf-os2",
+            cable_profile="single-1c1p",
+            trace_identity=identity,
+            segment_index=1,
+        )
+
+        # The same endpoints, so the same trace identity, and neither stored pair survives.
+        unit = self.unit(direct_path())
+
+        lost = [item for item in unit.diagnostics if item.code == "cable.segment_override_lost"]
+        self.assertEqual(
+            sorted(item.display["cable_type"] for item in lost),
+            sorted([cable_type_label("mmf-om4"), cable_type_label("smf-os2")]),
+        )
+
     def test_a_portmapping_edit_that_moves_the_peer_reports_the_lost_override(self):
         """The resolved pair changes without any operator decision, so a re-pick check misses it."""
         planned = self.unit(same_rear_port_path())
