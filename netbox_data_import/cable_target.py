@@ -224,6 +224,7 @@ class _TraceAnalysis:
     diagnostics: list = field(default_factory=list)
     endpoints: tuple = ()
     segments: list = field(default_factory=list)
+    segment_pairs_resolved: bool = False
     proven: dict = field(default_factory=dict)
     policies: dict = field(default_factory=dict)
     # Index i means a verified PortMapping joins segment i to segment i + 1.
@@ -784,6 +785,7 @@ class _CableBatch:
                 return
             left_ends[index + 1] = entry
             analysis.joined.add(index)
+        analysis.segment_pairs_resolved = True
         for index, segment in enumerate(segments):
             if left_ends[index].key != right_ends[index].key:
                 continue
@@ -1123,7 +1125,7 @@ class _CableBatch:
     def _decide(self) -> None:
         """Settle the Cable policy and the write permissions every actionable trace needs."""
         for analysis in self.analyses:
-            if not analysis.trace.segments or len(analysis.segments) == len(analysis.trace.segments):
+            if not analysis.trace.segments or analysis.segment_pairs_resolved:
                 self._report_lost_overrides(analysis)
             if analysis.stopped or not analysis.endpoints:
                 continue

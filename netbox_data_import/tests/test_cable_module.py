@@ -1255,6 +1255,28 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
         self.assertEqual([item.display["segment_index"] for item in lost], [0])
         self.assertEqual(self.creations(unit)[0].payload["cable_type"], "cat6")
 
+    def test_a_self_connected_re_pick_still_reports_the_lost_override(self):
+        """A blocked replacement pair still proves that the stored segment pair moved."""
+        source_peer = trace_termination("DEV-A", "SLOT-1", "eth9", "NIC")
+        peer = Interface.objects.create(device=self.device_a, name="eth9", type="1000base-t")
+        path = direct_path(DEVICE_A, source_peer)
+        planned = self.unit(path)
+        self.force(
+            self.eth0,
+            peer,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            trace_identity=planned.display["trace_identity"],
+        )
+        self.save_resolution(source_peer, self.eth0)
+
+        unit = self.unit(path)
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.segment_self_connection", self.codes(unit))
+        self.assertIn("cable.segment_override_lost", self.codes(unit))
+        self.assertEqual(unit.changes, ())
+
     def test_an_occupied_re_picked_termination_still_reports_the_lost_override(self):
         """A topology conflict must not hide the policy loss that the resolved pair confirms."""
         identity = self.identity_of(direct_path())
