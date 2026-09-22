@@ -242,7 +242,6 @@ class ProposalPresentation:
                 state = "stale"
             if proposal.status == ProposalStatus.FAILED:
                 state = ProposalStatus.FAILED
-        metadata = (proposal.backend_metadata or {}) if proposal is not None else {}
         return {
             "has_proposal": proposal is not None,
             "pending": pending,
@@ -253,12 +252,6 @@ class ProposalPresentation:
             "explanation": proposal.explanation if proposal is not None else "",
             "failure": proposal.get_failure_reason_display() if proposal is not None else "",
             "failure_code": proposal.failure_reason if proposal is not None else "",
-            "metadata": [
-                {"label": key.replace("_", " "), "value": value}
-                for key, value in metadata.items()
-                if key != "attempts" and isinstance(value, (str, int, float))
-            ],
-            "attempt_count": len(metadata.get("attempts", [])),
             "job_status": self.job_status(proposal) if pending else "",
             "job_note": self.job_note(proposal) if pending else "",
             "page_status": self.page_status(offered) if completed else "",

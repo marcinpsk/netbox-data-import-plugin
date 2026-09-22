@@ -78,14 +78,6 @@
     });
     node(card, 'failure').textContent = display.failure
       ? display.failure + ' (' + display.failure_code + ')' : '';
-    node(card, 'attempts').textContent = 'Backend attempts: ' + display.attempt_count;
-    var metadata = node(card, 'metadata');
-    metadata.replaceChildren();
-    display.metadata.forEach(function (item) {
-      var row = document.createElement('li');
-      row.textContent = item.label + ': ' + item.value;
-      metadata.appendChild(row);
-    });
     var history = node(card, 'history');
     history.replaceChildren();
     payload.history_display.forEach(function (attempt) {

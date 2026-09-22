@@ -1451,7 +1451,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(data["actions"][0]["reason"], "")
         self.assertEqual(self.call("request_proposal", field_key=self.field_key).status_code, 200)
 
-    def test_failed_card_retains_typed_reason_backend_and_attempt_count(self):
+    def test_failed_card_retains_its_typed_reason_without_backend_metadata(self):
         from netbox_data_import.models import ProposalFailureReason
         from netbox_data_import.resolution_proposals import fail_proposal
 
@@ -1466,8 +1466,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(data["failure_code"], ProposalFailureReason.BACKEND_REFUSAL)
         self.assertEqual(data["field_state"], ProposalStatus.FAILED)
         self.assertEqual(data["failure"], "Backend refusal")
-        self.assertEqual(data["attempt_count"], 1)
-        self.assertEqual(data["metadata"], [{"label": "backend model", "value": "fixture-model"}])
+        self.assertNotIn("attempt_count", data)
+        self.assertNotIn("metadata", data)
         self.assertEqual(data["actions"][0]["label"], "Ask AI again")
         for action in data["actions"][2:]:
             self.assertEqual(action["reason"], "The proposal failed: Backend refusal (backend_refusal).")

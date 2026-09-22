@@ -67,7 +67,7 @@ test('a boost removes the old poll and binds the replacement card only once', as
   expect(await page.evaluate(() => window.proposalReads)).toBe(3);
 });
 
-test('a completed card shows the candidate, kind, explanation, backend, and recent history', async ({page}) => {
+test('a completed card shows the candidate, kind, explanation, and recent history', async ({page}) => {
   const initial = completed();
   initial.history_display = [
     {id: 7, created: 'today', status: 'Completed', outcome: 'Candidate'},
@@ -79,8 +79,6 @@ test('a completed card shows the candidate, kind, explanation, backend, and rece
   await expect(slot(page, 'badge')).toHaveText('Proposal - not applied');
   await expect(slot(page, 'candidate')).toHaveText('eth0 (Interface)');
   await expect(slot(page, 'explanation')).toHaveText('The labels name the same port.');
-  await expect(slot(page, 'attempts')).toHaveText('Backend attempts: 2');
-  await expect(slot(page, 'metadata')).toHaveText('backend model: fixture-model');
   await expect(action(page, 'accept')).toBeEnabled();
   await expect(action(page, 'reject')).toBeEnabled();
   await expect(slot(page, 'history').locator('li')).toHaveText([
