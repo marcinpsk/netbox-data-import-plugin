@@ -70,19 +70,39 @@ def policy_choice_errors(cable_type, cable_profile):
     return errors
 
 
-# An active optical assembly states no terminated medium, so its group decides nothing.
-INDETERMINATE_MEDIA_GROUP = "Fiber - Other"
+# An active optical assembly states no terminated medium, so its whole group decides nothing.
+INDETERMINATE_MEDIA_TYPE = "aoc"
+
+
+def _media_groups():
+    """Return the Cable Type values of each group the running instance offers, with its label."""
+    from dcim.choices import CableTypeChoices
+
+    return [
+        (label, [item_value for item_value, _item_label in group])
+        for label, group in CableTypeChoices.CHOICES
+        if isinstance(group, (tuple, list))
+    ]
 
 
 def cable_media_families():
-    """Return the media family the running instance groups each Cable Type under."""
-    from dcim.choices import CableTypeChoices
+    """Return the family each Cable Type belongs to, keyed by a value rather than by a group label.
 
+    A group label is a lazy translation, so keying on it would make classification depend on the
+    reader's language and would put translated text in a fingerprint (spec section 4.3).
+    """
     families = {}
-    for value, label in CableTypeChoices.CHOICES:
-        if isinstance(label, (tuple, list)):
-            families.update({item_value: str(value) for item_value, _item_label in label})
+    for _label, values in _media_groups():
+        families.update(dict.fromkeys(values, min(values)))
     return families
+
+
+def cable_media_family_label(family) -> str:
+    """Return the operator-facing name of one media family, in the reader's own language."""
+    for label, values in _media_groups():
+        if min(values) == family:
+            return str(label)
+    return family
 
 
 def decisive_media_family(cable_type) -> str:
@@ -91,8 +111,9 @@ def decisive_media_family(cable_type) -> str:
     A value the instance does not group, and one it groups as indeterminate, are incomplete coverage.
     They never read as agreement with another segment and never contradict one.
     """
-    family = cable_media_families().get(cable_type or "", "")
-    return "" if family == INDETERMINATE_MEDIA_GROUP else family
+    families = cable_media_families()
+    family = families.get(cable_type or "", "")
+    return "" if family and family == families.get(INDETERMINATE_MEDIA_TYPE, "") else family
 
 
 def cable_profile_splits_a_span(cable_profile) -> bool:
@@ -120,8 +141,9 @@ def cable_profile_label(value) -> str:
 
 
 __all__ = (
-    "INDETERMINATE_MEDIA_GROUP",
+    "INDETERMINATE_MEDIA_TYPE",
     "cable_media_families",
+    "cable_media_family_label",
     "cable_profile_accepts_one_termination_per_side",
     "cable_profile_choices",
     "cable_profile_label",

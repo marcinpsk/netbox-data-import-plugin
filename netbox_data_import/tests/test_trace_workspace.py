@@ -2144,6 +2144,23 @@ class TraceWorkspaceCablePolicyTest(CableTopologyMixin, TransactionTestCase):
         self.assertContains(refused, "This preview states no segment with that CableClass.")
         self.assertFalse(CableClassMapping.objects.filter(cable_class="Invented Class").exists())
 
+    def test_a_policy_that_moved_under_this_preview_refuses_the_save(self):
+        """Two operators on one profile: the revision is per session, the fingerprint is not."""
+        from netbox_data_import.models import CableClassMapping
+
+        trace = self.open_workspace(self.unmapped_path()).context["traces"][0]
+        CableClassMapping.objects.create(profile=self.profile, cable_class="Other Class")
+
+        refused = self.save_policy(
+            trace=trace.identity,
+            cable_class="Fiber Cable",
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+        )
+
+        self.assertContains(refused, "policy changed since this preview was planned")
+        self.assertFalse(CableClassMapping.objects.filter(cable_class="Fiber Cable").exists())
+
     def test_a_stale_preview_revision_writes_nothing(self):
         """The decision and its replan commit together, so a stale command must not write."""
         from netbox_data_import.models import CableClassMapping
@@ -2306,6 +2323,80 @@ class TraceWorkspaceSegmentOverrideTest(CableTopologyMixin, TransactionTestCase)
         self.assertContains(forced, "Force the segment that states the wrong medium")
         # A warning decides nothing, so the trace stays synchronizable.
         self.assertEqual(forced.context["selected_trace"].disposition, Disposition.ACTIONABLE)
+
+    def test_a_decision_made_against_an_older_policy_is_refused(self):
+        """A session revision cannot see another operator's policy edit, so the lock has to."""
+        from netbox_data_import.models import CableClassMapping, CableSegmentOverride
+
+        trace = self.open_workspace(patched_path()).context["selected_trace"]
+        # What a second operator's save would leave behind between the read and this command.
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(cable_type="mmf-om4")
+
+        refused = self.force_segment(
+            trace=trace.identity,
+            segment=0,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+        )
+
+        self.assertContains(refused, "policy changed since this preview was planned")
+        self.assertFalse(CableSegmentOverride.objects.exists())
+
+    def test_schema_recovery_stands_aside_when_the_profile_is_gone(self):
+        """The recovery reads a Source Document its profile no longer owns, so it cannot assume one."""
+        self.open_workspace(patched_path())
+        session = self.client.session
+        session[PREVIEW_PLAN_SESSION_KEY] = {**session[PREVIEW_PLAN_SESSION_KEY], "schema_version": 1}
+        session.save()
+        self.profile.delete()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No import preview in progress")
+
+    def test_a_sync_that_starts_while_the_recovery_replans_leaves_the_stale_plan(self):
+        """The guard the recovery reads and the guard the write takes are two moments."""
+        import uuid
+
+        from core.choices import JobStatusChoices
+        from core.models import Job
+        from django.db import connection
+
+        from netbox_data_import.jobs import ImportJobRunner
+
+        self.open_workspace(patched_path())
+        context = self.client.session["import_context"]
+        session = self.client.session
+        stale = {**session[PREVIEW_PLAN_SESSION_KEY], "schema_version": 1}
+        session[PREVIEW_PLAN_SESSION_KEY] = stale
+        session.save()
+        queued: list[str] = []
+
+        def queue_the_sync_after_the_first_guard(execute, sql, params, many, context_):
+            result = execute(sql, params, many, context_)
+            if not queued and 'FROM "core_job"' in sql:
+                queued.append(sql)
+                Job.objects.create(
+                    name=ImportJobRunner.name,
+                    user=self.actor,
+                    job_id=uuid.uuid4(),
+                    status=JobStatusChoices.STATUS_PENDING,
+                    data={
+                        "job_type": ImportJobRunner.job_type,
+                        "keeps_preview": True,
+                        "profile_id": self.profile.pk,
+                        "source_document_id": context["source_document_id"],
+                    },
+                )
+            return result
+
+        with connection.execute_wrapper(queue_the_sync_after_the_first_guard):
+            response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), follow=True)
+
+        self.assertTrue(queued, "the recovery never read the retained sync guard")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], stale)
 
     def test_a_cached_plan_this_release_cannot_read_is_rebuilt_from_the_stored_source(self):
         """A plan schema change must not send an operator mid-review back to setup."""

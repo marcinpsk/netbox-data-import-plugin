@@ -125,6 +125,7 @@ from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .plan import ImportPlan, PlanError, PlanSchemaMismatch, fingerprint_of
 from .review_workspace import (
     IneligibleDeviceSelection,
+    ProfilePolicyMoved,
     ReviewWorkspace,
     UnacceptableCablePolicy,
     clear_cable_segment_override_and_replan,
@@ -3804,6 +3805,9 @@ def _rebuild_schema_rejected_preview(request) -> None:
         return
     context = request.session.get("import_context") or {}
     profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=context.get("profile_id")).first()
+    # A deleted profile leaves its Source Document behind, so the document alone proves nothing.
+    if profile is None:
+        return
     document = SourceDocument.objects.filter(pk=context.get("source_document_id"), profile=profile).first()
     # A retained sync is mid-write, so NetBox is not authoritative and the plan must not move.
     if document is None or _retained_sync_block_reason(request):
@@ -3820,7 +3824,11 @@ def _rebuild_schema_rejected_preview(request) -> None:
         plan = ImportEngine.plan(profile, document, request.user, planning_context)
     except (PlanError, PlanningTargetUnavailable, ValidationError):
         return
-    record_recalculated_preview(request.session, plan, user=request.user)
+    try:
+        record_recalculated_preview(request.session, plan, user=request.user)
+    except PreviewLocked:
+        # A sync took the preview while this replan ran, so the stale plan stays where it is.
+        return
     messages.info(request, "This preview was recalculated, because the plan format changed.")
 
 
@@ -4342,8 +4350,11 @@ class TraceCablePolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, Pe
                         "cable_type": request.POST.get("cable_type", ""),
                         "cable_profile": request.POST.get("cable_profile", ""),
                     },
+                    reviewed_fingerprint=workspace.plan.profile_fingerprint,
                 )
                 record_recalculated_preview(request.session, plan, user=request.user)
+        except ProfilePolicyMoved as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
         except UnacceptableCablePolicy as exc:
             return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
         except PlanningTargetUnavailable:
@@ -4391,6 +4402,7 @@ class TraceCableSegmentPolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
                         actor=request.user,
                         planning_context=planning_context,
                         segment_key=segment["segment_key"],
+                        reviewed_fingerprint=workspace.plan.profile_fingerprint,
                     )
                 else:
                     plan = save_cable_segment_override_and_replan(
@@ -4405,8 +4417,11 @@ class TraceCableSegmentPolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
                             "cable_type": request.POST.get("cable_type", ""),
                             "cable_profile": request.POST.get("cable_profile", ""),
                         },
+                        reviewed_fingerprint=workspace.plan.profile_fingerprint,
                     )
                 record_recalculated_preview(request.session, plan, user=request.user)
+        except ProfilePolicyMoved as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
         except UnacceptableCablePolicy as exc:
             return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
         except PlanningTargetUnavailable:

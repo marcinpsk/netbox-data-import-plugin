@@ -1352,6 +1352,11 @@ a pending card's job state says where a queued attempt stands, so a metadata blo
 state the same facts a second time in the backend's own vocabulary. The proposal row still stores the
 metadata (section 9.1), and the REST representation still carries it.
 
+Every workspace command that writes profile policy takes the profile policy lock and compares the
+reviewed plan's profile fingerprint under it. A preview revision is per session, so it cannot see
+another operator's policy edit; the comparison refuses a decision made against a policy that has
+already moved, and names the re-read.
+
 A drift warning strip appears when live NetBox differs from the reviewed snapshot, with a re-read
 action. The workspace compares the reviewed plan fingerprint with a freshly computed plan fingerprint
 on each full workspace load and on the explicit re-read action. It does not poll for drift

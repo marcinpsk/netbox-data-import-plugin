@@ -10,6 +10,7 @@ from dataclasses import replace
 from io import BytesIO
 
 from core.models import ObjectType
+from dcim.choices import CableTypeChoices
 from dcim.models import (
     Cable,
     CableTermination,
@@ -24,11 +25,16 @@ from dcim.models import (
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.test import TestCase, TransactionTestCase
+from django.utils import translation
 from django.urls import reverse
 from extras.models import Tag
 
 from netbox_data_import.adapters import SourceBatch, TraceWorkbookAdapter
-from netbox_data_import.cable_policy import cable_media_families, cable_type_label
+from netbox_data_import.cable_policy import (
+    cable_type_choices,
+    cable_type_label,
+    decisive_media_family,
+)
 from netbox_data_import.cable_target import CableModule, eligible_terminations
 from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import (
@@ -50,7 +56,7 @@ from netbox_data_import.models import (
     index_digest,
 )
 from netbox_data_import.netbox_reader import NetBoxReader
-from netbox_data_import.plan import Disposition, PlannedChange, Severity, fingerprint_of
+from netbox_data_import.plan import Disposition, PlannedChange, Severity, canonical_json, fingerprint_of
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.tests.helpers import (
     make_dcim_objects,
@@ -71,6 +77,8 @@ PANEL_1_FRONT = trace_termination("PANEL-1", "", "F1", "Position Front")
 PANEL_1_REAR = trace_termination("PANEL-1", "", "R1", "Punch-Down")
 PANEL_2_FRONT = trace_termination("PANEL-2", "", "F1", "Position Front")
 PANEL_2_REAR = trace_termination("PANEL-2", "", "R1", "Punch-Down")
+PANEL_3_FRONT = trace_termination("PANEL-3", "", "F1", "Position Front")
+PANEL_3_REAR = trace_termination("PANEL-3", "", "R1", "Punch-Down")
 
 
 def patched_path(from_end=DEVICE_A, to_end=DEVICE_B):
@@ -1243,6 +1251,34 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
         self.assertEqual([item.display["segment_index"] for item in lost], [0])
         self.assertEqual(self.creations(unit)[0].payload["cable_type"], "cat6")
 
+    def test_a_segment_that_only_moved_position_keeps_its_override_and_reports_nothing(self):
+        """A trace identity names its endpoints, so a revised path renumbers every segment after it."""
+        self.make_panel("PANEL-3")
+        longer = (
+            trace_endpoint_line(DEVICE_A),
+            trace_endpoint_line(DEVICE_B),
+            (
+                trace_segment(DEVICE_A, "Patch", PANEL_3_FRONT),
+                trace_segment(PANEL_3_REAR, "Trunk", PANEL_1_FRONT),
+                trace_segment(PANEL_1_REAR, "Trunk", PANEL_2_REAR),
+                trace_segment(PANEL_2_FRONT, "Patch", DEVICE_B),
+            ),
+        )
+        self.force(
+            self.panel_1_rear,
+            self.panel_2_rear,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            trace_identity=self.identity_of(patched_path()),
+            segment_index=1,
+        )
+
+        unit = self.unit(longer)
+
+        self.assertEqual([item.code for item in unit.diagnostics if "override" in item.code], [])
+        moved = self.creations(unit)[2]
+        self.assertEqual(moved.payload["cable_type"], "mmf-om4")
+
     def test_a_portmapping_edit_that_moves_the_peer_reports_the_lost_override(self):
         """The resolved pair changes without any operator decision, so a re-pick check misses it."""
         planned = self.unit(same_rear_port_path())
@@ -1311,9 +1347,14 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
         self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
         self.assertEqual(len(unit.changes), 3)
         self.assertEqual([item["segment_index"] for item in warning.display["segments"]], [0, 1, 2])
-        # The families are the running instance's own group labels, never a list of our own.
-        families = cable_media_families()
-        self.assertEqual(sorted(warning.display["families"]), sorted({families["cat6"], families["mmf-om4"]}))
+        # The families the page shows are the running instance's own group labels, read from NetBox.
+        groups = {
+            value: str(label)
+            for label, group in CableTypeChoices.CHOICES
+            if isinstance(group, (tuple, list))
+            for value, _item_label in group
+        }
+        self.assertEqual(sorted(warning.display["families"]), sorted({groups["cat6"], groups["mmf-om4"]}))
         self.assertIn(f"segment 1 is {cable_type_label('mmf-om4')}", warning.display["message"])
         self.assertIn("Force the segment that states the wrong medium", warning.display["message"])
 
@@ -1374,6 +1415,54 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
             [item.display["families"] for item in self.mismatches(after)],
         )
         self.assertNotEqual(fingerprint_of(before.fingerprint_data), fingerprint_of(after.fingerprint_data))
+
+    def test_a_hidden_retained_cable_keeps_its_media_out_of_the_warning(self):
+        """A media warning must not state what every other finding keeps from this actor."""
+        self.connect(self.panel_1_rear, self.panel_2_rear, type="mmf-om4")
+        actor = user_with_object_permission(
+            "cable-hidden-media",
+            [
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (Cable, ("add",), {}),
+            ],
+        )
+
+        unit = self.unit(patched_path(), actor=actor)
+
+        (warning,) = self.mismatches(unit)
+        self.assertIn("a Cable you cannot view", warning.display["message"])
+        # Neither the value nor the family it decides may reach the message, the display or the evidence.
+        self.assertNotIn("mmf", canonical_json(warning.to_dict()))
+        self.assertNotIn(str(cable_type_label("mmf-om4")), canonical_json(warning.to_dict()))
+
+    def test_the_media_family_is_a_stable_value_and_not_a_translated_label(self):
+        """A fingerprint excludes translated text, so a family cannot be named by its group label."""
+        with translation.override("de"):
+            self.assertEqual(decisive_media_family("aoc"), "")
+            translated = decisive_media_family("mmf-om4")
+
+        self.assertEqual(translated, decisive_media_family("mmf-om4"))
+        self.assertIn(translated, {value for value, _label in cable_type_choices()})
+
+    def test_the_active_language_does_not_change_the_unit_fingerprint(self):
+        """Two operators reading NetBox in two languages must not disagree about the plan."""
+        self.force_first_segment("mmf-om4")
+        english = self.unit(patched_path())
+
+        with translation.override("de"):
+            german = self.unit(patched_path())
+
+        self.assertEqual(len(self.mismatches(german)), 1)
+        # The evidence is what the fingerprint carries, so a difference shows up here first.
+        self.assertEqual(
+            [dict(item) for item in self.mismatches(english)[0].evidence["segments"]],
+            [dict(item) for item in self.mismatches(german)[0].evidence["segments"]],
+        )
+        self.assertEqual(fingerprint_of(english.fingerprint_data), fingerprint_of(german.fingerprint_data))
 
     def test_two_segments_no_mapping_joins_are_two_runs(self):
         """A shared Device name proves nothing, and here there is not even that."""

@@ -457,3 +457,40 @@ override slice introduced, and the recovery route built there covers both.
 
 Limitations 1 and 2 of section 9 stand, unchanged and still not fixed: a uniformly wrong family is
 not diagnosed, and the execution record does not preserve the warning.
+
+## 14. Review of increments 2 and 3
+
+Reviewer `gpt-6-astra`, effort high, read-only, scope `origin/develop...eb7d1429`. Six findings, all
+reproduced here before fixing, all fixed in the same change with a red test each and a mutation
+check.
+
+1. **An old form could overwrite another operator's newer policy.** Divergence 11's fingerprint
+   comparison under the lock was specified in r1 and never built. A preview revision is per session,
+   so A's token stays valid while B edits the profile. All three Cable policy commands now compare
+   the reviewed plan's `profile_fingerprint` with `planning_fingerprint` under the lock and refuse.
+2. **The media warning disclosed a Cable the actor may not view.** It read a retained Cable's type
+   and printed it, bypassing `_cable_diagnostic_disclosure`. A hidden Cable now still decides the
+   run, and states nothing about itself: the message says "a Cable you cannot view" and neither the
+   display nor the evidence carries its type or family. The consequence, recorded not fixed: a hidden
+   Cable's medium can change without moving the fingerprint, exactly as its attribute drift already
+   does.
+3. **Media families were keyed by a translated group label.** NetBox group labels are lazy
+   translations, so `str()` made classification depend on the reader's language: under German the
+   indeterminate group stopped matching and `cat6 / aoc / cat6` warned falsely, and a genuine
+   mismatch fingerprinted differently per language, against spec section 4.3. A family is now keyed
+   by the smallest Cable Type value in its group, the indeterminate group is found through `aoc`
+   rather than through its label, and the label is resolved for display only.
+4. **A renumbered segment was reported as a lost override.** A trace identity names its endpoints, so
+   inserting a panel earlier renumbers every later segment while the override still governs its pair.
+   Loss is now decided by pair membership, not by position.
+5. **Schema recovery crashed when the preview's profile had been deleted.** `SourceDocument.profile`
+   is `SET_NULL`, so the document survives and `filter(profile=None)` finds it. Recovery now refuses
+   a missing profile before it reads the document.
+6. **A retained sync starting during recovery answered 500.** `record_recalculated_preview` raises
+   `PreviewLocked`, and the call sat outside the handler. The stale plan now stays where it is.
+
+The reviewer's "checked and clean" list covered the override key and its complete replacement, the
+absence of a route from a stale override to a Cable write, `_attribute_drift` reading the effective
+row, the shared payload and preconditions, the consequences of removing the label check, the endpoint
+scope rules, successful schema recovery, the verified-join and fan-out boundaries, and the query
+counts.

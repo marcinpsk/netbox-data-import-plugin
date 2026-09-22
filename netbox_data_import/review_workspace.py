@@ -74,12 +74,28 @@ def save_termination_resolution_and_replan(
         return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
 
 
+class ProfilePolicyMoved(Exception):
+    """Another operator changed this profile's policy after the reviewed preview was planned."""
+
+
 class UnacceptableCablePolicy(Exception):
     """The submitted Cable Type and Cable Profile do not validate as a policy decision."""
 
     def __init__(self, errors):
         self.errors = errors
         super().__init__("; ".join(errors))
+
+
+def _refuse_moved_policy(locked_profile, reviewed_fingerprint) -> None:
+    """Refuse a decision made against a policy that has already moved under this preview.
+
+    A preview revision is per session, so it cannot see another operator's profile edit.
+    """
+    if locked_profile.planning_fingerprint != reviewed_fingerprint:
+        raise ProfilePolicyMoved(
+            "This profile's policy changed since this preview was planned. "
+            "Re-read from NetBox, then make the decision again."
+        )
 
 
 def _form_messages(form) -> list:
@@ -95,12 +111,14 @@ def save_cable_class_mapping_and_replan(
     planning_context,
     cable_class,
     data,
+    reviewed_fingerprint,
 ):
     """Persist one CableClass policy decision, then request a fresh Import Plan."""
     from .forms import CableClassMappingForm
 
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         lookup = {"profile": locked_profile, "cable_class": cable_class}
         # The row is read under the lock, so the form validates what the write will replace.
         instance = CableClassMapping.objects.filter(**lookup).first() or CableClassMapping(**lookup)
@@ -132,12 +150,14 @@ def save_cable_segment_override_and_replan(
     trace_identity,
     segment_index,
     data,
+    reviewed_fingerprint,
 ):
     """Force one planned segment's Cable policy, then request a fresh Import Plan."""
     from .forms import CableSegmentOverrideForm
 
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         lookup = {"profile": locked_profile, "segment_key": segment_key}
         # The row is read under the lock, so the form validates what the write will replace.
         instance = CableSegmentOverride.objects.filter(**lookup).first() or CableSegmentOverride(**lookup)
@@ -168,10 +188,12 @@ def clear_cable_segment_override_and_replan(
     actor,
     planning_context,
     segment_key,
+    reviewed_fingerprint,
 ):
     """Drop one segment override, so the CableClass policy decides that segment again."""
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         delete_permission_scoped_objects(
             actor,
             CableSegmentOverride.objects.filter(profile=locked_profile, segment_key=segment_key),
