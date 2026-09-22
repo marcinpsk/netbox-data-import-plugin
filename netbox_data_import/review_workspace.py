@@ -11,7 +11,14 @@ from typing import Any
 
 from .cable_target import UNRESOLVED
 from .import_engine import ImportEngine
-from .models import ImportProfile, TerminationResolution, TraceDeviceResolution, index_digest, locked_profile_policy
+from .models import (
+    CableClassMapping,
+    ImportProfile,
+    TerminationResolution,
+    TraceDeviceResolution,
+    index_digest,
+    locked_profile_policy,
+)
 from .object_permissions import save_permission_scoped_object
 from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
@@ -63,6 +70,49 @@ def save_termination_resolution_and_replan(
             values,
         )
         # atomic-exit-safe: decision-saved-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+class UnmappableCableClass(Exception):
+    """The submitted Cable policy does not validate for this CableClass."""
+
+    def __init__(self, errors):
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+def save_cable_class_mapping_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    cable_class,
+    data,
+):
+    """Persist one CableClass policy decision, then request a fresh Import Plan."""
+    from .forms import CableClassMappingForm
+
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        lookup = {"profile": locked_profile, "cable_class": cable_class}
+        # The row is read under the lock, so the form validates what the write will replace.
+        instance = CableClassMapping.objects.filter(**lookup).first() or CableClassMapping(**lookup)
+        form = CableClassMappingForm({**data, "cable_class": cable_class}, instance=instance)
+        if not form.is_valid():
+            raise UnmappableCableClass([message for messages in form.errors.values() for message in messages])
+        save_permission_scoped_object(
+            actor,
+            CableClassMapping,
+            lookup,
+            {
+                "cable_type_resolved": form.instance.cable_type_resolved,
+                "cable_type": form.instance.cable_type,
+                "cable_profile_resolved": form.instance.cable_profile_resolved,
+                "cable_profile": form.instance.cable_profile,
+            },
+        )
+        # atomic-exit-safe: policy-saved-and-replanned
         return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
 
 
@@ -124,7 +174,7 @@ _DIAGNOSTIC_MESSAGES = {
         "NetBox maps this port to several peer ports. Choose the peer port this trace continues through."
     ),
     "cable.attribute_drift": "The existing Cable carries attributes this import would not have written.",
-    "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Map it on the import profile.",
+    "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Set the Cable policy for it.",
     "cable.multi_termination_conflict": (
         "A Cable with several terminations on one side holds a port this trace needs. Correct that Cable in NetBox."
     ),

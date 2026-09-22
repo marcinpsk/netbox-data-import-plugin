@@ -398,7 +398,20 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         identity = escape(opened.context["selected_trace"].identity)
         commands = [form for form in re.findall(r"<form\b.*?</form>", page, re.DOTALL) if "/trace-workspace/" in form]
 
-        self.assertEqual(len(commands), 4, commands)
+        # Naming the set, not a count: a new command that skips the check below shows up here.
+        self.assertEqual(
+            sorted(re.search(r'action="([^"]+)"', form).group(1) for form in commands),
+            sorted(
+                [
+                    reverse("plugins:netbox_data_import:trace_workspace_reread"),
+                    reverse("plugins:netbox_data_import:trace_sync"),
+                    reverse("plugins:netbox_data_import:trace_resolve_device"),
+                    reverse("plugins:netbox_data_import:trace_resolve_termination"),
+                    # This path states two CableClass values, and each offers its own policy form.
+                    *[reverse("plugins:netbox_data_import:trace_cable_policy")] * 2,
+                ]
+            ),
+        )
         for form in commands:
             action = re.search(r'action="([^"]+)"', form).group(1)
             with self.subTest(action=action):
@@ -2027,3 +2040,120 @@ class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
         self.assertContains(response, "The saved import target is no longer available.")
         self.assertFalse(self.client.session["import_preview_pending"])
+
+
+class TraceWorkspaceCablePolicyTest(CableTopologyMixin, TransactionTestCase):
+    """Set the Cable policy for an unmapped CableClass without leaving the workspace."""
+
+    def setUp(self):
+        self.build_topology()
+        self.client.force_login(self.actor)
+
+    def unmapped_path(self):
+        """Return a one-segment path whose CableClass the profile does not map."""
+        from netbox_data_import.tests.test_cable_module import DEVICE_A, DEVICE_B
+
+        return (
+            trace_endpoint_line(DEVICE_A),
+            trace_endpoint_line(DEVICE_B),
+            (trace_segment(DEVICE_A, "Fiber Cable", DEVICE_B),),
+        )
+
+    def open_workspace(self, *blocks):
+        """Upload the given path blocks and return the rendered workspace response."""
+        upload = BytesIO(trace_workbook_bytes(path_blocks=blocks))
+        upload.name = "traces.xlsx"
+        setup = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        self.assertEqual(setup.status_code, 200)
+        return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+    def save_policy(self, **data):
+        """Post one CableClass policy decision through the workspace endpoint."""
+        data.setdefault("preview_revision", self.client.session[PREVIEW_REVISION_SESSION_KEY])
+        return self.client.post(reverse("plugins:netbox_data_import:trace_cable_policy"), data, follow=True)
+
+    def test_the_workspace_maps_an_unmapped_cableclass_and_the_import_writes_it(self):
+        """The operator unblocks the trace from the workspace, and execution writes those values."""
+        import uuid
+
+        from dcim.models import Cable
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.models import CableClassMapping, SourceDocument
+
+        blocked = self.open_workspace(self.unmapped_path())
+        self.assertEqual(blocked.context["traces"][0].disposition, Disposition.BLOCKED)
+        self.assertEqual(
+            [finding["code"] for finding in blocked.context["traces"][0].findings],
+            ["cable.cableclass_unmapped"],
+        )
+        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
+
+        saved = self.save_policy(
+            trace=blocked.context["traces"][0].identity,
+            cable_class="Fiber Cable",
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+        )
+
+        self.assertEqual(saved.status_code, 200)
+        row = CableClassMapping.objects.get(profile=self.profile, cable_class="Fiber Cable")
+        self.assertEqual((row.cable_type, row.cable_profile), ("mmf-om4", "single-1c1p"))
+        self.assertTrue(row.cable_type_resolved and row.cable_profile_resolved)
+        self.assertNotEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], before)
+
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        trace = workspace.context["traces"][0]
+        self.assertEqual(trace.disposition, Disposition.ACTIONABLE)
+
+        document = SourceDocument.objects.get(profile=self.profile)
+        plan = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        execution = ImportEngine.execute(
+            self.profile,
+            document,
+            plan.to_dict(),
+            [unit.identity for unit in plan.units if unit.disposition == Disposition.ACTIONABLE],
+            str(uuid.uuid4()),
+            self.actor,
+        )
+
+        self.assertEqual(execution.outcome, "succeeded")
+        written = Cable.objects.get()
+        self.assertEqual((written.type, written.profile), ("mmf-om4", "single-1c1p"))
+
+    def test_a_cableclass_this_preview_never_asked_about_is_refused(self):
+        """A review command answers a question the preview asked, never one the caller invented."""
+        from netbox_data_import.models import CableClassMapping
+
+        trace = self.open_workspace(self.unmapped_path()).context["traces"][0]
+
+        refused = self.save_policy(
+            trace=trace.identity,
+            cable_class="Invented Class",
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+        )
+
+        self.assertContains(refused, "This preview states no segment with that CableClass.")
+        self.assertFalse(CableClassMapping.objects.filter(cable_class="Invented Class").exists())
+
+    def test_a_stale_preview_revision_writes_nothing(self):
+        """The decision and its replan commit together, so a stale command must not write."""
+        from netbox_data_import.models import CableClassMapping
+
+        trace = self.open_workspace(self.unmapped_path()).context["traces"][0]
+
+        refused = self.save_policy(
+            trace=trace.identity,
+            cable_class="Fiber Cable",
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            preview_revision="obsolete",
+        )
+
+        self.assertEqual(refused.status_code, 200)
+        self.assertFalse(CableClassMapping.objects.filter(cable_class="Fiber Cable").exists())

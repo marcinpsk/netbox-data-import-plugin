@@ -123,6 +123,8 @@ from .plan import ImportPlan, PlanError, fingerprint_of
 from .review_workspace import (
     IneligibleDeviceSelection,
     ReviewWorkspace,
+    UnmappableCableClass,
+    save_cable_class_mapping_and_replan,
     save_termination_resolution_and_replan,
     save_trace_device_resolution_and_replan,
 )
@@ -3662,6 +3664,41 @@ def _workspace_field_keys(workspace) -> set:
     return {item["field_key"] for trace in workspace.traces for item in trace.terminations}
 
 
+def _cable_policy_forms(profile, trace) -> list:
+    """Return the Cable policy in force for each CableClass the selected trace states, once each.
+
+    The CableClass values come from the plan's own segments, so a cached plan needs no new key.
+    """
+    if trace is None:
+        return []
+    stated = list(dict.fromkeys(segment["cable_class"] for segment in trace.segments if segment["cable_class"]))
+    rows = {row.cable_class: row for row in CableClassMapping.objects.filter(profile=profile, cable_class__in=stated)}
+    forms = []
+    for index, cable_class in enumerate(stated):
+        row = rows.get(cable_class)
+        forms.append(
+            {
+                "cable_class": cable_class,
+                "cable_type": "Unresolved" if row is None else row.cable_type_display(),
+                "cable_profile": "Unresolved" if row is None else row.cable_profile_display(),
+                "resolved": row is not None and row.cable_type_resolved and row.cable_profile_resolved,
+                # The form owns the runtime choices, so each row only needs its own element ids.
+                "form": CableClassMappingForm(
+                    instance=row or CableClassMapping(profile=profile, cable_class=cable_class),
+                    auto_id=f"id_%s_{index}",
+                ),
+            }
+        )
+    return forms
+
+
+def _workspace_cable_classes(workspace) -> set:
+    """Return every CableClass value the reviewed preview's traces actually state."""
+    return {
+        segment["cable_class"] for trace in workspace.traces for segment in trace.segments if segment["cable_class"]
+    }
+
+
 def _workspace_device_questions(workspace) -> dict[str, dict]:
     """Return the active plan's Device questions, keyed by canonical source label."""
     questions: dict[str, dict] = {}
@@ -3825,6 +3862,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                     for field in selected.terminations
                 ],
             )
+        cable_policy_forms = _cable_policy_forms(profile, selected)
         attention, settled = group_terminations(selected.terminations if selected else [])
         selected_devices = _with_device_resolution_permissions(
             profile,
@@ -3876,6 +3914,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "settled_devices": settled_devices,
                 "attention_terminations": attention,
                 "settled_terminations": settled,
+                "cable_policy_forms": cable_policy_forms,
                 "summary": summary,
                 "drift": drift,
                 "retained_sync_reason": retained_reason,
@@ -4161,6 +4200,56 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
         except PreviewLocked as exc:
             return _preview_action_error(request, next_url, str(exc), status=409)
         messages.success(request, f"Source Device resolved to '{chosen}'.")
+        return redirect(next_url)
+
+
+class TraceCablePolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+    """Set the Cable policy for one CableClass the reviewed preview states, then replan."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Save the policy under the profile lock, so the decision and its replan commit together."""
+        next_url = _trace_workspace_url(request.POST.get("trace", ""))
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, workspace, planning_context = loaded
+        if stale_reason := _stale_preview_reason(request):
+            return _preview_action_error(request, next_url, stale_reason, status=409)
+        if retained_reason := _retained_sync_block_reason(request):
+            return _preview_action_error(request, next_url, retained_reason, status=409)
+        refusal = self.refuse_unregistered_adapter(request, profile)
+        if refusal is not None:
+            return refusal
+        cable_class = request.POST.get("cable_class", "").strip()
+        # A review command answers a question this preview asked, never one the caller invented.
+        if cable_class not in _workspace_cable_classes(workspace):
+            return _preview_action_error(
+                request, next_url, "This preview states no segment with that CableClass.", status=400
+            )
+        try:
+            with transaction.atomic():
+                plan = save_cable_class_mapping_and_replan(
+                    profile=profile,
+                    source_document=document,
+                    actor=request.user,
+                    planning_context=planning_context,
+                    cable_class=cable_class,
+                    data={
+                        "cable_type": request.POST.get("cable_type", ""),
+                        "cable_profile": request.POST.get("cable_profile", ""),
+                    },
+                )
+                record_recalculated_preview(request.session, plan, user=request.user)
+        except UnmappableCableClass as exc:
+            return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
+        except PlanningTargetUnavailable:
+            return self.discard_unavailable_target(request)
+        except PreviewLocked as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
+        messages.success(request, f"Cable policy saved for CableClass '{cable_class}'.")
         return redirect(next_url)
 
 
