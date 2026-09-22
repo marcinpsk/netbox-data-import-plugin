@@ -3829,10 +3829,12 @@ def _segment_policy_forms(profile, trace, viewer) -> list:
             initial={} if hidden or moved else cable_policy_form_initial(segment["policy"]),
             auto_id=f"id_%s_segment_{segment['index']}",
         )
-        shared_reason = (
-            POLICY_WRITE_REFUSED if hidden else PROFILE_POLICY_MOVED if moved else _segment_override_reason(segment)
+        shared_reason = POLICY_WRITE_REFUSED if hidden else PROFILE_POLICY_MOVED if moved else ""
+        force_reason = (
+            shared_reason
+            or _segment_override_reason(segment)
+            or ("" if force_assessment.allowed else SEGMENT_FORCE_PERMISSION_REFUSED)
         )
-        force_reason = shared_reason or ("" if force_assessment.allowed else SEGMENT_FORCE_PERMISSION_REFUSED)
         delete_permission = get_permission_for_model(CableSegmentOverride, "delete")
         clear_reason = shared_reason or (
             SEGMENT_CLEAR_PERMISSION_REFUSED
@@ -4503,10 +4505,10 @@ class TraceCableSegmentPolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
         # A review command answers a question this preview asked, never one the caller invented.
         if segment is None or not segment["segment_key"]:
             return _preview_action_error(request, next_url, "This preview resolved no segment there.", status=400)
-        # The override decides what the import writes, so it cannot decide a Cable the plan keeps.
-        if segment["retained"]:
-            return _preview_action_error(request, next_url, RETAINED_SEGMENT_REASON, status=400)
         clearing = bool(request.POST.get("clear"))
+        # An override cannot decide a Cable the plan keeps, but the operator can still remove it.
+        if segment["retained"] and not clearing:
+            return _preview_action_error(request, next_url, RETAINED_SEGMENT_REASON, status=400)
         try:
             with transaction.atomic():
                 if clearing:

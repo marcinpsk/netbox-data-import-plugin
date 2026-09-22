@@ -2970,6 +2970,26 @@ class TraceWorkspaceSegmentOverrideTest(CableTopologyMixin, TransactionTestCase)
         self.assertEqual([segment["overridden"] for segment in segments], [False, False, False])
         self.assertFalse(CableSegmentOverride.objects.exists())
 
+    def test_a_retained_segment_can_clear_the_override_that_created_its_cable(self):
+        """A completed sync must not strand the decision that selected the Cable policy."""
+        from netbox_data_import.models import CableSegmentOverride
+
+        trace = self.open_workspace(patched_path()).context["selected_trace"]
+        self.force_segment(trace=trace.identity, segment=0, cable_type="mmf-om4", cable_profile="single-1c1p")
+        self.assertEqual(self.execute_selected().outcome, "succeeded")
+
+        retained = self.open_workspace(patched_path())
+        trace = retained.context["selected_trace"]
+        self.assertTrue(trace.segments[0]["retained"])
+        self.assertTrue(trace.segments[0]["overridden"])
+        self.assertNotContains(retained, "data-segment-policy-clear disabled")
+
+        cleared = self.force_segment(trace=trace.identity, segment=0, clear="1")
+
+        self.assertEqual(cleared.status_code, 200)
+        self.assertFalse(CableSegmentOverride.objects.exists())
+        self.assertEqual(cables_on(self.eth0, self.panel_1_fronts[0]).get().type, "mmf-om4")
+
     def test_a_retained_segment_says_the_override_cannot_change_its_cable(self):
         """An override decides what the import writes, and this segment is one the import keeps."""
         from netbox_data_import.models import CableSegmentOverride
