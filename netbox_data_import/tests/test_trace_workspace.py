@@ -2291,6 +2291,22 @@ class TraceWorkspaceSegmentOverrideTest(CableTopologyMixin, TransactionTestCase)
         self.assertContains(refused, "This field is required.")
         self.assertFalse(CableSegmentOverride.objects.exists())
 
+    def test_the_page_says_the_run_states_two_media_and_who_can_correct_it(self):
+        """A warning the operator cannot see is the same as no warning at all."""
+        trace = self.open_workspace(patched_path()).context["selected_trace"]
+
+        forced = self.force_segment(
+            trace=trace.identity,
+            segment=0,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+        )
+
+        self.assertContains(forced, "data-finding-severity")
+        self.assertContains(forced, "Force the segment that states the wrong medium")
+        # A warning decides nothing, so the trace stays synchronizable.
+        self.assertEqual(forced.context["selected_trace"].disposition, Disposition.ACTIONABLE)
+
     def test_a_cached_plan_this_release_cannot_read_is_rebuilt_from_the_stored_source(self):
         """A plan schema change must not send an operator mid-review back to setup."""
         opened = self.open_workspace(patched_path())

@@ -28,6 +28,7 @@ from django.urls import reverse
 from extras.models import Tag
 
 from netbox_data_import.adapters import SourceBatch, TraceWorkbookAdapter
+from netbox_data_import.cable_policy import cable_media_families, cable_type_label
 from netbox_data_import.cable_target import CableModule, eligible_terminations
 from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import (
@@ -49,7 +50,7 @@ from netbox_data_import.models import (
     index_digest,
 )
 from netbox_data_import.netbox_reader import NetBoxReader
-from netbox_data_import.plan import Disposition, PlannedChange
+from netbox_data_import.plan import Disposition, PlannedChange, Severity, fingerprint_of
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.tests.helpers import (
     make_dcim_objects,
@@ -224,6 +225,24 @@ class CableTopologyMixin:
             selected_object_id=selected.pk,
             selected_display_name=str(selected),
         )
+
+    def force(self, first, second, *, cable_type, cable_profile, trace_identity, segment_index=0):
+        """Record one override for the segment the two given NetBox objects form."""
+        override = CableSegmentOverride(
+            profile=self.profile,
+            segment_key=self.segment_key(first, second),
+            cable_type=cable_type,
+            cable_profile=cable_profile,
+            source_trace_identity=trace_identity,
+            segment_index=segment_index,
+        )
+        override.full_clean()
+        override.save()
+        return override
+
+    def identity_of(self, *blocks):
+        """Return the Source Trace identity the first of the given path blocks plans under."""
+        return self.unit(*blocks).display["trace_identity"]
 
     @staticmethod
     def segment_key(first, second):
@@ -1105,24 +1124,6 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
     def setUpTestData(cls):
         cls.build_topology()
 
-    def identity_of(self, *blocks):
-        """Return the Source Trace identity the first of the given path blocks plans under."""
-        return self.unit(*blocks).display["trace_identity"]
-
-    def force(self, first, second, *, cable_type, cable_profile, trace_identity, segment_index=0):
-        """Record one override for the segment the two given NetBox objects form."""
-        override = CableSegmentOverride(
-            profile=self.profile,
-            segment_key=self.segment_key(first, second),
-            cable_type=cable_type,
-            cable_profile=cable_profile,
-            source_trace_identity=trace_identity,
-            segment_index=segment_index,
-        )
-        override.full_clean()
-        override.save()
-        return override
-
     def creations(self, unit):
         """Return the create changes one unit performs."""
         return [change for change in unit.changes if change.operation == "create"]
@@ -1268,6 +1269,139 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
         lost = [item for item in unit.diagnostics if item.code == "cable.segment_override_lost"]
         self.assertEqual([item.display["segment_index"] for item in lost], [1])
         self.assertEqual(self.creations(unit)[1].payload["cable_type"], "cat6")
+
+
+class CableMediaFamilyTest(CableTopologyMixin, TestCase):
+    """Section 3.6: what one run of verified pass-throughs says about the medium it carries."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+
+    def mismatches(self, unit):
+        """Return the media findings one unit carries."""
+        return [item for item in unit.diagnostics if item.code == "cable.media_family_mismatch"]
+
+    def force_first_segment(self, cable_type):
+        """Force the first segment of the standard patched path to one Cable Type."""
+        self.force(
+            self.eth0,
+            self.panel_1_fronts[0],
+            cable_type=cable_type,
+            cable_profile="single-1c1p",
+            trace_identity=self.identity_of(patched_path()),
+        )
+
+    def test_one_media_family_along_the_run_says_nothing(self):
+        """Every segment of the worked example resolves to one family, so there is nothing to say."""
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(self.mismatches(unit), [])
+
+    def test_a_verified_run_that_states_two_media_families_warns(self):
+        """A wrong CableClass writes a Cable of the wrong type, and nothing checked that before."""
+        self.force_first_segment("mmf-om4")
+
+        unit = self.unit(patched_path())
+
+        (warning,) = self.mismatches(unit)
+        self.assertEqual(warning.severity, Severity.WARNING)
+        # The warning reports, it does not decide: the operator can still synchronize the trace.
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(len(unit.changes), 3)
+        self.assertEqual([item["segment_index"] for item in warning.display["segments"]], [0, 1, 2])
+        # The families are the running instance's own group labels, never a list of our own.
+        families = cable_media_families()
+        self.assertEqual(sorted(warning.display["families"]), sorted({families["cat6"], families["mmf-om4"]}))
+        self.assertIn(f"segment 1 is {cable_type_label('mmf-om4')}", warning.display["message"])
+        self.assertIn("Force the segment that states the wrong medium", warning.display["message"])
+
+    def test_an_indeterminate_family_neither_agrees_nor_contradicts(self):
+        """An active optical assembly states no terminated medium, so it decides nothing."""
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(cable_type="aoc")
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(self.mismatches(unit), [])
+
+    def test_a_retained_cable_with_no_type_is_incomplete_coverage(self):
+        """An untyped Cable must not read as agreement with the family beside it."""
+        self.connect(self.panel_1_rear, self.panel_2_rear, type="")
+        self.force_first_segment("mmf-om4")
+
+        unit = self.unit(patched_path())
+
+        (warning,) = self.mismatches(unit)
+        self.assertEqual([item["segment_index"] for item in warning.display["segments"]], [0, 2])
+
+    def test_a_retained_cable_that_fans_out_ends_the_run(self):
+        """A breakout Cable states runs the path does not, so its neighbours are separate runs."""
+        self.connect(self.panel_1_rear, self.panel_2_rear, type="mmf-om4", profile="breakout-1c2p-2c1p")
+        self.force_first_segment("mmf-om4")
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(self.mismatches(unit), [])
+
+    def test_a_run_of_retained_cables_names_the_netbox_correction(self):
+        """No override changes a Cable the import keeps, so the workspace must not offer one."""
+        self.connect(self.eth0, self.panel_1_fronts[0], type="mmf-om4")
+        self.connect(self.panel_1_rear, self.panel_2_rear, type="cat6")
+        self.connect(self.panel_2_fronts[0], self.eth1, type="cat6")
+
+        unit = self.unit(patched_path())
+
+        (warning,) = self.mismatches(unit)
+        self.assertEqual(unit.disposition, Disposition.NO_OP)
+        self.assertIn("on the Cable this import keeps", warning.display["message"])
+        self.assertIn("Correct those Cables in NetBox, then re-read.", warning.display["message"])
+
+    def test_the_media_facts_alone_change_the_unit_fingerprint(self):
+        """A live Cable could otherwise change medium under an accepted plan without a trace of it."""
+        self.connect(self.eth0, self.panel_1_fronts[0], type="cat6")
+        first = self.connect(self.panel_1_rear, self.panel_2_rear, type="mmf-om4")
+        self.connect(self.panel_2_fronts[0], self.eth1, type="cat6")
+        before = self.unit(patched_path())
+
+        first.type = "smf-os2"
+        first.save()
+        after = self.unit(patched_path())
+
+        self.assertEqual(self.codes(before), self.codes(after))
+        self.assertNotEqual(
+            [item.display["families"] for item in self.mismatches(before)],
+            [item.display["families"] for item in self.mismatches(after)],
+        )
+        self.assertNotEqual(fingerprint_of(before.fingerprint_data), fingerprint_of(after.fingerprint_data))
+
+    def test_two_segments_no_mapping_joins_are_two_runs(self):
+        """A shared Device name proves nothing, and here there is not even that."""
+        other = self.make_device("DEV-E")
+        far = Interface.objects.create(device=other, name="eth0", type="1000base-t")
+        first = TraceWorkbookAdapter.interpret(trace_workbook_bytes(path_blocks=(direct_path(),)), {}).rows[0]
+        second = TraceWorkbookAdapter.interpret(
+            trace_workbook_bytes(
+                path_blocks=(direct_path(PANEL_1_FRONT, trace_termination("DEV-E", "", "eth0", "NIC")),)
+            ),
+            {},
+        ).rows[0]
+        spliced = replace(first, segments=(*first.segments, *second.segments))
+        self.force(
+            self.eth0,
+            self.eth1,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            trace_identity=spliced.identity,
+        )
+        batch = SourceBatch(output_kinds=frozenset({OutputKind.SOURCE_TRACE}), rows=(spliced,))
+        reader = NetBoxReader.for_actor(self.actor).for_planning_context(self.planning_context)
+
+        (unit,) = CableModule().plan(batch, self.profile, None, reader)
+
+        self.assertEqual(len(unit.changes), 2)
+        self.assertEqual(far.cable, None)
+        self.assertEqual(self.mismatches(unit), [])
 
 
 class EligibleTerminationTest(CableTopologyMixin, TestCase):

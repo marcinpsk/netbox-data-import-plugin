@@ -239,6 +239,10 @@ _DIAGNOSTIC_MESSAGES = {
     ),
     "cable.attribute_drift": "The existing Cable carries attributes this import would not have written.",
     "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Set the Cable policy for it.",
+    "cable.media_family_mismatch": (
+        "Verified pass-throughs join segments that state different media families. "
+        "Force the segment that states the wrong medium, or correct the Cable in NetBox."
+    ),
     "cable.multi_termination_conflict": (
         "A Cable with several terminations on one side holds a port this trace needs. Correct that Cable in NetBox."
     ),

@@ -70,6 +70,40 @@ def policy_choice_errors(cable_type, cable_profile):
     return errors
 
 
+# An active optical assembly states no terminated medium, so its group decides nothing.
+INDETERMINATE_MEDIA_GROUP = "Fiber - Other"
+
+
+def cable_media_families():
+    """Return the media family the running instance groups each Cable Type under."""
+    from dcim.choices import CableTypeChoices
+
+    families = {}
+    for value, label in CableTypeChoices.CHOICES:
+        if isinstance(label, (tuple, list)):
+            families.update({item_value: str(value) for item_value, _item_label in label})
+    return families
+
+
+def decisive_media_family(cable_type) -> str:
+    """Return the family that decides one Cable Type's medium, or "" when nothing decides it.
+
+    A value the instance does not group, and one it groups as indeterminate, are incomplete coverage.
+    They never read as agreement with another segment and never contradict one.
+    """
+    family = cable_media_families().get(cable_type or "", "")
+    return "" if family == INDETERMINATE_MEDIA_GROUP else family
+
+
+def cable_profile_splits_a_span(cable_profile) -> bool:
+    """Return whether a Cable with this profile cannot be read as one medium along one path.
+
+    A profile with several connectors on a side, a breakout or a trunk, fans one Cable out into runs
+    the path does not state, so its type says nothing about the medium of the segment beside it.
+    """
+    return bool(cable_profile) and not cable_profile_accepts_one_termination_per_side(cable_profile)
+
+
 def policy_in_force(override, mapping):
     """Return the stored decision that governs one segment: its override, else the CableClass row."""
     return mapping if override is None else override
@@ -86,12 +120,16 @@ def cable_profile_label(value) -> str:
 
 
 __all__ = (
+    "INDETERMINATE_MEDIA_GROUP",
+    "cable_media_families",
     "cable_profile_accepts_one_termination_per_side",
     "cable_profile_choices",
     "cable_profile_label",
+    "cable_profile_splits_a_span",
     "cable_type_choices",
     "cable_type_label",
     "compatible_cable_profile_choices",
+    "decisive_media_family",
     "policy_choice_errors",
     "policy_in_force",
 )

@@ -280,6 +280,24 @@ An override records the Source Trace and the segment position it was decided fro
 resolves that segment to a different pair, whether from a new termination decision or from a
 PortMapping edit that moves the unique mapped peer, reports the override that no longer applies.
 
+**Media consistency.** A run of consecutive segments joined by PortMapping rows the plan verified,
+including a verified same-port substitution, is read as one passive path. A shared Device name is not
+that: only a verified mapping joins two segments. Where such a run states two known media families,
+planning records a warning and leaves the disposition unchanged. It is a warning and not a block
+because a passive device can legitimately change medium: one balun carries coax on its front port and
+twisted pair on its rear port, with a one-position PortMapping between them, and no NetBox rule
+contradicts it.
+
+A Cable Type the running instance does not group, and one it groups as indeterminate, are incomplete
+coverage. They never read as agreement with another segment, and they never contradict one. A retained
+Cable whose Cable Profile carries several connectors on a side fans out into runs the path does not
+state, so it ends the run rather than contributing a medium to it.
+
+The warning names each stated segment, its Cable Type, its family, and whether the value comes from a
+Cable the import retains. A segment override changes what the import writes, so where every stated
+segment is retained the warning names the NetBox correction instead. There is no control that ignores
+the result: the operator states the correct medium, never an accepted contradiction.
+
 ## 4. Target-neutral plan, safety, review, and execution contracts
 
 This section restates ADR 0001 as the normative runtime contract.
@@ -307,7 +325,8 @@ several Cable changes.
 
 A unit has exactly one disposition. Diagnostics are separate structured values with `info`,
 `warning`, or `error` severity. A diagnostic carries a stable structured code, the severity, the
-affected identities, and display data. Diagnostic codes use a dotted lowercase namespace of the form
+affected identities, display data, and evidence: the facts the finding was decided from, where the
+identities do not already carry them. Diagnostic codes use a dotted lowercase namespace of the form
 `<domain>.<condition>` (spec default).
 
 `excluded` is reserved for operator-configured policy. An unsupported source construct is `invalid`,
@@ -327,8 +346,10 @@ canonical serialization (spec default for the algorithm; ADR 0002 already fixes 
 Source Trace content fingerprint, and one algorithm keeps the runtime consistent).
 
 A fingerprint includes the schema version, the stable unit and change identities, the target payloads,
-the dependencies, the preconditions, the dispositions, the structured diagnostic codes, the source
-fingerprint, the Import Profile configuration, the actor, and the planning context. It excludes
+the dependencies, the preconditions, the dispositions, the structured diagnostic codes with their
+evidence, the source fingerprint, the Import Profile configuration, the actor, and the planning
+context. Diagnostic evidence is part of it because a finding can rest on live state no identity names,
+such as the medium two Cables carry, which would otherwise move under an accepted plan unnoticed. It excludes
 timestamps, URLs, translated text, display-only wording, and the plan revision.
 
 Planning is side-effect free and deterministic. Equivalent source content, Import Profile, actor,
@@ -746,6 +767,7 @@ inside the transaction as the accepted plan's operator.
 | An existing Cable already proves a desired segment | `cable.segment_reused` | `info` diagnostic, disposition unchanged |
 | Attribute drift on a reused Cable | `cable.attribute_drift` | `info` diagnostic, disposition unchanged |
 | A segment resolves away from the pair its override was decided for | `cable.segment_override_lost` | `info` diagnostic, disposition unchanged |
+| One run of verified pass-throughs states two known media families | `cable.media_family_mismatch` | `warning` diagnostic, disposition unchanged |
 
 Diagnostic code strings are spec defaults; the conditions and dispositions are normative.
 

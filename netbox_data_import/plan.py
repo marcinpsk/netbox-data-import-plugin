@@ -178,6 +178,8 @@ class Diagnostic:
     severity: str
     identities: tuple[str, ...] = ()
     display: Mapping[str, Any] = field(default_factory=dict)
+    # The facts the finding was decided from, which the fingerprint carries and `display` does not.
+    evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate the code namespace and the severity vocabulary."""
@@ -187,6 +189,7 @@ class Diagnostic:
             raise PlanInvalid(f"Unknown diagnostic severity '{self.severity}'.")
         object.__setattr__(self, "identities", _identities(self.identities, "Diagnostic identities"))
         object.__setattr__(self, "display", _plan_mapping(self.display, "Diagnostic display"))
+        object.__setattr__(self, "evidence", _plan_mapping(self.evidence, "Diagnostic evidence"))
 
     def __hash__(self):
         """Hash over the serialized form, which mirrors the generated equality."""
@@ -194,8 +197,17 @@ class Diagnostic:
 
     @property
     def fingerprint_data(self):
-        """Return the decision inputs: the code, the severity, and the affected identities."""
-        return {"code": self.code, "severity": self.severity, "identities": list(self.identities)}
+        """Return the decision inputs: the code, the severity, the identities, and the evidence.
+
+        A finding about live state the identities do not name, such as the media two Cables carry,
+        would otherwise leave the fingerprint unchanged while the world moved under an accepted plan.
+        """
+        return {
+            "code": self.code,
+            "severity": self.severity,
+            "identities": list(self.identities),
+            "evidence": _thaw_json(self.evidence),
+        }
 
     def to_dict(self) -> dict:
         """Return the serialized form."""
@@ -204,6 +216,7 @@ class Diagnostic:
             "severity": self.severity,
             "identities": list(self.identities),
             "display": _thaw_json(self.display),
+            "evidence": _thaw_json(self.evidence),
         }
 
     @classmethod
@@ -214,6 +227,7 @@ class Diagnostic:
             severity=data["severity"],
             identities=tuple(data.get("identities", ())),
             display=data.get("display", {}),
+            evidence=data.get("evidence", {}),
         )
 
 

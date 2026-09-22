@@ -1,6 +1,6 @@
 # Trace Cable policy correction and media consistency
 
-Status: RATIFIED at r2 (design-blind, 2 rounds). Increments 1 and 2 built.
+Status: RATIFIED at r2 (design-blind, 2 rounds). Increments 1, 2 and 3 built.
 
 ## 1. Brief
 
@@ -424,3 +424,36 @@ override loss. `TraceWorkspaceSegmentOverrideTest` runs the HTTP flow end to end
 writes two media after one segment is forced, clearing returns the segment to its CableClass policy, a
 retained segment refuses the override and names the NetBox remedy, an invented segment and a half-made
 decision are refused, and a cached plan this release cannot read is rebuilt rather than discarded.
+
+## 13. Increment 3, as built: the media slice
+
+No new route and no new model. Planning gained one pass, and the plan gained one diagnostic field.
+
+- `cable_policy.py` answers two new questions from the running instance: which family it groups a
+  Cable Type under, and whether a Cable Profile fans one Cable out into runs the path does not state.
+  The fan-out test is `not cable_profile_accepts_one_termination_per_side`, so it needs no profile
+  family list. Only the indeterminate media group is named in source, as one constant with its
+  reason, because no structural property distinguishes an active optical assembly.
+- `_TraceAnalysis.joined` records the boundaries a verified PortMapping proved, and `_media_spans`
+  reads it. Today every boundary of a surviving trace is verified, because the adapter refuses a path
+  whose consecutive rows do not share a device and cards label and the planner refuses an unproven
+  pass-through. The set is kept anyway: the span is defined by verified continuity, not by the
+  adapter's linearity rule holding somewhere else, and `CableModule.plan` accepts a Source Trace from
+  any adapter. `test_two_segments_no_mapping_joins_are_two_runs` builds exactly that trace.
+- `cable.media_family_mismatch` is a WARNING and changes no disposition, so a trace carrying one can
+  still be synchronized. The message names each stated segment, its Cable Type, its family and
+  whether the value comes from a Cable the import keeps, and it names the remedy. Where every stated
+  segment is retained, the remedy is the NetBox correction, because no override can change those
+  Cables (r2 section 8.2).
+- `Diagnostic.evidence` carries the facts the finding rests on, and `fingerprint_data` includes it.
+  Without it a live Cable could change medium under an accepted plan with no change to the
+  fingerprint. `test_the_media_facts_alone_change_the_unit_fingerprint` moves one retained Cable from
+  one fiber family to another and asserts the codes are identical while the fingerprint differs.
+- The workspace marks a warning finding with a badge. A finding the operator reads as another note is
+  the same as no finding.
+
+**No second schema bump.** Version 3 has not shipped, so `evidence` joins the same version the
+override slice introduced, and the recovery route built there covers both.
+
+Limitations 1 and 2 of section 9 stand, unchanged and still not fixed: a uniformly wrong family is
+not diagnosed, and the execution record does not preserve the warning.

@@ -215,6 +215,8 @@ class _TraceAnalysis:
     segments: list = field(default_factory=list)
     proven: dict = field(default_factory=dict)
     policies: dict = field(default_factory=dict)
+    # Index i means a verified PortMapping joins segment i to segment i + 1.
+    joined: set = field(default_factory=set)
     devices: dict = field(default_factory=dict)
     terminations: dict = field(default_factory=dict)
     resolution_started: bool = False
@@ -255,6 +257,18 @@ class _TraceAnalysis:
         """Record one review note whose identities keep the unit honest about live state."""
         self.diagnostics.append(
             Diagnostic(code=code, severity=Severity.INFO, identities=tuple(identities), display=display)
+        )
+
+    def warn(self, code: str, display: dict, identities=(), evidence=None) -> None:
+        """Record a finding the operator has to see, which changes no disposition."""
+        self.diagnostics.append(
+            Diagnostic(
+                code=code,
+                severity=Severity.WARNING,
+                identities=tuple(identities),
+                display=display,
+                evidence=evidence or {},
+            )
         )
 
     def block(self, code: str, display: dict, identities=()) -> None:
@@ -460,6 +474,7 @@ class _CableBatch:
         self._load_existing_cables()
         self._classify()
         self._decide()
+        self._assess_media()
         self._block_planned_termination_conflicts()
         self._block_conflicting_creations()
         self._deletes_by_segment = self._shared_deletes()
@@ -748,6 +763,7 @@ class _CableBatch:
             if entry is None:
                 return
             left_ends[index + 1] = entry
+            analysis.joined.add(index)
         for index, segment in enumerate(segments):
             if left_ends[index].key != right_ends[index].key:
                 continue
@@ -1098,6 +1114,87 @@ class _CableBatch:
         if errors:
             return None
         return policy
+
+    def _assess_media(self) -> None:
+        """Report each run of verified pass-throughs whose segments state two known media."""
+        for analysis in self.analyses:
+            if analysis.stopped or not analysis.endpoints:
+                continue
+            observations = [self._media_observation(analysis, segment) for segment in analysis.segments]
+            for span in self._media_spans(analysis, observations):
+                self._report_media_mismatch(analysis, span)
+
+    def _media_observation(self, analysis: _TraceAnalysis, segment: _DesiredSegment) -> dict:
+        """Return what one segment says about the medium of the run it belongs to."""
+        from .cable_policy import cable_profile_splits_a_span, decisive_media_family
+
+        proven = analysis.proven.get(segment.index)
+        if proven is not None:
+            cable_type, cable_profile = proven.cable.type or "", proven.cable.profile or ""
+        else:
+            policy = analysis.policies.get(segment.index) or {}
+            cable_type, cable_profile = policy.get("cable_type") or "", ""
+        return {
+            "segment_index": segment.index,
+            "cable_type": cable_type,
+            "family": decisive_media_family(cable_type),
+            "retained": proven is not None,
+            "splits": cable_profile_splits_a_span(cable_profile),
+        }
+
+    @staticmethod
+    def _media_spans(analysis: _TraceAnalysis, observations: list) -> list:
+        """Return each run of segments a verified mapping joins, cut where a Cable fans out.
+
+        A shared Device name proves nothing: only a PortMapping the plan verified joins two segments.
+        """
+        spans: list[list[dict]] = [[]]
+        for observation in observations:
+            if observation["splits"]:
+                spans.append([])
+                continue
+            if not (spans[-1] and (observation["segment_index"] - 1) in analysis.joined):
+                spans.append([])
+            spans[-1].append(observation)
+        return [span for span in spans if len(span) > 1]
+
+    def _report_media_mismatch(self, analysis: _TraceAnalysis, span: list) -> None:
+        """Warn where one verified passive run carries two media families, and say who can fix it."""
+        from .cable_policy import cable_type_label
+
+        decided = [item for item in span if item["family"]]
+        families = sorted({item["family"] for item in decided})
+        if len(families) < 2:
+            return
+        resolved = {segment.index: segment for segment in analysis.segments}
+        stated = [
+            f"segment {item['segment_index'] + 1} is {cable_type_label(item['cable_type'])} ({item['family']})"
+            + (", on the Cable this import keeps" if item["retained"] else "")
+            for item in decided
+        ]
+        # An override decides what the import writes, so it cannot settle a run of retained Cables.
+        remedy = (
+            "Correct those Cables in NetBox, then re-read."
+            if all(item["retained"] for item in decided)
+            else "Force the segment that states the wrong medium, or correct the source."
+        )
+        analysis.warn(
+            "cable.media_family_mismatch",
+            {
+                "message": f"Verified pass-throughs join these segments, and {'; '.join(stated)}. {remedy}",
+                "families": families,
+                "segments": [dict(item) for item in decided],
+            },
+            identities=tuple(
+                identity
+                for item in decided
+                for identity in (
+                    resolved[item["segment_index"]].left.identity,
+                    resolved[item["segment_index"]].right.identity,
+                )
+            ),
+            evidence={"segments": [dict(item) for item in decided]},
+        )
 
     def _check_permissions(self, analysis: _TraceAnalysis) -> None:
         """Block the trace when the actor may not make every Cable write it asks for."""

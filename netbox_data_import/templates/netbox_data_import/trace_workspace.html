@@ -36,6 +36,7 @@
   .ndi-trace-panel .card-header { font-size: .75rem; letter-spacing: .06em; text-transform: uppercase; }
   .ndi-trace-claim { color: var(--tblr-secondary); font-size: .8rem; }
   .ndi-trace-reason { color: var(--tblr-secondary); font-size: .8rem; }
+  .ndi-trace-severity-warning { background-color: var(--tblr-warning) !important; color: #000 !important; }
 </style>
 
 <div hx-history="false">
@@ -513,7 +514,12 @@
           <strong>What this trace found</strong>
           <ul class="list-unstyled mt-1 mb-0">
             {% for finding in trace.findings %}
-              <li class="ndi-trace-reason">{{ finding.message }}</li>
+              <li class="ndi-trace-reason">
+                {% if finding.severity == "warning" %}
+                  <span class="badge ndi-trace-severity-warning" data-finding-severity>warning</span>
+                {% endif %}
+                {{ finding.message }}
+              </li>
             {% endfor %}
           </ul>
         </div>
