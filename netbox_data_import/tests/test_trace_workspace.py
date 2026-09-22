@@ -21,7 +21,7 @@ from netbox_data_import.adapters import TraceWorkbookAdapter
 from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import termination_field_key
 from netbox_data_import.models import CableClassMapping, CableSegmentOverride, ImportProfile, TerminationResolution
-from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit, canonical_json
+from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
 from netbox_data_import.preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
@@ -34,6 +34,7 @@ from netbox_data_import.tests.test_cable_module import (
     patched_path,
 )
 from netbox_data_import.tests.helpers import (
+    assert_absent_from,
     cables_on,
     competing_write_during,
     trace_endpoint_line,
@@ -2233,8 +2234,17 @@ class TraceWorkspaceCableDisclosureTest(CableTopologyMixin, TransactionTestCase)
         """Native Job readers receive no metadata that only the deleted Cable could authorize."""
         from core.models import Job
 
-        logical = self.connect(self.eth0, self.eth1, label="Hidden job cable", description="Hidden job detail")
-        logical.tags.add(Tag.objects.create(name="Hidden job tag", slug="hidden-job-tag"))
+        label = 'Hidden "job\\\tcable'
+        description = 'Hidden "job\\\tdetail'
+        tag_name = 'Hidden "job\\\ttag'
+        logical = self.connect(self.eth0, self.eth1, label=label, description=description)
+        tag = Tag.objects.create(name=tag_name, slug="hidden-job-tag")
+        logical.tags.add(tag)
+        logical.refresh_from_db()
+        tag.refresh_from_db()
+        self.assertEqual(logical.label, label)
+        self.assertEqual(logical.description, description)
+        self.assertEqual(tag.name, tag_name)
         opened = self.open_workspace(patched_path())
         trace = opened.context["selected_trace"]
 
@@ -2247,10 +2257,10 @@ class TraceWorkspaceCableDisclosureTest(CableTopologyMixin, TransactionTestCase)
         )
 
         self.assertEqual(response.status_code, 302)
-        stored = canonical_json(Job.objects.latest("pk").data["accepted_plan"])
-        self.assertNotIn("Hidden job cable", stored)
-        self.assertNotIn("Hidden job detail", stored)
-        self.assertNotIn("Hidden job tag", stored)
+        stored = Job.objects.latest("pk").data["accepted_plan"]
+        assert_absent_from(self, stored, label)
+        assert_absent_from(self, stored, description)
+        assert_absent_from(self, stored, tag_name)
 
 
 class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase):

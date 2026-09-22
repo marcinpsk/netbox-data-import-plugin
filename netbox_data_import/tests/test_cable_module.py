@@ -56,10 +56,11 @@ from netbox_data_import.models import (
     index_digest,
 )
 from netbox_data_import.netbox_reader import NetBoxReader
-from netbox_data_import.plan import Disposition, PlannedChange, Severity, canonical_json, fingerprint_of
+from netbox_data_import.plan import Disposition, PlannedChange, Severity, fingerprint_of
 from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.tests.helpers import (
+    assert_absent_from,
     make_dcim_objects,
     competing_write_during,
     run_on_separate_connection,
@@ -1629,8 +1630,10 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
         message = ReviewWorkspace(plan, actor).traces[0].findings[-1]["message"]
         self.assertIn("a Cable you cannot view", message)
         # Neither the value nor the family it decides may reach the message, the display or the evidence.
-        self.assertNotIn("mmf", canonical_json(warning.to_dict()))
-        self.assertNotIn(str(cable_type_label("mmf-om4")), canonical_json(warning.to_dict()))
+        assert_absent_from(self, message, "mmf")
+        assert_absent_from(self, message, str(cable_type_label("mmf-om4")))
+        assert_absent_from(self, warning.to_dict(), "mmf")
+        assert_absent_from(self, warning.to_dict(), str(cable_type_label("mmf-om4")))
 
     def test_the_media_family_is_a_stable_value_and_not_a_translated_label(self):
         """A fingerprint excludes translated text, so a family cannot be named by its group label."""
@@ -2332,8 +2335,17 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
 
         from netbox_data_import.models import ImportExecution
 
-        logical = self.connect(self.eth0, self.eth1, label="Hidden execution cable", description="Hidden detail")
-        logical.tags.add(Tag.objects.create(name="Hidden audit tag", slug="hidden-audit-tag"))
+        label = 'Hidden "execution\\\tcable'
+        description = 'Hidden "detail\\\tvalue'
+        tag_name = 'Hidden "audit\\\ttag'
+        logical = self.connect(self.eth0, self.eth1, label=label, description=description)
+        tag = Tag.objects.create(name=tag_name, slug="hidden-audit-tag")
+        logical.tags.add(tag)
+        logical.refresh_from_db()
+        tag.refresh_from_db()
+        self.assertEqual(logical.label, label)
+        self.assertEqual(logical.description, description)
+        self.assertEqual(tag.name, tag_name)
         reader = user_with_object_permission(
             "cable-execution-reader",
             [
@@ -2362,19 +2374,23 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
             response.json()["applied_changes"]["deleted"],
             [{"object_type": "dcim.cable", "object_id": logical.pk}],
         )
-        serialized = canonical_json(response.json())
-        self.assertNotIn("Hidden execution cable", serialized)
-        self.assertNotIn("Hidden detail", serialized)
-        self.assertNotIn("Hidden audit tag", serialized)
-        self.assertNotIn("Hidden execution cable", canonical_json(plan.to_dict()))
-        self.assertNotIn("Hidden detail", canonical_json(plan.to_dict()))
-        self.assertNotIn("Hidden audit tag", canonical_json(plan.to_dict()))
+        assert_absent_from(self, response.json(), label)
+        assert_absent_from(self, response.json(), description)
+        assert_absent_from(self, response.json(), tag_name)
+        assert_absent_from(self, plan.to_dict(), label)
+        assert_absent_from(self, plan.to_dict(), description)
+        assert_absent_from(self, plan.to_dict(), tag_name)
 
     def test_deleted_cable_metadata_drift_invalidates_the_accepted_plan_without_disclosing_it(self):
         """An opaque precondition detects review metadata drift without retaining its text."""
         from netbox_data_import.import_engine import StalePlan
 
-        logical = self.connect(self.eth0, self.eth1, label="Initial label", description="Initial detail")
+        initial_label = 'Initial "label\\\tvalue'
+        initial_description = 'Initial "detail\\\tvalue'
+        logical = self.connect(self.eth0, self.eth1, label=initial_label, description=initial_description)
+        logical.refresh_from_db()
+        self.assertEqual(logical.label, initial_label)
+        self.assertEqual(logical.description, initial_description)
         actor = user_with_object_permission(
             "cable-deletion-drift",
             [
@@ -2394,8 +2410,8 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
         current = self.plan(patched_path(), actor=actor)
 
         self.assertNotEqual(accepted.fingerprint, current.fingerprint)
-        self.assertNotIn("Initial label", canonical_json(accepted.to_dict()))
-        self.assertNotIn("Initial detail", canonical_json(accepted.to_dict()))
+        assert_absent_from(self, accepted.to_dict(), initial_label)
+        assert_absent_from(self, accepted.to_dict(), initial_description)
         with self.assertRaises(StalePlan):
             self.execute(accepted, actor=actor)
         self.assertTrue(Cable.objects.filter(pk=logical.pk).exists())

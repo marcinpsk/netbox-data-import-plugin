@@ -2,17 +2,47 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Shared test helpers for netbox_data_import tests."""
 
+import json
 import os
 import re
-from unittest import TestCase
 from contextlib import contextmanager
 from queue import Queue
 from threading import Thread
 from time import monotonic, sleep
+from unittest import TestCase
 
 from django.db import connections
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_workbook.xlsx")
+
+
+def assert_absent_from(test: TestCase, structure, needle: str, msg=None) -> None:
+    """Fail when a decoded string in *structure* contains *needle*."""
+    pending = [(structure, "$")]
+    while pending:
+        value, path = pending.pop()
+        if isinstance(value, str):
+            if needle in value:
+                detail = f"{needle!r} found at {path}."
+                test.fail(f"{msg}: {detail}" if msg else detail)
+            try:
+                decoded = json.loads(
+                    value,
+                    object_pairs_hook=lambda pairs: [item for pair in pairs for item in pair],
+                )
+            except json.JSONDecodeError:
+                continue
+            except RecursionError as exc:
+                detail = f"JSON at {path} exceeded the parser recursion limit."
+                raise test.failureException(f"{msg}: {detail}" if msg else detail) from exc
+            pending.append((decoded, f"{path} decoded JSON"))
+        elif isinstance(value, dict):
+            for index, (key, item) in reversed(list(enumerate(value.items()))):
+                pending.append((item, f"{path}[{key!r}]"))
+                pending.append((key, f"{path} keys[{index}]"))
+        elif isinstance(value, (list, tuple)):
+            for index in range(len(value) - 1, -1, -1):
+                pending.append((value[index], f"{path}[{index}]"))
 
 
 def workbook_bytes(headers, rows, *, sheet_name="Data") -> bytes:
