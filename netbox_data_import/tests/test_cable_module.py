@@ -24,7 +24,7 @@ from dcim.models import (
 )
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.test import TestCase, TransactionTestCase
+from django.test import SimpleTestCase, TestCase, TransactionTestCase
 from django.utils import translation
 from django.urls import reverse
 from extras.models import Tag
@@ -1410,6 +1410,205 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
         lost = [item for item in unit.diagnostics if item.code == "cable.segment_override_lost"]
         self.assertEqual([item.display["segment_index"] for item in lost], [1])
         self.assertEqual(self.creations(unit)[1].payload["cable_type"], "cat6")
+
+
+class CableDisclosureSchemaTest(SimpleTestCase):
+    """Reject disclosure data that cannot be presented without leaking row state."""
+
+    def test_diagnostic_schemas_reject_invalid_visibility_metadata(self):
+        """Cable and policy fields must carry a boolean flag and a matching row source."""
+        from netbox_data_import.cable_disclosure import (
+            CABLE_ROW,
+            CABLE_SEGMENT_OVERRIDE_ROW,
+            DISCLOSURE_SOURCE,
+            POLICY_VISIBLE,
+            validate_diagnostic_disclosures,
+        )
+
+        cases = (
+            (
+                "unregistered diagnostic",
+                "cable.unregistered",
+                {},
+                "Diagnostic 'cable.unregistered' has no registered display schema.",
+            ),
+            (
+                "unregistered field",
+                "cable.segment_reused",
+                {"segment_index": 0, "typo": "Cable A"},
+                "Diagnostic 'cable.segment_reused' has unregistered display fields: typo.",
+            ),
+            (
+                "Cable field without visibility",
+                "cable.segment_reused",
+                {"segment_index": 0, "cable": "Cable A"},
+                "Diagnostic 'cable.segment_reused' has Cable fields without a visibility flag.",
+            ),
+            (
+                "visible Cable without source",
+                "cable.segment_reused",
+                {"segment_index": 0, "cable": "Cable A", "cable_visible": True},
+                "Diagnostic 'cable.segment_reused' has visible Cable fields without a Cable source.",
+            ),
+            (
+                "hidden Cable with source",
+                "cable.segment_reused",
+                {
+                    "segment_index": 0,
+                    "cable_visible": False,
+                    DISCLOSURE_SOURCE: {"kind": CABLE_ROW, "pk": 1},
+                },
+                "Diagnostic 'cable.segment_reused' has a source for a hidden Cable.",
+            ),
+            (
+                "policy field without visibility",
+                "cable.segment_override_lost",
+                {"segment_index": 0, "cable_type": "cat6"},
+                "Diagnostic 'cable.segment_override_lost' has policy fields without a visibility flag.",
+            ),
+            (
+                "visible policy without source",
+                "cable.segment_override_lost",
+                {"segment_index": 0, "cable_type": "cat6", POLICY_VISIBLE: True},
+                "Diagnostic 'cable.segment_override_lost' has visible policy fields without a policy source.",
+            ),
+            (
+                "hidden policy with source",
+                "cable.segment_override_lost",
+                {
+                    "segment_index": 0,
+                    POLICY_VISIBLE: False,
+                    DISCLOSURE_SOURCE: {"kind": CABLE_SEGMENT_OVERRIDE_ROW, "pk": 1},
+                },
+                "Diagnostic 'cable.segment_override_lost' has a source for a hidden policy.",
+            ),
+        )
+
+        for label, code, display, message in cases:
+            with self.subTest(label=label), self.assertRaisesMessage(ValueError, message):
+                validate_diagnostic_disclosures(code, display)
+
+    def test_media_schema_rejects_invalid_nested_disclosures(self):
+        """Each media segment must name its origin and disclose only a visible source."""
+        from netbox_data_import.cable_disclosure import DISCLOSURE_SOURCE, validate_diagnostic_disclosures
+
+        base = {"segment_index": 0, "retained": False, "visible": False, "origin": "cable"}
+        cases = (
+            ({}, "Diagnostic 'cable.media_family_mismatch' has an invalid display schema."),
+            (
+                {"segments": [{"segment_index": 0}]},
+                "Diagnostic 'cable.media_family_mismatch' has invalid segment fields.",
+            ),
+            (
+                {"segments": [{**base, "origin": "other"}]},
+                "Diagnostic 'cable.media_family_mismatch' has an invalid segment origin.",
+            ),
+            (
+                {
+                    "segments": [
+                        {
+                            **base,
+                            "cable_type": "cat6",
+                            "family": "cat6",
+                            DISCLOSURE_SOURCE: {"kind": "dcim.cable", "pk": 1},
+                        }
+                    ]
+                },
+                "Diagnostic 'cable.media_family_mismatch' discloses a hidden segment.",
+            ),
+            (
+                {
+                    "segments": [
+                        {
+                            **base,
+                            "visible": True,
+                            "cable_type": "cat6",
+                            "family": "cat6",
+                            DISCLOSURE_SOURCE: {},
+                        }
+                    ]
+                },
+                "Diagnostic 'cable.media_family_mismatch' has a visible segment without its source.",
+            ),
+        )
+
+        for display, message in cases:
+            with self.subTest(message=message), self.assertRaisesMessage(ValueError, message):
+                validate_diagnostic_disclosures("cable.media_family_mismatch", display)
+
+    def test_live_presentation_redacts_a_policy_source_that_is_no_longer_visible(self):
+        """A cached diagnostic must not retain policy values after its source leaves view scope."""
+        from netbox_data_import.cable_disclosure import (
+            CABLE_CLASS_MAPPING_ROW,
+            CABLE_ROW,
+            CABLE_SEGMENT_OVERRIDE_ROW,
+            DISCLOSURE_SOURCE,
+            POLICY_HIDDEN,
+            POLICY_VISIBLE,
+            _diagnostic,
+        )
+        from netbox_data_import.plan import Diagnostic
+
+        diagnostic = Diagnostic(
+            code="cable.segment_override_lost",
+            severity=Severity.WARNING,
+            display={
+                "segment_index": 0,
+                "cable_type": "cat6",
+                "cable_profile": "single-1c1p",
+                POLICY_VISIBLE: True,
+                DISCLOSURE_SOURCE: {"kind": CABLE_SEGMENT_OVERRIDE_ROW, "pk": 7},
+            },
+        )
+        visible_row_ids = {
+            CABLE_ROW: set(),
+            CABLE_CLASS_MAPPING_ROW: set(),
+            CABLE_SEGMENT_OVERRIDE_ROW: set(),
+        }
+
+        presented = _diagnostic(diagnostic, visible_row_ids)
+
+        self.assertEqual(presented.display["cable_type"], POLICY_HIDDEN)
+        self.assertEqual(presented.display["cable_profile"], POLICY_HIDDEN)
+        self.assertIs(presented.display[POLICY_VISIBLE], False)
+        self.assertNotIn(DISCLOSURE_SOURCE, presented.display)
+
+    def test_disclosure_boundaries_reject_unsupported_callers(self):
+        """Only policy models and a live workspace viewer may enter presentation."""
+        from netbox_data_import.cable_disclosure import policy_row_kind, present_units
+
+        with self.assertRaisesMessage(TypeError, "Unsupported Cable policy row: object"):
+            policy_row_kind(object())
+        with self.assertRaisesMessage(TypeError, "ReviewWorkspace requires a live viewer."):
+            present_units((), None)
+
+
+class CablePolicyChoiceTest(SimpleTestCase):
+    """Keep Cable policy choices stable across grouped and flat NetBox vocabularies."""
+
+    def test_choice_flattening_accepts_grouped_and_flat_entries(self):
+        """A NetBox version may expose a choice at the top level or inside a group."""
+        from netbox_data_import.cable_policy import _flatten_choice_groups
+
+        choices = (("flat", "Flat"), ("Group", (("grouped", "Grouped"),)))
+
+        self.assertEqual(_flatten_choice_groups(choices), (("flat", "Flat"), ("grouped", "Grouped")))
+
+    def test_unknown_media_family_label_falls_back_to_its_value(self):
+        """Stored values remain readable when the running NetBox no longer groups one."""
+        from netbox_data_import.cable_policy import cable_media_family_label
+
+        self.assertEqual(cable_media_family_label("removed-family"), "removed-family")
+
+
+class CableModuleContractTest(SimpleTestCase):
+    """Keep the Cable module isolated from source batches it does not consume."""
+
+    def test_a_non_trace_batch_produces_no_cable_units(self):
+        """The module returns before it reads planning state for an unrelated batch."""
+        batch = SourceBatch(output_kinds=frozenset({OutputKind.DEVICE_SOURCE_ROW}))
+
+        self.assertEqual(CableModule().plan(batch, None, None, None), [])
 
 
 class CablePolicyDisclosureRegistryTest(CableTopologyMixin, TestCase):

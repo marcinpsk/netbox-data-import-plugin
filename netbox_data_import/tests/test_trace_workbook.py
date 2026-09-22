@@ -141,6 +141,18 @@ class TraceWorkbookFixtureTest(SimpleTestCase):
 class TraceWorkbookIdentityTest(SimpleTestCase):
     """Trace identity and content use direction-independent canonical forms."""
 
+    def test_endpoint_lines_reject_each_invalid_grammar_shape(self):
+        """The endpoint grammar rejects a bad field count, suffix, and required value."""
+        cases = (
+            "DEVICE-A",
+            "DEVICE-A > PORT-A",
+            "DEVICE-A > PORT-A ()",
+        )
+
+        for line in cases:
+            with self.subTest(line=line), self.assertRaises(ValueError):
+                parse_endpoint_line(line)
+
     def test_endpoint_lines_keep_cards_and_port_classes_distinct(self):
         """The endpoint grammar accepts every source shape used by the fixtures."""
         examples = {
@@ -400,6 +412,38 @@ class TraceWorkbookCorroborationTest(SimpleTestCase):
 
 class TraceWorkbookTaxonomyTest(SimpleTestCase):
     """Small workbooks cover source-only validation conditions absent from the corpus."""
+
+    def test_an_invalid_endpoint_line_becomes_an_incomplete_trace(self):
+        """Endpoint grammar failures stay structured diagnostics at the adapter boundary."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        block = (
+            "DEVICE-A",
+            _endpoint_line(endpoint_b),
+            (_segment(endpoint_a, "Cable", endpoint_b),),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertEqual(batch.rows, ())
+        self.assertEqual(_codes(batch), ["trace.incomplete_block"])
+        self.assertIn("optional cards label", batch.diagnostics[0].message)
+
+    def test_an_empty_cable_class_becomes_an_incomplete_trace(self):
+        """A segment without policy input remains in the batch as an invalid trace."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        block = (
+            _endpoint_line(endpoint_a),
+            _endpoint_line(endpoint_b),
+            (_segment(endpoint_a, "", endpoint_b),),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.incomplete_block"])
+        self.assertIn("empty CableClass", batch.diagnostics[0].message)
 
     def test_an_overlength_export_timestamp_is_rejected_at_the_adapter(self):
         """Raw export metadata cannot reach a shorter provenance database column."""
