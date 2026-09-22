@@ -1309,7 +1309,7 @@ Proposal card contract:
 
 | Card state | Contents |
 | --- | --- |
-| Completed with a candidate | A "Proposal - not applied" badge, the suggested candidate with its kind, the required explanation, backend metadata with attempt count, and explicit Accept and Reject buttons |
+| Completed with a candidate | A "Proposal - not applied" badge, the suggested candidate with its kind, the required explanation, and explicit Accept and Reject buttons |
 | Completed and stale | The same card with a "Proposal - stale, not applied" badge and a disabled Accept action showing its reason |
 | Completed with no match | The backend's own explanation of why the evidence did not distinguish the candidates, and a disabled accept action naming that reason |
 | Failed | The typed failure reason, including `backend_refusal` for a refusal or an empty-content completion, and an Ask AI again action that creates a new proposal |
@@ -1324,6 +1324,11 @@ appears only once a proposal exists, so Accept and Reject are card actions and n
 
 A per-field proposal history list shows the ten most recent attempts, their status, and their outcome.
 The list links to a field-filtered, paginated history endpoint for all older attempts.
+
+The card states no backend metadata of its own. The history list is where the attempts are named, and
+a pending card's job state says where a queued attempt stands, so a metadata block on the card would
+state the same facts a second time in the backend's own vocabulary. The proposal row still stores the
+metadata (section 9.1), and the REST representation still carries it.
 
 A drift warning strip appears when live NetBox differs from the reviewed snapshot, with a re-read
 action. The workspace compares the reviewed plan fingerprint with a freshly computed plan fingerprint
@@ -1888,7 +1893,7 @@ permissions at the view boundary.
   exists, when no Inference Backend is enabled, or when the operator lacks the permission.
 - A pending card shows progress in place, polls until a terminal state, and offers cancel.
 - A completed card shows the "Proposal - not applied" badge, the candidate with its kind, the
-  explanation, the backend metadata with attempt count, and explicit Accept and Reject buttons.
+  explanation, and explicit Accept and Reject buttons.
 - A stale card shows the stale badge and a disabled Accept with its reason.
 - A no-match card has a disabled accept action with its reason; a failed card offers Ask AI again.
 - Accepting writes a `TerminationResolution` row, marks the termination `accepted`, and triggers a
