@@ -6,7 +6,10 @@ from dataclasses import replace
 from types import MappingProxyType
 
 CABLE_ROW = "dcim.cable"
+CABLE_CLASS_MAPPING_ROW = "netbox_data_import.cableclassmapping"
+CABLE_SEGMENT_OVERRIDE_ROW = "netbox_data_import.cablesegmentoverride"
 DISCLOSURE_SOURCE = "disclosure_source"
+POLICY_HIDDEN = "a policy you cannot view"
 
 CABLE_DIAGNOSTIC_DISCLOSURES = MappingProxyType(
     {
@@ -16,6 +19,14 @@ CABLE_DIAGNOSTIC_DISCLOSURES = MappingProxyType(
         "cable.permission_denied": frozenset({"cable"}),
         "cable.segment_reused": frozenset({"cable"}),
         "cable.termination_occupied": frozenset({"cable"}),
+    }
+)
+
+POLICY_DIAGNOSTIC_DISCLOSURES = MappingProxyType(
+    {
+        "cable.media_family_mismatch": frozenset({"segments"}),
+        "cable.resolved_segment_conflict": frozenset({"cable_type", "cable_profile"}),
+        "cable.segment_override_lost": frozenset({"cable_type", "cable_profile"}),
     }
 )
 
@@ -34,6 +45,25 @@ def disclosed_cable(cable) -> dict:
     }
 
 
+def policy_row_kind(row) -> str:
+    """Return the disclosure kind for one supported Cable policy row."""
+    from .models import CableClassMapping, CableSegmentOverride
+
+    if isinstance(row, CableClassMapping):
+        return CABLE_CLASS_MAPPING_ROW
+    if isinstance(row, CableSegmentOverride):
+        return CABLE_SEGMENT_OVERRIDE_ROW
+    raise TypeError(f"Unsupported Cable policy row: {type(row).__name__}")
+
+
+def disclosed_policy(row, viewer, display: dict) -> dict:
+    """Return policy display values only when the planning viewer may read their row."""
+    permission = f"{row._meta.app_label}.view_{row._meta.model_name}"
+    if viewer is not None and not viewer.has_perm(permission, row):
+        return _redact_policy(display)
+    return {**display, DISCLOSURE_SOURCE: disclosure_source(policy_row_kind(row), row.pk)}
+
+
 def _source_pk(value, row_kind: str) -> int | None:
     if not isinstance(value, dict) or value.get("kind") != row_kind:
         return None
@@ -41,20 +71,30 @@ def _source_pk(value, row_kind: str) -> int | None:
     return row_pk if isinstance(row_pk, int) and not isinstance(row_pk, bool) else None
 
 
-def _cable_ids(units) -> set[int]:
-    cable_ids = set()
+def _row_ids(units) -> dict[str, set[int]]:
+    row_ids: dict[str, set[int]] = {
+        CABLE_ROW: set(),
+        CABLE_CLASS_MAPPING_ROW: set(),
+        CABLE_SEGMENT_OVERRIDE_ROW: set(),
+    }
+
+    def collect(value) -> None:
+        if isinstance(value, dict):
+            source = value.get(DISCLOSURE_SOURCE)
+            for row_kind, ids in row_ids.items():
+                if row_pk := _source_pk(source, row_kind):
+                    ids.add(row_pk)
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                collect(child)
+
     for unit in units:
-        trace = unit.display.get("trace") or {}
-        logical = trace.get("logical_cable") or {}
-        if row_pk := _source_pk(logical.get(DISCLOSURE_SOURCE), CABLE_ROW):
-            cable_ids.add(row_pk)
+        collect(unit.display)
         for diagnostic in unit.diagnostics:
-            if row_pk := _source_pk(diagnostic.display.get(DISCLOSURE_SOURCE), CABLE_ROW):
-                cable_ids.add(row_pk)
-            for segment in diagnostic.display.get("segments") or ():
-                if row_pk := _source_pk(segment.get(DISCLOSURE_SOURCE), CABLE_ROW):
-                    cable_ids.add(row_pk)
-    return cable_ids
+            collect(diagnostic.display)
+    return row_ids
 
 
 def _redact_cable(display: dict, keys: frozenset[str]) -> dict:
@@ -65,14 +105,43 @@ def _redact_cable(display: dict, keys: frozenset[str]) -> dict:
     return display
 
 
-def _media_segment(segment: dict, visible_cable_ids: set[int]) -> dict:
+def _redact_policy(display: dict) -> dict:
+    display = dict(display)
+    for key in ("cable_type", "cable_profile"):
+        if key in display:
+            display[key] = POLICY_HIDDEN
+    if "policy" in display:
+        display["policy"] = {}
+    display.pop(DISCLOSURE_SOURCE, None)
+    return display
+
+
+def _media_segment(segment: dict, visible_row_ids: dict[str, set[int]]) -> dict:
+    source = segment.get(DISCLOSURE_SOURCE)
     row_pk = _source_pk(segment.get(DISCLOSURE_SOURCE), CABLE_ROW)
-    if row_pk is None or row_pk in visible_cable_ids:
+    if row_pk is not None and row_pk not in visible_row_ids[CABLE_ROW]:
+        return {
+            "segment_index": segment["segment_index"],
+            "retained": segment["retained"],
+            "visible": False,
+            "origin": "cable",
+        }
+    for row_kind in (CABLE_CLASS_MAPPING_ROW, CABLE_SEGMENT_OVERRIDE_ROW):
+        row_pk = _source_pk(source, row_kind)
+        if row_pk is not None and row_pk not in visible_row_ids[row_kind]:
+            return {
+                "segment_index": segment["segment_index"],
+                "retained": segment["retained"],
+                "visible": False,
+                "origin": "policy",
+            }
+    if segment["visible"]:
         return segment
     return {
         "segment_index": segment["segment_index"],
         "retained": segment["retained"],
         "visible": False,
+        "origin": segment.get("origin", "cable"),
     }
 
 
@@ -83,7 +152,8 @@ def _media_message(segments: list[dict]) -> str:
     for segment in segments:
         position = segment["segment_index"] + 1
         if not segment["visible"]:
-            statements.append(f"segment {position} is a Cable you cannot view")
+            hidden = POLICY_HIDDEN if segment.get("origin") == "policy" else "a Cable you cannot view"
+            statements.append(f"segment {position} uses {hidden}")
             continue
         family = cable_media_family_label(segment["family"])
         statement = f"segment {position} is {cable_type_label(segment['cable_type'])} ({family})"
@@ -98,10 +168,10 @@ def _media_message(segments: list[dict]) -> str:
     return f"Verified pass-throughs join these segments, and {'; '.join(statements)}. {remedy}"
 
 
-def _diagnostic(diagnostic, visible_cable_ids: set[int]):
+def _diagnostic(diagnostic, visible_row_ids: dict[str, set[int]]):
     display = diagnostic.to_dict()["display"]
     if diagnostic.code == "cable.media_family_mismatch":
-        segments = [_media_segment(segment, visible_cable_ids) for segment in display["segments"]]
+        segments = [_media_segment(segment, visible_row_ids) for segment in display["segments"]]
         display["segments"] = segments
         display["families"] = sorted(
             {_family_label(segment["family"]) for segment in segments if segment["visible"] and segment.get("family")}
@@ -109,8 +179,14 @@ def _diagnostic(diagnostic, visible_cable_ids: set[int]):
         display["message"] = _media_message(segments)
     elif keys := CABLE_DIAGNOSTIC_DISCLOSURES.get(diagnostic.code):
         row_pk = _source_pk(display.get(DISCLOSURE_SOURCE), CABLE_ROW)
-        if row_pk is not None and row_pk not in visible_cable_ids:
+        if row_pk is not None and row_pk not in visible_row_ids[CABLE_ROW]:
             display = _redact_cable(display, keys)
+    if diagnostic.code in POLICY_DIAGNOSTIC_DISCLOSURES:
+        source = display.get(DISCLOSURE_SOURCE)
+        for row_kind in (CABLE_CLASS_MAPPING_ROW, CABLE_SEGMENT_OVERRIDE_ROW):
+            row_pk = _source_pk(source, row_kind)
+            if row_pk is not None and row_pk not in visible_row_ids[row_kind]:
+                display = _redact_policy(display)
     return replace(diagnostic, display=display)
 
 
@@ -120,16 +196,27 @@ def _family_label(family: str) -> str:
     return cable_media_family_label(family)
 
 
-def _unit(unit, visible_cable_ids: set[int]):
+def _unit(unit, visible_row_ids: dict[str, set[int]]):
     display = unit.to_dict()["display"]
     trace = display.get("trace")
     if trace is not None:
         logical = trace.get("logical_cable")
         if logical is not None:
             row_pk = _source_pk(logical.get(DISCLOSURE_SOURCE), CABLE_ROW)
-            if row_pk is not None and row_pk not in visible_cable_ids:
+            if row_pk is not None and row_pk not in visible_row_ids[CABLE_ROW]:
                 trace["logical_cable"] = {"visible": False, "display": "", "description": "", "tags": []}
-    diagnostics = tuple(_diagnostic(item, visible_cable_ids) for item in unit.diagnostics)
+        for segment in trace.get("segments") or ():
+            source = segment.get(DISCLOSURE_SOURCE)
+            for row_kind in (CABLE_CLASS_MAPPING_ROW, CABLE_SEGMENT_OVERRIDE_ROW):
+                row_pk = _source_pk(source, row_kind)
+                if row_pk is not None and row_pk not in visible_row_ids[row_kind]:
+                    segment.update(_redact_policy(segment))
+        for policy in trace.get("cable_policies") or ():
+            source = policy.get(DISCLOSURE_SOURCE)
+            row_pk = _source_pk(source, CABLE_CLASS_MAPPING_ROW)
+            if row_pk is not None and row_pk not in visible_row_ids[CABLE_CLASS_MAPPING_ROW]:
+                policy.update(_redact_policy(policy))
+    diagnostics = tuple(_diagnostic(item, visible_row_ids) for item in unit.diagnostics)
     return replace(unit, diagnostics=diagnostics, display=display)
 
 
@@ -138,22 +225,37 @@ def present_units(units, viewer) -> tuple:
     if viewer is None:
         raise TypeError("ReviewWorkspace requires a live viewer.")
     units = tuple(units)
-    cable_ids = _cable_ids(units)
-    visible = set()
-    if cable_ids:
-        from dcim.models import Cable
+    from dcim.models import Cable
 
-        visible = set(
-            Cable.objects.restrict(viewer, "view").filter(pk__in=sorted(cable_ids)).values_list("pk", flat=True)
+    from .models import CableClassMapping, CableSegmentOverride
+
+    row_ids = _row_ids(units)
+    models = {
+        CABLE_ROW: Cable,
+        CABLE_CLASS_MAPPING_ROW: CableClassMapping,
+        CABLE_SEGMENT_OVERRIDE_ROW: CableSegmentOverride,
+    }
+    visible = {}
+    for row_kind, model in models.items():
+        ids = row_ids[row_kind]
+        visible[row_kind] = (
+            set(model.objects.restrict(viewer, "view").filter(pk__in=sorted(ids)).values_list("pk", flat=True))
+            if ids
+            else set()
         )
     return tuple(_unit(unit, visible) for unit in units)
 
 
 __all__ = (
+    "CABLE_CLASS_MAPPING_ROW",
     "CABLE_DIAGNOSTIC_DISCLOSURES",
     "CABLE_ROW",
+    "CABLE_SEGMENT_OVERRIDE_ROW",
     "DISCLOSURE_SOURCE",
+    "POLICY_DIAGNOSTIC_DISCLOSURES",
+    "POLICY_HIDDEN",
     "disclosed_cable",
+    "disclosed_policy",
     "disclosure_source",
     "present_units",
 )

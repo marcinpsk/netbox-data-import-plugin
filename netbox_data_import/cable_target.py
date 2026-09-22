@@ -1085,13 +1085,19 @@ class _CableBatch:
         for stored in self._overrides_by_trace.get(analysis.trace.identity, ()):
             if stored.segment_key in stated:
                 continue
+            from .cable_disclosure import disclosed_policy
+
             analysis.note(
                 "cable.segment_override_lost",
-                {
-                    "segment_index": stored.segment_index,
-                    "cable_type": stored.cable_type_display(),
-                    "cable_profile": stored.cable_profile_display(),
-                },
+                disclosed_policy(
+                    stored,
+                    self.actor,
+                    {
+                        "segment_index": stored.segment_index,
+                        "cable_type": stored.cable_type_display(),
+                        "cable_profile": stored.cable_profile_display(),
+                    },
+                ),
             )
 
     def _decide(self) -> None:
@@ -1135,6 +1141,7 @@ class _CableBatch:
 
     def _media_observation(self, analysis: _TraceAnalysis, segment: _DesiredSegment) -> dict:
         """Return what one segment says about the medium of the run it belongs to."""
+        from .cable_disclosure import DISCLOSURE_SOURCE, disclosed_policy
         from .cable_policy import cable_profile_splits_a_span, decisive_media_family
 
         proven = analysis.proven.get(segment.index)
@@ -1145,9 +1152,15 @@ class _CableBatch:
             disclosure = self._cable_diagnostic_disclosure(proven.cable)[0]
             visible = disclosure["cable_visible"]
             source = disclosure.get("disclosure_source")
+            origin = "cable"
         else:
             policy = analysis.policies.get(segment.index) or {}
             cable_type, cable_profile = policy.get("cable_type") or "", ""
+            row = self._policy_row(segment)
+            disclosure = disclosed_policy(row, self.actor, {}) if row is not None else {}
+            visible = DISCLOSURE_SOURCE in disclosure
+            source = disclosure.get(DISCLOSURE_SOURCE)
+            origin = "policy"
         return {
             "segment_index": segment.index,
             "cable_type": cable_type,
@@ -1156,6 +1169,7 @@ class _CableBatch:
             "visible": visible,
             "splits": cable_profile_splits_a_span(cable_profile),
             "disclosure_source": source,
+            "origin": origin,
         }
 
     @staticmethod
@@ -1192,18 +1206,20 @@ class _CableBatch:
                     resolved[item["segment_index"]].right.identity,
                 )
             ),
-            evidence={"segments": [self._media_display(item) for item in decided]},
+            evidence={"segments": [self._media_display(item, for_evidence=True) for item in decided]},
         )
 
     @staticmethod
-    def _media_display(observation: dict, *, include_source: bool = False) -> dict:
+    def _media_display(observation: dict, *, include_source: bool = False, for_evidence: bool = False) -> dict:
         """Return stable media facts, with row identity only in presentation data."""
+        visible = observation["visible"] or (for_evidence and observation["origin"] == "policy")
         record = {
             "segment_index": observation["segment_index"],
             "retained": observation["retained"],
-            "visible": observation["visible"],
+            "visible": visible,
+            "origin": observation["origin"],
         }
-        if not observation["visible"]:
+        if not visible:
             return record
         record.update(cable_type=observation["cable_type"], family=observation["family"])
         if include_source and observation["disclosure_source"] is not None:
@@ -1267,14 +1283,21 @@ class _CableBatch:
             if len(policies) < 2:
                 continue
             for analysis, segment, policy in records:
+                from .cable_disclosure import disclosed_policy
+
+                row = self._policy_row(segment)
                 analysis.block(
                     "cable.resolved_segment_conflict",
-                    {
-                        "segment_index": segment.index,
-                        "cable_type": policy["cable_type"],
-                        "cable_profile": policy["cable_profile"],
-                        "terminations": segment.as_json(),
-                    },
+                    disclosed_policy(
+                        row,
+                        self.actor,
+                        {
+                            "segment_index": segment.index,
+                            "cable_type": policy["cable_type"],
+                            "cable_profile": policy["cable_profile"],
+                            "terminations": segment.as_json(),
+                        },
+                    ),
                     identities=(segment.left.identity, segment.right.identity),
                 )
 
@@ -1367,6 +1390,7 @@ class _CableBatch:
                     **self._policy_display(planned),
                 }
             )
+        cable_classes = list(dict.fromkeys(source_text(segment.cable_class) for segment in stated_segments))
         return {
             "identity": analysis.trace.identity,
             "endpoints": {
@@ -1374,6 +1398,7 @@ class _CableBatch:
                 "to": _endpoint_label(summary.to_termination),
             },
             "segments": segments,
+            "cable_policies": [self._cable_class_display(cable_class) for cable_class in cable_classes],
             "logical_cable": self._logical_cable_display(analysis),
             "resolution_started": analysis.resolution_started,
             "topology_known": analysis.topology_read,
@@ -1383,12 +1408,27 @@ class _CableBatch:
             "terminations": list(analysis.terminations.values()),
         }
 
+    def _cable_class_display(self, cable_class: str) -> dict:
+        """Return one CableClass decision for the workspace policy table."""
+        from .cable_disclosure import disclosed_policy
+
+        row = self._cable_class_mapping(cable_class)
+        display = {
+            "cable_class": cable_class,
+            "cable_type": "Unresolved" if row is None else row.cable_type_display(),
+            "cable_profile": "Unresolved" if row is None else row.cable_profile_display(),
+            "policy": (None if row is None else row.decided_policy()) or {},
+        }
+        return display if row is None else disclosed_policy(row, self.actor, display)
+
     def _policy_display(self, planned: _DesiredSegment | None) -> dict:
         """Return the Cable policy in force for one resolved segment, and whether it is an override."""
         if planned is None:
             return {"segment_key": "", "overridden": False, "cable_type": "", "cable_profile": "", "policy": {}}
+        from .cable_disclosure import disclosed_policy
+
         row = self._policy_row(planned)
-        return {
+        display = {
             "segment_key": planned.key,
             "overridden": planned.key in self._overrides,
             "cable_type": "Unresolved" if row is None else row.cable_type_display(),
@@ -1396,6 +1436,7 @@ class _CableBatch:
             # The stored values, not their labels, so the workspace can offer what is in force.
             "policy": (None if row is None else row.decided_policy()) or {},
         }
+        return display if row is None else disclosed_policy(row, self.actor, display)
 
     @staticmethod
     def _entered_through_claim(planned: _DesiredSegment | None, stated: _Termination | None) -> bool:

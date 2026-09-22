@@ -529,3 +529,68 @@ operator's own consecutive saves and a no-op replan, the empty-fingerprint defau
 the freshly planned hidden-Cable redaction including identities, the family keys across the 4.6.10
 and 4.7.0 choice tables including singleton groups, pair-membership loss for a lone renumbered
 override, and the recovery route's single revision rotation.
+
+## 16. Review round 3 closure
+
+This change closes the three findings that sections 14 and 15 left open.
+
+### 16.1 Lost override reporting after topology classification
+
+`_decide` now reports a lost override before it stops a blocked trace. It reports only when the
+source states no Segment Evidence, or when every stated segment resolved. These cases confirm that
+the stored pair no longer governs the trace. A source path that did not resolve does not confirm a
+loss, because the same pair can govern after the resolution problem is corrected. An occupied
+replacement port therefore reports both `cable.termination_occupied` and
+`cable.segment_override_lost`, stays blocked, and produces no changes. An endpoint-only trace also
+reports the loss. An unresolved stated path does not.
+
+### 16.2 Live Cable disclosure
+
+Plan schema 4 records a disclosure source beside each visible Cable value. A value redacted during
+planning records no source, so a later grant cannot reveal it. `ReviewWorkspace` requires a live
+viewer and resolves every referenced Cable primary key with one restricted query per render. It
+redacts a cached value when the viewer lost access or the row no longer exists. The same module owns
+the diagnostic keys, redaction shapes, and media sentence used by planning and presentation.
+
+The planner now stores structured media segments. Presentation translates Cable Type and media
+family labels and composes `cable.media_family_mismatch` for the reader. Schema 3 is rejected and
+rebuilt through the existing recovery route. The recovery keeps the source document, import context,
+and current preview flow.
+
+Disclosure sources stay in `display`. They do not enter `Diagnostic.fingerprint_data` or
+`SynchronizationUnit.fingerprint_data`. Rendering one accepted plan under different live Cable
+permissions does not mutate its fingerprint. A Cable hidden during planning still contributes no
+identity or media facts, so its drift still does not move the fingerprint. Section 14 item 2 records
+that trade, and this change does not alter it.
+
+### 16.3 Live Cable policy disclosure
+
+The same disclosure module also owns the two policy row kinds, the diagnostic registry, and the
+shared text `a policy you cannot view`. The planner still reads all `CableClassMapping` and
+`CableSegmentOverride` rows without restriction. It uses them for disposition, changes, evidence,
+and fingerprints. It records a row identity only when the planning viewer may read the display
+value. The renderer then rechecks those identities on every workspace render.
+
+The profile detail table, workspace CableClass table, and segment panel keep the policy listed but
+replace both values with the shared text when the deciding row is not viewable. Hidden rows provide
+no form initial values. Their controls and buttons are disabled with the same reason. The save,
+force, and clear commands repeat the view check under the profile policy lock and refuse the write
+with that reason. A deleted row redacts cached text. A later grant does not reveal a value the
+planner redacted.
+
+Policy-based media evidence keeps its unrestricted Cable Type and stable media-family key. Only its
+display is redacted. The plan therefore keeps the same disposition, changes, diagnostic evidence,
+and fingerprint when the same actor loses policy view access. The media-family key remains the
+smallest Cable Type value in the NetBox group.
+
+The diagnostic registry enumerates policy-derived display for
+`cable.media_family_mismatch`, `cable.resolved_segment_conflict`, and
+`cable.segment_override_lost`. The segment panel and workspace CableClass table use plan fields from
+the same disclosure vocabulary.
+
+Section 15 was correct that the child write paths used NetBox object-permission scoping for change
+and delete. It omitted a separate read condition. A user with change or delete access but no view
+access could open the edit or delete page and read the row. Both child views now require view access
+in addition to their existing write scope. The workspace commands also needed an explicit view
+check to prevent a blind overwrite. Thus the statement that the write path was already scoped was
+true for write authority, but incomplete for the disclosure and blind-write rule.

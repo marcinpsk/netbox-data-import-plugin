@@ -188,6 +188,9 @@ class CableClassMappingTableTest(TestCase):
 
     def test_sorting_a_display_column_orders_through_its_field(self):
         """django-tables2 falls back to the accessor, so sorting must name a real column."""
+        from django.contrib.auth import get_user_model
+
+        viewer = get_user_model().objects.create_superuser("cable-table-viewer")
         profile = _make_profile("CableTableProfile")
         for cable_class, cable_type in (("Patch", "cat6"), ("Trunk", "cat5e")):
             CableClassMapping.objects.create(
@@ -201,7 +204,7 @@ class CableClassMappingTableTest(TestCase):
 
         for column in ("cable_type", "cable_profile"):
             with self.subTest(column=column):
-                table = CableClassMappingTable(CableClassMapping.objects.filter(profile=profile))
+                table = CableClassMappingTable(CableClassMapping.objects.filter(profile=profile), viewer=viewer)
                 table.order_by = column
 
                 self.assertEqual(len(list(table.rows)), 2)

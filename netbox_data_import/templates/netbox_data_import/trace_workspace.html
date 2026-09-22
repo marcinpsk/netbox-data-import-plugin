@@ -497,8 +497,10 @@
                       <label class="visually-hidden" for="{{ policy.form.cable_profile.id_for_label }}">
                         Cable Profile for {{ policy.cable_class }}</label>
                       {{ policy.form.cable_profile }}
-                      <button type="submit" class="btn btn-sm btn-primary" data-cable-policy-save>Save</button>
+                      <button type="submit" class="btn btn-sm btn-primary" data-cable-policy-save
+                              {% if policy.reason %}disabled{% endif %}>Save</button>
                     </form>
+                    {% if policy.reason %}<div class="ndi-trace-reason mt-1">{{ policy.reason }}</div>{% endif %}
                   </td>
                 </tr>
               {% empty %}

@@ -121,7 +121,12 @@ def save_cable_class_mapping_and_replan(
         _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         lookup = {"profile": locked_profile, "cable_class": cable_class}
         # The row is read under the lock, so the form validates what the write will replace.
-        instance = CableClassMapping.objects.filter(**lookup).first() or CableClassMapping(**lookup)
+        stored = CableClassMapping.objects.filter(**lookup).first()
+        if stored is not None and not actor.has_perm("netbox_data_import.view_cableclassmapping", stored):
+            from .cable_disclosure import POLICY_HIDDEN
+
+            raise UnacceptableCablePolicy([POLICY_HIDDEN])
+        instance = stored or CableClassMapping(**lookup)
         form = CableClassMappingForm({**data, "cable_class": cable_class}, instance=instance)
         if not form.is_valid():
             raise UnacceptableCablePolicy(_form_messages(form))
@@ -149,6 +154,7 @@ def save_cable_segment_override_and_replan(
     segment_key,
     trace_identity,
     segment_index,
+    cable_class,
     data,
     reviewed_fingerprint,
 ):
@@ -160,7 +166,15 @@ def save_cable_segment_override_and_replan(
         _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         lookup = {"profile": locked_profile, "segment_key": segment_key}
         # The row is read under the lock, so the form validates what the write will replace.
-        instance = CableSegmentOverride.objects.filter(**lookup).first() or CableSegmentOverride(**lookup)
+        stored = CableSegmentOverride.objects.filter(**lookup).first()
+        deciding = stored or CableClassMapping.objects.filter(profile=locked_profile, cable_class=cable_class).first()
+        if deciding is not None:
+            permission = f"netbox_data_import.view_{deciding._meta.model_name}"
+            if not actor.has_perm(permission, deciding):
+                from .cable_disclosure import POLICY_HIDDEN
+
+                raise UnacceptableCablePolicy([POLICY_HIDDEN])
+        instance = stored or CableSegmentOverride(**lookup)
         instance.source_trace_identity = trace_identity
         instance.segment_index = segment_index
         form = CableSegmentOverrideForm(data, instance=instance)
@@ -194,10 +208,13 @@ def clear_cable_segment_override_and_replan(
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
         _refuse_moved_policy(locked_profile, reviewed_fingerprint)
-        delete_permission_scoped_objects(
-            actor,
-            CableSegmentOverride.objects.filter(profile=locked_profile, segment_key=segment_key),
-        )
+        stored = CableSegmentOverride.objects.filter(profile=locked_profile, segment_key=segment_key).first()
+        if stored is not None and not actor.has_perm("netbox_data_import.view_cablesegmentoverride", stored):
+            from .cable_disclosure import POLICY_HIDDEN
+
+            raise UnacceptableCablePolicy([POLICY_HIDDEN])
+        if stored is not None:
+            delete_permission_scoped_objects(actor, CableSegmentOverride.objects.filter(pk=stored.pk))
         # atomic-exit-safe: segment-override-cleared-and-replanned
         return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
 
@@ -658,6 +675,7 @@ class TraceWorkspaceUnit:
     sheet: str
     endpoints: dict[str, str]
     segments: list[dict[str, Any]]
+    cable_policies: list[dict[str, Any]]
     logical_cable: dict[str, Any] | None
     deletes_logical_cable: bool
     resolution_started: bool
@@ -685,6 +703,7 @@ class TraceWorkspaceUnit:
             sheet=str(display.get("sheet") or ""),
             endpoints=dict(workspace.get("endpoints") or {}),
             segments=[dict(segment) for segment in workspace.get("segments") or ()],
+            cable_policies=[dict(policy) for policy in workspace["cable_policies"]],
             logical_cable=workspace.get("logical_cable"),
             deletes_logical_cable=bool(workspace.get("deletes_logical_cable")),
             resolution_started=bool(workspace.get("resolution_started")),

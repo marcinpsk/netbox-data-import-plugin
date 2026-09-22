@@ -2,6 +2,7 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
+from .cable_disclosure import POLICY_HIDDEN
 from .models import (
     CableClassMapping,
     ImportProfile,
@@ -22,6 +23,7 @@ _MAPPING_ACTIONS_TEMPLATE = """
     <i class="mdi mdi-trash-can-outline"></i>
 </a>
 """
+_CABLE_MAPPING_ACTIONS_TEMPLATE = "{% if record.policy_viewable %}" + _MAPPING_ACTIONS_TEMPLATE + "{% endif %}"
 
 
 def _mapping_actions_column(route_prefix: str) -> tables.TemplateColumn:
@@ -115,7 +117,38 @@ class CableClassMappingTable(tables.Table):
     cable_profile = tables.Column(
         accessor="cable_profile_display", order_by="cable_profile", verbose_name="Cable Profile"
     )
-    actions = _mapping_actions_column("cableclassmapping")
+    actions = tables.TemplateColumn(
+        template_code=_CABLE_MAPPING_ACTIONS_TEMPLATE,
+        extra_context={
+            "edit_url": "plugins:netbox_data_import:cableclassmapping_edit",
+            "delete_url": "plugins:netbox_data_import:cableclassmapping_delete",
+        },
+        verbose_name="",
+        orderable=False,
+    )
+
+    def __init__(self, data, *, viewer):
+        rows = list(data)
+        self.visible_ids = (
+            {row.pk for row in rows}
+            if viewer.is_superuser
+            else set(
+                CableClassMapping.objects.restrict(viewer, "view")
+                .filter(pk__in=[row.pk for row in rows])
+                .values_list("pk", flat=True)
+            )
+        )
+        for row in rows:
+            row.policy_viewable = row.pk in self.visible_ids  # type: ignore[attr-defined]
+        super().__init__(rows)
+
+    def render_cable_type(self, record):
+        """Render the decision only while this viewer may read its row."""
+        return record.cable_type_display() if record.pk in self.visible_ids else POLICY_HIDDEN
+
+    def render_cable_profile(self, record):
+        """Render the decision only while this viewer may read its row."""
+        return record.cable_profile_display() if record.pk in self.visible_ids else POLICY_HIDDEN
 
     class Meta:
         model = CableClassMapping

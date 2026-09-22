@@ -25,6 +25,7 @@ from utilities.permissions import get_permission_for_model
 from utilities.views import ConditionalLoginRequiredMixin
 
 from .filters import ImportProfileFilterSet
+from .cable_disclosure import POLICY_HIDDEN
 from .forms import (
     CableClassMappingForm,
     CableSegmentOverrideForm,
@@ -515,7 +516,7 @@ class ImportProfileView(generic.ObjectView):
         class_role_table = ClassRoleMappingTable(instance.class_role_mappings.all())
         device_type_table = DeviceTypeMappingTable(instance.device_type_mappings.all())
         transform_table = ColumnTransformRuleTable(instance.column_transform_rules.all())
-        cable_class_table = CableClassMappingTable(instance.cable_class_mappings.all())
+        cable_class_table = CableClassMappingTable(instance.cable_class_mappings.all(), viewer=request.user)
         applicable_policy_sections = frozenset(
             section.key for section in POLICY_SECTIONS if section.applies_to(instance.output_kinds)
         )
@@ -900,12 +901,26 @@ class CableClassMappingEditView(_ProfileChildEditView):
     template_name = "netbox_data_import/cableclassmapping_edit.html"
     permission_required = "netbox_data_import.change_cableclassmapping"
 
+    def get_object(self, **kwargs):
+        """Refuse an edit form that would disclose a row through its initial values."""
+        obj = super().get_object(**kwargs)
+        if obj.pk and not self.request.user.has_perm("netbox_data_import.view_cableclassmapping", obj):
+            raise PermissionDenied
+        return obj
+
 
 class CableClassMappingDeleteView(_ProfileChildDeleteView):
     """Delete a CableClass mapping."""
 
     queryset = CableClassMapping.objects.all()
     permission_required = "netbox_data_import.delete_cableclassmapping"
+
+    def get_object(self, **kwargs):
+        """Refuse a delete page that would disclose the row it names."""
+        obj = super().get_object(**kwargs)
+        if not self.request.user.has_perm("netbox_data_import.view_cableclassmapping", obj):
+            raise PermissionDenied
+        return obj
 
 
 # ---------------------------------------------------------------------------
@@ -3671,6 +3686,11 @@ def _workspace_field_keys(workspace) -> set:
     return {item["field_key"] for trace in workspace.traces for item in trace.terminations}
 
 
+def _disable_policy_form(form) -> None:
+    for field in form.fields.values():
+        field.disabled = True
+
+
 def _cable_policy_forms(profile, trace) -> list:
     """Return the Cable policy in force for each CableClass the selected trace states, once each.
 
@@ -3678,22 +3698,30 @@ def _cable_policy_forms(profile, trace) -> list:
     """
     if trace is None:
         return []
-    stated = list(dict.fromkeys(segment["cable_class"] for segment in trace.segments if segment["cable_class"]))
+    planned = {policy["cable_class"]: policy for policy in trace.cable_policies}
+    stated = list(planned)
     rows = {row.cable_class: row for row in CableClassMapping.objects.filter(profile=profile, cable_class__in=stated)}
     forms = []
     for index, cable_class in enumerate(stated):
         row = rows.get(cable_class)
+        decision = planned[cable_class]
+        visible = decision["cable_type"] != POLICY_HIDDEN
+        form = CableClassMappingForm(
+            instance=row
+            if visible and row is not None
+            else CableClassMapping(profile=profile, cable_class=cable_class),
+            auto_id=f"id_%s_{index}",
+        )
+        if not visible:
+            _disable_policy_form(form)
         forms.append(
             {
                 "cable_class": cable_class,
-                "cable_type": "Unresolved" if row is None else row.cable_type_display(),
-                "cable_profile": "Unresolved" if row is None else row.cable_profile_display(),
-                "resolved": row is not None and row.cable_type_resolved and row.cable_profile_resolved,
-                # The form owns the runtime choices, so each row only needs its own element ids.
-                "form": CableClassMappingForm(
-                    instance=row or CableClassMapping(profile=profile, cable_class=cable_class),
-                    auto_id=f"id_%s_{index}",
-                ),
+                "cable_type": decision["cable_type"],
+                "cable_profile": decision["cable_profile"],
+                "resolved": bool(decision["policy"]),
+                "form": form,
+                "reason": "" if visible else POLICY_HIDDEN,
             }
         )
     return forms
@@ -3726,17 +3754,24 @@ def _segment_policy_forms(profile, trace) -> list:
     forms = []
     for segment in trace.segments:
         stored = rows.get(segment["segment_key"])
+        hidden = segment["cable_type"] == POLICY_HIDDEN
+        form = CableSegmentOverrideForm(
+            instance=(
+                stored
+                if stored is not None and not hidden
+                else CableSegmentOverride(profile=profile, segment_key=segment["segment_key"])
+            ),
+            initial={} if hidden else cable_policy_form_initial(segment["policy"]),
+            auto_id=f"id_%s_segment_{segment['index']}",
+        )
+        if hidden:
+            _disable_policy_form(form)
         forms.append(
             {
                 **segment,
                 "position": segment["index"] + 1,
-                "reason": _segment_override_reason(segment),
-                # The form owns the runtime choices, so each row only needs its own element ids.
-                "form": CableSegmentOverrideForm(
-                    instance=stored or CableSegmentOverride(profile=profile, segment_key=segment["segment_key"]),
-                    initial=cable_policy_form_initial(segment["policy"]),
-                    auto_id=f"id_%s_segment_{segment['index']}",
-                ),
+                "reason": POLICY_HIDDEN if hidden else _segment_override_reason(segment),
+                "form": form,
             }
         )
     return forms
@@ -4414,6 +4449,7 @@ class TraceCableSegmentPolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
                         segment_key=segment["segment_key"],
                         trace_identity=trace.trace_identity,
                         segment_index=segment["index"],
+                        cable_class=segment["cable_class"],
                         data={
                             "cable_type": request.POST.get("cable_type", ""),
                             "cable_profile": request.POST.get("cable_profile", ""),

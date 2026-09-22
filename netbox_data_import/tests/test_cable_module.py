@@ -1409,6 +1409,23 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
         self.assertEqual(self.creations(unit)[1].payload["cable_type"], "cat6")
 
 
+class CablePolicyDisclosureRegistryTest(TestCase):
+    """Pin every diagnostic display field that can come from a Cable policy row."""
+
+    def test_every_policy_derived_diagnostic_display_is_registered(self):
+        """A new policy disclosure must declare its redaction keys in the shared vocabulary."""
+        from netbox_data_import.cable_disclosure import POLICY_DIAGNOSTIC_DISCLOSURES
+
+        self.assertEqual(
+            dict(POLICY_DIAGNOSTIC_DISCLOSURES),
+            {
+                "cable.media_family_mismatch": frozenset({"segments"}),
+                "cable.resolved_segment_conflict": frozenset({"cable_type", "cable_profile"}),
+                "cable.segment_override_lost": frozenset({"cable_type", "cable_profile"}),
+            },
+        )
+
+
 class CableMediaFamilyTest(CableTopologyMixin, TestCase):
     """Section 3.6: what one run of verified pass-throughs says about the medium it carries."""
 
