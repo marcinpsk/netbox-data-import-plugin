@@ -147,7 +147,9 @@
       <div>
         <span class="badge ndi-trace-disposition-{{ trace.disposition }}">{{ trace.disposition }}</span>
         <strong class="ms-2">{{ trace.name }}</strong>
-        {% if trace.sheet %}<span class="text-secondary ms-2">{{ trace.sheet }} row {{ trace.row_number }}</span>{% endif %}
+        {% if trace.sheet %}
+          <span class="text-secondary ms-2">(sheet {{ trace.sheet }}{% if trace.row_number %}, row {{ trace.row_number }}{% endif %})</span>
+        {% endif %}
       </div>
       <div class="text-end">
         {% for action in trace.actions %}
