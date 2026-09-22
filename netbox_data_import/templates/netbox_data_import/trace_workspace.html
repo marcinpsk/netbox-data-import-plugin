@@ -234,7 +234,7 @@
               {% endif %}
               <ol class="mb-0 ps-3">
                 {% for segment in segment_policy_forms %}
-                  <li data-trace-segment="{{ segment.index }}">
+                  <li class="mb-2" data-trace-segment="{{ segment.index }}">
                     {{ segment.left }} &rarr; {{ segment.right }}
                     {% if segment.status == "create" %}
                       <span class="badge ndi-trace-status-create">create</span>

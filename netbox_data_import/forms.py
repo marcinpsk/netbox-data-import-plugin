@@ -285,8 +285,9 @@ class CableClassMappingForm(forms.ModelForm):
 class CableSegmentOverrideForm(forms.ModelForm):
     """Force both Cable dimensions on one planned segment, which an override always decides."""
 
-    cable_type = _RuntimeCableChoiceField()
-    cable_profile = _RuntimeCableChoiceField()
+    # One control per segment in a narrow panel, so the small variant keeps a long path readable.
+    cable_type = _RuntimeCableChoiceField(widget=forms.Select(attrs={"class": "form-select form-select-sm"}))
+    cable_profile = _RuntimeCableChoiceField(widget=forms.Select(attrs={"class": "form-select form-select-sm"}))
 
     class Meta:
         model = CableSegmentOverride
