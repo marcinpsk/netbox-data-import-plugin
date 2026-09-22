@@ -1095,9 +1095,10 @@ class _CableBatch:
     def _decide(self) -> None:
         """Settle the Cable policy and the write permissions every actionable trace needs."""
         for analysis in self.analyses:
+            if not analysis.trace.segments or len(analysis.segments) == len(analysis.trace.segments):
+                self._report_lost_overrides(analysis)
             if analysis.stopped or not analysis.endpoints:
                 continue
-            self._report_lost_overrides(analysis)
             for segment in analysis.pending:
                 policy = self._cable_policy(analysis, segment)
                 if policy is not None:

@@ -1251,6 +1251,78 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
         self.assertEqual([item.display["segment_index"] for item in lost], [0])
         self.assertEqual(self.creations(unit)[0].payload["cable_type"], "cat6")
 
+    def test_an_occupied_re_picked_termination_still_reports_the_lost_override(self):
+        """A topology conflict must not hide the policy loss that the resolved pair confirms."""
+        identity = self.identity_of(direct_path())
+        self.force(
+            self.eth0,
+            self.eth1,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            trace_identity=identity,
+        )
+        replacement = Interface.objects.create(device=self.device_b, name="eth9", type="1000base-t")
+        occupied_peer = Interface.objects.create(device=self.device_a, name="eth9", type="1000base-t")
+        self.connect(occupied_peer, replacement)
+        self.save_resolution(DEVICE_B, replacement)
+
+        unit = self.unit(direct_path())
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.termination_occupied", self.codes(unit))
+        self.assertIn("cable.segment_override_lost", self.codes(unit))
+        self.assertEqual(unit.changes, ())
+
+    def test_an_unresolved_pair_does_not_claim_that_its_override_was_lost(self):
+        """An unproven path does not establish that its stored pair changed to another pair."""
+        identity = self.identity_of(patched_path())
+        self.force(
+            self.panel_1_rear,
+            self.panel_2_rear,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            trace_identity=identity,
+            segment_index=1,
+        )
+        PortMapping.objects.filter(front_port=self.panel_1_fronts[0]).delete()
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.INVALID)
+        self.assertIn("cable.pass_through_not_mapped", self.codes(unit))
+        self.assertNotIn("cable.segment_override_lost", self.codes(unit))
+        self.assertEqual(unit.changes, ())
+
+    def test_endpoint_evidence_confirms_that_a_stored_segment_override_was_lost(self):
+        """A trace that now states no segments cannot retain a segment policy override."""
+        self.connect(self.eth0, self.eth1)
+        content = trace_workbook_bytes(
+            include_path=False,
+            include_list=True,
+            list_blocks=(
+                (
+                    trace_endpoint_line(DEVICE_A),
+                    trace_endpoint_line(DEVICE_B),
+                    (("", "", "", "DEV-A", "", "eth0", "Port", "Ignored"),),
+                ),
+            ),
+        )
+        document = SourceDocument.store(profile=self.profile, content=content)
+        before = ImportEngine.plan(self.profile, document, self.actor, self.planning_context).units[0]
+        self.force(
+            self.eth0,
+            self.eth1,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            trace_identity=before.display["trace_identity"],
+        )
+
+        unit = ImportEngine.plan(self.profile, document, self.actor, self.planning_context).units[0]
+
+        self.assertEqual(unit.disposition, Disposition.NO_OP)
+        self.assertIn("cable.segment_override_lost", self.codes(unit))
+        self.assertEqual(unit.changes, ())
+
     def test_a_segment_that_only_moved_position_keeps_its_override_and_reports_nothing(self):
         """A trace identity names its endpoints, so a revised path renumbers every segment after it."""
         self.make_panel("PANEL-3")
