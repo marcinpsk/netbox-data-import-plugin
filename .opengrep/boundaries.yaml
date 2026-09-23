@@ -104,4 +104,6 @@ rules:
     paths:
       exclude:
         - "tests/"
-    pattern: '$JOB.data = {..., "accepted_plan": $PLAN, ...}'
+    pattern-either:
+      - pattern: '$JOB.data = {..., "accepted_plan": $PLAN, ...}'
+      - pattern: '$JOB.data["accepted_plan"] = $PLAN'

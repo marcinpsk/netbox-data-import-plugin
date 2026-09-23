@@ -1150,7 +1150,8 @@ class _CableBatch:
     def _decide(self) -> None:
         """Settle the Cable policy and the write permissions every actionable trace needs."""
         for analysis in self.analyses:
-            if not analysis.trace.segments or analysis.segment_pairs_resolved:
+            # A refused Segment Evidence block also leaves no segments, and states no path at all.
+            if (analysis.trace.valid and not analysis.trace.segments) or analysis.segment_pairs_resolved:
                 self._report_lost_overrides(analysis)
             if analysis.stopped or not analysis.endpoints:
                 continue

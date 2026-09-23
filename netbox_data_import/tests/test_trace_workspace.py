@@ -2470,6 +2470,83 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
         override.refresh_from_db()
         self.assertEqual(override.cable_type, "mmf-om4")
 
+    def assert_refused_on_the_trace(self, route, trace, data):
+        """Post one write NetBox object permissions refuse, and require the same trace and preview."""
+        revision = self.client.session[PREVIEW_REVISION_SESSION_KEY]
+        refused = self.client.post(
+            reverse(route),
+            {"preview_revision": revision, "trace": trace.identity, **data},
+            follow=True,
+        )
+        self.assertEqual(refused.redirect_chain[-1][0], _trace_workspace_url(trace.identity))
+        self.assertContains(refused, "Permission denied: this action is outside your NetBox object permissions.")
+        self.assertEqual(refused.context["selected_trace"].identity, trace.identity)
+        self.assertEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], revision)
+
+    def test_a_refused_cableclass_policy_write_returns_to_its_trace(self):
+        """A readable mapping the viewer may not change refuses in the workspace, not the flat preview."""
+        trace = self.open_workspace().context["selected_trace"]
+        self.set_mapping_actions(["view"])
+
+        self.assert_refused_on_the_trace(
+            "plugins:netbox_data_import:trace_cable_policy",
+            trace,
+            {"cable_class": "Patch", "cable_type": "mmf-om4", "cable_profile": "single-1c1p"},
+        )
+
+        self.assertEqual(CableClassMapping.objects.get(profile=self.profile, cable_class="Patch").cable_type, "cat6")
+
+    def test_refused_segment_override_writes_return_to_their_trace(self):
+        """Both the force and the clear of one override refuse back onto the trace they came from."""
+        trace = self.open_workspace().context["selected_trace"]
+        self.set_override_actions(["view"])
+
+        self.assert_refused_on_the_trace(
+            "plugins:netbox_data_import:trace_segment_policy",
+            trace,
+            {"segment": 0, "cable_type": "mmf-om4", "cable_profile": "single-1c1p"},
+        )
+        self.assertFalse(CableSegmentOverride.objects.exists())
+
+        self.set_override_actions(["view", "add", "change"])
+        forced = self.client.post(
+            reverse("plugins:netbox_data_import:trace_segment_policy"),
+            {
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+                "trace": trace.identity,
+                "segment": 0,
+                "cable_type": "mmf-om4",
+                "cable_profile": "single-1c1p",
+            },
+            follow=True,
+        )
+        self.assertEqual(forced.status_code, 200)
+        self.assert_refused_on_the_trace(
+            "plugins:netbox_data_import:trace_segment_policy", trace, {"segment": 0, "clear": "1"}
+        )
+        self.assertTrue(CableSegmentOverride.objects.exists())
+
+    def test_a_refused_termination_decision_returns_to_its_trace(self):
+        """A viewer without TerminationResolution grants stays on the trace whose port it picked."""
+        trace = self.open_workspace(
+            direct_path(
+                from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
+                to_end=trace_termination("DEV-B", "", "eth1", "Port"),
+            )
+        ).context["selected_trace"]
+
+        self.assert_refused_on_the_trace(
+            "plugins:netbox_data_import:trace_resolve_termination",
+            trace,
+            {
+                "field_key": termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface"),
+                "object_type": "dcim.interface",
+                "object_id": self.eth0.pk,
+            },
+        )
+
+        self.assertFalse(TerminationResolution.objects.exists())
+
     def test_a_hidden_mapping_created_after_preview_cannot_populate_or_accept_the_form(self):
         """A live row absent from the cached plan cannot borrow authority from Unresolved text."""
         CableClassMapping.objects.filter(profile=self.profile, cable_class="Patch").delete()

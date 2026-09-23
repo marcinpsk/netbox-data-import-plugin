@@ -1346,6 +1346,27 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
         self.assertNotIn("cable.segment_override_lost", self.codes(unit))
         self.assertEqual(unit.changes, ())
 
+    def test_refused_segment_evidence_does_not_claim_that_its_override_was_lost(self):
+        """A trace whose Segment Evidence rows were refused states an unknown path, not an empty one."""
+        self.force(
+            self.eth0,
+            self.eth1,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            trace_identity=self.identity_of(direct_path()),
+        )
+        unreadable = (
+            trace_endpoint_line(DEVICE_A),
+            trace_endpoint_line(DEVICE_B),
+            (trace_segment(DEVICE_A, "", DEVICE_B),),
+        )
+
+        unit = self.unit(unreadable)
+
+        self.assertEqual(unit.display["trace_identity"], self.identity_of(direct_path()))
+        self.assertIn("trace.incomplete_block", self.codes(unit))
+        self.assertNotIn("cable.segment_override_lost", self.codes(unit))
+
     def test_endpoint_evidence_confirms_that_a_stored_segment_override_was_lost(self):
         """A trace that now states no segments cannot retain a segment policy override."""
         self.connect(self.eth0, self.eth1)

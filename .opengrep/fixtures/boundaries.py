@@ -22,6 +22,11 @@ def job_data_exposes_accepted_plan(job, plan):
     job.data = {"phase": "queued", "accepted_plan": plan}
 
 
+def job_data_key_exposes_accepted_plan(job, plan):
+    # ruleid: nbdi-job-data-excludes-accepted-plan
+    job.data["accepted_plan"] = plan
+
+
 def queued_worker_receives_accepted_plan(runner, plan):
     # ok: nbdi-job-data-excludes-accepted-plan
     return runner.enqueue(accepted_plan=plan)

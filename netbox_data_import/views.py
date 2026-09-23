@@ -1617,7 +1617,11 @@ class _PermissionScopedWriteMixin:
         if getattr(self, "permission_denied_response_format", "redirect") == "json" or _wants_json(request):
             return JsonResponse({"ok": False, "error": error}, status=status)
         messages.error(request, error)
-        return redirect(_safe_next_url(request, "plugins:netbox_data_import:import_preview"))
+        return redirect(self.refusal_url(request))
+
+    def refusal_url(self, request):
+        """Return the page a refused form write goes back to."""
+        return _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
 
 class ImportRunView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
@@ -3882,7 +3886,7 @@ def _workspace_device_questions(workspace) -> dict[str, dict]:
 
 
 def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Return findings once per message in their first-seen order."""
+    """Return findings once per message in first-seen order, keeping every lost override."""
     messages: set[str] = set()
     unique: list[dict[str, str]] = []
     for finding in findings:
@@ -3972,6 +3976,10 @@ class _TraceWorkspaceMixin:
             "tenant_id": context.get("tenant_id"),
         }
         return profile, document, workspace, planning_context
+
+    def refusal_url(self, request):
+        """Return the trace a refused workspace write came from, so the selection survives."""
+        return _trace_workspace_url(request.POST.get("trace", ""))
 
     def discard_unavailable_target(self, request):
         """Return the response that ends a request whose saved import target is gone."""

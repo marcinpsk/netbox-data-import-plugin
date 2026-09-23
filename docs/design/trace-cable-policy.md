@@ -50,7 +50,7 @@ House rules that bind this design:
 5. No media family list appears in plugin source. The families come from
    `dcim.choices.CableTypeChoices.CHOICES` group labels.
 6. A stored policy value the running instance no longer offers still blocks with
-   `cable.cableclass_stale_mapping`.
+   `cable.policy_stale`.
 
 ### Evidence
 
