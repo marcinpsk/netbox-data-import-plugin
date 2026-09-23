@@ -3038,7 +3038,7 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
             plan = self.plan(patched_path())
 
         self.assertTrue(renamed, "the plan did not read the reviewed tags")
-        self.assertEqual(plan.units[0].display["trace"]["logical_cable"]["tags"], ["Before"])
+        self.assertEqual(list(plan.units[0].display["trace"]["logical_cable"]["tags"]), ["Before"])
         self.assertEqual(Tag.objects.get(pk=tag.pk).name, "After")
 
     def test_deletion_holds_its_termination_rows_through_the_snapshot(self):
