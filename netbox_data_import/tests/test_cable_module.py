@@ -2979,6 +2979,72 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
             ).exists()
         )
 
+    def test_a_queued_tag_writer_cannot_commit_after_logical_cable_deletion(self):
+        """A writer waiting through deletion fails without leaving an orphan tag."""
+        from queue import Queue
+        from threading import Event, Thread
+        from time import monotonic, sleep
+
+        from django.db import connection, connections
+        from django.db.models.signals import pre_delete
+
+        logical = self.connect(self.eth0, self.eth1)
+        tag = Tag.objects.create(name="Queued", slug="queued")
+        cable_type = ObjectType.objects.get_for_model(Cable)
+        plan = self.plan(patched_path())
+        ready = Event()
+        outcome = Queue()
+        worker = None
+        observed_wait = []
+
+        def add_tag():
+            connections["default"].close()
+            try:
+                with transaction.atomic():
+                    with connection.cursor() as cursor:
+                        cursor.execute("SELECT pg_backend_pid()")
+                        outcome.put(cursor.fetchone()[0])
+                    ready.set()
+                    TaggedItem.objects.create(content_type=cable_type, object_id=logical.pk, tag=tag)
+            except IntegrityError as exc:
+                outcome.put(getattr(exc.__cause__, "sqlstate", None))
+            else:
+                outcome.put("committed")
+            finally:
+                connections["default"].close()
+
+        def queue_writer_at_delete(sender, instance, **kwargs):
+            nonlocal worker
+            if instance.pk != logical.pk or worker is not None:
+                return
+            worker = Thread(target=add_tag, daemon=True)
+            worker.start()
+            self.assertTrue(ready.wait(timeout=5), "the tag writer did not start")
+            writer_pid = outcome.get_nowait()
+            deadline = monotonic() + 5
+            while monotonic() < deadline:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s", [writer_pid])
+                    if cursor.fetchone()[0] == "Lock":
+                        observed_wait.append(True)
+                        return
+                sleep(0.01)
+            self.fail("the tag writer did not wait for the locked Cable")
+
+        pre_delete.connect(queue_writer_at_delete, sender=Cable, weak=False)
+        try:
+            self.execute(plan)
+        finally:
+            pre_delete.disconnect(queue_writer_at_delete, sender=Cable)
+            if worker is not None:
+                worker.join(timeout=10)
+
+        self.assertEqual(observed_wait, [True])
+        self.assertIsNotNone(worker)
+        self.assertFalse(worker.is_alive(), "the tag writer did not finish after deletion")
+        self.assertEqual(outcome.get_nowait(), "23503")
+        self.assertFalse(TaggedItem.objects.filter(content_type=cable_type, object_id=logical.pk).exists())
+
     def test_deletion_holds_existing_tag_associations_through_the_review(self):
         """An existing Cable tag cannot be removed after execution reviews it."""
         from django.db import OperationalError, connection
