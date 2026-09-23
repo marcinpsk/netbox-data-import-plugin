@@ -251,6 +251,12 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.assertEqual(setup.status_code, 200)
         return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
+    def test_workspace_disables_browser_history_snapshot(self):
+        """The browser must not retain a trace preview after another operator opens it."""
+        response = self.open_workspace(patched_path())
+
+        self.assertEqual(response.content.count(b'hx-history="false"'), 1)
+
     def test_trace_setup_opens_the_trace_workspace_directly(self):
         """A trace-only profile starts on its review surface instead of the flat preview."""
         self.client.force_login(self.actor)

@@ -38,6 +38,7 @@
   .ndi-trace-reason { color: var(--tblr-secondary); font-size: .8rem; }
 </style>
 
+<div hx-history="false">
 <h1 class="page-title mb-3">Trace Review Workspace</h1>
 
 <div class="{% if drift %}alert alert-warning{% else %}card mb-3 p-2{% endif %}
@@ -527,4 +528,5 @@
 <script src="{% static 'netbox_data_import/js/trace_picker_search.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_device_picker.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_termination_picker.js' %}?v={{ plugin_version }}"></script>
+</div>
 {% endblock %}
