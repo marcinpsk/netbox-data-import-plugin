@@ -289,3 +289,40 @@ class MigrationGraphResolvesWithoutReplacementTest(SimpleTestCase):
         self.assertEqual(
             reports, ["0002_later -> extras.9999_absent (initial=False, newest live extras ancestor=0001_squashed)"]
         )
+
+
+class CableTagIntegrityMigrationTest(TransactionTestCase):
+    """The Cable tag migration rejects existing orphan relations atomically."""
+
+    def test_orphan_cable_tag_refuses_upgrade_without_partial_schema(self):
+        from core.models import ObjectType
+        from dcim.models import Cable
+        from django.db import IntegrityError
+        from extras.models import Tag, TaggedItem
+
+        previous = (APP, "0037_cablesegmentoverride")
+        leaf = (APP, "0038_cable_tag_integrity")
+        orphan_pk = None
+
+        def restore_leaf():
+            if orphan_pk is not None:
+                TaggedItem.objects.filter(pk=orphan_pk).delete()
+            MigrationExecutor(connection).migrate([leaf])
+
+        self.addCleanup(restore_leaf)
+        tag = Tag.objects.create(name="Orphan upgrade", slug="orphan-upgrade")
+        cable_type = ObjectType.objects.get_for_model(Cable)
+        MigrationExecutor(connection).migrate([previous])
+        orphan_pk = TaggedItem.objects.create(tag=tag, content_type=cable_type, object_id=2_147_483_647).pk
+
+        with self.assertRaises(IntegrityError) as raised:
+            MigrationExecutor(connection).migrate([leaf])
+
+        self.assertEqual(getattr(raised.exception.__cause__, "sqlstate", None), "23503")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name = 'extras_taggeditem' AND column_name = 'ndi_cable_id'"
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)
+        self.assertTrue(TaggedItem.objects.filter(pk=orphan_pk).exists())
