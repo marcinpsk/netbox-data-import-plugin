@@ -349,6 +349,11 @@ class SynchronizationUnit:
         )
 
 
+def is_current_schema_version(version: Any) -> bool:
+    """Return whether a serialized plan's ``schema_version`` is the one this release executes."""
+    return isinstance(version, int) and not isinstance(version, bool) and version == SCHEMA_VERSION
+
+
 @dataclass(frozen=True)
 class ImportPlan:
     """A serializable plan: units, diagnostics, and the inputs its fingerprint covers."""
@@ -443,7 +448,7 @@ class ImportPlan:
         """
         try:
             version = data.get("schema_version")
-            if not isinstance(version, int) or isinstance(version, bool) or version != SCHEMA_VERSION:
+            if not is_current_schema_version(version):
                 raise PlanSchemaMismatch(f"Import Plan schema version {version} is not version {SCHEMA_VERSION}.")
             return cls(
                 units=tuple(SynchronizationUnit.from_dict(item) for item in data["units"]),
@@ -547,5 +552,6 @@ __all__ = (
     "canonical_json",
     "executable_units",
     "fingerprint_of",
+    "is_current_schema_version",
     "merge_changes",
 )

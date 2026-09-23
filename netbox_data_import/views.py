@@ -122,7 +122,7 @@ from .import_engine import (
 from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
 from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
-from .plan import ImportPlan, PlanError, PlanSchemaMismatch, fingerprint_of
+from .plan import ImportPlan, PlanError, fingerprint_of, is_current_schema_version
 from .review_workspace import (
     IneligibleDeviceSelection,
     PROFILE_POLICY_MOVED,
@@ -3910,13 +3910,8 @@ def _rebuild_schema_rejected_preview(request) -> None:
     stored = request.session.get(PREVIEW_PLAN_SESSION_KEY)
     if request.session.get("import_preview_pending") is not True or not isinstance(stored, dict):
         return
-    try:
-        ImportPlan.from_dict(stored)
-    except PlanSchemaMismatch:
-        pass
-    except PlanError:
-        return
-    else:
+    # Any other unreadable plan is refused by `load_cached_preview`, which parses it anyway.
+    if is_current_schema_version(stored.get("schema_version")):
         return
     context = request.session.get("import_context") or {}
     profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=context.get("profile_id")).first()
