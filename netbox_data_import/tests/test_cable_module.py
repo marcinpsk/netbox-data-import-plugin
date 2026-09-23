@@ -2979,6 +2979,44 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
             ).exists()
         )
 
+    def test_deletion_holds_existing_tag_associations_through_the_review(self):
+        """An existing Cable tag cannot be removed after execution reviews it."""
+        from django.db import OperationalError, connection
+        from django.db.models.signals import pre_delete
+
+        logical = self.connect(self.eth0, self.eth1)
+        tag = Tag.objects.create(name="Reviewed", slug="reviewed")
+        logical.tags.add(tag)
+        association = TaggedItem.objects.get(content_type=ObjectType.objects.get_for_model(Cable), object_id=logical.pk)
+        plan = self.plan(patched_path())
+        observed = []
+        blocked_sqlstates = []
+
+        def remove_tag_during_delete(sender, instance, **kwargs):
+            if instance.pk != logical.pk or observed:
+                return
+            observed.append(True)
+
+            def remove_tag():
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout TO '750ms'")
+                try:
+                    TaggedItem.objects.filter(pk=association.pk).delete()
+                except OperationalError as exc:
+                    blocked_sqlstates.append(getattr(exc.__cause__, "sqlstate", None))
+
+            with run_on_separate_connection(remove_tag):
+                pass
+
+        pre_delete.connect(remove_tag_during_delete, sender=Cable, weak=False)
+        try:
+            self.execute(plan)
+        finally:
+            pre_delete.disconnect(remove_tag_during_delete, sender=Cable)
+
+        self.assertTrue(observed, "the Logical Cable deletion was not reached")
+        self.assertEqual(blocked_sqlstates, ["55P03"])
+
     def test_deletion_holds_its_termination_rows_through_the_snapshot(self):
         """A Logical Cable termination cannot move after deletion records its reviewed state."""
         from django.db.models.signals import pre_delete
