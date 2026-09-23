@@ -98,11 +98,6 @@ def start_new_preview(session, plan) -> str:
     return _store_preview(session, plan)
 
 
-def restore_preview_plan(session, plan_data) -> None:
-    """Adopt the accepted plan a failed Job stored, so its preview can be reviewed again."""
-    session[PREVIEW_PLAN_SESSION_KEY] = plan_data
-
-
 def clear_preview_state(session) -> None:
     """Drop the stored plan, for a preview that is being discarded."""
     session.pop(PREVIEW_PLAN_SESSION_KEY, None)

@@ -1140,7 +1140,7 @@ class RetainedTraceSyncTest(CableTopologyMixin, TestCase):
             job_timeout=3600,
             profile_id=self.profile.pk,
             source_document_id=first.data["source_document_id"],
-            accepted_plan=first.data["accepted_plan"],
+            accepted_plan=self.client.session[PREVIEW_PLAN_SESSION_KEY],
             selection=[],
             idempotency_key="rival-selection",
         )
@@ -2297,7 +2297,8 @@ class TraceWorkspaceCableDisclosureTest(CableTopologyMixin, TransactionTestCase)
         )
 
         self.assertEqual(response.status_code, 302)
-        stored = Job.objects.latest("pk").data["accepted_plan"]
+        stored = Job.objects.latest("pk").data
+        self.assertNotIn("accepted_plan", stored)
         assert_absent_from(self, stored, label)
         assert_absent_from(self, stored, description)
         assert_absent_from(self, stored, tag_name)
@@ -2973,6 +2974,29 @@ class TraceWorkspaceSegmentOverrideTest(CableTopologyMixin, TransactionTestCase)
             str(uuid.uuid4()),
             self.actor,
         )
+
+    def test_queued_job_keeps_policy_values_in_worker_input_only(self):
+        """Job readers cannot see the reviewed policy that the worker must apply."""
+        from core.models import Job
+        from django_rq import get_queue
+
+        trace = self.open_workspace(patched_path()).context["selected_trace"]
+        self.force_segment(trace=trace.identity, segment=0, cable_type="mmf-om4", cable_profile="single-1c1p")
+        accepted = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        self.assertIn("mmf-om4", repr(accepted))
+
+        queued = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {"identity": trace.identity, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
+        )
+
+        self.assertEqual(queued.status_code, 302)
+        job = Job.objects.latest("pk")
+        rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
+        self.assertIn("mmf-om4", repr(rq_job.kwargs["accepted_plan"]))
+        self.assertNotIn("accepted_plan", job.data)
+        assert_absent_from(self, job.data, "mmf-om4")
+        assert_absent_from(self, job.data, "single-1c1p")
 
     def test_one_cableclass_writes_two_media_once_a_segment_is_forced(self):
         """The reported case: one label names multimode on this path and something else elsewhere."""

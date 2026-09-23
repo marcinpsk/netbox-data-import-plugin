@@ -357,7 +357,6 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
             queue_name="default",
             data={
                 "job_type": "netbox_data_import.import",
-                "accepted_plan": session["import_plan"],
                 "context_data": session["import_context"],
                 "source_document_id": self.document.pk,
             },

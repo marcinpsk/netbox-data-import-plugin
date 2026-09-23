@@ -107,7 +107,6 @@ from .preview_row_actions import (
     mark_preview_dirty,
     pending_preview_payload,
     record_recalculated_preview,
-    restore_preview_plan,
     retained_sync_block_reason,
     retire_preview_revision,
     start_new_preview,
@@ -1484,9 +1483,7 @@ def _import_job_progress(job, preview_blocked=False, source_rows_available=False
         "is_active": job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES,
         "is_completed": job.status == JobStatusChoices.STATUS_COMPLETED,
         "is_failed": job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED),
-        "preview_available": bool(data.get("accepted_plan"))
-        and isinstance(data.get("context_data"), dict)
-        and source_rows_available,
+        "preview_available": isinstance(data.get("context_data"), dict) and source_rows_available,
         "preview_blocked": preview_blocked,
         "message": data.get("message") or "",
     }
@@ -1500,16 +1497,17 @@ def _restore_import_session(request, job):
     if request.session.get("import_background_job_id") != job.pk:
         request.session["import_background_job_id"] = job.pk
     preview_is_pending = request.session.get("import_preview_pending") is True
-    failed_preview_available = job.status in (
-        JobStatusChoices.STATUS_FAILED,
-        JobStatusChoices.STATUS_ERRORED,
-    ) and (
-        data.get("accepted_plan")
+    failed_preview_available = (
+        job.status
+        in (
+            JobStatusChoices.STATUS_FAILED,
+            JobStatusChoices.STATUS_ERRORED,
+        )
         and isinstance(data.get("context_data"), dict)
         and _import_source_rows_available(request, job)
     )
     if failed_preview_available and not preview_is_pending:
-        restore_preview_plan(request.session, data["accepted_plan"])
+        clear_preview_state(request.session)
         request.session["import_context"] = data["context_data"]
         request.session["import_preview_pending"] = True
         request.session["import_preview_source_job_id"] = job.pk
@@ -1573,7 +1571,6 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
                 "profile_id": profile.pk,
                 "profile_name": profile.name,
                 "source_document_id": document.pk,
-                "accepted_plan": execution_plan_data,
                 "context_data": ctx_data,
                 # What makes this Job hold the preview, so the guard finds it without the session.
                 "keeps_preview": keep_preview,
