@@ -3017,6 +3017,30 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
         self.assertTrue(observed, "the Logical Cable deletion was not reached")
         self.assertEqual(blocked_sqlstates, ["55P03"])
 
+    def test_the_review_displays_the_tag_names_its_deletion_fingerprint_covers(self):
+        """A rename between planning reads cannot change only the operator's review."""
+        from django.db import connection
+
+        logical = self.connect(self.eth0, self.eth1)
+        tag = Tag.objects.create(name="Before", slug="before")
+        logical.tags.add(tag)
+        renamed = []
+
+        def rename_after_first_tag_read(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if not renamed and '"extras_tag"."name"' in sql and '"extras_taggeditem"' in sql:
+                renamed.append(True)
+                with run_on_separate_connection(lambda: Tag.objects.filter(pk=tag.pk).update(name="After")):
+                    pass
+            return result
+
+        with connection.execute_wrapper(rename_after_first_tag_read):
+            plan = self.plan(patched_path())
+
+        self.assertTrue(renamed, "the plan did not read the reviewed tags")
+        self.assertEqual(plan.units[0].display["trace"]["logical_cable"]["tags"], ["Before"])
+        self.assertEqual(Tag.objects.get(pk=tag.pk).name, "After")
+
     def test_deletion_holds_its_termination_rows_through_the_snapshot(self):
         """A Logical Cable termination cannot move after deletion records its reviewed state."""
         from django.db.models.signals import pre_delete
