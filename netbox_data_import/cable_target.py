@@ -921,6 +921,27 @@ class _CableBatch:
         for row in terminations:
             label = _object_type_label(row.termination_type.model_class())
             sides.setdefault(row.cable_id, {"A": set(), "B": set()})[row.cable_end].add((label, row.termination_id))
+        if self.lock_plan_references:
+            from core.models import ObjectType
+            from django.db import connection
+            from extras.models import TaggedItem
+
+            associations = list(
+                TaggedItem.objects.filter(
+                    content_type_id=ObjectType.objects.get_for_model(Cable).pk,
+                    object_id__in=sorted(cable_ids),
+                )
+                .order_by("pk")
+                .select_for_update(of=("self",))
+            )
+            tag_ids = sorted({association.tag_id for association in associations})
+            if tag_ids:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT id FROM extras_tag WHERE id = ANY(%s) ORDER BY id FOR SHARE",
+                        [tag_ids],
+                    )
+                    cursor.fetchall()
         for cable in locked:
             ends = sides.get(cable.pk, {"A": set(), "B": set()})
             existing = _ExistingCable(cable=cable, a_side=frozenset(ends["A"]), b_side=frozenset(ends["B"]))
