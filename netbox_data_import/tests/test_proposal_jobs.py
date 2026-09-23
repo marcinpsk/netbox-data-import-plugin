@@ -130,12 +130,14 @@ class WorkerFixture:
         )
 
     @contextmanager
-    def configured(self, api_root, allowlist, *, fallback=False, vault_status=200, secret=SECRET):
+    def configured(self, api_root, allowlist, *, fallback=False, vault_status=200, secret=SECRET, candidate_limit=None):
         with serving_vault(status=vault_status, payload={"data": {"data": {"api_key": secret}}}) as (
             vault_settings,
             vault_seen,
         ):
             config = {"inference_backend_origin_allowlist": allowlist, "vault": vault_settings}
+            if candidate_limit is not None:
+                config["inference_proposal_candidate_limit"] = candidate_limit
             row = make_row(api_root=api_root, connect_timeout=2, read_timeout=2)
             if fallback:
                 config["inference_backend"] = {
@@ -203,7 +205,8 @@ class ProposalPageTest(WorkerFixture, ProposalFixture):
         del stored["page_size"]
         ResolutionProposal.objects.filter(pk=proposal.pk).update(candidate_snapshot=stored)
 
-        with serving() as (root, seen, allowed), self.configured(root, allowed):
+        # A limit below the three candidates, so a default taken from the configuration shows.
+        with serving() as (root, seen, allowed), self.configured(root, allowed, candidate_limit=2):
             run_proposal(proposal.pk)
 
         sent = json.loads(json.loads([call for call in seen if call["body"]][-1]["body"])["messages"][-1]["content"])
