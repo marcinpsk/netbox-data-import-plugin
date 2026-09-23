@@ -117,6 +117,30 @@ def test_flags_patching_the_proposal_eligible_set_limit_with_a_real_replacement(
     ]
 
 
+def test_flags_keyword_form_policy_patches():
+    src = (
+        "from unittest.mock import patch\n"
+        "from netbox_data_import import inference_backend\n"
+        "patch.object(target=inference_backend, attribute='proposal_eligible_set_limit', new=lambda: 1)\n"
+        "patch(target='netbox_data_import.inference_backend.proposal_eligible_set_limit', new=lambda: 1)\n"
+    )
+    assert [(hit.kind, hit.mock) for hit in scan_source(src)] == [
+        ("policy-patch", "inference_backend.proposal_eligible_set_limit"),
+        ("policy-patch", "netbox_data_import.inference_backend.proposal_eligible_set_limit"),
+    ]
+
+
+def test_flags_keyword_form_first_party_patch_targets():
+    src = (
+        "from unittest.mock import DEFAULT, patch\n"
+        "from netbox_data_import import views\n"
+        "patch.object(target=views, attribute='helper')\n"
+        "patch(target='netbox_data_import.views.helper')\n"
+        "patch.multiple(target='netbox_data_import.views', helper=DEFAULT)\n"
+    )
+    assert [hit.kind for hit in scan_source(src)] == ["patch", "patch", "patch"]
+
+
 def test_ignores_a_first_party_alias_rebound_to_a_third_party_module():
     """`views = requests` inside a test makes the patch an external boundary, not our own code."""
     src = (

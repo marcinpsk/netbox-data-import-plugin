@@ -260,7 +260,7 @@ class ProposalPresentation:
             "attempt_count": len(metadata.get("attempts", [])),
             "job_status": self.job_status(proposal) if pending else "",
             "job_note": self.job_note(proposal) if pending else "",
-            "page_status": self.page_status(offered),
+            "page_status": self.page_status(offered) if completed else "",
             "actions": actions,
         }
 

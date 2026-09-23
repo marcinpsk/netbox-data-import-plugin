@@ -249,13 +249,16 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
     def test_a_queued_card_reports_where_its_background_job_is(self):
         """A job no worker has taken reads exactly like one that started, which is the whole bug."""
         self.operator()
-        self.request_proposal()
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.request_proposal()
 
         card = self.card()
 
         self.assertIn("Pending", card["job_status"])
         self.assertIn("requested", card["job_status"])
         self.assertEqual(card["job_note"], "")
+        self.assertEqual(card["page_status"], "")
 
     def test_a_card_names_a_background_job_that_ended_without_a_result(self):
         """A worker killed mid-run leaves the attempt active forever, with nothing else to show it."""
