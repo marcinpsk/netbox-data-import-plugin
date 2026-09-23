@@ -466,6 +466,7 @@ class _CableBatch:
         self.lock_plan_references = lock_plan_references
         self.analyses = [self._new_analysis(trace) for trace in traces]
         self._objects: dict[tuple[str, int], Any] = {}
+        self._visible: dict[tuple[str, int], bool] = {}
         self._components: dict[tuple[int, str], dict[str, list]] = {}
         self._resolved: dict[str, dict[tuple, _Termination]] = {}
         self._mappings_by_front: dict[int, list] = {}
@@ -980,9 +981,19 @@ class _CableBatch:
             terminations.extend(segment.terminations)
         return terminations
 
+    def _may_view(self, row: Any) -> bool:
+        """Return whether the actor may read one row, asking NetBox once per row in this batch."""
+        if self.actor is None:
+            return True
+        key = (row._meta.label_lower, row.pk)
+        if key not in self._visible:
+            # NetBox answers each object-level check with its own query.
+            self._visible[key] = self.actor.has_perm(f"{row._meta.app_label}.view_{row._meta.model_name}", row)
+        return self._visible[key]
+
     def _cable_diagnostic_disclosure(self, cable: Any) -> tuple[dict[str, Any], tuple[str, ...]]:
         """Return the diagnostic fields and identity the actor may see for one Cable."""
-        cable_visible = self.actor is None or self.actor.has_perm("dcim.view_cable", cable)
+        cable_visible = self._may_view(cable)
         if not cable_visible:
             return {"cable_visible": False}, ()
         from .cable_disclosure import disclosed_cable
@@ -1138,7 +1149,7 @@ class _CableBatch:
                 "cable.segment_override_lost",
                 disclosed_policy(
                     stored,
-                    self.actor,
+                    self._may_view(stored),
                     {
                         "segment_index": stored.segment_index,
                         "cable_type": stored.cable_type_display(),
@@ -1210,7 +1221,7 @@ class _CableBatch:
                     policy = decided
             policy = policy or {}
             cable_type, cable_profile = policy.get("cable_type") or "", policy.get("cable_profile") or ""
-            disclosure = disclosed_policy(row, self.actor, {}) if row is not None else {}
+            disclosure = disclosed_policy(row, self._may_view(row), {}) if row is not None else {}
             visible = DISCLOSURE_SOURCE in disclosure
             source = disclosure.get(DISCLOSURE_SOURCE)
             origin = "policy"
@@ -1343,7 +1354,7 @@ class _CableBatch:
                     "cable.resolved_segment_conflict",
                     disclosed_policy(
                         row,
-                        self.actor,
+                        self._may_view(row),
                         {
                             "segment_index": segment.index,
                             "cable_type": policy["cable_type"],
@@ -1472,7 +1483,7 @@ class _CableBatch:
             "cable_profile": "Unresolved" if row is None else row.cable_profile_display(),
             "policy": (None if row is None else row.decided_policy()) or {},
         }
-        return display if row is None else disclosed_policy(row, self.actor, display)
+        return display if row is None else disclosed_policy(row, self._may_view(row), display)
 
     def _policy_display(self, planned: _DesiredSegment | None) -> dict:
         """Return the Cable policy in force for one resolved segment, and whether it is an override."""
@@ -1489,7 +1500,7 @@ class _CableBatch:
             # The stored values, not their labels, so the workspace can offer what is in force.
             "policy": (None if row is None else row.decided_policy()) or {},
         }
-        return display if row is None else disclosed_policy(row, self.actor, display)
+        return display if row is None else disclosed_policy(row, self._may_view(row), display)
 
     @staticmethod
     def _entered_through_claim(planned: _DesiredSegment | None, stated: _Termination | None) -> bool:

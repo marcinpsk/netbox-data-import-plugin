@@ -115,17 +115,18 @@ def latest_proposal(*, profile, task_type, field_key):
 def next_page_offset(*, profile, task_type, field_key, inventory) -> int:
     """Return where the next request starts: after the last page that used itself up.
 
-    Any other last attempt, evidence that has moved since, or a page that already reached the end,
-    starts the search again at the first candidate. Freshness is the same read the card shows, so
-    the offer and the request cannot disagree: a replaced Device renumbers every page just as a
-    changed candidate set does, even when the ports themselves moved across unchanged.
+    Any other last attempt leaves its page unfinished, so the request asks that page again.
+    Evidence that has moved since, or a used-up page that reached the end, starts the search again
+    at the first candidate. Freshness is the same read the card shows, so the offer and the request
+    cannot disagree: a replaced Device renumbers every page just as a changed candidate set does,
+    even when the ports themselves moved across unchanged.
     """
     previous = latest_proposal(profile=profile, task_type=task_type, field_key=field_key)
-    if previous is None or not page_exhausted(previous):
-        return 0
-    if proposal_inventory_staleness(previous, inventory).is_stale:
+    if previous is None or proposal_inventory_staleness(previous, inventory).is_stale:
         return 0
     offered = CandidateSnapshot.from_json(previous.candidate_snapshot)
+    if not page_exhausted(previous):
+        return offered.page_offset
     return offered.page_end if offered.has_next_page else 0
 
 

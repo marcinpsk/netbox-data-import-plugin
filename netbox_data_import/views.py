@@ -3706,10 +3706,7 @@ POLICY_SAVE_PERMISSION_REFUSED = "You do not have permission to save this CableC
 
 
 def _cable_policy_forms(profile, trace, viewer) -> list:
-    """Return the Cable policy in force for each CableClass the selected trace states, once each.
-
-    The CableClass values come from the plan's own segments, so a cached plan needs no new key.
-    """
+    """Return one policy form per CableClass in the selected trace's `cable_policies` display."""
     if trace is None:
         return []
     planned = {policy["cable_class"]: policy for policy in trace.cable_policies}
@@ -3803,7 +3800,8 @@ def _segment_policy_forms(profile, trace, viewer) -> list:
     forms = []
     for segment in trace.segments:
         stored = rows.get(segment["segment_key"])
-        deciding = stored or mappings_by_class.get(segment["cable_class"])
+        # An unplanned segment carries no policy disclosure, so no row can have moved under it.
+        deciding = (stored or mappings_by_class.get(segment["cable_class"])) if segment["segment_key"] else None
         visible_ids = visible_overrides if stored is not None else visible_mappings
         visible = deciding is None or deciding.pk in visible_ids
         disclosed = deciding is not None and visible and policy_row_is_disclosed(segment, deciding)

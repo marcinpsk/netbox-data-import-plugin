@@ -107,3 +107,7 @@ rules:
     pattern-either:
       - pattern: '$JOB.data = {..., "accepted_plan": $PLAN, ...}'
       - pattern: '$JOB.data["accepted_plan"] = $PLAN'
+      - pattern: '$JOB.data.update({..., "accepted_plan": $PLAN, ...})'
+      - pattern: '$JOB.data.update(..., accepted_plan=$PLAN, ...)'
+      - pattern: '$JOB.data |= {..., "accepted_plan": $PLAN, ...}'
+      - pattern: '$JOB.data.setdefault("accepted_plan", $PLAN)'

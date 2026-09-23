@@ -138,10 +138,9 @@ def policy_row_kind(row) -> str:
     raise TypeError(f"Unsupported Cable policy row: {type(row).__name__}")
 
 
-def disclosed_policy(row, viewer, display: dict) -> dict:
+def disclosed_policy(row, visible: bool, display: dict) -> dict:
     """Return policy display values only when the planning viewer may read their row."""
-    permission = f"{row._meta.app_label}.view_{row._meta.model_name}"
-    if viewer is not None and not viewer.has_perm(permission, row):
+    if not visible:
         return _redact_policy(display)
     return {
         **display,

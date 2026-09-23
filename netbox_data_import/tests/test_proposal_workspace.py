@@ -36,7 +36,7 @@ from netbox_data_import.preview_row_actions import (
     retained_sync_block_reason,
 )
 from netbox_data_import.proposal_tasks import CandidateSnapshot
-from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, complete_proposal
+from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, complete_proposal, fail_proposal
 from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes, user_with_object_permission
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
@@ -396,6 +396,29 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             second = self.request_proposal()
 
         self.assertEqual(second.candidate_snapshot["page_offset"], 0)
+
+    def assert_unfinished_page_is_asked_again(self, settle):
+        """Leave page 1 searched and page 2 unfinished, then require the next request on page 2."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.no_match(self.request_proposal())
+            second = self.request_proposal()
+            self.assertEqual(second.candidate_snapshot["page_offset"], 2)
+            self.assertTrue(settle(second.pk))
+
+            retried = self.request_proposal()
+
+        self.assertEqual(retried.candidate_snapshot["page_offset"], 2)
+
+    def test_a_failed_later_page_is_asked_again_not_restarted(self):
+        """The card offers "Ask AI again", and page 1 already found nothing."""
+        self.assert_unfinished_page_is_asked_again(
+            lambda pk: fail_proposal(pk, reason=ProposalFailureReason.TEMPORARY_BACKEND_FAILURE)
+        )
+
+    def test_a_cancelled_later_page_is_asked_again_not_restarted(self):
+        """A cancelled attempt did not search its page, so it does not advance and does not restart."""
+        self.assert_unfinished_page_is_asked_again(cancel_proposal)
 
     def card_action(self, key, card=None):
         """Return one command as the card offers it."""

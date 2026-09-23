@@ -157,7 +157,8 @@ cost per request.
 
 The search restarts at the first candidate when the eligible set changed since the last request,
 because adding or removing a port renumbers every page. The card says so instead of offering a next
-page. It also restarts once the last page is reached.
+page. It also restarts once the last page is reached. A request that failed, was cancelled, or is
+still waiting for your decision did not use its page up, so the next request asks that page again.
 
 A Device with more than 1024 eligible ports of one kind is refused. That ceiling bounds the stored
 candidate set, not the prompt. Above it, narrow the eligible set instead.

@@ -54,6 +54,13 @@ def _migrations_with_dependency_comments():
     return found
 
 
+def upgrade_note_sql(heading: str) -> list[str]:
+    """Return the SQL blocks one installation upgrade note tells an operator to run."""
+    notes = (Path(__file__).parents[2] / "docs" / "installation.md").read_text(encoding="utf-8")
+    section = notes.split(f"### {heading}\n", 1)[1].split("\n### ", 1)[0]
+    return [block.split("```", 1)[0] for block in section.split("```sql\n")[1:]]
+
+
 class GeneratedMigrationDependencyTest(SimpleTestCase):
     def test_only_approved_compatibility_migrations_have_dependency_comments(self):
         self.assertEqual(_migrations_with_dependency_comments(), _DEPENDENCY_COMMENT_EXCEPTIONS)
@@ -374,3 +381,12 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
             )
             self.assertEqual(cursor.fetchone()[0], 0)
         self.assertTrue(TaggedItem.objects.filter(pk=orphan_pk).exists())
+
+        # The upgrade note is what an operator runs, so the documented SQL itself must clear the way.
+        find, delete = upgrade_note_sql("Cable tag integrity")
+        with connection.cursor() as cursor:
+            cursor.execute(find)
+            self.assertEqual([row[0] for row in cursor.fetchall()], [orphan_pk])
+            cursor.execute(delete)
+        MigrationExecutor(connection).migrate([leaf])
+        self.assertFalse(TaggedItem.objects.filter(pk=orphan_pk).exists())

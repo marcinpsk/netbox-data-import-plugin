@@ -1346,6 +1346,42 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
         self.assertNotIn("cable.segment_override_lost", self.codes(unit))
         self.assertEqual(unit.changes, ())
 
+    def test_one_plan_asks_netbox_once_whether_its_viewer_may_read_each_row(self):
+        """Each segment, display and media check reads the same rows, and every read is a query."""
+        import re
+
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self.connect(self.eth0, self.panel_1_fronts[0])
+        actor = user_with_object_permission(
+            "row-visibility-once",
+            [
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (Cable, ("view", "add", "delete"), {}),
+                (CableClassMapping, ("view",), {}),
+                (CableSegmentOverride, ("view",), {}),
+            ],
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            unit = self.unit(patched_path(), actor=actor)
+
+        self.assertIn("cable.segment_reused", self.codes(unit))
+        checks = [
+            match.groups()
+            for query in queries.captured_queries
+            if (match := re.match(r'SELECT 1 AS "a" FROM "(\w+)" WHERE .*"\1"\."id" = (\d+)', query["sql"]))
+        ]
+        self.assertEqual(
+            {table for table, _row in checks}, {"dcim_cable", "netbox_data_import_cableclassmapping"}, checks
+        )
+        self.assertEqual(len(checks), len(set(checks)), checks)
+
     def test_refused_segment_evidence_does_not_claim_that_its_override_was_lost(self):
         """A trace whose Segment Evidence rows were refused states an unknown path, not an empty one."""
         self.force(

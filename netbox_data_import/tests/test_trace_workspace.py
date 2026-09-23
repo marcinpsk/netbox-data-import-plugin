@@ -2526,6 +2526,19 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
         )
         self.assertTrue(CableSegmentOverride.objects.exists())
 
+    def test_an_unplanned_segment_reports_its_unresolved_ends_not_a_moved_policy(self):
+        """A mapped CableClass must not make a segment the plan never resolved read as a moved policy."""
+        opened = self.open_workspace(
+            direct_path(
+                from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
+                to_end=trace_termination("DEV-B", "", "eth1", "Port"),
+            )
+        )
+
+        segments = opened.context["segment_policy_forms"]
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0]["reason"], "This trace has not resolved both ends of this segment.")
+
     def test_a_refused_termination_decision_returns_to_its_trace(self):
         """A viewer without TerminationResolution grants stays on the trace whose port it picked."""
         trace = self.open_workspace(
