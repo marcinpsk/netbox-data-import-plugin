@@ -203,15 +203,18 @@ def _delete_identity(cable_pk: int) -> str:
     return f"cable:delete:{cable_pk}"
 
 
+def _cable_review_snapshot(cable) -> dict:
+    """Read the Logical Cable metadata that review and deletion must share."""
+    return {
+        "display": str(cable),
+        "description": cable.description,
+        "tags": tuple(sorted(cable.tags.values_list("name", flat=True))),
+    }
+
+
 def _deleted_cable_review_fingerprint(cable) -> str:
     """Hash the review metadata whose plaintext must not survive Cable deletion."""
-    return fingerprint_of(
-        {
-            "display": str(cable),
-            "description": cable.description,
-            "tags": sorted(cable.tags.values_list("name", flat=True)),
-        }
-    )
+    return fingerprint_of(_cable_review_snapshot(cable))
 
 
 @dataclass
@@ -469,6 +472,7 @@ class _CableBatch:
         self._mappings_by_rear: dict[int, list] = {}
         self._mapping_ports: dict[tuple[str, int], Any] = {}
         self._existing: dict[int, _ExistingCable] = {}
+        self._cable_review_snapshots: dict[int, dict] = {}
         self._occupied: dict[tuple[str, int], _ExistingCable] = {}
         self._mapping_rows: dict[str, Any] | None = None
         self._overrides: dict[str, Any] = {}
@@ -1506,13 +1510,20 @@ class _CableBatch:
         disclosure, _identities = self._cable_diagnostic_disclosure(cable)
         if not disclosure["cable_visible"]:
             return {"visible": False, "display": "", "description": "", "tags": []}
+        review = self._cable_review_snapshot(cable)
         return {
             "visible": True,
-            "display": disclosure["cable"],
-            "description": cable.description,
-            "tags": sorted(cable.tags.values_list("name", flat=True)),
+            "display": review["display"],
+            "description": review["description"],
+            "tags": review["tags"],
             "disclosure_source": disclosure["disclosure_source"],
         }
+
+    def _cable_review_snapshot(self, cable) -> dict:
+        """Reuse one Cable review value for all changes and displays in this plan."""
+        if cable.pk not in self._cable_review_snapshots:
+            self._cable_review_snapshots[cable.pk] = _cable_review_snapshot(cable)
+        return self._cable_review_snapshots[cable.pk]
 
     def _changes(self, analysis: _TraceAnalysis) -> tuple[PlannedChange, ...]:
         """Return the deletion and the creations one actionable trace performs, in that order."""
@@ -1524,8 +1535,7 @@ class _CableBatch:
         changes.extend(self._create_change(segment, analysis.policies[segment.index]) for segment in analysis.pending)
         return tuple(changes)
 
-    @staticmethod
-    def _delete_change(logical: _ExistingCable) -> PlannedChange:
+    def _delete_change(self, logical: _ExistingCable) -> PlannedChange:
         """Return the one deletion a Patched Path Replacement ever performs."""
         return PlannedChange(
             identity=_delete_identity(logical.cable.pk),
@@ -1535,7 +1545,7 @@ class _CableBatch:
             preconditions={
                 "cable_id": logical.cable.pk,
                 "terminations": logical.terminations,
-                "review_fingerprint": _deleted_cable_review_fingerprint(logical.cable),
+                "review_fingerprint": fingerprint_of(self._cable_review_snapshot(logical.cable)),
             },
         )
 
