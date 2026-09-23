@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 
 from core.models import Job, ObjectType
+from dcim.models import Interface
 
 from django.db import connections
 from django.test import SimpleTestCase, TransactionTestCase, override_settings
@@ -19,9 +20,15 @@ from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from netbox_data_import import inference_adapter, inference_credentials, proposal_jobs
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK
 from netbox_data_import.jobs import ResolutionProposalJob
-from netbox_data_import.models import InferenceBackend, ProposalFailureReason, ProposalOutcome, ProposalStatus
+from netbox_data_import.models import (
+    InferenceBackend,
+    ProposalFailureReason,
+    ProposalOutcome,
+    ProposalStatus,
+    ResolutionProposal,
+)
 from netbox_data_import.proposal_jobs import ADAPTER_FAILURE_REASONS, CREDENTIAL_FAILURE_REASONS, run_proposal
-from netbox_data_import.proposal_response import RESPONSE_SCHEMA_VERSION
+from netbox_data_import.proposal_response import RESPONSE_SCHEMA_VERSION, candidate_id_for
 from netbox_data_import.proposal_tasks import CandidateSnapshot, CandidateSnapshotEntry
 from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, request_proposal
 from netbox_data_import.tests.test_inference_adapter import RecordingBackend, completion, serving, serving_truncated
@@ -95,13 +102,42 @@ class WorkerFixture:
             requested_by=self.operator,
         )
 
+    def paged_proposal(self, *, offset, size):
+        """Freeze three real candidates and record that the request offers only one page of them."""
+        interfaces = [self.interface] + [
+            Interface.objects.create(device=self.device, name=f"Ethernet 1/{index}") for index in (2, 3)
+        ]
+        entries = tuple(
+            CandidateSnapshotEntry(
+                candidate_id=candidate_id_for(position),
+                object_type="dcim.interface",
+                object_id=interface.pk,
+                display_name=interface.name,
+            )
+            for position, interface in enumerate(interfaces)
+        )
+        return request_proposal(
+            profile=self.profile,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=self.field_key,
+            source_evidence={"port": "Eth1/1"},
+            resolved_device_type=self.device_type_ct,
+            resolved_device_id=self.device.pk,
+            prompt_version=proposal_jobs.PROMPT_VERSION,
+            response_schema_version=RESPONSE_SCHEMA_VERSION,
+            candidate_snapshot=CandidateSnapshot(entries=entries, total=3).with_page(offset=offset, size=size),
+            requested_by=self.operator,
+        )
+
     @contextmanager
-    def configured(self, api_root, allowlist, *, fallback=False, vault_status=200, secret=SECRET):
+    def configured(self, api_root, allowlist, *, fallback=False, vault_status=200, secret=SECRET, candidate_limit=None):
         with serving_vault(status=vault_status, payload={"data": {"data": {"api_key": secret}}}) as (
             vault_settings,
             vault_seen,
         ):
             config = {"inference_backend_origin_allowlist": allowlist, "vault": vault_settings}
+            if candidate_limit is not None:
+                config["inference_proposal_candidate_limit"] = candidate_limit
             row = make_row(api_root=api_root, connect_timeout=2, read_timeout=2)
             if fallback:
                 config["inference_backend"] = {
@@ -145,6 +181,63 @@ class WorkerFixture:
         )
         self.assertEqual(proposal.backend_metadata["backend_source"], "database")
         self.assertEqual(len(proposal.backend_metadata["attempts"]), attempts)
+
+
+class ProposalPageTest(WorkerFixture, ProposalFixture):
+    """A dense Device is searched one page at a time, and only that page reaches the backend."""
+
+    def test_the_request_offers_only_the_page_it_recorded(self):
+        """The whole set establishes freshness; the prompt is allowed to carry one page of it."""
+        proposal = self.paged_proposal(offset=1, size=2)
+
+        with serving() as (root, seen, allowed), self.configured(root, allowed):
+            run_proposal(proposal.pk)
+
+        sent = json.loads(json.loads([call for call in seen if call["body"]][-1]["body"])["messages"][-1]["content"])
+        self.assertEqual([entry["candidate_id"] for entry in sent["candidates"]], ["candidate-0002", "candidate-0003"])
+        self.assertEqual([entry["display_name"] for entry in sent["candidates"]], ["Ethernet 1/2", "Ethernet 1/3"])
+
+    def test_a_row_written_before_paging_still_offers_every_candidate(self):
+        """No data migration ran over those rows, so they have to behave exactly as they did."""
+        proposal = self.paged_proposal(offset=0, size=3)
+        stored = dict(proposal.candidate_snapshot)
+        del stored["page_offset"]
+        del stored["page_size"]
+        ResolutionProposal.objects.filter(pk=proposal.pk).update(candidate_snapshot=stored)
+
+        # A limit below the three candidates, so a default taken from the configuration shows.
+        with serving() as (root, seen, allowed), self.configured(root, allowed, candidate_limit=2):
+            run_proposal(proposal.pk)
+
+        sent = json.loads(json.loads([call for call in seen if call["body"]][-1]["body"])["messages"][-1]["content"])
+        self.assertEqual(
+            [entry["candidate_id"] for entry in sent["candidates"]],
+            ["candidate-0001", "candidate-0002", "candidate-0003"],
+        )
+
+    def test_an_answer_naming_a_candidate_outside_the_page_is_refused(self):
+        """The backend never saw it, so a response that names it is not a choice it could make."""
+        proposal = self.paged_proposal(offset=0, size=1)
+        payload = completion(answer(candidate_id="candidate-0002", candidate_display_name="Ethernet 1/2"))
+
+        with serving(payload=payload) as (root, _seen, allowed), self.configured(root, allowed):
+            run_proposal(proposal.pk)
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.status, ProposalStatus.FAILED)
+        self.assertEqual(proposal.failure_reason, ProposalFailureReason.INVALID_RESPONSE)
+
+    def test_an_answer_from_a_later_page_completes_against_the_candidate_it_named(self):
+        proposal = self.paged_proposal(offset=1, size=2)
+        payload = completion(answer(candidate_id="candidate-0003", candidate_display_name="Ethernet 1/3"))
+
+        with serving(payload=payload) as (root, _seen, allowed), self.configured(root, allowed):
+            run_proposal(proposal.pk)
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.status, ProposalStatus.COMPLETED)
+        self.assertEqual(proposal.outcome, ProposalOutcome.CANDIDATE)
+        self.assertEqual(proposal.selected_candidate_id, "candidate-0003")
 
 
 class ProposalWorkerTest(WorkerFixture, ProposalFixture):

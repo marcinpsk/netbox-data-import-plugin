@@ -36,8 +36,10 @@
   .ndi-trace-panel .card-header { font-size: .75rem; letter-spacing: .06em; text-transform: uppercase; }
   .ndi-trace-claim { color: var(--tblr-secondary); font-size: .8rem; }
   .ndi-trace-reason { color: var(--tblr-secondary); font-size: .8rem; }
+  .ndi-trace-severity-warning { background-color: var(--tblr-warning) !important; color: #000 !important; }
 </style>
 
+<div hx-history="false">
 <h1 class="page-title mb-3">Trace Review Workspace</h1>
 
 <div class="{% if drift %}alert alert-warning{% else %}card mb-3 p-2{% endif %}
@@ -53,9 +55,13 @@
       <div class="ndi-trace-reason mt-1">{{ retained_sync_reason }}</div>
     {% endif %}
   </div>
-  <form method="post" action="{% url 'plugins:netbox_data_import:trace_workspace_reread' %}" class="ms-3">
+  <form id="traceWorkspaceRereadForm" method="post"
+        action="{% url 'plugins:netbox_data_import:trace_workspace_reread' %}" class="ms-3"
+        hx-post="{% url 'plugins:netbox_data_import:trace_workspace_reread' %}"
+        hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
     {% csrf_token %}
     <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+    <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
     <button type="submit" id="traceWorkspaceReread"
             class="btn {% if drift %}btn-warning{% else %}btn-outline-secondary{% endif %}"
             {% if retained_sync_reason %}disabled title="{{ retained_sync_reason }}"{% endif %}>
@@ -142,7 +148,9 @@
       <div>
         <span class="badge ndi-trace-disposition-{{ trace.disposition }}">{{ trace.disposition }}</span>
         <strong class="ms-2">{{ trace.name }}</strong>
-        {% if trace.sheet %}<span class="text-secondary ms-2">{{ trace.sheet }} row {{ trace.row_number }}</span>{% endif %}
+        {% if trace.sheet %}
+          <span class="text-secondary ms-2">(sheet {{ trace.sheet }}{% if trace.row_number %}, row {{ trace.row_number }}{% endif %})</span>
+        {% endif %}
       </div>
       <div class="text-end">
         {% for action in trace.actions %}
@@ -226,8 +234,8 @@
                 </div>
               {% endif %}
               <ol class="mb-0 ps-3">
-                {% for segment in trace.segments %}
-                  <li>
+                {% for segment in segment_policy_forms %}
+                  <li class="mb-2" data-trace-segment="{{ segment.index }}">
                     {{ segment.left }} &rarr; {{ segment.right }}
                     {% if segment.status == "create" %}
                       <span class="badge ndi-trace-status-create">create</span>
@@ -240,6 +248,39 @@
                     {% endif %}
                     {% if segment.pass_through %}
                       <div class="ndi-trace-claim">Pass-Through Claim: entered at {{ segment.left }}.</div>
+                    {% endif %}
+                    {% if segment.segment_key %}
+                      <div class="text-secondary small" data-segment-policy>
+                        {{ segment.cable_type }} &middot; {{ segment.cable_profile }}
+                        {% if segment.overridden %}
+                          <span class="badge ndi-trace-state-manual">forced</span>
+                        {% endif %}
+                      </div>
+                    {% endif %}
+                    <form method="post" class="d-flex flex-wrap gap-2 mt-1"
+                          action="{% url 'plugins:netbox_data_import:trace_segment_policy' %}"
+                          hx-post="{% url 'plugins:netbox_data_import:trace_segment_policy' %}"
+                          hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
+                      {% csrf_token %}
+                      <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+                      <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
+                      <input type="hidden" name="segment" value="{{ segment.index }}">
+                      <label class="visually-hidden" for="{{ segment.form.cable_type.id_for_label }}">
+                        Cable Type for segment {{ segment.position }}</label>
+                      {{ segment.form.cable_type }}
+                      <label class="visually-hidden" for="{{ segment.form.cable_profile.id_for_label }}">
+                        Cable Profile for segment {{ segment.position }}</label>
+                      {{ segment.form.cable_profile }}
+                      <button type="submit" class="btn btn-sm btn-outline-primary" data-segment-policy-force
+                              {% if segment.reason %}disabled{% endif %}>Force</button>
+                      {% if segment.overridden %}
+                        <button type="submit" name="clear" value="1" class="btn btn-sm btn-outline-secondary"
+                                data-segment-policy-clear {% if segment.clear_reason %}disabled{% endif %}>Clear</button>
+                      {% endif %}
+                    </form>
+                    {% if segment.reason %}<div class="ndi-trace-reason mt-1">{{ segment.reason }}</div>{% endif %}
+                    {% if segment.clear_reason and segment.clear_reason != segment.reason %}
+                      <div class="ndi-trace-reason mt-1">{{ segment.clear_reason }}</div>
                     {% endif %}
                   </li>
                 {% empty %}
@@ -428,12 +469,62 @@
         {% endif %}
       </section>
 
+      <section class="mt-3" data-trace-cable-policy>
+        <h3>Cable policy</h3>
+        <div class="table-responsive">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>CableClass</th><th>Cable Type</th><th>Cable Profile</th><th></th></tr></thead>
+            <tbody>
+              {% for policy in cable_policy_forms %}
+                <tr data-cable-class="{{ policy.cable_class }}">
+                  <td>
+                    {{ policy.cable_class }}
+                    {% if not policy.resolved %}
+                      <span class="badge ndi-trace-state-unresolved">unresolved</span>
+                    {% endif %}
+                  </td>
+                  <td>{{ policy.cable_type }}</td>
+                  <td>{{ policy.cable_profile }}</td>
+                  <td class="text-end">
+                    <form method="post" class="d-flex flex-wrap gap-2 justify-content-end"
+                          action="{% url 'plugins:netbox_data_import:trace_cable_policy' %}"
+                          hx-post="{% url 'plugins:netbox_data_import:trace_cable_policy' %}"
+                          hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
+                      {% csrf_token %}
+                      <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+                      <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
+                      <input type="hidden" name="cable_class" value="{{ policy.cable_class }}">
+                      <label class="visually-hidden" for="{{ policy.form.cable_type.id_for_label }}">
+                        Cable Type for {{ policy.cable_class }}</label>
+                      {{ policy.form.cable_type }}
+                      <label class="visually-hidden" for="{{ policy.form.cable_profile.id_for_label }}">
+                        Cable Profile for {{ policy.cable_class }}</label>
+                      {{ policy.form.cable_profile }}
+                      <button type="submit" class="btn btn-sm btn-primary" data-cable-policy-save
+                              {% if policy.reason %}disabled{% endif %}>Save</button>
+                    </form>
+                    {% if policy.reason %}<div class="ndi-trace-reason mt-1">{{ policy.reason }}</div>{% endif %}
+                  </td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="4" class="text-secondary">This trace states no CableClass.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       {% if trace.findings and trace.disposition != "invalid" %}
         <div class="mt-3" data-trace-findings>
           <strong>What this trace found</strong>
           <ul class="list-unstyled mt-1 mb-0">
             {% for finding in trace.findings %}
-              <li class="ndi-trace-reason">{{ finding.message }}</li>
+              <li class="ndi-trace-reason">
+                {% if finding.severity == "warning" %}
+                  <span class="badge ndi-trace-severity-warning" data-finding-severity>warning</span>
+                {% endif %}
+                {{ finding.message }}
+              </li>
             {% endfor %}
           </ul>
         </div>
@@ -452,9 +543,12 @@
     <div class="modal-content">
       <form id="traceDeviceForm" method="post"
             action="{% url 'plugins:netbox_data_import:trace_resolve_device' %}"
-            data-candidates-url="{% url 'plugins:netbox_data_import:trace_device_candidates' %}">
+            data-candidates-url="{% url 'plugins:netbox_data_import:trace_device_candidates' %}"
+            hx-post="{% url 'plugins:netbox_data_import:trace_resolve_device' %}"
+            hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
         {% csrf_token %}
         <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+        <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
         <input type="hidden" name="search" id="traceDeviceOfferedSearch">
         <input type="hidden" name="device_key" id="traceDeviceKey">
         <input type="hidden" name="device_id" id="traceDeviceId">
@@ -484,9 +578,12 @@
     <div class="modal-content">
       <form id="traceTerminationForm" method="post"
             action="{% url 'plugins:netbox_data_import:trace_resolve_termination' %}"
-            data-candidates-url="{% url 'plugins:netbox_data_import:trace_termination_candidates' %}">
+            data-candidates-url="{% url 'plugins:netbox_data_import:trace_termination_candidates' %}"
+            hx-post="{% url 'plugins:netbox_data_import:trace_resolve_termination' %}"
+            hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
         {% csrf_token %}
         <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+        <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
         <input type="hidden" name="search" id="traceTerminationOfferedSearch">
         <input type="hidden" name="field_key" id="traceTerminationFieldKey">
         <input type="hidden" name="object_type" id="traceTerminationObjectType">
@@ -517,4 +614,5 @@
 <script src="{% static 'netbox_data_import/js/trace_picker_search.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_device_picker.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_termination_picker.js' %}?v={{ plugin_version }}"></script>
+</div>
 {% endblock %}

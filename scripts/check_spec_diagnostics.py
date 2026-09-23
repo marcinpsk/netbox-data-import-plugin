@@ -18,7 +18,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "netbox_data_import"
 SPEC = ROOT / "docs" / "spec" / "target-neutral-import-architecture.md"
-EMITTING_MODULES = ("cable_target.py", "models.py", "target_modules.py", "trace_workbook.py")
+EMITTING_MODULES = ("cable_policy.py", "cable_target.py", "models.py", "target_modules.py", "trace_workbook.py")
 CODE = re.compile(r"(cable|profile|trace)\.[a-z_]+")
 TABLE_HEADER = re.compile(r"^\|\s*Condition\s*\|\s*Diagnostic code\s*\|")
 TABLE_CODE = re.compile(r"`((?:cable|profile|trace)\.[a-z_]+)`")

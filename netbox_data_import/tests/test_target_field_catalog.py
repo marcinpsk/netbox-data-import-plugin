@@ -1048,7 +1048,7 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         """Return a preview row number `SyncSingleRowView` accepts."""
         from netbox_data_import.review_workspace import ReviewWorkspace
 
-        workspace = ReviewWorkspace.from_dict(self.client.session["import_plan"])
+        workspace = ReviewWorkspace.from_dict(self.client.session["import_plan"], self.user)
         for unit in workspace.units:
             if unit.row_number is None:
                 continue

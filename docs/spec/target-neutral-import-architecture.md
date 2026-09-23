@@ -260,8 +260,43 @@ Two block conditions are distinct and carry distinct diagnostic codes (section 6
 
 | Condition | Diagnostic code |
 | --- | --- |
-| The stored Cable Type or Cable Profile value is no longer offered by the running instance | `cable.cableclass_stale_mapping` |
+| The stored Cable Type or Cable Profile value is no longer offered by the running instance | `cable.policy_stale` |
 | The stored Cable Profile is still offered but is incompatible with one termination per side | `cable.profile_incompatible` |
+
+**Segment overrides.** A CableClass mapping decides a label, and one label names different media on
+different traces. The Import Profile therefore also holds an override per planned segment. Its key is
+the direction-independent pair of resolved termination identities, so two Source Traces that state one
+shared segment read one override. An override decides both dimensions at once: a per-dimension overlay
+would give one segment four precedence states for no stated requirement. Where an override exists it
+decides that segment, and the CableClass mapping keeps deciding every other segment its label names.
+Override values validate against the running instance and go stale exactly as mapping values do.
+
+An override changes what the import writes, so it cannot change a Cable the import retains. It is
+offered only while the reviewed plan states that pair as pending. Where the reviewed plan retains the
+pair, the workspace shows the action disabled and names the remedy: correct the Cable in NetBox, then
+re-read.
+
+An override records the Source Trace and the segment position it was decided from. A replan that
+resolves that segment to a different pair, whether from a new termination decision or from a
+PortMapping edit that moves the unique mapped peer, reports the override that no longer applies.
+
+**Media consistency.** A run of consecutive segments joined by PortMapping rows the plan verified,
+including a verified same-port substitution, is read as one passive path. A shared Device name is not
+that: only a verified mapping joins two segments. Where such a run states two known media families,
+planning records a warning and leaves the disposition unchanged. It is a warning and not a block
+because a passive device can legitimately change medium: one balun carries coax on its front port and
+twisted pair on its rear port, with a one-position PortMapping between them, and no NetBox rule
+contradicts it.
+
+A Cable Type the running instance does not group, and one it groups as indeterminate, are incomplete
+coverage. They never read as agreement with another segment, and they never contradict one. A retained
+Cable whose Cable Profile carries several connectors on a side fans out into runs the path does not
+state, so it ends the run rather than contributing a medium to it.
+
+The warning names each stated segment, its Cable Type, its family, and whether the value comes from a
+Cable the import retains. A segment override changes what the import writes, so where every stated
+segment is retained the warning names the NetBox correction instead. There is no control that ignores
+the result: the operator states the correct medium, never an accepted contradiction.
 
 ## 4. Target-neutral plan, safety, review, and execution contracts
 
@@ -290,7 +325,8 @@ several Cable changes.
 
 A unit has exactly one disposition. Diagnostics are separate structured values with `info`,
 `warning`, or `error` severity. A diagnostic carries a stable structured code, the severity, the
-affected identities, and display data. Diagnostic codes use a dotted lowercase namespace of the form
+affected identities, display data, and evidence: the facts the finding was decided from, where the
+identities do not already carry them. Diagnostic codes use a dotted lowercase namespace of the form
 `<domain>.<condition>` (spec default).
 
 `excluded` is reserved for operator-configured policy. An unsupported source construct is `invalid`,
@@ -310,8 +346,10 @@ canonical serialization (spec default for the algorithm; ADR 0002 already fixes 
 Source Trace content fingerprint, and one algorithm keeps the runtime consistent).
 
 A fingerprint includes the schema version, the stable unit and change identities, the target payloads,
-the dependencies, the preconditions, the dispositions, the structured diagnostic codes, the source
-fingerprint, the Import Profile configuration, the actor, and the planning context. It excludes
+the dependencies, the preconditions, the dispositions, the structured diagnostic codes with their
+evidence, the source fingerprint, the Import Profile configuration, the actor, and the planning
+context. Diagnostic evidence is part of it because a finding can rest on live state no identity names,
+such as the medium two Cables carry, which would otherwise move under an accepted plan unnoticed. It excludes
 timestamps, URLs, translated text, display-only wording, and the plan revision.
 
 Planning is side-effect free and deterministic. Equivalent source content, Import Profile, actor,
@@ -489,7 +527,7 @@ existing Cables, PortMapping rows) and cannot be detected during source interpre
 | `Trace List` contradicts the path rows | `trace.corroboration_mismatch` | `invalid` | Source Adapter |
 | Same identity stated with differing evidence | `trace.duplicate_conflict` | `invalid` | Source Adapter |
 | Pass-Through Claim whose entry or exit carries an interface-kind PortClass | `trace.pass_through_at_interface` | `invalid` | Source Adapter |
-| Same termination claimed by different traces, or same segment pair with different CableClass | `trace.cross_trace_conflict` | `invalid` on every involved trace | Source Adapter |
+| Same termination claimed by different traces for different segments | `trace.cross_trace_conflict` | `invalid` on every involved trace | Source Adapter |
 | A PortClass value outside the adapter's fixed vocabulary | `trace.unknown_port_class` | `invalid` | Source Adapter |
 | Raw export metadata longer than the provenance column that stores it | `trace.metadata_too_long` | `invalid` | Source Adapter |
 | The resolved object is not an Interface, FrontPort, or RearPort | `cable.unsupported_termination_kind` | `invalid` | Cable Target Module |
@@ -509,10 +547,12 @@ cards. The adapter records the claimed entry and exit pair verbatim. Same-port c
 evidence, including a trunk and a patch recorded on one rear port. Whether NetBox's front-to-rear
 mapping can realize it is planning-time work (section 6).
 
-An identical shared segment across traces (same termination pair, same CableClass) is allowed. It
-dedupes at Planned Change identity per ADR 0001. The cross-trace occupancy check counts claims from
-distinct traces only. A termination repeated inside one trace is either the legal same-port
-continuation or part of an already-invalid structure.
+An identical shared segment across traces (same termination pair) is allowed, whatever CableClass
+each trace states. Planning compares the effective Cable policy of that segment instead
+(`cable.resolved_segment_conflict`, section 6.7). The shared segment dedupes at Planned Change
+identity per ADR 0001. The cross-trace occupancy check counts claims from distinct traces only. A
+termination repeated inside one trace is either the legal same-port continuation or part of an
+already-invalid structure.
 
 ### 5.7 Binding and provenance persistence
 
@@ -543,7 +583,7 @@ blank-row layout, empty-string cells, and sheet dimensions.
 | --- | --- |
 | Copper trace workbook | 20 blocks per sheet collapse to 10 Source Traces, zero duplicate conflicts, all 10 valid with 3 Segment Evidence entries each, empty `Trace List` corroborates nothing |
 | Fiber trace workbook | 20 blocks per sheet collapse to 10 Source Traces, zero duplicate conflicts, 8 valid with 4 to 9 segments, 4 ending at a rear port, every `Trace List` corroboration passing, 1 `trace.non_linear_path`, 1 `trace.pass_through_at_interface`, and one accepted legal same-rear-port continuation |
-| Both | Zero shared terminations and zero CableClass conflicts between distinct traces |
+| Both | Zero shared terminations between distinct traces |
 
 ## 6. Patched Path Replacement planning and transaction behavior
 
@@ -672,8 +712,8 @@ Creation policy for a new segment:
 | Attribute | Value |
 | --- | --- |
 | Status | `connected` |
-| Type | From the Import Profile CableClass mapping |
-| Profile | From the Import Profile CableClass mapping |
+| Type | From the segment override, else from the Import Profile CableClass mapping |
+| Profile | From the segment override, else from the Import Profile CableClass mapping |
 | Termination connector and position data | None written |
 | Label, description, tenant | Empty |
 | Color | NetBox default |
@@ -719,15 +759,17 @@ inside the transaction as the accepted plan's operator.
 | A segment whose two ends resolve to one termination | `cable.segment_self_connection` | `blocked` |
 | A stored termination selection whose kind contradicts the stated PortClass | `cable.termination_kind_mismatch` | `blocked` |
 | A CableClass dimension is unresolved | `cable.cableclass_unmapped` | `blocked` |
-| A stored Cable Type or Cable Profile value is no longer offered by the running instance | `cable.cableclass_stale_mapping` | `blocked` |
+| A stored Cable Type or Cable Profile value is no longer offered by the running instance | `cable.policy_stale` | `blocked` |
 | A stored Cable Profile is offered but is incompatible with one termination per side | `cable.profile_incompatible` | `blocked` |
-| Source Traces resolve one shared segment to different Cable policies | `cable.resolved_segment_conflict` | `invalid` |
+| Source Traces resolve one shared segment to different Cable policies | `cable.resolved_segment_conflict` | `blocked` |
 | The operator lacks a required Cable or view permission | `cable.permission_denied` | `blocked` |
 | A dangling natural-key reference in `adapter_config` | `profile.dangling_reference` | `blocked` |
 | A PortMapping row proves the stated Pass-Through Claim | `cable.pass_through_verified` | `info` diagnostic, disposition unchanged |
 | A mapped peer substitutes a same-port continuation | `cable.same_port_continuation` | `info` diagnostic, disposition unchanged |
 | An existing Cable already proves a desired segment | `cable.segment_reused` | `info` diagnostic, disposition unchanged |
 | Attribute drift on a reused Cable | `cable.attribute_drift` | `info` diagnostic, disposition unchanged |
+| A segment resolves away from the pair its override was decided for | `cable.segment_override_lost` | `info` diagnostic, disposition unchanged |
+| One run of verified pass-throughs states two known media families | `cable.media_family_mismatch` | `warning` diagnostic, disposition unchanged |
 
 Diagnostic code strings are spec defaults; the conditions and dispositions are normative.
 
@@ -1125,9 +1167,13 @@ section 13.1. There is no separate administrator or superuser check.
 
 ## 9. Database changes and migration ownership
 
-Migrations are generated artifacts. Change a model, then generate the migration with the project's
-`makemigrations` helper. Never hand-edit a generated migration. The only exception is a data migration
-whose operations cannot be generated, and that migration contains data operations only.
+Schema migrations are generated artifacts. Change a model, then generate the migration with the
+project's `makemigrations` helper. Never hand-edit a generated migration. Write a data migration by
+hand when its operations cannot be generated. Keep only data operations in that migration.
+The ratified Cable tag integrity migration is a narrow `RunSQL` exception for NetBox 4.6 and 4.7.
+The planner cannot lock a new tag association before its row exists, so this migration enforces
+integrity in the database. Its reverse SQL removes the plugin's foreign key, triggers, functions,
+index, and projection column.
 
 ### 9.1 New models
 
@@ -1137,6 +1183,7 @@ whose operations cannot be generated, and that migration contains data operation
 | `TraceDeviceResolution` | A trace source Device label selected as one NetBox Device | (Import Profile, normalized source Device key) unique | T6 |
 | `TerminationResolution` | The trace-side Row Resolution written by manual selection or proposal acceptance | (Import Profile, task type, field key) unique | T4 |
 | `CableClassMapping` | Cable target policy for one CableClass value | (Import Profile, CableClass value) unique | T4 |
+| `CableSegmentOverride` | Cable target policy forced on one planned segment | (Import Profile, resolved termination pair) unique | T4 |
 | `CableImportSource` | Provenance for one Cable and one contributing Source Trace | (Cable, Import Profile, trace identity) unique | T5 |
 | `InferenceBackend` | One named Inference Backend definition, at most one row enabled | Backend key unique | T7 |
 | `ResolutionProposal` | The Resolution Proposal request, attempt, and decision row | (Import Profile, task type, field key) with at most one active row | T8 |
@@ -1164,6 +1211,12 @@ selection for both the `termination` and `mapped_peer` roles. `SourceResolution`
 Device ID, and a display snapshot. The plain Device ID preserves a stale decision after Device
 deletion so the operator can replace it. The snapshot is never shown unless the Device is still in
 the actor's view scope. Installation-local Device IDs are not part of portable profile YAML.
+
+`CableSegmentOverride` stores the Import Profile, the resolved termination pair key, the forced Cable
+Type and Cable Profile, and the Source Trace identity and segment position the decision was made from.
+The pair key and the values it holds are installation-local, so overrides are not part of portable
+profile YAML. The provenance columns are not identity: they report the override a replan lost when the
+segment resolves to another pair.
 
 `CableImportSource` records the Import Profile, the Cable (a plain foreign key), the trace identity,
 the segment index, the original From/To text and direction, the workbook provenance (fingerprint,
@@ -1230,9 +1283,12 @@ submission mints a new idempotency key, so an abandoned attempt consumes no key 
 operator can always resubmit.
 
 **Deleted-object snapshot.** For each deleted object the applied-changes field records the object
-type, the database id, the display value, and, for a Cable, its termination set at deletion time. This
-is where a removed Logical Cable is recorded, which satisfies the audit requirement stated in sections
-5.7 and 10.7. Provenance rows never record a deletion.
+type and database id. A deleted row can no longer authorize its former display data for a later audit
+reader, so the snapshot stores no display value or Cable metadata. The Cable delete precondition
+stores its termination set and an opaque fingerprint of the reviewed display, description, and tags.
+This detects drift without disclosing the values. The snapshot is where a removed Logical Cable is
+recorded, which satisfies the audit requirement stated in sections 5.7 and 10.7. Provenance rows never
+record a deletion.
 
 Every new field is nullable at the database level so retained `ImportJob` rows can keep their
 historical columns. The cutover drops `dry_run` and the stored result rows, backfills nothing, and
@@ -1268,6 +1324,9 @@ The workspace is one page per preview. Layout:
 - **Three panels** for the selected trace: source evidence (From and To plus the ordered Segment
   Evidence with implied Pass-Through Claims), current NetBox topology, and proposed physical topology
   with a per-segment status of create, reuse existing, delete Logical Cable, or conflict.
+- **Cable policy** for the selected trace: the policy in force on each stated CableClass, editable
+  in place, and the policy in force on each resolved segment with the action that forces one segment
+  to its own Cable Type and Cable Profile.
 
 Termination field states render as badges: `unresolved`, `automatically resolved`, `manually
 resolved`, `proposed`, `accepted`, `stale`, `failed`. The `automatically resolved` state is distinct
@@ -1281,7 +1340,7 @@ Proposal card contract:
 
 | Card state | Contents |
 | --- | --- |
-| Completed with a candidate | A "Proposal - not applied" badge, the suggested candidate with its kind, the required explanation, backend metadata with attempt count, and explicit Accept and Reject buttons |
+| Completed with a candidate | A "Proposal - not applied" badge, the suggested candidate with its kind, the required explanation, and explicit Accept and Reject buttons |
 | Completed and stale | The same card with a "Proposal - stale, not applied" badge and a disabled Accept action showing its reason |
 | Completed with no match | The backend's own explanation of why the evidence did not distinguish the candidates, and a disabled accept action naming that reason |
 | Failed | The typed failure reason, including `backend_refusal` for a refusal or an empty-content completion, and an Ask AI again action that creates a new proposal |
@@ -1296,6 +1355,16 @@ appears only once a proposal exists, so Accept and Reject are card actions and n
 
 A per-field proposal history list shows the ten most recent attempts, their status, and their outcome.
 The list links to a field-filtered, paginated history endpoint for all older attempts.
+
+The card states no backend metadata of its own. The history list is where the attempts are named, and
+a pending card's job state says where a queued attempt stands, so a metadata block on the card would
+state the same facts a second time in the backend's own vocabulary. The proposal row still stores the
+metadata (section 9.1), and the REST representation still carries it.
+
+Every workspace command that writes profile policy takes the profile policy lock and compares the
+reviewed plan's profile fingerprint under it. A preview revision is per session, so it cannot see
+another operator's policy edit; the comparison refuses a decision made against a policy that has
+already moved, and names the re-read.
 
 A drift warning strip appears when live NetBox differs from the reviewed snapshot, with a re-read
 action. The workspace compares the reviewed plan fingerprint with a freshly computed plan fingerprint
@@ -1361,8 +1430,8 @@ Synchronization Units and Planned Changes.
 | Resolution Proposal row | Created by the request, completed or failed by the inference job, decided once by an operator |
 
 The Logical Cable removal is recorded only in the `ImportExecution` deleted-object snapshot
-(section 9.2), which stores the Cable's object type, id, display value, and termination set at
-deletion time.
+(section 9.2), which stores the Cable's object type and id. Its delete precondition protects the
+reviewed metadata and termination set without copying readable values into the audit record.
 
 ## 11. Cutover plan
 
@@ -1612,7 +1681,8 @@ view or job into private engine behavior.
 - The request inserts a `pending` `ImportExecution` row and commits it before the target transaction
   opens; a duplicate submission returns the existing row in any outcome, including `pending`.
 - The applied-changes field records every applied Planned Change identity, and every deleted object
-  with its type, id, display, and, for a Cable, its terminations.
+  with its type and id. A Cable delete precondition fingerprints its reviewed metadata and records
+  its terminations, but the audit record stores neither.
 - A background execution links the native NetBox Job to its `ImportExecution` row.
 - A `SourceDocument` referenced by an `ImportExecution` is never deleted; an unreferenced one is
   deleted by housekeeping 30 days after creation and never sooner; reading one requires Import
@@ -1652,7 +1722,7 @@ T5 registers the key.
 - The fiber fixture produces 10 Source Traces, 8 valid with 4 to 9 segments and 4 ending at a rear
   port, exactly one `trace.non_linear_path` and exactly one `trace.pass_through_at_interface`, and
   zero duplicate conflicts.
-- Cross-trace checks report zero shared terminations and zero CableClass conflicts on both fixtures.
+- Cross-trace checks report zero shared terminations on both fixtures.
 - A reversed re-statement of a trace collapses into the same Source Trace and leaves the content
   fingerprint unchanged.
 - Two labels that differ only in separator characters produce different canonical JSON identities.
@@ -1682,7 +1752,7 @@ ticket writes and validates decisions; it plans nothing.
   `ImportEngine.plan`; it never edits an Import Plan.
 - The `CableClassMapping` form offers only Cable Type and Cable Profile values the running instance
   reports, and only Cable Profiles compatible with one termination per side.
-- Validation distinguishes `cable.cableclass_stale_mapping` from `cable.profile_incompatible`.
+- Validation distinguishes `cable.policy_stale` from `cable.profile_incompatible`.
 - The CableClass mapping section appears only on a trace-adapter profile and is rejected on any other
   profile.
 - The change is independently mergeable with all tests passing.
@@ -1860,7 +1930,7 @@ permissions at the view boundary.
   exists, when no Inference Backend is enabled, or when the operator lacks the permission.
 - A pending card shows progress in place, polls until a terminal state, and offers cancel.
 - A completed card shows the "Proposal - not applied" badge, the candidate with its kind, the
-  explanation, the backend metadata with attempt count, and explicit Accept and Reject buttons.
+  explanation, and explicit Accept and Reject buttons.
 - A stale card shows the stale badge and a disabled Accept with its reason.
 - A no-match card has a disabled accept action with its reason; a failed card offers Ask AI again.
 - Accepting writes a `TerminationResolution` row, marks the termination `accepted`, and triggers a

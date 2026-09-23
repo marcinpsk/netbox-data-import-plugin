@@ -17,6 +17,51 @@ from netbox_data_import import import_engine as ie
 from netbox_data_import.import_engine import ImportEngine as Coordinator
 
 
+def job_data_exposes_accepted_plan(job, plan):
+    # ruleid: nbdi-job-data-excludes-accepted-plan
+    job.data = {"phase": "queued", "accepted_plan": plan}
+
+
+def job_data_key_exposes_accepted_plan(job, plan):
+    # ruleid: nbdi-job-data-excludes-accepted-plan
+    job.data["accepted_plan"] = plan
+
+
+def job_data_update_exposes_accepted_plan(job, plan):
+    # ruleid: nbdi-job-data-excludes-accepted-plan
+    job.data.update({"phase": "queued", "accepted_plan": plan})
+
+
+def job_data_keyword_update_exposes_accepted_plan(job, plan):
+    # ruleid: nbdi-job-data-excludes-accepted-plan
+    job.data.update(accepted_plan=plan)
+
+
+def job_data_merge_exposes_accepted_plan(job, plan):
+    # ruleid: nbdi-job-data-excludes-accepted-plan
+    job.data |= {"accepted_plan": plan}
+
+
+def job_data_setdefault_exposes_accepted_plan(job, plan):
+    # ruleid: nbdi-job-data-excludes-accepted-plan
+    job.data.setdefault("accepted_plan", plan)
+
+
+def job_data_update_keeps_progress_only(job):
+    # ok: nbdi-job-data-excludes-accepted-plan
+    job.data.update({"phase": "queued", "processed": 0})
+
+
+def queued_worker_receives_accepted_plan(runner, plan):
+    # ok: nbdi-job-data-excludes-accepted-plan
+    return runner.enqueue(accepted_plan=plan)
+
+
+def job_data_keeps_progress_only(job):
+    # ok: nbdi-job-data-excludes-accepted-plan
+    job.data = {"phase": "queued", "processed": 0}
+
+
 def caught_today_class_attr():
     # ruleid: nbdi-tests-use-public-coordinator
     return ImportEngine._private_helper

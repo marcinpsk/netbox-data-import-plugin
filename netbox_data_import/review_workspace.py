@@ -11,8 +11,16 @@ from typing import Any
 
 from .cable_target import UNRESOLVED
 from .import_engine import ImportEngine
-from .models import ImportProfile, TerminationResolution, TraceDeviceResolution, index_digest, locked_profile_policy
-from .object_permissions import save_permission_scoped_object
+from .models import (
+    CableClassMapping,
+    CableSegmentOverride,
+    ImportProfile,
+    TerminationResolution,
+    TraceDeviceResolution,
+    index_digest,
+    locked_profile_policy,
+)
+from .object_permissions import delete_permission_scoped_objects, save_permission_scoped_object
 from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
     effective_device_name,
@@ -63,6 +71,151 @@ def save_termination_resolution_and_replan(
             values,
         )
         # atomic-exit-safe: decision-saved-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+class ProfilePolicyMoved(Exception):
+    """Another operator changed this profile's policy after the reviewed preview was planned."""
+
+
+PROFILE_POLICY_MOVED = (
+    "This profile's policy changed since this preview was planned. Re-read from NetBox, then make the decision again."
+)
+
+
+class UnacceptableCablePolicy(Exception):
+    """The submitted Cable Type and Cable Profile do not validate as a policy decision."""
+
+    def __init__(self, errors):
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+def _refuse_hidden_policy(actor, row) -> None:
+    """Refuse a blind policy write against a row this actor cannot read."""
+    if row is None or row.__class__.objects.restrict(actor, "view").filter(pk=row.pk).exists():
+        return
+    from .cable_disclosure import POLICY_WRITE_REFUSED
+
+    raise UnacceptableCablePolicy([POLICY_WRITE_REFUSED])
+
+
+def _refuse_moved_policy(locked_profile, reviewed_fingerprint) -> None:
+    """Refuse a decision made against a policy that has already moved under this preview.
+
+    A preview revision is per session, so it cannot see another operator's profile edit.
+    """
+    if locked_profile.planning_fingerprint != reviewed_fingerprint:
+        raise ProfilePolicyMoved(PROFILE_POLICY_MOVED)
+
+
+def _form_messages(form) -> list:
+    """Return every field and non-field message one refused policy form reports."""
+    return [message for messages in form.errors.values() for message in messages]
+
+
+def save_cable_class_mapping_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    cable_class,
+    data,
+    reviewed_fingerprint,
+):
+    """Persist one CableClass policy decision, then request a fresh Import Plan."""
+    from .forms import CableClassMappingForm
+
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        lookup = {"profile": locked_profile, "cable_class": cable_class}
+        # The row is read under the lock, so the form validates what the write will replace.
+        stored = CableClassMapping.objects.filter(**lookup).first()
+        _refuse_hidden_policy(actor, stored)
+        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        instance = stored or CableClassMapping(**lookup)
+        form = CableClassMappingForm({**data, "cable_class": cable_class}, instance=instance)
+        if not form.is_valid():
+            raise UnacceptableCablePolicy(_form_messages(form))
+        save_permission_scoped_object(
+            actor,
+            CableClassMapping,
+            lookup,
+            {
+                "cable_type_resolved": form.instance.cable_type_resolved,
+                "cable_type": form.instance.cable_type,
+                "cable_profile_resolved": form.instance.cable_profile_resolved,
+                "cable_profile": form.instance.cable_profile,
+            },
+        )
+        # atomic-exit-safe: policy-saved-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+def save_cable_segment_override_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    segment_key,
+    trace_identity,
+    segment_index,
+    cable_class,
+    data,
+    reviewed_fingerprint,
+):
+    """Force one planned segment's Cable policy, then request a fresh Import Plan."""
+    from .forms import CableSegmentOverrideForm
+
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        lookup = {"profile": locked_profile, "segment_key": segment_key}
+        # The row is read under the lock, so the form validates what the write will replace.
+        stored = CableSegmentOverride.objects.filter(**lookup).first()
+        deciding = stored or CableClassMapping.objects.filter(profile=locked_profile, cable_class=cable_class).first()
+        _refuse_hidden_policy(actor, deciding)
+        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        instance = stored or CableSegmentOverride(**lookup)
+        instance.source_trace_identity = trace_identity
+        instance.segment_index = segment_index
+        form = CableSegmentOverrideForm(data, instance=instance)
+        if not form.is_valid():
+            raise UnacceptableCablePolicy(_form_messages(form))
+        save_permission_scoped_object(
+            actor,
+            CableSegmentOverride,
+            lookup,
+            {
+                "cable_type": form.instance.cable_type,
+                "cable_profile": form.instance.cable_profile,
+                "source_trace_identity": trace_identity,
+                "segment_index": segment_index,
+            },
+        )
+        # atomic-exit-safe: segment-override-saved-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+def clear_cable_segment_override_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    segment_key,
+    reviewed_fingerprint,
+):
+    """Drop one segment override, so the CableClass policy decides that segment again."""
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        stored = CableSegmentOverride.objects.filter(profile=locked_profile, segment_key=segment_key).first()
+        _refuse_hidden_policy(actor, stored)
+        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        if stored is not None:
+            delete_permission_scoped_objects(actor, CableSegmentOverride.objects.filter(pk=stored.pk))
+        # atomic-exit-safe: segment-override-cleared-and-replanned
         return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
 
 
@@ -124,7 +277,11 @@ _DIAGNOSTIC_MESSAGES = {
         "NetBox maps this port to several peer ports. Choose the peer port this trace continues through."
     ),
     "cable.attribute_drift": "The existing Cable carries attributes this import would not have written.",
-    "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Map it on the import profile.",
+    "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Set the Cable policy for it.",
+    "cable.media_family_mismatch": (
+        "Verified pass-throughs join segments that state different media families. "
+        "Force the segment that states the wrong medium, or correct the Cable in NetBox."
+    ),
     "cable.multi_termination_conflict": (
         "A Cable with several terminations on one side holds a port this trace needs. Correct that Cable in NetBox."
     ),
@@ -137,8 +294,14 @@ _DIAGNOSTIC_MESSAGES = {
     "cable.planned_termination_conflict": (
         "Another Source Trace plans a Cable on this termination. Resolve this trace to a different termination."
     ),
+    "cable.policy_stale": "The selected Cable policy value is no longer offered by this NetBox instance.",
+    "cable.profile_incompatible": "The selected Cable Profile does not permit one termination on each side.",
     "cable.resolved_segment_conflict": (
-        "Two Source Traces give one shared segment different Cable policies. Make their CableClass values agree."
+        "Two Source Traces give one shared segment different Cable policies. "
+        "Force one policy on the segment, or make the CableClass policies agree."
+    ),
+    "cable.segment_override_lost": (
+        "This segment now resolves to different ports, so the Cable policy forced on it no longer applies."
     ),
     "cable.same_port_continuation": "A mapped peer port continues the path where the source repeats one port.",
     "cable.segment_reused": "An existing Cable already proves this segment, so the import keeps it.",
@@ -289,7 +452,19 @@ def _states_a_trace(unit: SynchronizationUnit) -> bool:
 
 def _diagnostic_message(diagnostic) -> str:
     """Return the operator wording for one diagnostic."""
-    return str(diagnostic.display.get("message") or "") or _DIAGNOSTIC_MESSAGES.get(diagnostic.code, diagnostic.code)
+    message = str(diagnostic.display.get("message") or "") or _DIAGNOSTIC_MESSAGES.get(diagnostic.code, diagnostic.code)
+    if diagnostic.code == "cable.segment_override_lost":
+        from .cable_disclosure import CABLE_SEGMENT_OVERRIDE_ROW, DISCLOSURE_SOURCE, POLICY_VISIBLE
+
+        source = diagnostic.display.get(DISCLOSURE_SOURCE)
+        if (
+            diagnostic.display.get(POLICY_VISIBLE) is True
+            and isinstance(source, dict)
+            and source.get("kind") == CABLE_SEGMENT_OVERRIDE_ROW
+            and type(source.get("pk")) is int
+        ):
+            return f"Stored Cable policy override {source['pk']}: {message}"
+    return message
 
 
 def _detail(unit: SynchronizationUnit, action: str, object_type: str, name: str) -> str:
@@ -514,6 +689,7 @@ class TraceWorkspaceUnit:
     sheet: str
     endpoints: dict[str, str]
     segments: list[dict[str, Any]]
+    cable_policies: list[dict[str, Any]]
     logical_cable: dict[str, Any] | None
     deletes_logical_cable: bool
     resolution_started: bool
@@ -541,6 +717,7 @@ class TraceWorkspaceUnit:
             sheet=str(display.get("sheet") or ""),
             endpoints=dict(workspace.get("endpoints") or {}),
             segments=[dict(segment) for segment in workspace.get("segments") or ()],
+            cable_policies=[dict(policy) for policy in workspace["cable_policies"]],
             logical_cable=workspace.get("logical_cable"),
             deletes_logical_cable=bool(workspace.get("deletes_logical_cable")),
             resolution_started=bool(workspace.get("resolution_started")),
@@ -568,14 +745,17 @@ class TraceWorkspaceUnit:
 class ReviewWorkspace:
     """Read-only presentation of the accepted Import Plan."""
 
-    def __init__(self, plan: ImportPlan):
+    def __init__(self, plan: ImportPlan, viewer):
+        from .cable_disclosure import present_units
+
         self.plan = plan
-        self.units = tuple(WorkspaceUnit.from_unit(unit) for unit in plan.units)
+        self._presentation_units = present_units(plan.units, viewer)
+        self.units = tuple(WorkspaceUnit.from_unit(unit) for unit in self._presentation_units)
 
     @classmethod
-    def from_dict(cls, data: dict) -> ReviewWorkspace:
+    def from_dict(cls, data: dict, viewer) -> ReviewWorkspace:
         """Restore a workspace from the session's serialized Import Plan."""
-        return cls(ImportPlan.from_dict(data))
+        return cls(ImportPlan.from_dict(data), viewer)
 
     @property
     def counts(self) -> MappingProxyType:
@@ -611,7 +791,7 @@ class ReviewWorkspace:
 
         Cached because one page reads it twice, and each build reserializes every change.
         """
-        return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self.plan.units if _states_a_trace(unit))
+        return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self._presentation_units if _states_a_trace(unit))
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:
         """Return the unit and every unit owning a change it depends on, transitively.
@@ -828,6 +1008,7 @@ class ReviewWorkspace:
         """Return a presentation-only copy with replaced units."""
         workspace = object.__new__(type(self))
         workspace.plan = self.plan
+        workspace._presentation_units = self._presentation_units
         workspace.units = tuple(units)
         return workspace
 

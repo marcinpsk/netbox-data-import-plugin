@@ -32,6 +32,18 @@ AUDITED_EXITS = {
         "The selection cleared its permission check and is meant to commit, and the plan that "
         "follows it inside the lock only reads."
     ),
+    ("save_cable_class_mapping_and_replan", "policy-saved-and-replanned"): (
+        "The form and the permission-scoped write both passed, so the policy is meant to commit. "
+        "The plan that follows it inside the lock only reads."
+    ),
+    ("save_cable_segment_override_and_replan", "segment-override-saved-and-replanned"): (
+        "The form and the permission-scoped write both passed, so the override is meant to commit. "
+        "The plan that follows it inside the lock only reads."
+    ),
+    ("clear_cable_segment_override_and_replan", "segment-override-cleared-and-replanned"): (
+        "The scoped delete removed every row it was allowed to, and the plan that follows it "
+        "inside the lock only reads."
+    ),
     ("save_trace_device_resolution_and_replan", "device-decision-saved-and-replanned"): (
         "The Device choice cleared its candidate and permission checks. The new plan reads the "
         "committed choice inside the same profile lock."

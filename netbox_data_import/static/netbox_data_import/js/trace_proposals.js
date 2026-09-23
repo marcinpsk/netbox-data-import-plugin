@@ -69,16 +69,15 @@
       node(card, name).textContent = display[name];
     });
     node(card, 'progress').hidden = !display.pending;
+    [
+      ['job', display.job_status], ['job-note', display.job_note], ['page', display.page_status],
+    ].forEach(function (slot) {
+      var target = node(card, slot[0]);
+      target.textContent = slot[1];
+      target.hidden = !slot[1];
+    });
     node(card, 'failure').textContent = display.failure
       ? display.failure + ' (' + display.failure_code + ')' : '';
-    node(card, 'attempts').textContent = 'Backend attempts: ' + display.attempt_count;
-    var metadata = node(card, 'metadata');
-    metadata.replaceChildren();
-    display.metadata.forEach(function (item) {
-      var row = document.createElement('li');
-      row.textContent = item.label + ': ' + item.value;
-      metadata.appendChild(row);
-    });
     var history = node(card, 'history');
     history.replaceChildren();
     payload.history_display.forEach(function (attempt) {

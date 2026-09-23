@@ -43,6 +43,7 @@ def _unit(identity, disposition, *, row=None, operation=None, rack_name=""):
 
 def _workspace(*units):
     """Return a Review Workspace over the supplied units."""
+    viewer, _created = get_user_model().objects.get_or_create(username="review-workspace-viewer")
     return ReviewWorkspace(
         ImportPlan(
             units=units,
@@ -50,7 +51,8 @@ def _workspace(*units):
             profile_fingerprint="1" * 64,
             actor="1",
             planning_context={"site_id": 1, "location_id": None, "tenant_id": None},
-        )
+        ),
+        viewer,
     )
 
 
@@ -167,7 +169,11 @@ class ReviewWorkspacePresentationTest(TestCase):
             planning_context={"site_id": 1, "location_id": None, "tenant_id": None},
         )
 
-        self.assertEqual(ReviewWorkspace(plan).unused_columns, [{"name": "Notes", "count": 2, "samples": ("first",)}])
+        viewer = get_user_model().objects.create_user(username="unused-column-viewer")
+        self.assertEqual(
+            ReviewWorkspace(plan, viewer).unused_columns,
+            [{"name": "Notes", "count": 2, "samples": ("first",)}],
+        )
 
     def test_rack_groups_sort_devices_and_source_rows_are_deduplicated(self):
         """One source row can yield dependencies, but it appears once and devices sort by position."""

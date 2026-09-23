@@ -2,17 +2,47 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Shared test helpers for netbox_data_import tests."""
 
+import json
 import os
 import re
-from unittest import TestCase
 from contextlib import contextmanager
 from queue import Queue
 from threading import Thread
 from time import monotonic, sleep
+from unittest import TestCase
 
 from django.db import connections
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_workbook.xlsx")
+
+
+def assert_absent_from(test: TestCase, structure, needle: str, msg=None) -> None:
+    """Fail when a decoded string in *structure* contains *needle*."""
+    pending = [(structure, "$")]
+    while pending:
+        value, path = pending.pop()
+        if isinstance(value, str):
+            if needle in value:
+                detail = f"{needle!r} found at {path}."
+                test.fail(f"{msg}: {detail}" if msg else detail)
+            try:
+                decoded = json.loads(
+                    value,
+                    object_pairs_hook=lambda pairs: [item for pair in pairs for item in pair],
+                )
+            except json.JSONDecodeError:
+                continue
+            except RecursionError as exc:
+                detail = f"JSON at {path} exceeded the parser recursion limit."
+                raise test.failureException(f"{msg}: {detail}" if msg else detail) from exc
+            pending.append((decoded, f"{path} decoded JSON"))
+        elif isinstance(value, dict):
+            for index, (key, item) in reversed(list(enumerate(value.items()))):
+                pending.append((item, f"{path}[{key!r}]"))
+                pending.append((key, f"{path} keys[{index}]"))
+        elif isinstance(value, (list, tuple)):
+            for index in range(len(value) - 1, -1, -1):
+                pending.append((value[index], f"{path}[{index}]"))
 
 
 def workbook_bytes(headers, rows, *, sheet_name="Data") -> bytes:
@@ -118,12 +148,17 @@ def trace_workbook_bytes(
     export_timestamp="2026-08-31 12:00:00+00:00",
 ) -> bytes:
     """Build trace workbook bytes with the fixed trace sheet names."""
+    from datetime import UTC, datetime
     from io import BytesIO
+    from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
     import openpyxl
     from openpyxl.worksheet.worksheet import Worksheet
 
     book = openpyxl.Workbook()
+    fixed_time = datetime(2000, 1, 1, tzinfo=UTC)
+    book.properties.created = fixed_time
+    book.properties.modified = fixed_time
     active = book.active
     if isinstance(active, Worksheet):
         book.remove(active)
@@ -133,7 +168,22 @@ def trace_workbook_bytes(
         add_trace_sheet(book, "Trace List", TRACE_LIST_HEADER, list_blocks, export_timestamp)
     buffer = BytesIO()
     book.save(buffer)
-    return buffer.getvalue()
+    stable = BytesIO()
+    with ZipFile(BytesIO(buffer.getvalue())) as source, ZipFile(stable, "w", compression=ZIP_DEFLATED) as target:
+        for original in source.infolist():
+            item = ZipInfo(original.filename, (1980, 1, 1, 0, 0, 0))
+            item.compress_type = original.compress_type
+            item.external_attr = original.external_attr
+            item.create_system = original.create_system
+            content = source.read(original.filename)
+            if original.filename == "docProps/core.xml":
+                content = re.sub(
+                    rb"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)",
+                    rb"\g<1>2000-01-01T00:00:00Z\g<2>",
+                    content,
+                )
+            target.writestr(item, content)
+    return stable.getvalue()
 
 
 def store_workbook_document(profile, headers, rows, uploaded_by, filename, *, sheet_name="Data"):
@@ -148,7 +198,7 @@ def store_workbook_document(profile, headers, rows, uploaded_by, filename, *, sh
     )
 
 
-def plan_source_rows(rows, profile, site, *, actor=None, location=None, tenant=None):
+def plan_source_rows(rows, profile, site, *, actor, location=None, tenant=None):
     """Plan canonical flat-source rows through the registered Target Module interfaces."""
     from netbox_data_import import catalog, target_modules
     from netbox_data_import.adapters import FlatWorkbookAdapter, SourceBatch
@@ -157,7 +207,7 @@ def plan_source_rows(rows, profile, site, *, actor=None, location=None, tenant=N
     from netbox_data_import.review_workspace import ReviewWorkspace
     from netbox_data_import.source_resolution import derive_effective_rows
 
-    reader = NetBoxReader.for_actor(actor) if actor is not None else NetBoxReader.unrestricted()
+    reader = NetBoxReader.for_actor(actor)
     reader = reader.for_target(site=site, location=location, tenant=tenant)
     batch = SourceBatch(
         output_kinds=FlatWorkbookAdapter.output_kinds,
@@ -171,17 +221,17 @@ def plan_source_rows(rows, profile, site, *, actor=None, location=None, tenant=N
         units=tuple(units),
         source_fingerprint="0" * 64,
         profile_fingerprint=profile.planning_fingerprint,
-        actor=str(actor.pk) if actor is not None else "test-unrestricted",
+        actor=str(actor.pk),
         planning_context={
             "site_id": site.pk,
             "location_id": location.pk if location is not None else None,
             "tenant_id": tenant.pk if tenant is not None else None,
         },
     )
-    return ReviewWorkspace(plan)
+    return ReviewWorkspace(plan, actor)
 
 
-def apply_source_rows(rows, profile, site, *, actor=None, location=None, tenant=None):
+def apply_source_rows(rows, profile, site, *, actor, location=None, tenant=None):
     """Apply canonical rows through Target Module runtimes and return their accepted workspace."""
     from django.db import transaction
 
@@ -198,7 +248,7 @@ def apply_source_rows(rows, profile, site, *, actor=None, location=None, tenant=
         location=location,
         tenant=tenant,
     )
-    reader = NetBoxReader.for_actor(actor) if actor is not None else NetBoxReader.unrestricted()
+    reader = NetBoxReader.for_actor(actor)
     reader = reader.for_target(site=site, location=location, tenant=tenant)
     context = ExecutionContext(actor=actor, reader=reader, profile=profile)
     with transaction.atomic():
@@ -376,7 +426,7 @@ def setup_preview_with_device_matches(client, profile):
         uploaded_by=actor,
     )
     planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
-    result = ReviewWorkspace(ImportEngine.plan(profile, document, actor, planning_context))
+    result = ReviewWorkspace(ImportEngine.plan(profile, document, actor, planning_context), actor)
 
     device_rows = [row for row in result.units if row.object_type == "device" and row.source_id]
     if len(device_rows) > 0:
@@ -397,7 +447,7 @@ def setup_preview_with_device_matches(client, profile):
         )
 
     plan = ImportEngine.plan(profile, document, actor, planning_context)
-    result = ReviewWorkspace(plan)
+    result = ReviewWorkspace(plan, actor)
     session = client.session
     start_new_preview(session, plan)
     session["import_rows"] = result.source_rows

@@ -67,7 +67,7 @@ test('a boost removes the old poll and binds the replacement card only once', as
   expect(await page.evaluate(() => window.proposalReads)).toBe(3);
 });
 
-test('a completed card shows the candidate, kind, explanation, backend, and recent history', async ({page}) => {
+test('a completed card shows the candidate, kind, explanation, and recent history', async ({page}) => {
   const initial = completed();
   initial.history_display = [
     {id: 7, created: 'today', status: 'Completed', outcome: 'Candidate'},
@@ -79,8 +79,6 @@ test('a completed card shows the candidate, kind, explanation, backend, and rece
   await expect(slot(page, 'badge')).toHaveText('Proposal - not applied');
   await expect(slot(page, 'candidate')).toHaveText('eth0 (Interface)');
   await expect(slot(page, 'explanation')).toHaveText('The labels name the same port.');
-  await expect(slot(page, 'attempts')).toHaveText('Backend attempts: 2');
-  await expect(slot(page, 'metadata')).toHaveText('backend model: fixture-model');
   await expect(action(page, 'accept')).toBeEnabled();
   await expect(action(page, 'reject')).toBeEnabled();
   await expect(slot(page, 'history').locator('li')).toHaveText([
@@ -199,4 +197,48 @@ test('a first request adds the card and history while field actions stay outside
   await expect(slot(page, 'progress')).toBeVisible();
   await expect(action(page, 'cancel')).toBeEnabled();
   await expect(slot(page, 'history').locator('li')).toHaveCount(1);
+});
+
+test('the job line follows the background job and warns when it ended with no result', async ({page}) => {
+  await page.clock.install({time: new Date("2026-09-11T08:00:00Z")});
+  await page.clock.pauseAt(new Date("2026-09-11T08:00:01Z"));
+  await mount(page);
+  await expect(slot(page, 'job')).toHaveText('Background job: Pending, requested 0 minutes ago');
+  // An empty slot reads as hidden to a visibility check, so the attribute is what has to be asserted.
+  expect(await slot(page, 'job-note').evaluate(el => el.hidden)).toBe(true);
+
+  // The worker was killed mid-run, so the attempt stays active and only the job says so.
+  await serve(page, payload({
+    job_status: 'Background job: Errored, requested 2 hours ago',
+    job_note: 'The background job ended without recording a result. Cancel this proposal and ask again.',
+  }));
+  await page.clock.runFor(3000);
+
+  await expect(slot(page, 'job')).toHaveText('Background job: Errored, requested 2 hours ago');
+  await expect(slot(page, 'job-note')).toBeVisible();
+});
+
+test('a settled card carries no job line', async ({page}) => {
+  await mount(page, completed());
+
+  expect(await slot(page, 'job').evaluate(el => el.hidden)).toBe(true);
+  expect(await slot(page, 'job-note').evaluate(el => el.hidden)).toBe(true);
+});
+
+test('a no_match that searched one page says so and offers the next', async ({page}) => {
+  await mount(page, completed({
+    badge: 'Proposal - not applied', candidate: '', explanation: 'No candidate in this page names the port.',
+    page_status: 'Searched candidates 1-64 of 120.',
+    actions: [
+      {key: 'request', label: 'Ask AI: next 56', reason: '', url: '/request/'},
+      {key: 'cancel', label: 'Cancel', reason: 'There is no active proposal.', url: '/cancel/'},
+      {key: 'accept', label: 'Accept', reason: 'No match in candidates 1-64 of 120. Ask AI for the next 56.',
+       url: '/accept/'},
+      {key: 'reject', label: 'Reject', reason: '', url: '/reject/'},
+    ],
+  }));
+
+  await expect(slot(page, 'page')).toHaveText('Searched candidates 1-64 of 120.');
+  await expect(action(page, 'request')).toHaveText('Ask AI: next 56');
+  await expect(action(page, 'accept')).toBeDisabled();
 });

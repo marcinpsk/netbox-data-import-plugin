@@ -23,6 +23,7 @@ from .adapters import (
     output_kinds_for,
 )
 from . import plan
+from .cable_policy import cable_profile_label, cable_type_label, policy_choice_errors
 from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
 from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from . import inference_settings as _inference_settings
@@ -551,71 +552,6 @@ class ClassRoleMapping(PolicySectionModel):
         return reverse("plugins:netbox_data_import:classrolemapping_edit", args=[self.pk])
 
 
-def _flatten_choice_groups(choices):
-    """Return value and label pairs from flat or grouped NetBox choices."""
-    flattened = []
-    for value, label in choices:
-        if isinstance(label, (tuple, list)):
-            flattened.extend(label)
-        else:
-            flattened.append((value, label))
-    return tuple(flattened)
-
-
-def cable_type_choices():
-    """Return the Cable Type values offered by the running NetBox instance."""
-    from dcim.choices import CableTypeChoices
-
-    return _flatten_choice_groups(CableTypeChoices.CHOICES)
-
-
-def cable_profile_choices():
-    """Return the Cable Profile values offered by the running NetBox instance."""
-    from dcim.choices import CableProfileChoices
-
-    return _flatten_choice_groups(CableProfileChoices.CHOICES)
-
-
-def cable_profile_accepts_one_termination_per_side(value) -> bool:
-    """Return whether NetBox reports one connector on each side of the Cable Profile."""
-    from dcim.models import Cable
-
-    profile_class = Cable(profile=value).profile_class
-    return profile_class is not None and len(profile_class.a_connectors) == 1 and len(profile_class.b_connectors) == 1
-
-
-def compatible_cable_profile_choices():
-    """Return running Cable Profiles that permit one termination on each side."""
-    return tuple(
-        (value, label)
-        for value, label in cable_profile_choices()
-        if cable_profile_accepts_one_termination_per_side(value)
-    )
-
-
-def cable_class_mapping_choice_errors(cable_type, cable_profile):
-    """Return runtime-choice and profile-cardinality errors by model field."""
-    errors = {}
-    type_values = {value for value, _label in cable_type_choices()}
-    profile_values = {value for value, _label in cable_profile_choices()}
-    if cable_type is not None and cable_type not in type_values:
-        errors["cable_type"] = ValidationError(
-            "The selected Cable Type is no longer offered by this NetBox instance.",
-            code="cable.cableclass_stale_mapping",
-        )
-    if cable_profile is not None and cable_profile not in profile_values:
-        errors["cable_profile"] = ValidationError(
-            "The selected Cable Profile is no longer offered by this NetBox instance.",
-            code="cable.cableclass_stale_mapping",
-        )
-    elif cable_profile is not None and not cable_profile_accepts_one_termination_per_side(cable_profile):
-        errors["cable_profile"] = ValidationError(
-            "The selected Cable Profile does not permit one termination on each side.",
-            code="cable.profile_incompatible",
-        )
-    return errors
-
-
 class CableClassMapping(PolicySectionModel):
     """Map one source CableClass to independent Cable Type and Cable Profile decisions."""
 
@@ -658,7 +594,7 @@ class CableClassMapping(PolicySectionModel):
         super().clean()
         self.cable_type = self.cable_type or None
         self.cable_profile = self.cable_profile or None
-        errors = cable_class_mapping_choice_errors(self.cable_type, self.cable_profile)
+        errors = policy_choice_errors(self.cable_type, self.cable_profile)
         if not self.cable_type_resolved and self.cable_type is not None:
             errors["cable_type"] = ValidationError(
                 "An unresolved Cable Type cannot store a selected value.",
@@ -672,21 +608,19 @@ class CableClassMapping(PolicySectionModel):
         if errors:
             raise ValidationError(errors)
 
+    def decided_policy(self):
+        """Return the Cable policy this row decides, or None while either dimension is unresolved."""
+        if not (self.cable_type_resolved and self.cable_profile_resolved):
+            return None
+        return {"cable_type": self.cable_type, "cable_profile": self.cable_profile}
+
     def cable_type_display(self):
         """Return the operator-facing Cable Type decision."""
-        if not self.cable_type_resolved:
-            return "Unresolved"
-        if self.cable_type is None:
-            return "None"
-        return str(dict(cable_type_choices()).get(self.cable_type, self.cable_type))
+        return "Unresolved" if not self.cable_type_resolved else cable_type_label(self.cable_type)
 
     def cable_profile_display(self):
         """Return the operator-facing Cable Profile decision."""
-        if not self.cable_profile_resolved:
-            return "Unresolved"
-        if self.cable_profile is None:
-            return "None"
-        return str(dict(cable_profile_choices()).get(self.cable_profile, self.cable_profile))
+        return "Unresolved" if not self.cable_profile_resolved else cable_profile_label(self.cable_profile)
 
     def __str__(self):
         return self.cable_class
@@ -694,6 +628,69 @@ class CableClassMapping(PolicySectionModel):
     def get_absolute_url(self):
         """Return the edit URL for this CableClass mapping."""
         return reverse("plugins:netbox_data_import:cableclassmapping_edit", args=[self.pk])
+
+
+class CableSegmentOverride(PolicySectionModel):
+    """Force the Cable policy of one planned segment, keyed by its pair of resolved terminations."""
+
+    POLICY_SECTION = "cable_segment_overrides"
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="cable_segment_overrides",
+    )
+    segment_key = models.CharField(
+        max_length=200,
+        help_text="Direction-independent pair of resolved termination identities, derived by the planner",
+    )
+    cable_type = models.CharField(max_length=50, null=True, blank=True)
+    cable_profile = models.CharField(max_length=50, null=True, blank=True)
+    source_trace_identity = models.TextField(
+        help_text="Source Trace the decision was made from, so a replan can report the override it lost",
+    )
+    segment_index = models.PositiveIntegerField(
+        help_text="Segment position in that Source Trace when the decision was made",
+    )
+
+    # An override decides both dimensions, so it reads beside a CableClass row wherever one is read.
+    cable_type_resolved = True
+    cable_profile_resolved = True
+
+    class Meta:
+        ordering = ["profile", "segment_key"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "segment_key"],
+                name="ndi_cablesegmentoverride_profile_segment",
+            ),
+        ]
+        verbose_name = "Cable Segment Override"
+        verbose_name_plural = "Cable Segment Overrides"
+
+    def clean(self):
+        """Reject a value the running instance no longer offers or cannot terminate on one side."""
+        super().clean()
+        self.cable_type = self.cable_type or None
+        self.cable_profile = self.cable_profile or None
+        errors = policy_choice_errors(self.cable_type, self.cable_profile)
+        if errors:
+            raise ValidationError(errors)
+
+    def decided_policy(self):
+        """Return the Cable policy this row decides, which an override always decides completely."""
+        return {"cable_type": self.cable_type, "cable_profile": self.cable_profile}
+
+    def cable_type_display(self):
+        """Return the operator-facing Cable Type this override forces."""
+        return cable_type_label(self.cable_type)
+
+    def cable_profile_display(self):
+        """Return the operator-facing Cable Profile this override forces."""
+        return cable_profile_label(self.cable_profile)
+
+    def __str__(self):
+        return f"segment {self.segment_index} of {self.source_trace_identity}"
 
 
 def index_digest(value: str) -> str:
@@ -1399,6 +1396,10 @@ class ResolutionProposal(DigestIndexedMixin, models.Model):
     response_diagnostic = models.JSONField(null=True, blank=True)
 
     failure_reason = models.CharField(max_length=50, choices=ProposalFailureReason.CHOICES, blank=True, default="")
+    # Set after the row commits, because the enqueue needs the id the request writes.
+    job = models.OneToOneField(
+        "core.Job", on_delete=models.SET_NULL, null=True, blank=True, related_name="resolution_proposal"
+    )
 
     decision = models.CharField(max_length=20, choices=ProposalDecision.CHOICES, blank=True, default="")
     decided_by = models.ForeignKey(

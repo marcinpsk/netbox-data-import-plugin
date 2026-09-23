@@ -45,7 +45,7 @@ class ContactResolutionSessionMixin:
         # The first decision unblocks the row, so the second one meets a matched device.
         self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-one")
         plan = ImportEngine.plan(self.profile, self.document, self.user, self.planning_context)
-        result = ReviewWorkspace(plan)
+        result = ReviewWorkspace(plan, self.user)
         session = self.client.session
         record_recalculated_preview(session, plan, user=self.user)
         session["import_rows"] = result.source_rows
@@ -140,7 +140,7 @@ class ContactResolutionSessionMixin:
         )
         self.planning_context = {"site_id": self.site.pk, "location_id": None, "tenant_id": None}
         plan = ImportEngine.plan(self.profile, self.document, user, self.planning_context)
-        workspace = ReviewWorkspace(plan)
+        workspace = ReviewWorkspace(plan, user)
         session = self.client.session
         start_new_preview(session, plan)
         session["import_rows"] = workspace.source_rows
@@ -357,7 +357,6 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
             queue_name="default",
             data={
                 "job_type": "netbox_data_import.import",
-                "accepted_plan": session["import_plan"],
                 "context_data": session["import_context"],
                 "source_document_id": self.document.pk,
             },
@@ -531,7 +530,7 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
             self.user,
             self.planning_context,
         )
-        result = ReviewWorkspace(plan)
+        result = ReviewWorkspace(plan, self.user)
         device_row = next(row for row in result.units if row.object_type == "device")
         self.assertEqual(device_row.extra_data.get("netbox_device_id"), device.pk)
 
@@ -695,7 +694,7 @@ class RefusedRowContactAssignmentTest(ContactResolutionSessionMixin, TestCase):
         # The first decision settles the Contact question, so the replan reaches the binding check.
         self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-one")
         plan = ImportEngine.plan(self.profile, self.document, self.user, self.planning_context)
-        result = ReviewWorkspace(plan)
+        result = ReviewWorkspace(plan, self.user)
         session = self.client.session
         record_recalculated_preview(session, plan, user=self.user)
         session["import_rows"] = result.source_rows

@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 _DIAGNOSTIC_CODE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*\.[a-z0-9]+(?:_[a-z0-9]+)*$")
 
@@ -178,6 +178,8 @@ class Diagnostic:
     severity: str
     identities: tuple[str, ...] = ()
     display: Mapping[str, Any] = field(default_factory=dict)
+    # The facts the finding was decided from, which the fingerprint carries and `display` does not.
+    evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate the code namespace and the severity vocabulary."""
@@ -187,6 +189,7 @@ class Diagnostic:
             raise PlanInvalid(f"Unknown diagnostic severity '{self.severity}'.")
         object.__setattr__(self, "identities", _identities(self.identities, "Diagnostic identities"))
         object.__setattr__(self, "display", _plan_mapping(self.display, "Diagnostic display"))
+        object.__setattr__(self, "evidence", _plan_mapping(self.evidence, "Diagnostic evidence"))
 
     def __hash__(self):
         """Hash over the serialized form, which mirrors the generated equality."""
@@ -194,8 +197,17 @@ class Diagnostic:
 
     @property
     def fingerprint_data(self):
-        """Return the decision inputs: the code, the severity, and the affected identities."""
-        return {"code": self.code, "severity": self.severity, "identities": list(self.identities)}
+        """Return the decision inputs: the code, the severity, the identities, and the evidence.
+
+        A finding about live state the identities do not name, such as the media two Cables carry,
+        would otherwise leave the fingerprint unchanged while the world moved under an accepted plan.
+        """
+        return {
+            "code": self.code,
+            "severity": self.severity,
+            "identities": list(self.identities),
+            "evidence": _thaw_json(self.evidence),
+        }
 
     def to_dict(self) -> dict:
         """Return the serialized form."""
@@ -204,6 +216,7 @@ class Diagnostic:
             "severity": self.severity,
             "identities": list(self.identities),
             "display": _thaw_json(self.display),
+            "evidence": _thaw_json(self.evidence),
         }
 
     @classmethod
@@ -214,6 +227,7 @@ class Diagnostic:
             severity=data["severity"],
             identities=tuple(data.get("identities", ())),
             display=data.get("display", {}),
+            evidence=data.get("evidence", {}),
         )
 
 
@@ -335,6 +349,11 @@ class SynchronizationUnit:
         )
 
 
+def is_current_schema_version(version: Any) -> bool:
+    """Return whether a serialized plan's ``schema_version`` is the one this release executes."""
+    return isinstance(version, int) and not isinstance(version, bool) and version == SCHEMA_VERSION
+
+
 @dataclass(frozen=True)
 class ImportPlan:
     """A serializable plan: units, diagnostics, and the inputs its fingerprint covers."""
@@ -429,7 +448,7 @@ class ImportPlan:
         """
         try:
             version = data.get("schema_version")
-            if not isinstance(version, int) or isinstance(version, bool) or version != SCHEMA_VERSION:
+            if not is_current_schema_version(version):
                 raise PlanSchemaMismatch(f"Import Plan schema version {version} is not version {SCHEMA_VERSION}.")
             return cls(
                 units=tuple(SynchronizationUnit.from_dict(item) for item in data["units"]),
@@ -533,5 +552,6 @@ __all__ = (
     "canonical_json",
     "executable_units",
     "fingerprint_of",
+    "is_current_schema_version",
     "merge_changes",
 )

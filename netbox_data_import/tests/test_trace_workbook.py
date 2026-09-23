@@ -6,6 +6,7 @@ from collections import Counter
 from io import BytesIO
 import json
 from pathlib import Path
+from zipfile import ZipFile
 
 from django.test import SimpleTestCase
 import openpyxl
@@ -63,6 +64,15 @@ def _codes(batch):
 
 class TraceWorkbookFixtureTest(SimpleTestCase):
     """The committed workbooks define the real trace format."""
+
+    def test_generated_workbooks_have_stable_archive_metadata(self):
+        """Fixture fingerprints must not depend on the wall clock of each OpenPyXL save."""
+        with ZipFile(BytesIO(_workbook())) as archive:
+            timestamps = {item.date_time for item in archive.infolist()}
+            core_properties = archive.read("docProps/core.xml")
+
+        self.assertEqual(timestamps, {(1980, 1, 1, 0, 0, 0)})
+        self.assertIn(b">2000-01-01T00:00:00Z</dcterms:modified>", core_properties)
 
     def test_copper_fixture_collapses_duplicate_blocks(self):
         """The copper corpus produces ten valid three-segment Source Traces."""
@@ -130,6 +140,18 @@ class TraceWorkbookFixtureTest(SimpleTestCase):
 
 class TraceWorkbookIdentityTest(SimpleTestCase):
     """Trace identity and content use direction-independent canonical forms."""
+
+    def test_endpoint_lines_reject_each_invalid_grammar_shape(self):
+        """The endpoint grammar rejects a bad field count, suffix, and required value."""
+        cases = (
+            "DEVICE-A",
+            "DEVICE-A > PORT-A",
+            "DEVICE-A > PORT-A ()",
+        )
+
+        for line in cases:
+            with self.subTest(line=line), self.assertRaises(ValueError):
+                parse_endpoint_line(line)
 
     def test_endpoint_lines_keep_cards_and_port_classes_distinct(self):
         """The endpoint grammar accepts every source shape used by the fixtures."""
@@ -391,6 +413,38 @@ class TraceWorkbookCorroborationTest(SimpleTestCase):
 class TraceWorkbookTaxonomyTest(SimpleTestCase):
     """Small workbooks cover source-only validation conditions absent from the corpus."""
 
+    def test_an_invalid_endpoint_line_becomes_an_incomplete_trace(self):
+        """Endpoint grammar failures stay structured diagnostics at the adapter boundary."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        block = (
+            "DEVICE-A",
+            _endpoint_line(endpoint_b),
+            (_segment(endpoint_a, "Cable", endpoint_b),),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertEqual(batch.rows, ())
+        self.assertEqual(_codes(batch), ["trace.incomplete_block"])
+        self.assertIn("optional cards label", batch.diagnostics[0].message)
+
+    def test_an_empty_cable_class_becomes_an_incomplete_trace(self):
+        """A segment without policy input remains in the batch as an invalid trace."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        block = (
+            _endpoint_line(endpoint_a),
+            _endpoint_line(endpoint_b),
+            (_segment(endpoint_a, "", endpoint_b),),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.incomplete_block"])
+        self.assertIn("empty CableClass", batch.diagnostics[0].message)
+
     def test_an_overlength_export_timestamp_is_rejected_at_the_adapter(self):
         """Raw export metadata cannot reach a shorter provenance database column."""
         endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
@@ -515,23 +569,15 @@ class TraceWorkbookTaxonomyTest(SimpleTestCase):
         self.assertIn("claimed by another Source Trace", batch.diagnostics[0].message)
         self.assertNotIn("CableClass", batch.diagnostics[0].message)
 
-    def test_one_segment_claimed_with_two_cable_classes_invalidates_both_traces(self):
-        """A shared segment stated with two labels cannot become one Cable."""
-        blocks = _two_traces_over_one_pair("Shared A", "Shared B")
+    def test_one_segment_stated_with_two_cable_classes_is_no_source_disagreement(self):
+        """Two labels can resolve to one Cable policy, so only the planner can call this a conflict."""
+        for first, second in (("Shared A", "Shared B"), ("Shared", "shared")):
+            with self.subTest(labels=(first, second)):
+                batch = _interpret(_workbook(path_blocks=_two_traces_over_one_pair(first, second)))
 
-        batch = _interpret(_workbook(path_blocks=blocks))
-
-        self.assertEqual(len(batch.rows), 2)
-        self.assertTrue(all(not trace.valid for trace in batch.rows))
-        self.assertEqual(_codes(batch), ["trace.cross_trace_conflict", "trace.cross_trace_conflict"])
-        self.assertIn("conflicting CableClass labels", batch.diagnostics[0].message)
-
-    def test_a_cable_class_that_differs_only_in_case_is_a_disagreement(self):
-        """A CableClass label keys its own mapping row, so it is not normalized like an identity."""
-        batch = _interpret(_workbook(path_blocks=_two_traces_over_one_pair("Shared", "shared")))
-
-        self.assertTrue(all(not trace.valid for trace in batch.rows))
-        self.assertIn("conflicting CableClass labels", batch.diagnostics[0].message)
+                self.assertEqual(len(batch.rows), 2)
+                self.assertTrue(all(trace.valid for trace in batch.rows))
+                self.assertNotIn("trace.cross_trace_conflict", _codes(batch))
 
     def test_two_unreadable_rows_each_report_their_own_location(self):
         """Issue #84 asks the diagnostics to name the malformed rows, not just the first."""

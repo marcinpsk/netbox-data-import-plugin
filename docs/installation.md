@@ -68,6 +68,37 @@ Use a negated class or property for the uppercase forms. The command prints noth
 unsupported syntax or common Unicode-sensitive constructs. Test every rule with representative
 source values before you upgrade because successful compilation alone does not prove equal behavior.
 
+### Cable tag integrity
+
+Migration `0038_cable_tag_integrity` adds a foreign key from each Cable tag association to its
+Cable. If a tag association names a Cable that no longer exists, the migration stops with a foreign
+key violation on `ndi_taggeditem_cable_fk` and changes nothing.
+
+Find these associations with `python manage.py dbshell` before you run `migrate`:
+
+```sql
+SELECT item.id, item.object_id, item.tag_id
+FROM extras_taggeditem AS item
+JOIN django_content_type AS kind ON kind.id = item.content_type_id
+WHERE kind.app_label = 'dcim' AND kind.model = 'cable'
+  AND NOT EXISTS (SELECT 1 FROM dcim_cable AS cable WHERE cable.id = item.object_id);
+```
+
+Each returned row tags a deleted Cable, so NetBox shows it nowhere. Delete all of them, then run
+`migrate` again:
+
+```sql
+DELETE FROM extras_taggeditem AS item
+USING django_content_type AS kind
+WHERE kind.id = item.content_type_id
+  AND kind.app_label = 'dcim' AND kind.model = 'cable'
+  AND NOT EXISTS (SELECT 1 FROM dcim_cable AS cable WHERE cable.id = item.object_id);
+```
+
+The migration locks `extras_taggeditem` until it commits, so NetBox cannot read or write tags for
+that time. The time grows with the number of tagged items: about 10 seconds for 5,000,000 tagged
+items on PostgreSQL 18.
+
 ### Import Job becomes Import Execution
 
 The Import Job history model is renamed to Import Execution. Existing history rows are kept and stay

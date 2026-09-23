@@ -18,11 +18,11 @@ from .models import (
     ClassRoleMapping,
     DeviceTypeMapping,
     ColumnTransformRule,
+    CableSegmentOverride,
     _require_adapter_config_mapping,
     validate_registered_adapter,
-    cable_type_choices,
-    compatible_cable_profile_choices,
 )
+from .cable_policy import cable_type_choices, compatible_cable_profile_choices
 
 _EXPLICIT_NONE = "__explicit_none__"
 
@@ -53,11 +53,12 @@ class _RuntimeCableChoiceField(forms.ChoiceField):
         forms.Field.validate(self, value)
 
 
-def _decision_choices(runtime_choices):
-    """Add unresolved and explicit-none form states to current NetBox choices."""
+def _decision_choices(runtime_choices, *, unresolved=True):
+    """Add the explicit-none form state, and the unresolved one a complete decision does not offer."""
     if _EXPLICIT_NONE in {value for value, _label in runtime_choices}:
         raise RuntimeError("A NetBox Cable choice conflicts with the form's explicit-none control value.")
-    return [("", "Unresolved"), (_EXPLICIT_NONE, "Explicitly none"), *runtime_choices]
+    states = [("", "Unresolved")] if unresolved else []
+    return [*states, (_EXPLICIT_NONE, "Explicitly none"), *runtime_choices]
 
 
 def _with_stored_decision(choices, resolved, value):
@@ -85,6 +86,16 @@ def _decode_decision(value):
     if value == _EXPLICIT_NONE:
         return True, None
     return True, value
+
+
+def cable_policy_form_initial(policy: dict) -> dict:
+    """Return the control values that offer one decided Cable policy as the default."""
+    if not policy:
+        return {}
+    return {
+        "cable_type": _decision_initial(True, policy["cable_type"]),
+        "cable_profile": _decision_initial(True, policy["cable_profile"]),
+    }
 
 
 def _profile_output_kinds(form):
@@ -265,6 +276,43 @@ class CableClassMappingForm(forms.ModelForm):
         self.instance.cable_type_resolved = type_resolved
         self.instance.cable_type = cable_type
         self.instance.cable_profile_resolved = profile_resolved
+        self.instance.cable_profile = cable_profile
+        cleaned["cable_type"] = cable_type
+        cleaned["cable_profile"] = cable_profile
+        return cleaned
+
+
+class CableSegmentOverrideForm(forms.ModelForm):
+    """Force both Cable dimensions on one planned segment, which an override always decides."""
+
+    # One control per segment in a narrow panel, so the small variant keeps a long path readable.
+    cable_type = _RuntimeCableChoiceField(widget=forms.Select(attrs={"class": "form-select form-select-sm"}))
+    cable_profile = _RuntimeCableChoiceField(widget=forms.Select(attrs={"class": "form-select form-select-sm"}))
+
+    class Meta:
+        model = CableSegmentOverride
+        fields = ["cable_type", "cable_profile"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The empty state is a prompt the required field refuses, not a decision the override stores.
+        self.fields["cable_type"].choices = _with_stored_decision(
+            [("", "Choose a Cable Type"), *_decision_choices(cable_type_choices(), unresolved=False)],
+            True,
+            self.instance.cable_type,
+        )
+        self.fields["cable_profile"].choices = _with_stored_decision(
+            [("", "Choose a Cable Profile"), *_decision_choices(compatible_cable_profile_choices(), unresolved=False)],
+            True,
+            self.instance.cable_profile,
+        )
+
+    def clean(self):
+        """Decode both explicit decisions, which the model then validates against the instance."""
+        cleaned = super().clean()
+        _type_resolved, cable_type = _decode_decision(cleaned.get("cable_type"))
+        _profile_resolved, cable_profile = _decode_decision(cleaned.get("cable_profile"))
+        self.instance.cable_type = cable_type
         self.instance.cable_profile = cable_profile
         cleaned["cable_type"] = cable_type
         cleaned["cable_profile"] = cable_profile

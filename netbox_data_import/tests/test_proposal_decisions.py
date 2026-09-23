@@ -13,6 +13,7 @@ from django.db import connection
 from django.test import TestCase, TransactionTestCase, override_settings
 
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, termination_field_key
+from netbox_data_import.inference_backend import proposal_eligible_set_limit
 from netbox_data_import.models import (
     ImportProfile,
     ProposalDecision,
@@ -26,7 +27,7 @@ from netbox_data_import.models import (
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.object_permissions import ObjectPermissionDenied
 from netbox_data_import.proposal_decisions import accept_proposal, proposal_staleness, reject_proposal
-from netbox_data_import.proposal_tasks import proposal_task
+from netbox_data_import.proposal_tasks import TOO_MANY_CANDIDATES, proposal_task
 from netbox_data_import.resolution_proposals import (
     cancel_proposal,
     claim_proposal,
@@ -166,10 +167,32 @@ class ProposalFreshnessTest(DecisionInventory, TestCase):
         Interface.objects.filter(device=self.device).delete()
         self.assert_candidates_stale(proposal)
 
-    def test_a_candidate_set_above_the_bound_is_stale(self):
+    def test_a_candidate_set_above_the_eligible_ceiling_is_stale(self):
+        """Past the ceiling the freshness read builds no snapshot, so nothing can be compared."""
         proposal = self.proposal()
+        existing = Interface.objects.filter(device=self.device).count()
+        Interface.objects.bulk_create(
+            Interface(device=self.device, name=f"Ethernet ceiling {number}")
+            for number in range(proposal_eligible_set_limit() + 1 - existing)
+        )
+
+        inventory = self.task.inventory(
+            profile=self.profile,
+            field_key=self.field_key,
+            netbox_reader=self.reader(),
+            limit=proposal_eligible_set_limit(),
+        )
+        self.assertIsNone(inventory.candidate_snapshot)
+        self.assertEqual(inventory.candidate_error.reason, TOO_MANY_CANDIDATES)
+
+        self.assert_candidates_stale(proposal)
+
+    def test_a_candidate_set_above_the_page_size_stays_fresh(self):
+        """The page is only what the prompt carried; freshness is still the whole eligible set."""
+        proposal = self.proposal()
+
         with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 1}}):
-            self.assert_candidates_stale(proposal)
+            self.assertFalse(self.stale(proposal).is_stale)
 
     def test_staleness_is_recomputed_without_changing_the_proposal(self):
         proposal = self.proposal()

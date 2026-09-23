@@ -10,6 +10,7 @@ from unittest.mock import patch
 from core.choices import JobStatusChoices
 from core.models import Job, ObjectType
 from dcim.models import Device, Interface, Site
+from django.db import connection
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -18,6 +19,7 @@ from django_rq import get_queue
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
+from netbox_data_import.inference_backend import proposal_eligible_set_limit
 from netbox_data_import.jobs import ImportJobRunner, ResolutionProposalJob
 from netbox_data_import.models import (
     ImportProfile,
@@ -33,7 +35,8 @@ from netbox_data_import.preview_row_actions import (
     PREVIEW_REVISION_SESSION_KEY,
     retained_sync_block_reason,
 )
-from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, complete_proposal
+from netbox_data_import.proposal_tasks import CandidateSnapshot
+from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, complete_proposal, fail_proposal
 from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes, user_with_object_permission
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
@@ -229,6 +232,67 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(queued.kwargs, {"job": job, "proposal_id": proposal.pk})
         self.assertEqual(job.user_id, proposal.requested_by_id)
 
+    def test_the_request_records_the_background_job_on_the_attempt(self):
+        """Nothing else links the two, so an unrecorded job leaves the card unable to say anything."""
+        self.operator()
+
+        proposal = self.request_proposal()
+
+        self.assertEqual(proposal.job_id, Job.objects.get(name=ResolutionProposalJob.Meta.name).pk)
+
+    def card(self):
+        """Return the card the workspace polls for, as the logged-in operator reads it."""
+        response = self.call("proposal", field_key=self.field_key)
+        self.assertEqual(response.status_code, 200, response.content)
+        return response.json()["presentation"]
+
+    def test_a_queued_card_reports_where_its_background_job_is(self):
+        """A job no worker has taken reads exactly like one that started, which is the whole bug."""
+        self.operator()
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.request_proposal()
+
+        card = self.card()
+
+        self.assertIn("Pending", card["job_status"])
+        self.assertIn("requested", card["job_status"])
+        self.assertEqual(card["job_note"], "")
+        self.assertEqual(card["page_status"], "")
+
+    def test_a_card_names_a_background_job_that_ended_without_a_result(self):
+        """A worker killed mid-run leaves the attempt active forever, with nothing else to show it."""
+        self.operator()
+        proposal = self.request_proposal()
+        self.assertTrue(claim_proposal(proposal.pk))
+        Job.objects.filter(pk=proposal.job_id).update(status=JobStatusChoices.STATUS_ERRORED)
+
+        card = self.card()
+
+        self.assertIn("Errored", card["job_status"])
+        self.assertIn("ended without recording a result", card["job_note"])
+
+    def test_a_card_says_when_no_background_job_is_recorded(self):
+        """The job row can go, and a queued attempt with no job is never going to run."""
+        self.operator()
+        proposal = self.request_proposal()
+        Job.objects.filter(pk=proposal.job_id).delete()
+
+        card = self.card()
+
+        self.assertIn("none recorded", card["job_status"])
+        self.assertIn("No background job is recorded", card["job_note"])
+
+    def test_a_settled_card_reports_no_background_job(self):
+        """Once the attempt has its answer the job is spent, so the line would only be noise."""
+        self.operator()
+        self.completed()
+
+        card = self.card()
+
+        self.assertEqual(card["job_status"], "")
+        self.assertEqual(card["job_note"], "")
+
     def test_request_keeps_the_resolved_device_and_candidates_from_one_inventory_read(self):
         from django.db import connection
 
@@ -257,6 +321,313 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(resolution_reads, [True])
         self.assertEqual(proposal.resolved_device_id, self.device_a.pk)
         self.assertEqual(proposal.candidate_snapshot["candidates"][0]["object_id"], self.eth0.pk)
+
+    def dense_device(self, *names):
+        """Give DEV-A more eligible interfaces than one request offers."""
+        for name in names or ("eth5", "eth6"):
+            Interface.objects.create(device=self.device_a, name=name, type="1000base-t")
+
+    def no_match(self, proposal):
+        """Settle one attempt the way a backend that found nothing in its page would."""
+        self.assertTrue(claim_proposal(proposal.pk))
+        self.assertTrue(
+            complete_proposal(
+                proposal.pk,
+                outcome=ProposalOutcome.NO_MATCH,
+                explanation="No candidate in this page names the source port.",
+            )
+        )
+
+    def test_a_dense_device_is_offered_one_page_and_asked_again_for_the_next(self):
+        """120 candidates used to refuse the request outright; they are searched in turns now."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            first = self.request_proposal()
+            self.assertEqual(first.candidate_snapshot["total"], 3)
+            self.assertEqual((first.candidate_snapshot["page_offset"], first.candidate_snapshot["page_size"]), (0, 2))
+            self.no_match(first)
+
+            second = self.request_proposal()
+
+        self.assertEqual(second.candidate_snapshot["page_offset"], 2)
+        self.assertEqual(second.candidate_snapshot["total"], 3)
+
+    def test_the_search_starts_again_once_the_last_page_found_nothing(self):
+        """The whole set has been seen, so the next request is a fresh search, not a fourth page."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.no_match(self.request_proposal())
+            self.no_match(self.request_proposal())
+
+            third = self.request_proposal()
+
+        self.assertEqual(third.candidate_snapshot["page_offset"], 0)
+
+    def test_a_changed_eligible_set_restarts_the_search(self):
+        """A new port renumbers every page, so continuing from the old offset would skip candidates."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.no_match(self.request_proposal())
+            Interface.objects.create(device=self.device_a, name="eth7", type="1000base-t")
+
+            second = self.request_proposal()
+
+        self.assertEqual(second.candidate_snapshot["page_offset"], 0)
+        self.assertEqual(second.candidate_snapshot["total"], 4)
+
+    def test_a_candidate_answer_does_not_advance_the_page(self):
+        """Only a page that found nothing is exhausted; an answered one is waiting for a decision."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            proposal = self.request_proposal()
+            entry = proposal.candidate_snapshot["candidates"][0]
+            self.assertTrue(claim_proposal(proposal.pk))
+            self.assertTrue(
+                complete_proposal(
+                    proposal.pk,
+                    outcome=ProposalOutcome.CANDIDATE,
+                    explanation="The label matches.",
+                    selected_candidate_id=entry["candidate_id"],
+                    selected_object_type=ObjectType.objects.get_for_model(Interface),
+                    selected_object_id=entry["object_id"],
+                )
+            )
+
+            second = self.request_proposal()
+
+        self.assertEqual(second.candidate_snapshot["page_offset"], 0)
+
+    def assert_unfinished_page_is_asked_again(self, settle):
+        """Leave page 1 searched and page 2 unfinished, then require the next request on page 2."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.no_match(self.request_proposal())
+            second = self.request_proposal()
+            self.assertEqual(second.candidate_snapshot["page_offset"], 2)
+            self.assertTrue(settle(second.pk))
+
+            retried = self.request_proposal()
+
+        self.assertEqual(retried.candidate_snapshot["page_offset"], 2)
+
+    def test_a_failed_later_page_is_asked_again_not_restarted(self):
+        """The card offers "Ask AI again", and page 1 already found nothing."""
+        self.assert_unfinished_page_is_asked_again(
+            lambda pk: fail_proposal(pk, reason=ProposalFailureReason.TEMPORARY_BACKEND_FAILURE)
+        )
+
+    def test_a_cancelled_later_page_is_asked_again_not_restarted(self):
+        """A cancelled attempt did not search its page, so it does not advance and does not restart."""
+        self.assert_unfinished_page_is_asked_again(cancel_proposal)
+
+    def card_action(self, key, card=None):
+        """Return one command as the card offers it."""
+        return next(item for item in (card or self.card())["actions"] if item["key"] == key)
+
+    def test_a_paged_card_names_the_candidates_it_searched(self):
+        """A no_match means nothing without the range it searched."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.no_match(self.request_proposal())
+
+        self.assertEqual(self.card()["page_status"], "Searched candidates 1-2 of 3.")
+
+    def test_a_card_rebuilds_its_offered_page_once(self):
+        """Polling a card must not deserialize its complete candidate set twice."""
+        from netbox_data_import.cable_target import UNRESOLVED
+        from netbox_data_import.netbox_reader import NetBoxReader
+        from netbox_data_import.proposal_presentation import ProposalPresentation
+
+        class CountingPresentation(ProposalPresentation):
+            offered_page_calls = 0
+
+            def offered_page(self, proposal):
+                self.offered_page_calls += 1
+                return super().offered_page(proposal)
+
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.no_match(self.request_proposal())
+            reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
+            presentation = CountingPresentation(profile=self.profile, actor=self.actor, reader=reader)
+            payload = presentation.fields(({"field_key": self.field_key, "state": UNRESOLVED},))
+
+        self.assertEqual(payload[self.field_key]["presentation"]["page_status"], "Searched candidates 1-2 of 3.")
+        self.assertEqual(presentation.offered_page_calls, 1)
+
+    def test_a_no_match_with_a_next_page_offers_the_next_one(self):
+        """Nothing in this page is not nothing on the Device, and the card has to say which."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.no_match(self.request_proposal())
+
+        card = self.card()
+        self.assertEqual(self.card_action("request", card)["label"], "Ask AI: next 1")
+        self.assertEqual(
+            self.card_action("accept", card)["reason"],
+            "No match in candidates 1-2 of 3. Ask AI for the next 1.",
+        )
+
+    def test_a_no_match_over_the_whole_set_stays_a_plain_no_match(self):
+        """With every candidate searched there is no next page and nothing left to offer."""
+        self.no_match(self.request_proposal())
+
+        card = self.card()
+        self.assertEqual(card["page_status"], "")
+        self.assertEqual(self.card_action("request", card)["label"], "Ask AI")
+        self.assertEqual(
+            self.card_action("accept", card)["reason"],
+            "The backend found no match. There is no candidate to accept.",
+        )
+
+    def test_the_next_page_offer_names_one_page_not_the_whole_remainder(self):
+        """Five candidates in pages of two leave three, but the next request only sends two."""
+        self.dense_device("eth5", "eth6", "eth7", "eth8")
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.no_match(self.request_proposal())
+
+            card = self.card()
+
+        self.assertEqual(self.card_action("request", card)["label"], "Ask AI: next 2")
+        self.assertEqual(
+            self.card_action("accept", card)["reason"],
+            "No match in candidates 1-2 of 5. Ask AI for the next 2.",
+        )
+
+    def test_a_changed_set_advertises_a_restart_and_not_a_continuation(self):
+        """The next request restarts on a changed set, so promising a continuation is a lie."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.no_match(self.request_proposal())
+            Interface.objects.create(device=self.device_a, name="eth7", type="1000base-t")
+
+            card = self.card()
+
+        self.assertEqual(self.card_action("request", card)["label"], "Ask AI")
+        self.assertEqual(
+            self.card_action("accept", card)["reason"],
+            "The resolved Device or eligible candidates changed. Request a new proposal.",
+        )
+
+    def test_a_replaced_resolved_device_restarts_the_search(self):
+        """The same ports moved wholesale, so the candidate set matches while the Device did not."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.no_match(self.request_proposal())
+            old_name = self.device_a.name
+            self.device_a.name = "Former DEV-A"
+            self.device_a.save()
+            replacement = Device.objects.create(
+                name=old_name, site=self.site, device_type=self.device_type, role=self.role
+            )
+            Interface.objects.filter(device=self.device_a).update(device=replacement)
+            # The card already calls this a restart; the request has to agree with it.
+            self.assertEqual(self.card_action("request")["label"], "Ask AI")
+
+            second = self.request_proposal()
+
+        self.assertEqual(second.candidate_snapshot["page_offset"], 0)
+
+    def test_a_rejected_candidate_moves_the_search_to_the_next_page(self):
+        """Otherwise one confident wrong answer on page one hides every later candidate for good."""
+        from netbox_data_import.proposal_decisions import reject_proposal
+
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            proposal = self.request_proposal()
+            entry = proposal.candidate_snapshot["candidates"][0]
+            self.assertTrue(claim_proposal(proposal.pk))
+            self.assertTrue(
+                complete_proposal(
+                    proposal.pk,
+                    outcome=ProposalOutcome.CANDIDATE,
+                    explanation="The label matches.",
+                    selected_candidate_id=entry["candidate_id"],
+                    selected_object_type=ObjectType.objects.get_for_model(Interface),
+                    selected_object_id=entry["object_id"],
+                )
+            )
+            self.assertTrue(reject_proposal(proposal.pk, operator=self.actor))
+
+            second = self.request_proposal()
+
+        self.assertEqual(second.candidate_snapshot["page_offset"], 2)
+
+    def test_a_request_refuses_a_predecessor_it_observed_running(self):
+        """The worker can settle between the read and the insert, and page one is searched twice."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            first = self.request_proposal()
+            self.assertTrue(claim_proposal(first.pk))
+            settled = []
+
+            proposal_table = connection.ops.quote_name(ResolutionProposal._meta.db_table)
+
+            def settle_the_predecessor_after_the_active_read(execute, sql, params, many, context):
+                result = execute(sql, params, many, context)
+                if (
+                    not settled
+                    and sql.startswith("SELECT")
+                    and f"FROM {proposal_table}" in sql
+                    and '"status" IN' in sql
+                ):
+                    settled.append(True)
+                    complete_proposal(first.pk, outcome=ProposalOutcome.NO_MATCH, explanation="Nothing in this page.")
+                return result
+
+            with connection.execute_wrapper(settle_the_predecessor_after_the_active_read):
+                response = self.call("request_proposal", field_key=self.field_key)
+
+        self.assertEqual(settled, [True])
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertEqual(ResolutionProposal.objects.count(), 1)
+
+    def answer_with(self, proposal, position):
+        """Settle one attempt on the candidate at *position* in its whole set."""
+        entry = proposal.candidate_snapshot["candidates"][position]
+        self.assertTrue(claim_proposal(proposal.pk))
+        self.assertTrue(
+            complete_proposal(
+                proposal.pk,
+                outcome=ProposalOutcome.CANDIDATE,
+                explanation="The label matches.",
+                selected_candidate_id=entry["candidate_id"],
+                selected_object_type=ObjectType.objects.get_for_model(Interface),
+                selected_object_id=entry["object_id"],
+            )
+        )
+        return entry
+
+    def test_a_candidate_found_on_a_later_page_is_accepted_and_written(self):
+        """Paging is worthless if the answer it finds cannot be applied."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            self.no_match(self.request_proposal())
+            second = self.request_proposal()
+            self.assertEqual(second.candidate_snapshot["page_offset"], 2)
+            entry = self.answer_with(second, 2)
+
+        response = self.call("accept_proposal", proposal_id=second.pk)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(TerminationResolution.objects.get(profile=self.profile).selected_object_id, entry["object_id"])
+
+    def test_a_change_outside_the_offered_page_still_refuses_acceptance(self):
+        """The whole set is the evidence, so a candidate the prompt never saw still ages it."""
+        self.dense_device()
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 2}}):
+            proposal = self.request_proposal()
+            self.answer_with(proposal, 0)
+        outside = Interface.objects.get(device=self.device_a, name="eth6")
+        offered = CandidateSnapshot.from_json(proposal.candidate_snapshot)
+        self.assertNotIn(outside.pk, [entry.object_id for entry in offered.page])
+        outside.name = "eth6 renamed"
+        outside.save()
+
+        response = self.call("accept_proposal", proposal_id=proposal.pk)
+
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
 
     def test_second_active_request_refuses_and_terminal_attempt_allows_retry(self):
         proposal = self.request_proposal()
@@ -346,12 +717,29 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertFalse(ResolutionProposal.objects.exists())
 
     def test_too_many_candidates_has_its_own_reason(self):
-        Interface.objects.create(device=self.device_a, name="extra", type="1000base-t")
-        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 1}}):
-            response = self.call("request_proposal", field_key=self.field_key)
+        """Past the eligible-set ceiling the answer is pre-filtering, not another page."""
+        existing = Interface.objects.filter(device=self.device_a).count()
+        Interface.objects.bulk_create(
+            Interface(device=self.device_a, name=f"extra-{number}", type="1000base-t")
+            for number in range(proposal_eligible_set_limit() + 1 - existing)
+        )
+
+        response = self.call("request_proposal", field_key=self.field_key)
+
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["reason"], "too_many_candidates")
         self.assertFalse(ResolutionProposal.objects.exists())
+
+    def test_a_set_over_the_page_size_is_paged_instead_of_refused(self):
+        """This is the refusal operators hit on dense equipment; it is a page now, not an error."""
+        Interface.objects.create(device=self.device_a, name="extra", type="1000base-t")
+
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 1}}):
+            response = self.call("request_proposal", field_key=self.field_key)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        stored = ResolutionProposal.objects.get(pk=response.json()["proposal_id"]).candidate_snapshot
+        self.assertEqual((stored["total"], stored["page_size"]), (2, 1))
 
     def test_read_computes_candidate_staleness_with_view_only_profile_access(self):
         proposal = self.completed()
@@ -1055,7 +1443,39 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(data["badge"], "Accepted")
         self.assertIn("already resolved", data["actions"][0]["reason"])
 
-    def test_failed_card_retains_typed_reason_backend_and_attempt_count(self):
+    def test_a_written_resolution_the_plan_cannot_use_reopens_the_field(self):
+        """The plan owns the field state, so a deleted port must not still read as accepted."""
+        from netbox_data_import.tests.test_inference_backend import ALLOWLIST, FALLBACK
+
+        proposal = self.completed()
+        self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 200)
+        Interface.objects.create(device=self.device_a, name="eth9", type="1000base-t")
+        self.eth0.delete()
+        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
+        with override_settings(
+            PLUGINS_CONFIG={
+                "netbox_data_import": {
+                    "inference_backend": FALLBACK,
+                    "inference_backend_origin_allowlist": ALLOWLIST,
+                }
+            }
+        ):
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:trace_workspace_reread"),
+                {"preview_revision": before},
+                follow=True,
+            )
+
+        data = response.context["proposal_fields"][self.field_key]["presentation"]
+        self.assertEqual(data["field_state"], "unresolved")
+        self.assertEqual(data["state_style"], "unresolved")
+        self.assertEqual(data["badge"], "Accepted resolution no longer applies")
+        self.assertEqual(response.context["selected_trace"].disposition, "blocked")
+        # The reader must offer the request the writer accepts: see TraceRequestProposalView.
+        self.assertEqual(data["actions"][0]["reason"], "")
+        self.assertEqual(self.call("request_proposal", field_key=self.field_key).status_code, 200)
+
+    def test_failed_card_retains_its_typed_reason_without_backend_metadata(self):
         from netbox_data_import.models import ProposalFailureReason
         from netbox_data_import.resolution_proposals import fail_proposal
 
@@ -1070,8 +1490,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(data["failure_code"], ProposalFailureReason.BACKEND_REFUSAL)
         self.assertEqual(data["field_state"], ProposalStatus.FAILED)
         self.assertEqual(data["failure"], "Backend refusal")
-        self.assertEqual(data["attempt_count"], 1)
-        self.assertEqual(data["metadata"], [{"label": "backend model", "value": "fixture-model"}])
+        self.assertNotIn("attempt_count", data)
+        self.assertNotIn("metadata", data)
         self.assertEqual(data["actions"][0]["label"], "Ask AI again")
         for action in data["actions"][2:]:
             self.assertEqual(action["reason"], "The proposal failed: Backend refusal (backend_refusal).")
@@ -1296,6 +1716,20 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertRegex(html, r'<script src="[^"]*/trace_proposals.js[^"]*"></script>')
         script = re.search(r'<script id="traceProposalFields" type="application/json">(.*?)</script>', html)
         self.assertEqual(json.loads(script.group(1))[self.field_key]["proposal"]["id"], proposal.pk)
+
+    def test_a_queued_card_renders_the_background_job_line(self):
+        """The operator reads the page, not the JSON, so the first render has to carry the line."""
+        import re
+
+        self.request_proposal()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        html = re.sub(r"<template\b.*?</template>", "", response.content.decode(), flags=re.DOTALL)
+        line = re.search(r"<div\b(?![^>]*\bhidden\b)[^>]*data-proposal-job[^-][^>]*>([^<]*)</div>", html)
+        self.assertIsNotNone(line, html[html.index("data-proposal-field") :][:2000])
+        self.assertIn("Background job: Pending", line.group(1))
+        self.assertRegex(html, r"<div\b[^>]*data-proposal-job-note[^>]*\bhidden\b")
 
     def test_no_proposal_has_only_field_actions_and_no_history(self):
         import re

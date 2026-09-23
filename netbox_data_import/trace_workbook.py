@@ -104,7 +104,7 @@ class _ParsedVisit:
     row_number: int
 
 
-_SegmentClaim = tuple[tuple[IdentityKey, IdentityKey], str]
+_SegmentClaim = tuple[IdentityKey, IdentityKey]
 
 
 def parse_endpoint_line(line: str) -> TerminationReference:
@@ -784,20 +784,16 @@ def _location_from_provenance(provenance: TraceProvenance) -> str:
 
 
 def _cross_trace_conflicts(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ...]:
-    """Flag every trace that shares a termination or disagrees about a CableClass."""
+    """Flag every trace that claims a termination another Source Trace claims for another segment."""
     termination_claims: dict[IdentityKey, dict[int, set[_SegmentClaim]]] = defaultdict(lambda: defaultdict(set))
-    segment_classes: dict[tuple[IdentityKey, IdentityKey], dict[str, set[int]]] = defaultdict(lambda: defaultdict(set))
     for index, trace in enumerate(traces):
         claims: dict[IdentityKey, set[_SegmentClaim]] = defaultdict(set)
         for segment in trace.segments:
             ordered_pair = sorted((segment.left.identity_key, segment.right.identity_key))
+            # Two labels for one pair can resolve to one policy, so the label decides nothing here.
             segment_pair = ordered_pair[0], ordered_pair[1]
-            # The CableClass label keys its own mapping row, so it compares as the source states it.
-            cable_class = segment.cable_class
-            claim = segment_pair, cable_class
-            claims[segment.left.identity_key].add(claim)
-            claims[segment.right.identity_key].add(claim)
-            segment_classes[segment_pair][cable_class].add(index)
+            claims[segment.left.identity_key].add(segment_pair)
+            claims[segment.right.identity_key].add(segment_pair)
         claims.setdefault(trace.endpoint_summary.from_termination.identity_key, set())
         claims.setdefault(trace.endpoint_summary.to_termination.identity_key, set())
         for termination, trace_claims in claims.items():
@@ -809,11 +805,6 @@ def _cross_trace_conflicts(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, 
         if len(claims_by_owner) > 1 and not identical_shared_segment:
             for owner in claims_by_owner:
                 conflicts[owner].add("a termination is claimed by another Source Trace")
-    for classes in segment_classes.values():
-        owners = set().union(*classes.values())
-        if len(classes) > 1 and len(owners) > 1:
-            for owner in owners:
-                conflicts[owner].add("a shared segment has conflicting CableClass labels")
     checked = []
     for index, trace in enumerate(traces):
         if index not in conflicts:

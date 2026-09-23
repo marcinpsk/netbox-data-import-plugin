@@ -79,6 +79,8 @@ _FUNCTOOLS_PARTIAL = "functools.partial"
 _FIRST_PARTY = "netbox_data_import"
 # The canonical binding a first-party import gets, so a later local rebinding shadows it.
 _FIRST_PARTY_BINDING = "<first-party>"
+# Deterministic policies that tests must exercise with real inputs.
+_REAL_BEHAVIOR_PATCH_TARGETS = {"proposal_eligible_set_limit"}
 # Inline opt-out marker (in a comment): `# mock-ok` or `# mock-ok: reason`.
 _MARKER = "mock-ok"
 # Files the scanner never inspects (itself + its own test).
@@ -110,6 +112,8 @@ class Violation:
         return f"{self.path}::{self.qualname}"
 
     def __str__(self) -> str:
+        if self.kind == "policy-patch":
+            return f"{self.path}:{self.lineno}: patch of deterministic policy {self.mock} in {self.qualname}()"
         if self.kind == "patch":
             return f"{self.path}:{self.lineno}: unspecced patch of first-party {self.mock} in {self.qualname}()"
         return f"{self.path}:{self.lineno}: unapproved {self.mock}() in {self.qualname}()"
@@ -266,10 +270,52 @@ class _Scanner(ast.NodeVisitor):
         name = self._mock_class(node.func)
         if name and not self._is_bounded(node) and not self._is_marked(node):
             self.hits.append(Violation(self._rel, node.lineno, self._qual(), name))
-        target = self._unspecced_first_party_patch(node)
-        if target and not self._is_marked(node):
-            self.hits.append(Violation(self._rel, node.lineno, self._qual(), target, kind="patch"))
+        policy_target = self._patched_deterministic_policy(node)
+        if policy_target:
+            self.hits.append(Violation(self._rel, node.lineno, self._qual(), policy_target, kind="policy-patch"))
+        else:
+            target = self._unspecced_first_party_patch(node)
+            if target and not self._is_marked(node):
+                self.hits.append(Violation(self._rel, node.lineno, self._qual(), target, kind="patch"))
         self.generic_visit(node)
+
+    def _patched_deterministic_policy(self, node: ast.Call) -> str | None:
+        """Return a first-party policy target that tests must exercise with real inputs."""
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "multiple":
+            if not self._is_patch(func.value):
+                return None
+            name = self._first_party_multiple_target(node)
+            if name is None:
+                return None
+            members = (f"{name}.{item.arg}" for item in node.keywords if item.arg in _REAL_BEHAVIOR_PATCH_TARGETS)
+            return ", ".join(members) or None
+        if isinstance(func, ast.Attribute) and func.attr == "object":
+            if not self._is_patch(func.value):
+                return None
+            target = self._call_argument(node, 0, "target")
+            member = self._call_argument(node, 1, "attribute")
+            if target is None or member is None:
+                return None
+            root = target
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if (
+                self._canonical_binding(root) == _FIRST_PARTY_BINDING
+                and isinstance(member, ast.Constant)
+                and member.value in _REAL_BEHAVIOR_PATCH_TARGETS
+            ):
+                return f"{ast.unparse(target)}.{member.value}"
+            return None
+        target = self._call_argument(node, 0, "target") if self._is_patch(func) else None
+        if (
+            isinstance(target, ast.Constant)
+            and isinstance(target.value, str)
+            and target.value.split(".")[0] == _FIRST_PARTY
+            and target.value.rsplit(".", 1)[-1] in _REAL_BEHAVIOR_PATCH_TARGETS
+        ):
+            return target.value
+        return None
 
     def _unspecced_first_party_patch(self, node: ast.Call) -> str | None:
         """Return the patched first-party target, or None if this call is fine.
@@ -288,18 +334,19 @@ class _Scanner(ast.NodeVisitor):
             # patch.object(target, "attribute"[, new]) — a third positional is `new`.
             if not self._is_patch(func.value) or self._is_patch_bounded(node, new_position=2):
                 return None
-            if not node.args:
+            target = self._call_argument(node, 0, "target")
+            if target is None:
                 return None
-            root = node.args[0]
+            root = target
             while isinstance(root, ast.Attribute):
                 root = root.value
             if self._canonical_binding(root) == _FIRST_PARTY_BINDING:
-                return ast.unparse(node.args[0])
+                return ast.unparse(target)
             return None
         # patch("dotted.target"[, new]) — a second positional is `new`.
         if not self._is_patch(func) or self._is_patch_bounded(node, new_position=1):
             return None
-        target = node.args[0] if node.args else None
+        target = self._call_argument(node, 0, "target")
         if (
             isinstance(target, ast.Constant)
             and isinstance(target.value, str)
@@ -312,28 +359,39 @@ class _Scanner(ast.NodeVisitor):
         """Return the first-party members ``patch.multiple`` leaves as a fabricating mock."""
         if not self._is_patch(func.value) or self._is_patch_bounded(node, new_position=None):
             return None
-        if not node.args:
+        name = self._first_party_multiple_target(node)
+        if name is None:
             return None
-        patched = node.args[0]
+        # Every other keyword names a patched member; these are patch.multiple's own arguments.
+        members = (
+            f"{name}.{kw.arg}"
+            for kw in node.keywords
+            if kw.arg not in {None, "target", "spec", "spec_set", "autospec", "new_callable", "create"}
+            and self._is_mock_default(kw.value)
+        )
+        return ", ".join(members) or None
+
+    def _first_party_multiple_target(self, node: ast.Call) -> str | None:
+        """Name a first-party patch.multiple target in either call form."""
+        patched = self._call_argument(node, 0, "target")
+        if patched is None:
+            return None
         base = patched
         while isinstance(base, ast.Attribute):
             base = base.value
         if isinstance(patched, ast.Constant) and isinstance(patched.value, str):
             if patched.value.split(".")[0] != _FIRST_PARTY:
                 return None
-            name = patched.value
+            return patched.value
         elif self._canonical_binding(base) == _FIRST_PARTY_BINDING:
-            name = ast.unparse(patched)
-        else:
-            return None
-        # Every other keyword names a patched member; these are patch.multiple's own arguments.
-        members = (
-            f"{name}.{kw.arg}"
-            for kw in node.keywords
-            if kw.arg not in {None, "spec", "spec_set", "autospec", "new_callable", "create"}
-            and self._is_mock_default(kw.value)
-        )
-        return ", ".join(members) or None
+            return ast.unparse(patched)
+        return None
+
+    @staticmethod
+    def _call_argument(node: ast.Call, position: int, keyword: str) -> ast.expr | None:
+        if len(node.args) > position:
+            return node.args[position]
+        return next((item.value for item in node.keywords if item.arg == keyword), None)
 
     def _is_patch(self, func: ast.expr) -> bool:
         """True for ``patch``, an aliased import of it, or ``<module>.patch``."""

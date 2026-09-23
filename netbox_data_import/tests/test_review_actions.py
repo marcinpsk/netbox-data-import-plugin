@@ -17,7 +17,12 @@ from netbox_data_import.models import (
     ImportProfile,
 )
 from netbox_data_import.preview_row_actions import start_new_preview
-from netbox_data_import.tests.helpers import plan_source_rows, run_on_separate_connection, user_with_object_permission
+from netbox_data_import.tests.helpers import (
+    apply_source_rows,
+    plan_source_rows,
+    run_on_separate_connection,
+    user_with_object_permission,
+)
 
 
 class TargetNeutralFieldReviewTest(TransactionTestCase):
@@ -107,6 +112,14 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         }
         session["import_preview_pending"] = True
         session.save()
+
+    def test_planning_requires_an_actor_before_it_reads_rows(self):
+        with self.assertRaisesRegex(TypeError, "actor"):
+            plan_source_rows(self.rows, self.profile, self.site)
+
+    def test_applying_requires_an_actor_before_it_reads_rows(self):
+        with self.assertRaisesRegex(TypeError, "actor"):
+            apply_source_rows(self.rows, self.profile, self.site)
 
     def test_the_row_reports_the_fields_netbox_already_holds(self):
         """The preview states what stays the same, so a sync is not read as rewriting every field."""

@@ -1,11 +1,20 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
 
-/* One debounced candidate search, shared by the trace pickers.
+/* The behavior both trace pickers share: one debounced candidate search, and closing the dialog
+ * before an htmx swap takes it away.
  * Scheduling a search retires the one in flight, so an answer to a superseded query can never
  * render. Both pickers held their own copy of this and both let that answer land. */
 (function () {
   if (window.ndiPickerSearch) return;
+
+  // htmx replaces the content the dialog lives in, so an open dialog would strand its backdrop.
+  document.addEventListener('htmx:beforeRequest', function (event) {
+    var modal = event.target.closest && event.target.closest('.modal');
+    var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;
+    var instance = modal && ModalClass && ModalClass.getInstance && ModalClass.getInstance(modal);
+    if (instance) instance.hide();
+  });
 
   window.ndiPickerSearch = function (options) {
     var pending = 0;
