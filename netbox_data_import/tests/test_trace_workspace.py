@@ -2563,6 +2563,8 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
                 data = copy.deepcopy(original)
                 policy = data["units"][0]["display"]["trace"]["cable_policies"][0]
                 policy["disclosure_source"] = source
+                segment = data["units"][0]["display"]["trace"]["segments"][0]
+                segment["disclosure_source"] = source
                 session = self.client.session
                 session[PREVIEW_PLAN_SESSION_KEY] = data
                 session.save()
@@ -2573,6 +2575,8 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
                 self.assertEqual(policy_form["cable_type"], "a policy you cannot view")
                 self.assertTrue(policy_form["form"].fields["cable_type"].disabled)
                 self.assertEqual(policy_form["reason"], "You cannot change a policy you cannot view.")
+                self.assertNotIn("disclosure_source", response.context["traces"][0].cable_policies[0])
+                self.assertNotIn("disclosure_source", response.context["traces"][0].segments[0])
 
         data = copy.deepcopy(original)
         data["units"][0]["display"]["trace"]["cable_policies"][0].pop("disclosure_source")

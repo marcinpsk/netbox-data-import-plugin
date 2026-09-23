@@ -1770,6 +1770,17 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
         self.assertIn(f"segment 1 is {cable_type_label('mmf-om4')}", message)
         self.assertIn("Force the segment that states the wrong medium", message)
 
+    def test_an_unmapped_policy_does_not_hide_verified_media_mismatch(self):
+        """A blocked decision does not erase medium facts from the verified path."""
+        self.force_first_segment("mmf-om4")
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").delete()
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.cableclass_unmapped", self.codes(unit))
+        self.assertEqual(len(self.mismatches(unit)), 1)
+
     def test_an_indeterminate_family_neither_agrees_nor_contradicts(self):
         """An active optical assembly states no terminated medium, so it decides nothing."""
         CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(cable_type="aoc")
