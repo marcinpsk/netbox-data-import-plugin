@@ -790,6 +790,15 @@ class _CableBatch:
             left_ends[index + 1] = entry
             analysis.joined.add(index)
         analysis.segment_pairs_resolved = True
+        analysis.segments = [
+            _DesiredSegment(
+                index=index,
+                left=left_ends[index],
+                right=right_ends[index],
+                cable_class=source_text(segment.cable_class),
+            )
+            for index, segment in enumerate(segments)
+        ]
         for index, segment in enumerate(segments):
             if left_ends[index].key != right_ends[index].key:
                 continue
@@ -803,15 +812,6 @@ class _CableBatch:
                 identities=(left_ends[index].identity,),
             )
             return
-        analysis.segments = [
-            _DesiredSegment(
-                index=index,
-                left=left_ends[index],
-                right=right_ends[index],
-                cable_class=source_text(segment.cable_class),
-            )
-            for index, segment in enumerate(segments)
-        ]
 
     def _continue_path(self, analysis: _TraceAnalysis, reference, exit_end, entry_end) -> _Termination | None:
         """Return the termination the next cable end takes where the path passes through a panel."""
