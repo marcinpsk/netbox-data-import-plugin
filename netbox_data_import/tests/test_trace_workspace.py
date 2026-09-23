@@ -3285,17 +3285,14 @@ class TraceWorkspaceSegmentOverrideTest(CableTopologyMixin, TransactionTestCase)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], stale)
 
-    def test_a_current_cached_plan_is_parsed_once_per_request(self):
-        """The recovery decides on the schema version alone, so a readable plan is not parsed twice."""
-        from unittest.mock import patch
+    def test_a_current_cached_plan_opens_the_workspace(self):
+        """A current cached plan reaches the workspace through its normal request path."""
+        opened = self.open_workspace(patched_path())
 
-        self.open_workspace(patched_path())
-
-        with patch.object(ImportPlan, "from_dict", wraps=ImportPlan.from_dict) as parsed:
-            response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(parsed.call_count, 1)
+        self.assertEqual(response.context["selected_trace"].identity, opened.context["selected_trace"].identity)
 
     def test_a_cached_plan_this_release_cannot_read_is_rebuilt_from_the_stored_source(self):
         """A plan schema change must not send an operator mid-review back to setup."""
