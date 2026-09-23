@@ -368,6 +368,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#cable-tag-integrity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cable tag integrity
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#import-job-becomes-import-execution" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -522,6 +533,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#cable-tag-integrity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cable tag integrity
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#import-job-becomes-import-execution" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -609,6 +631,28 @@ values.</p>
 <p>Use a negated class or property for the uppercase forms. The command prints nothing when it finds no
 unsupported syntax or common Unicode-sensitive constructs. Test every rule with representative
 source values before you upgrade because successful compilation alone does not prove equal behavior.</p>
+<h3 id="cable-tag-integrity">Cable tag integrity</h3>
+<p>Migration <code>0038_cable_tag_integrity</code> adds a foreign key from each Cable tag association to its
+Cable. If a tag association names a Cable that no longer exists, the migration stops with a foreign
+key violation on <code>ndi_taggeditem_cable_fk</code> and changes nothing.</p>
+<p>Find these associations with <code>python manage.py dbshell</code> before you run <code>migrate</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">object_id</span><span class="p">,</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">tag_id</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="k">FROM</span><span class="w"> </span><span class="n">extras_taggeditem</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">item</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="k">JOIN</span><span class="w"> </span><span class="n">django_content_type</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">kind</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">kind</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">content_type_id</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">kind</span><span class="p">.</span><span class="n">app_label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'dcim'</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">kind</span><span class="p">.</span><span class="n">model</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'cable'</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">dcim_cable</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">cable</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">cable</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">object_id</span><span class="p">);</span>
+</code></pre></div>
+<p>Each returned row tags a deleted Cable, so NetBox shows it nowhere. Delete all of them, then run
+<code>migrate</code> again:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">DELETE</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">extras_taggeditem</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">item</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="k">USING</span><span class="w"> </span><span class="n">django_content_type</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">kind</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">kind</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">content_type_id</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">kind</span><span class="p">.</span><span class="n">app_label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'dcim'</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">kind</span><span class="p">.</span><span class="n">model</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'cable'</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">dcim_cable</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">cable</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">cable</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">object_id</span><span class="p">);</span>
+</code></pre></div>
+<p>The migration locks <code>extras_taggeditem</code> until it commits, so NetBox cannot read or write tags for
+that time. The time grows with the number of tagged items: about 10 seconds for 5,000,000 tagged
+items on PostgreSQL 18.</p>
 <h3 id="import-job-becomes-import-execution">Import Job becomes Import Execution</h3>
 <p>The Import Job history model is renamed to Import Execution. Existing history rows are kept and stay
 display-only. The migration drops two columns permanently, and a rollback cannot restore them:</p>
@@ -618,13 +662,13 @@ display-only. The migration drops two columns permanently, and a rollback cannot
 </ul>
 <p>If you still need those columns, export them <strong>before you upgrade the package</strong>. <code>dumpdata</code> reads the
 model from the app registry, and the new release no longer defines <code>ImportJob</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1"># On the old version, before you install the new package.</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>python<span class="w"> </span>manage.py<span class="w"> </span>dumpdata<span class="w"> </span>netbox_data_import.ImportJob<span class="w"> </span>&gt;<span class="w"> </span>import-job-history.json
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1"># On the old version, before you install the new package.</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>python<span class="w"> </span>manage.py<span class="w"> </span>dumpdata<span class="w"> </span>netbox_data_import.ImportJob<span class="w"> </span>&gt;<span class="w"> </span>import-job-history.json
 </code></pre></div>
 <p>If the new package is already installed but you have not run <code>migrate</code> yet, the table still
 carries its old name. Dump it with SQL instead:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>psql<span class="w"> </span>-d<span class="w"> </span>netbox<span class="w"> </span>-c<span class="w"> </span><span class="s2">"\copy (SELECT id, dry_run, result_rows FROM netbox_data_import_importjob) \</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="s2">  TO 'import-job-history.csv' WITH CSV HEADER"</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>psql<span class="w"> </span>-d<span class="w"> </span>netbox<span class="w"> </span>-c<span class="w"> </span><span class="s2">"\copy (SELECT id, dry_run, result_rows FROM netbox_data_import_importjob) \</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="s2">  TO 'import-job-history.csv' WITH CSV HEADER"</span>
 </code></pre></div>
 <p>Three surfaces are renamed in the same release. Update any integration that uses them:</p>
 <table>

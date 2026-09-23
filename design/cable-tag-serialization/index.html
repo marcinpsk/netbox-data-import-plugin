@@ -1,0 +1,806 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://marcinpsk.github.io/netbox-data-import-plugin/design/cable-tag-serialization/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Cable tag state during Logical Cable replacement - NetBox Data Import</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#cable-tag-state-during-logical-cable-replacement" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="NetBox Data Import" class="md-header__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Data Import
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Cable tag state during Logical Cable replacement
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="NetBox Data Import" class="md-nav__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    NetBox Data Import
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#brief" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Brief
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#candidate-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Candidate shapes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#blind-designs-and-divergence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Blind designs and divergence
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#merged-design-r5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Merged design, r5
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#astra-high-round-1-not-ratified" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Astra high round 1: not ratified
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#astra-high-round-2-not-ratified" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Astra high round 2: not ratified
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#astra-high-round-3-not-ratified" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Astra high round 3: not ratified
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#astra-high-round-4-ratified" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Astra high round 4: ratified
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="cable-tag-state-during-logical-cable-replacement">Cable tag state during Logical Cable replacement</h1>
+<p>Status: RATIFIED at r5 by Astra high, after four adversarial rounds. Implemented on the Cable policy branch.</p>
+<h2 id="brief">Brief</h2>
+<p>Patched Path Replacement records the reviewed description and tag names in a
+deletion fingerprint. Execution locks the Logical Cable, replans, checks that
+fingerprint, and deletes the Cable in one transaction. NetBox stores Cable tags
+in <code>extras_taggeditem</code>, where <code>(content_type_id, object_id)</code> is a generic
+relation without a foreign key to <code>dcim_cable</code>. A concurrent tag writer can
+therefore change the relation after the fingerprint check. A writer waiting on a
+table lock could also add a relation after the Cable is deleted.</p>
+<p>The Cable Target Module owns the reviewed deletion. The database must own the
+serialization seam because NetBox UI, API, background jobs, and direct ORM
+writes all use the same tag relation. A Python lock at one caller cannot cover
+them. The migration is the mechanical guard for this failure class.</p>
+<p>Acceptance conditions:</p>
+<ol>
+<li>A tag association inserted, updated, or removed before execution locks the
+   complete review set changes the replan fingerprint and stops the accepted
+   plan. An uncommitted association cannot commit an orphan after deletion.</li>
+<li>A tag association writer starting after the complete review lock set cannot
+   change the reviewed state. If replacement commits, an insert or update
+   targeting that deleted Cable fails by the end of its transaction and leaves
+   no orphan relation. An update or removal of a deleted association can affect
+   zero rows without an integrity error.</li>
+<li>A tag rename cannot change the fingerprint between replan and deletion.</li>
+<li>Unrelated tag writes do not wait for this Cable. Normal NetBox tag cleanup
+   during Cable deletion still succeeds.</li>
+<li>The behavior works on NetBox 4.6 and 4.7. Migration reversal removes only
+   the database objects this plugin added.</li>
+</ol>
+<p>Evidence: <code>cable_target.py</code> defines <code>_deleted_cable_review_fingerprint</code>,
+<code>_load_existing_cables</code>, and <code>CableModule._delete</code>. The actual 4.7 PostgreSQL
+schema has foreign keys from <code>extras_taggeditem</code> to content type and tag, but
+none from <code>object_id</code> to Cable. <code>CableExecutionTest</code> exercises the real
+<code>ImportEngine</code> and PostgreSQL with competing connections.</p>
+<h2 id="candidate-shapes">Candidate shapes</h2>
+<table>
+<thead>
+<tr>
+<th>Shape</th>
+<th>Mechanism</th>
+<th>Limitation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A</td>
+<td>A trigger on tag association writes locks old and new Cable rows and rejects missing new targets</td>
+<td>The plugin must implement referential integrity itself and prove behavior across transaction snapshots.</td>
+</tr>
+<tr>
+<td>B</td>
+<td>Derive a nullable Cable ID on each association and enforce it with a real foreign key</td>
+<td>PostgreSQL owns existence checks. The plugin must lock existing association rows while it reviews them.</td>
+</tr>
+<tr>
+<td>Rejected</td>
+<td>Lock existing association rows or the tag table only during replacement</td>
+<td>A missing association has no row to lock. A queued insert can land after deletion; a table lock delays unrelated tags.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="blind-designs-and-divergence">Blind designs and divergence</h2>
+<p>The first design was drafted here with a plugin trigger that locks old and new
+Cable rows on every association write. A fresh <code>gpt-6-astra</code> high-effort
+read-only design, given only the factual brief and code pointers, proposed a
+derived Cable foreign key. Neither designer saw the other's proposal before
+both were complete.</p>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>First design</th>
+<th>Blind design</th>
+<th>Disposition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Association integrity</td>
+<td>Manual row-lock trigger and missing-row check</td>
+<td>Derived Cable foreign key with PostgreSQL referential integrity</td>
+<td>Use the foreign key with deferred <code>NO ACTION</code>. It prevents committed orphans and leaves cleanup to Django.</td>
+</tr>
+<tr>
+<td>Existing association updates and removals</td>
+<td>Trigger locks the parent Cable</td>
+<td>Lock association rows during execution</td>
+<td>Use association locks. The FK guards new targets; existing rows need their own lock to preserve reviewed membership.</td>
+</tr>
+<tr>
+<td>Tag names</td>
+<td>Lock Tag rows</td>
+<td>Lock Tag rows</td>
+<td>Shared requirement, not independent verification.</td>
+</tr>
+<tr>
+<td>Reviewed display</td>
+<td>Separate reads</td>
+<td>One canonical review snapshot for display and fingerprint</td>
+<td>Use one cached snapshot. Astra high round 1 reproduced a plan whose display and fingerprint disagreed.</td>
+</tr>
+</tbody>
+</table>
+<p>The interface affected by the choice is the database schema and the locks in
+<code>CableModule._delete</code>. Both shapes expose the same ImportEngine behavior. The
+foreign key has greater depth: it hides referential integrity and cleanup from
+the plugin. Deleting it would force these rules back into a trigger.</p>
+<h2 id="merged-design-r5">Merged design, r5</h2>
+<p>A reversible custom migration extends <code>extras_taggeditem</code> with nullable
+<code>ndi_cable_id bigint</code>. A <code>BEFORE INSERT OR UPDATE</code> trigger derives the value
+from <code>(content_type_id, object_id)</code> on every write, including attempts to set
+<code>ndi_cable_id</code> directly. It resolves <code>dcim.cable</code> by natural content-type
+identity at runtime, not an installation-specific numeric ID. An initially
+deferred foreign key to <code>dcim_cable(id)</code> uses <code>ON DELETE NO ACTION</code> and
+<code>ON UPDATE NO ACTION</code>. An index covers non-null projected IDs. The migration
+backfills existing associations, rejects any pre-existing Cable orphan, and
+keeps Django model state unchanged. It depends on the <code>__first__</code> migration
+sentinel for <code>extras</code> and <code>dcim</code>, which resolves to the installed NetBox
+version's first migration. Reverse SQL removes only this FK, trigger, function,
+index, and column. DDL runs atomically; a lock timeout or validation failure
+rolls it all back.</p>
+<p>Installation locks <code>django_content_type</code>, <code>dcim_cable</code>, then
+<code>extras_taggeditem</code> in one migration transaction. It adds the
+column, installs the derivation trigger,
+backfills every Cable-typed association from its <code>object_id</code> without joining
+away missing Cable rows, adds the index, and validates the FK. A missing
+content-type row causes the trigger to reject a new or updated association;
+it never projects it to NULL. Every association insert or update reads its
+content-type row with <code>FOR SHARE</code> before deriving the projection. A separate
+trigger rejects changing a content type into or out of <code>dcim.cable</code> while it
+has tagged items. The shared row lock makes the check and the projection
+serialize: if an association commits first, the identity change sees it and
+refuses; if the identity change commits first, the association reads its new
+identity and derives the correct projection. This also covers an
+administrator's multirow content-type update. Migration reversal removes both
+triggers and both functions.</p>
+<p>The <code>extras_taggeditem</code> lock is <code>ACCESS EXCLUSIVE</code>, because <code>ADD COLUMN</code>
+requires it. It blocks tag reads as well as tag writes until the migration
+commits. This cost is accepted. The migration runs in the upgrade window, and
+one transaction keeps enforcement and backfill atomic. A staged migration could
+release reads earlier, but it cannot roll back as one unit. On PostgreSQL 18,
+with 5,000,000 tagged items of which 500,000 are on Cables, the migration held
+the lock for about 10.3 seconds. The backfill took 9.5 seconds of that time.
+The cost grows with the number of tagged items.</p>
+<p>The content-type identity trigger rejects any transition into or out of
+<code>dcim.cable</code> when <code>current_setting('transaction_isolation')</code> is not
+<code>read committed</code>. This check runs before its association query. A transaction
+snapshot established before a competing association commits cannot then make
+the identity guard miss that association after waiting. Ordinary tag writes
+retain their supported isolation behavior; a content-type identity change
+under stronger isolation fails explicitly and must be retried under
+<code>READ COMMITTED</code> after the administrator checks existing associations.</p>
+<p>Execution already takes <code>FOR UPDATE</code> on the Cable during replan. Because the FK
+is deferred, a concurrent insert can remain uncommitted while replan reads.
+Its commit must check the Cable reference. If deletion commits first, that
+writer fails with <code>23503</code>. If the writer commits first, replan sees its tag or
+the deletion transaction fails safely and rolls back. Django's generic
+relation collector remains responsible for removing associations. A direct
+SQL Cable delete that leaves associations fails at commit instead of silently
+leaving orphans. No hidden cascade changes collector or signal behavior.</p>
+<p>After locking all relevant Cable and CableTermination rows, execution locks
+the Cable's existing association rows <code>FOR UPDATE</code> in primary-key order. It
+then locks their referenced Tag rows <code>FOR SHARE</code> in primary-key order. It
+acquires this complete set before the first replan review read. Association
+locks preserve membership and <code>tag_id</code>; Tag locks preserve names. A rename
+that commits before these locks is seen by the fingerprint check. The preview
+path remains read-only.</p>
+<p>Planning caches one immutable Cable review snapshot per Cable per invocation.
+The deletion fingerprint and operator-visible Logical Cable display derive
+from that exact value. Execution builds a fresh snapshot under the complete
+lock set and compares it with the accepted fingerprint. The reviewed metadata
+does not enter the post-deletion audit row.</p>
+<p>The public test seam is <code>ImportEngine.plan</code> and <code>ImportEngine.execute</code> against
+the real database. The first red test covers a queued association insert at
+Cable <code>pre_delete</code>: it must fail after committed deletion and leave no orphan.
+Next slices cover existing-row removal or update, Tag rename, writer-first
+stale review, and unrelated tag writes. A migration test covers backfill,
+reversal, and a pre-existing orphan. Run these on both supported NetBox
+versions. A real backend lock observation, SQLSTATE, and final database state
+must prove a wait; catching any <code>OperationalError</code> as a timeout is inadequate.</p>
+<p>Deadlocks remain possible when an external writer locks a Tag or association
+before touching a Cable. A database abort is safe; the complete import
+transaction rolls back. The guarantee concerns reviewed tag names, not every
+Tag field or same-transaction application hooks after validation. Stronger
+transaction isolation must abort safely or pass the same invariant.</p>
+<h2 id="astra-high-round-1-not-ratified">Astra high round 1: not ratified</h2>
+<p>The reviewer found that <code>ON DELETE CASCADE</code> can remove a TaggedItem before
+Django's collector or signals observe it. It also reproduced a review display
+whose tag names differed from the accepted fingerprint. Both findings are
+accepted and changed r3. The reviewer verified that ImportEngine holds its
+Cable locks through deletion and refuted the claim that a <code>BEFORE</code> trigger
+cannot fill a foreign-key column. It also showed that an association update or
+removal can complete between the Cable lock and association lock; r3 names
+the complete review lock set as the serialization point. The migration order,
+content-type lifecycle, and real PostgreSQL proof remain open for round 2.</p>
+<p>Open review questions: Does the deferred <code>NO ACTION</code> FK preserve Django's
+collector behavior on both installed NetBox versions? Does a queued writer
+fail when deletion commits, including when its statement started earlier?
+Does the migration work with fresh and existing databases and reverse cleanly?
+The adversarial reviewer must verify the revised mechanism. PostgreSQL
+regression tests must settle its runtime claims before the branch is pushed.</p>
+<h2 id="astra-high-round-2-not-ratified">Astra high round 2: not ratified</h2>
+<p>The deferred <code>NO ACTION</code> foreign key survived the reviewer's writer-timing
+attack. The remaining blocker was a content-type rename racing an uncommitted
+association: a plain identity lookup could project NULL, then the rename could
+make that association Cable-typed before it commits. Revision r4 adds a shared
+content-type row lock to the association trigger. The identity-change trigger
+already takes the incompatible update lock. The reviewer closed the other
+round-1 design findings and kept real PostgreSQL tests as an implementation
+gate. Round 3 must verify this final locking protocol.</p>
+<h2 id="astra-high-round-3-not-ratified">Astra high round 3: not ratified</h2>
+<p>The reviewer closed the READ COMMITTED content-type race and the requested
+multirow and upsert cases at design level. It found a REPEATABLE READ schedule
+where an administrator's identity-change trigger can keep a stale snapshot
+after waiting for an association writer. Revision r5 fails that identity
+change before its association check when the transaction isolation level is
+stronger than READ COMMITTED. The deletion core remains unchanged. Round 4
+must verify that this explicit abort closes the last lifecycle blocker.</p>
+<h2 id="astra-high-round-4-ratified">Astra high round 4: ratified</h2>
+<p>The reviewer closed the REPEATABLE READ identity-change blocker because r5
+rejects that transition before its association query. It also verified from
+PostgreSQL's row-lock executor that a stronger-isolation association writer
+which tries to lock a content-type row changed since its snapshot aborts with
+<code>40001</code>; it cannot commit an obsolete NULL Cable projection. The reviewer
+ratified r5 for the acceptance conditions above. Red ImportEngine tests proved
+that a deleted Cable could gain a tag and that an existing tag association
+could change during deletion review. The migration and execution locks made
+both tests pass on NetBox 4.6 and 4.7. Separate tests cover a queued writer,
+Tag rename, content-type identity changes, and upgrade failure on an existing
+orphan. The complete test suites remain the final validation gate.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

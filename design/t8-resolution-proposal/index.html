@@ -558,6 +558,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#candidate-paging-revision-2026-09-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Candidate paging revision, 2026-09-21
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#first-implementable-increment" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -971,6 +982,46 @@ values fail at startup and when read at runtime. Supporting larger sets requires
 pre-filtering or another selection mechanism, not a larger materialized prompt. Boundary tests keep
 1,025 out of both validation paths. The existing proposal tests prove that an oversized eligible
 set returns <code>too_many_candidates</code> without persisting a partial snapshot.</p>
+<h2 id="candidate-paging-revision-2026-09-21">Candidate paging revision, 2026-09-21</h2>
+<p>Operators hit <code>120 eligible candidates exceed the configured bound of 64</code> on ordinary equipment. The
+2026-09-13 revision left one number doing two jobs: bounding the prompt and bounding the eligible
+set. A 120-port switch is not a resource-exhaustion risk, but it was refused as one.</p>
+<p>The two jobs are separated. <code>inference_proposal_candidate_limit</code> now bounds the <strong>prompt</strong>: it is the
+page size one request offers. The eligible set is bounded by <code>proposal_eligible_set_limit()</code>, which
+returns the existing 1,024 ceiling. A set between the two is searched a page at a time.</p>
+<p><strong>"A truncated result must never establish freshness" is preserved, not weakened.</strong> The stored
+snapshot still holds the complete eligible set and <code>CandidateSnapshot.matches</code> still compares all of
+it, so a rename, an addition or a removal anywhere in the set is still stale. What the snapshot gains
+is <code>page_offset</code> and <code>page_size</code>, recording which slice reached the backend. The set establishes
+freshness; the page is only what the prompt carried. <code>matches</code> deliberately ignores the page, because
+two pages of one set describe the same world.</p>
+<p>The page also bounds the answer. The worker builds the prompt, the accepted display-name map and the
+selected entry from <code>snapshot.page</code>, so a response naming a candidate the backend never saw is
+<code>invalid_response</code>, not a silent selection.</p>
+<p>Paging is operator-driven, one page per request. A <code>no_match</code> on a page that is not the last is not a
+<code>no_match</code> on the Device: the card names the range it searched, Accept stays refused with that range,
+and Ask AI offers the next page.</p>
+<p>An attempt uses its page up in two ways, and <code>page_exhausted</code> is the one definition both the
+lifecycle and the card read. A <code>no_match</code> found nothing there. A <strong>rejected</strong> candidate was the wrong
+answer from there, which matters because a repeatable wrong answer on the first page would otherwise
+hide every later candidate for good. Any other last attempt, including an undecided one still
+awaiting a decision, leaves the page unfinished and does not advance.</p>
+<p>The next offset resets to the first candidate when the evidence has moved since or when the last
+page reached the end. "Moved" is <code>proposal_inventory_staleness</code>, the same read the card shows, so
+the offer and the request cannot disagree. Comparing the candidate snapshot alone was not enough: a
+Device replaced under its own name, with its ports moved across unchanged, leaves the snapshot
+matching while the resolved Device is a different row, and the request would have continued from an
+offset the card had already called a restart.</p>
+<p><code>next_page_offset</code> reads the last attempt inside the profile policy lock, but a worker settles an
+attempt without taking that lock. The partial unique index therefore cannot close the window: it
+reads the world at insert time, and an attempt observed as active can be terminal by then, letting
+the next request repeat a page. The request refuses on what it <strong>observed</strong>, through
+<code>active_proposal_exists</code>, rather than on what the index sees later.</p>
+<p>The count the card advertises is one page, <code>min(remaining, page size)</code>, not the whole remainder: the
+next request sends a page. It reads the page size from the current configuration, because that is
+what the next request will use.</p>
+<p>Above 1,024 the 2026-09-13 conclusion stands unchanged: the answer is authoritative pre-filtering,
+not more pages, because the ceiling bounds the stored set and the retrieval, not only the prompt.</p>
 <h2 id="first-implementable-increment">First implementable increment</h2>
 <p>The <code>ResolutionProposal</code> model, its generated schema migration, and the transition service.</p>
 <p>Observable acceptance conditions:</p>

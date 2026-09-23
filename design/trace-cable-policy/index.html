@@ -1,0 +1,1654 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://marcinpsk.github.io/netbox-data-import-plugin/design/trace-cable-policy/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Trace Cable policy correction and media consistency - NetBox Data Import</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#trace-cable-policy-correction-and-media-consistency" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="NetBox Data Import" class="md-header__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Data Import
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Trace Cable policy correction and media consistency
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="NetBox Data Import" class="md-nav__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    NetBox Data Import
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-brief" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Brief
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1. Brief">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#decision" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decision
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#constraints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Constraints
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#observable-acceptance-conditions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Observable acceptance conditions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Evidence
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-open-decisions-between-competing-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Open decisions between competing shapes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-designs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Designs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-divergence-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Divergence table
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-merged-design-r1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Merged design (r1)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. Merged design (r1)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#51-divergence-1-settled" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.1 Divergence 1, settled
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-ratify-round-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Ratify round 1
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Ratify round 1">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#blocker-1-confirmed-the-physical-impossibility-premise-is-false" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Blocker 1 (CONFIRMED). The physical-impossibility premise is false.
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#blocker-2-confirmed-the-override-cannot-fix-a-disagreement-between-two-retained-cables" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Blocker 2 (CONFIRMED). The override cannot fix a disagreement between two retained Cables.
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#non-blocking-findings-accepted-for-r2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Non-blocking findings accepted for r2
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#checked-and-clean-reviewer-spot-checked-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Checked and clean (reviewer, spot-checked here)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-revision-r2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Revision r2
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="8. Revision r2">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#81-divergence-1-settled-again-warn" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 Divergence 1, settled again: warn
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#82-blocker-2-recovery-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.2 Blocker 2, recovery contract
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#83-findings-3-and-4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.3 Findings 3 and 4
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#84-unchanged-from-design-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.4 Unchanged from design 2
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-ratify-round-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Ratify round 2
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="9. Ratify round 2">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#accepted-limitations-recorded-not-fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Accepted limitations, recorded not fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10-first-increment-and-follow-ups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. First increment, and follow-ups
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#11-increment-1-as-built" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11. Increment 1, as built
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#12-increment-2-as-built-the-override-slice" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12. Increment 2, as built: the override slice
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#13-increment-3-as-built-the-media-slice" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13. Increment 3, as built: the media slice
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#14-review-of-increments-2-and-3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14. Review of increments 2 and 3
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#15-review-round-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        15. Review round 2
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#16-review-round-3-closure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16. Review round 3 closure
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="16. Review round 3 closure">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#161-lost-override-reporting-after-topology-classification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.1 Lost override reporting after topology classification
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#162-live-cable-disclosure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.2 Live Cable disclosure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#163-live-cable-policy-disclosure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.3 Live Cable policy disclosure
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#17-review-round-4-closure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17. Review round 4 closure
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="17. Review round 4 closure">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#171-live-policy-rows-and-explicit-presentation-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.1 Live policy rows and explicit presentation state
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#172-deleted-cable-audit-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.2 Deleted Cable audit data
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#173-fail-closed-disclosure-schemas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.3 Fail-closed disclosure schemas
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#174-cableclass-table-query" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4 CableClass table query
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#175-fingerprint-determinism" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.5 Fingerprint determinism
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="trace-cable-policy-correction-and-media-consistency">Trace Cable policy correction and media consistency</h1>
+<p>Status: RATIFIED at r2 (design-blind, 2 rounds). Increments 1, 2 and 3 built.</p>
+<h2 id="1-brief">1. Brief</h2>
+<h3 id="decision">Decision</h3>
+<p>Where the Cable policy for one planned segment is decided, who owns that decision, and what the
+plugin checks about media consistency along one Source Trace.</p>
+<p>Today the only answer is <code>CableClassMapping</code>, one row per <code>(Import Profile, CableClass value)</code>, held
+on the Import Profile edit page. Three operator needs do not fit it.</p>
+<ol>
+<li>The policy can be set only on the profile page, away from the trace being reviewed.</li>
+<li>One CableClass value carries different media on different traces. A reported workbook gives one
+   segment a generic fiber CableClass, and that run is multimode OM4. The same value names a
+   single-mode run on another trace. A <code>(profile, cable_class)</code> row cannot state both.</li>
+<li>Nothing checks that one path stays in one media family. The source is not always correct, and a
+   wrong CableClass silently writes a Cable of the wrong type.</li>
+</ol>
+<p>The framing from the operator: "input data from trace is sometimes not 100% correct". The workspace
+has to let the operator correct the source without editing the workbook.</p>
+<h3 id="constraints">Constraints</h3>
+<p>House rules that bind this design:</p>
+<ul>
+<li>No backwards-compatibility layer. An old path is deleted in the change that replaces it.</li>
+<li>One source of truth. Everything else derives from it.</li>
+<li>Validate at boundaries and fail fast. No silent fallback, no default that hides an error.</li>
+<li>The Import Plan is the authority on state. The presentation layer may refine what the plan says
+  and may never contradict it. A defect of exactly that kind was fixed in
+  <code>proposal_presentation.card</code> on 2026-09-21.</li>
+<li>Cable Type and Cable Profile values come from the running NetBox instance, never a hardcoded list
+  (spec section 3.6).</li>
+<li>Tests exercise real wiring first: HTTP request, view, real DB, real plan.</li>
+</ul>
+<h3 id="observable-acceptance-conditions">Observable acceptance conditions</h3>
+<ol>
+<li>From the trace workspace, with no visit to the Import Profile page, an operator can give every
+   segment of a 9-segment trace a Cable Type and Cable Profile, and the trace reaches
+   disposition <code>actionable</code>.</li>
+<li>Two segments of one trace that share a CableClass value can carry different Cable Types.</li>
+<li>A trace whose segments resolve to more than one media family is reported, and the report names
+   the segments and the families. The worked example, once all nine segments carry one
+   fiber family, reports nothing.</li>
+<li>Two Source Traces that state one shared segment still cannot give it two policies:
+   <code>cable.resolved_segment_conflict</code> still fires.</li>
+<li>No media family list appears in plugin source. The families come from
+   <code>dcim.choices.CableTypeChoices.CHOICES</code> group labels.</li>
+<li>A stored policy value the running instance no longer offers still blocks with
+   <code>cable.policy_stale</code>.</li>
+</ol>
+<h3 id="evidence">Evidence</h3>
+<table>
+<thead>
+<tr>
+<th>Fact</th>
+<th>Location</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CableClassMapping</code>, <code>(profile, cable_class)</code> unique, two tri-state dimensions</td>
+<td><code>netbox_data_import/models.py:619</code></td>
+</tr>
+<tr>
+<td>Policy read, and the block on an unresolved dimension</td>
+<td><code>netbox_data_import/cable_target.py:1025</code>, <code>:1045</code></td>
+</tr>
+<tr>
+<td>Policy stored per segment index, then consumed by the create change</td>
+<td><code>cable_target.py:1034</code>, <code>:1274</code></td>
+</tr>
+<tr>
+<td>Shared-segment policy conflict, keyed on <code>_DesiredSegment.key</code></td>
+<td><code>cable_target.py:1101</code></td>
+</tr>
+<tr>
+<td><code>_DesiredSegment.key</code> is the direction-independent pair of resolved termination identities</td>
+<td><code>cable_target.py:148</code></td>
+</tr>
+<tr>
+<td><code>_Termination</code> carries no NetBox port type</td>
+<td><code>cable_target.py:112</code></td>
+</tr>
+<tr>
+<td>Choice groups flattened, group label discarded</td>
+<td><code>models.py:555</code>, <code>:565</code></td>
+</tr>
+<tr>
+<td>Runtime choice and cardinality validation</td>
+<td><code>models.py:599</code></td>
+</tr>
+<tr>
+<td>Decision persistence shape to mirror</td>
+<td><code>models.py</code> <code>TerminationResolution</code>, <code>TraceDeviceResolution</code>; <code>review_workspace.py:31</code></td>
+</tr>
+<tr>
+<td>Spec: CableClass mappings, creation policy, diagnostics</td>
+<td><code>docs/spec/target-neutral-import-architecture.md</code> 3.6, 6.4, 6.7</td>
+</tr>
+<tr>
+<td>Trace identity</td>
+<td><code>docs/adr/0002-source-trace-identity.md</code></td>
+</tr>
+</tbody>
+</table>
+<p>NetBox <code>CableTypeChoices.CHOICES</code> group labels, read from the running 4.7.0 instance:
+<code>Copper - Twisted Pair (UTP/STP)</code>, <code>Copper - Twinax (DAC)</code>, <code>Copper - Coaxial</code>,
+<code>Fiber - Multimode</code> (<code>mmf</code>, <code>mmf-om1</code>..<code>mmf-om5</code>), <code>Fiber - Single-mode</code> (<code>smf</code>, <code>smf-os1</code>,
+<code>smf-os2</code>), <code>Fiber - Other</code> (<code>aoc</code>), <code>Power</code>, <code>USB</code>.</p>
+<p><code>CableProfileChoices</code> groups: <code>Single</code>, <code>Trunk</code>, <code>Breakout</code>. Spec 3.6 already restricts a created
+segment to a profile with one termination per side, so <code>Trunk</code> and <code>Breakout</code> are out of scope for
+creation.</p>
+<p>Worked example, from an operator report. One 9-segment trace between two switch interfaces, across
+8 fiber cassettes. Four CableClass values: one on segments 0, 2, 4, 6, 8; one on 1; one on 3; one on
+5 and 7. Segments 1, 3, 5, 7 are rear-to-rear backbone runs. Segments 0, 2, 4, 6, 8 are
+front-to-front patch leads. Two of the four values are ambiguous: the same label names multimode on
+this path and single-mode elsewhere.</p>
+<h2 id="2-open-decisions-between-competing-shapes">2. Open decisions between competing shapes</h2>
+<ul>
+<li><strong>A. Override key.</strong> Resolved termination pair (<code>_DesiredSegment.key</code>), or a source-side key built
+  from the two source Termination References, or <code>(trace identity, segment index)</code>.</li>
+<li><strong>B. Media consistency check.</strong> Block, warn, or info. Whole-trace agreement, or the narrower
+  invariant across one pass-through. Whether a separate port-media against cable-media check is part
+  of this design.</li>
+<li><strong>C. Trace-view edit of the profile-level mapping.</strong> The same write as the profile form, or a
+  separate narrow endpoint. Interaction with <code>locked_profile_policy</code> and the preview revision.</li>
+<li><strong>D. Presentation.</strong> Precedence between a per-segment override and the profile row, how the card
+  states which one is in force, and how an override is cleared.</li>
+</ul>
+<h2 id="3-designs">3. Designs</h2>
+<p>Two designs were made blind from one factual brief. Neither designer saw the other.</p>
+<table>
+<thead>
+<tr>
+<th>Design</th>
+<th>Model</th>
+<th>Effort</th>
+<th>Isolation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Opus 5 (this session)</td>
+<td>n/a</td>
+<td>Drafted while design 2 ran</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>gpt-6-astra</code> via <code>codex exec -s read-only</code></td>
+<td>high</td>
+<td>Fresh context, brief only, no access to design 1</td>
+</tr>
+</tbody>
+</table>
+<p>The brief stated the problem, the constraints, the evidence pointers and the four open decisions.
+It named no preferred shape.</p>
+<h2 id="4-divergence-table">4. Divergence table</h2>
+<p>Both designs agreed on: the resolved termination pair as the override key; a complete override
+rather than a per-dimension overlay; a new <code>cable_policy.py</code> owning the effective-policy question;
+reuse of <code>CableClassMappingForm</code> behind a dedicated workspace endpoint that locks, replans and
+rotates the preview revision; reused segments contributing their existing Cable type to the media
+check; and families derived from the running instance's grouped choices. Agreement narrows where to
+look. It closes nothing.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Decision</th>
+<th>Design 1</th>
+<th>Design 2</th>
+<th>Evidence</th>
+<th>Disposition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Media mismatch severity</td>
+<td><code>blocked</code></td>
+<td>warning, disposition unchanged</td>
+<td><code>trace.pass_through_at_interface</code> (<code>trace_workbook.py:501</code>) rejects a Pass-Through Claim at an interface, and a span only spans verified PortMapping continuity, so the source contract cannot state a legitimate mixed passive span today</td>
+<td><strong>Settled twice. See 5.1 and section 8.</strong></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Span definition</td>
+<td>"across one pass-through"</td>
+<td>consecutive segments joined by verified FrontPort/RearPort mappings, including verified same-port substitution; a device name alone proves nothing</td>
+<td>Design 2 is strictly more precise and excludes the converter case by construction</td>
+<td>Design 2</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Breakout carve-out</td>
+<td>none needed, cardinality already excludes breakout from creation</td>
+<td>a Breakout-classified profile on a reused Cable excludes that segment and splits the span</td>
+<td>Design 1 missed reused Cables, which can already carry a Breakout profile</td>
+<td>Design 2</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Unknown media</td>
+<td>one <code>info</code> code</td>
+<td>explicit incomplete coverage; <code>Fiber - Other</code> indeterminate; unknown never reads as agreement; an unclassified group is explicit, not assumed</td>
+<td>Design 2 is sharper and refuses a false "consistent" claim</td>
+<td>Design 2</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Diagnostic fingerprint</td>
+<td>not addressed</td>
+<td>add <code>Diagnostic.evidence</code>, fingerprint it, bump the plan schema</td>
+<td>Verified: <code>Diagnostic.fingerprint_data</code> (<code>plan.py:196</code>) is code, severity, identities only. Media facts placed in <code>display</code> would not change the fingerprint, so a live Cable could change under an accepted plan</td>
+<td>Design 2</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>cable.resolved_segment_conflict</code></td>
+<td>leave as <code>invalid</code></td>
+<td>becomes <code>blocked</code>, and compares only effective Type and Profile, dropping <code>cable_class</code> from the comparison and from the shared payload</td>
+<td>Once an override exists, a decision inside the plugin resolves the conflict, which is what <code>blocked</code> means (<code>cable_target.py:260</code>)</td>
+<td>Design 2</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Source-level CableClass disagreement</td>
+<td>not addressed</td>
+<td>remove the label condition from <code>_cross_trace_conflicts</code></td>
+<td>Verified: <code>trace_workbook.py:786</code> flags two traces that "disagree about a CableClass" on one source segment pair. With overrides, two labels can resolve to one policy, so the label check would invalidate a correct pair</td>
+<td>Design 2</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Rename <code>cable.cableclass_stale_mapping</code> to <code>cable.policy_stale</code></td>
+<td>not proposed</td>
+<td>proposed, no alias</td>
+<td>The code is no longer about a CableClass row alone once an override can go stale. House rule forbids an alias</td>
+<td>Design 2</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Choice helpers</td>
+<td>leave in <code>models.py</code></td>
+<td>move into <code>cable_policy.py</code>, delete the originals</td>
+<td>One definition for forms, models, planning and classification</td>
+<td>Design 2</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Editing before resolution</td>
+<td>nothing useful before both ends resolve</td>
+<td>the CableClass default stays editable; only the segment override is disabled, with a reason</td>
+<td>Design 2 gives the operator work to do earlier</td>
+<td>Design 2</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Concurrency</td>
+<td>preview revision plus profile lock</td>
+<td>also compare the reviewed profile fingerprint under the lock</td>
+<td>A session revision cannot see another operator's profile edit</td>
+<td>Design 2</td>
+</tr>
+</tbody>
+</table>
+<p>Design 2 wins every dispositioned divergence. That is a finding about design 1, not a formality:
+design 1 stopped at the planning seam and under-read the reused-Cable, fingerprint and cross-trace
+consequences.</p>
+<h2 id="5-merged-design-r1">5. Merged design (r1)</h2>
+<p>Adopt design 2 entire, with divergence 1 left open for the operator.</p>
+<p>The one substantive argument design 1 contributes is on divergence 1. Design 2 chose warning on the
+ground that a media result is "not sufficient evidence to prohibit a write". But its own span
+definition already removes the case that argument protects: a span is only the run of segments
+joined by <em>verified</em> PortMapping continuity, a converter is not that, and
+<code>trace.pass_through_at_interface</code> refuses to let the workbook state one anyway. Inside a verified
+passive span, two known different families is a physical impossibility, and the segment override is
+a decision inside the plugin that resolves it, which is the definition of <code>blocked</code> in this
+codebase. Unknown and unclassified stay non-blocking under either choice.</p>
+<p>Reopening condition for divergence 1: converter support, which would split a span at the converter
+and remove the blocking case.</p>
+<h3 id="51-divergence-1-settled">5.1 Divergence 1, settled</h3>
+<p>The operator settled it on 2026-09-21: "trace xls can be wrong, so I need an option to just force
+given cable to a type if it differs on a path."</p>
+<p>That is a request for the escape, not for a softer check. A mismatch inside a verified passive span
+<strong>blocks</strong>, and the segment override is what clears it. The operator forces the one segment to the
+correct Type, the families agree, and the trace proceeds. Design 2's "no ignore-media checkbox"
+rule stands: the escape is to state the correct media, not to accept a contradiction.</p>
+<p>This keeps design 2's own reasoning intact everywhere it applies. Unknown, unclassified and
+<code>Fiber - Other</code> observations stay non-blocking, because they are incomplete coverage and not a
+contradiction. Only two known and different families inside one verified passive span block.</p>
+<p>Reopening condition: converter support. A converter would split the span and remove the blocking
+case.</p>
+<p>Note on wording: the operator said "force ... to a type", one dimension. The override still stores
+both dimensions, because both designs agreed a partial overlay gives four precedence states per
+segment for no stated requirement. The editor prepopulates both from the effective policy, so
+forcing the Type is one field change in practice.</p>
+<h2 id="6-ratify-round-1">6. Ratify round 1</h2>
+<p>Reviewer <code>gpt-6-astra</code>, effort high, read-only, scope r1 whole merged design.
+<strong>Verdict: NOT RATIFIED.</strong> Two blockers, both verified independently here by reading the code.</p>
+<h3 id="blocker-1-confirmed-the-physical-impossibility-premise-is-false">Blocker 1 (CONFIRMED). The physical-impossibility premise is false.</h3>
+<p>A passive balun is a counterexample: one device with a BNC FrontPort, an 8P8C RearPort and a
+one-position PortMapping. Coax on the front, twisted pair on the rear, both correct.</p>
+<p>Verified here:</p>
+<ul>
+<li><code>Position Front</code> and <code>Punch-Down</code> are valid non-interface port classes at a join
+  (<code>field_keys.py:12</code>).</li>
+<li><code>_pass_through_error</code> rejects a join only when a port class is an interface class
+  (<code>trace_workbook.py:488</code>). A balun join uses neither.</li>
+<li>NetBox <code>PortMapping.clean()</code> checks same device and rear position. It never compares media
+  (<code>dcim/models/base.py</code>, <code>dcim/models/device_components.py:1495</code>).</li>
+</ul>
+<p>So a verified passive span can legitimately hold two media families, and r1 would block correct
+data with no escape: an override could clear it only by recording a cable type that is wrong.</p>
+<p>The disposition on divergence 1 rested on this premise. The premise is refuted, so the disposition
+reopens. The operator's authority to choose blocking is untouched; the evidence offered for it was
+wrong.</p>
+<h3 id="blocker-2-confirmed-the-override-cannot-fix-a-disagreement-between-two-retained-cables">Blocker 2 (CONFIRMED). The override cannot fix a disagreement between two retained Cables.</h3>
+<p>Section 5.1 promises the operator forces the offending segment and the trace proceeds. That holds
+only for a segment the import creates. A reused segment keeps its existing Cable unchanged, and the
+media check reads that Cable's actual type.</p>
+<p>Verified here: <code>pending</code> excludes <code>proven</code> (<code>cable_target.py:232</code>), and creation runs over <code>pending</code>
+only (<code>cable_target.py:1274</code>).</p>
+<p>Case: an existing first patch Cable recorded OM4, an existing backbone recorded SMF, both joins
+verified. No override changes either. The remedy is a NetBox correction.</p>
+<p>r2 must state that contract and the workspace must say it, rather than offering an action that
+cannot work.</p>
+<h3 id="non-blocking-findings-accepted-for-r2">Non-blocking findings accepted for r2</h3>
+<ol>
+<li>The plan schema bump leaves the trace workspace unable to recover its own cached plan: loading
+   and Re-read both redirect to setup, because Re-read needs a successful deserialization first
+   (<code>views.py:3895</code>, <code>preview_row_actions.py:142</code>). Queued Jobs fail safely. Specify the recovery
+   route without a compatibility reader.</li>
+<li>Override loss is not limited to an operator re-pick. A PortMapping edit that changes the unique
+   mapped peer also changes the resolved pair (<code>cable_target.py:771</code>, <code>:802</code>). The notification and
+   the tests must cover every pair change, not only a re-pick.</li>
+</ol>
+<h3 id="checked-and-clean-reviewer-spot-checked-here">Checked and clean (reviewer, spot-checked here)</h3>
+<p>Shared-conflict and media cannot deadlock; removing <code>cable_class</code> from the shared payload is sound
+and <code>test_a_shared_termination_invalidates_every_involved_trace</code> guards the regression; the
+fingerprint gap is real; the helper move needs no import cycle; the permission helpers fit, with
+the outer lock supplying what the deletion helper does not take.</p>
+<h2 id="8-revision-r2">8. Revision r2</h2>
+<h3 id="81-divergence-1-settled-again-warn">8.1 Divergence 1, settled again: warn</h3>
+<p>The operator chose warn on 2026-09-21, after blocker 1 refuted the premise behind the earlier
+block decision. Design 2's original position stands, now on evidence rather than assumption.</p>
+<ul>
+<li>A mismatch of two known families inside one verified passive span records
+  <code>cable.media_family_mismatch</code>, severity WARNING, disposition unchanged.</li>
+<li>The warning names the differing segments, their effective Cable Types and their families.</li>
+<li>Unknown, unclassified and <code>Fiber - Other</code> remain incomplete coverage, never agreement, never a
+  claim of consistency.</li>
+<li>The segment override stays. It is the operator's "force this cable to a type" action, and it is
+  how a mismatch caused by a wrong workbook gets corrected.</li>
+<li>No ignore-media control, and no per-pass-through converter decision in this delivery. A legitimate
+  converter, for example a passive balun, produces a warning that is simply true: the path does
+  change media there. Nothing is blocked, so nothing needs an exception.</li>
+</ul>
+<p>This removes the balun trap without a second model. It is also why the converter feature stays out
+of scope: with a warning, a converter needs no representation to be importable.</p>
+<h3 id="82-blocker-2-recovery-contract">8.2 Blocker 2, recovery contract</h3>
+<p>The override changes what the import writes. It cannot change a Cable the import retains.</p>
+<ul>
+<li>A mismatch between two retained Cables, or between a retained Cable and a created segment, is
+  reported the same way, but the workspace must state which observations come from a retained
+  Cable.</li>
+<li>Where every mismatched observation comes from a retained Cable, the workspace says the override
+  cannot change it and names the remedy: correct the Cable in NetBox, then re-read.</li>
+<li>The override action is not offered for a retained segment. It is shown disabled with that reason,
+  following the existing action-with-a-reason pattern.</li>
+</ul>
+<h3 id="83-findings-3-and-4">8.3 Findings 3 and 4</h3>
+<ol>
+<li>Plan schema bump. The trace workspace must be able to recover its own stale cached plan. Re-read
+   currently needs a successful deserialization first (<code>views.py:3895</code>), so a bumped schema sends
+   the operator to setup. r2 routes a schema rejection to a rebuild from the stored Source Document,
+   the route the preview already uses (<code>views.py:1212</code>). No compatibility reader.</li>
+<li>Override loss covers every resolved-pair change, not only an operator re-pick: a PortMapping edit
+   that changes the unique mapped peer does it too (<code>cable_target.py:771</code>, <code>:802</code>). The workspace
+   notice and the regression tests cover all of them.</li>
+</ol>
+<h3 id="84-unchanged-from-design-2">8.4 Unchanged from design 2</h3>
+<p>Everything else is adopted as written: the resolved-pair override key, the complete override, the
+<code>cable_policy.py</code> seam and the helper move, fingerprinted <code>Diagnostic.evidence</code> with the schema
+bump, <code>cable.resolved_segment_conflict</code> becoming <code>blocked</code> and comparing effective policy only,
+<code>cable_class</code> leaving the shared payload and <code>_cross_trace_conflicts</code>, the rename to
+<code>cable.policy_stale</code>, the workspace endpoint with the profile lock, the fingerprint comparison and
+the revision rotation, and the presentation rules.</p>
+<h2 id="9-ratify-round-2">9. Ratify round 2</h2>
+<p>Reviewer <code>gpt-6-astra</code>, effort high, read-only. <strong>Verdict: RATIFY revision r2</strong>, scope: workspace
+Cable policy correction, resolved-pair overrides, warning-based media assessment, and the recovery
+contracts in 8.2 and 8.3. No blockers. Design approval, not implementation verification.</p>
+<p>Two corrections supplied in the same round, both verified here and folded into r2.</p>
+<p><strong>8.2 is a property of the reviewed plan, not of the source segment.</strong> A retained pair can become
+pending: re-picking endpoints to free ports replans, and pair equality decides reuse again
+(<code>cable_target.py:937</code>). Deleting the Cable in NetBox and re-reading does the same for the same
+pair. So the override is disabled while <strong>the reviewed plan retains that pair</strong>, and offered once a
+replan gives a resolved pending pair.</p>
+<p>Do <strong>not</strong> gate the override on segment status <code>create</code>. Verified: <code>_segment_status</code> returns <code>""</code>
+for a pending segment when the unit writes nothing (<code>cable_target.py:1249</code>), which is exactly the
+unmapped-policy case. Gating on <code>create</code> would make an unmapped pending segment unable to receive
+the override that would unblock it. That is a recovery deadlock.</p>
+<p><strong>8.3 must not discard the preview first.</strong> Verified: <code>_discard_import_preview</code> pops
+<code>import_context</code> (<code>views.py:1404</code>), which carries <code>source_document_id</code>, so calling it before the
+rebuild destroys the reference the rebuild needs. Recovery must distinguish a schema rejection from
+any other loader failure, preserve <code>import_context</code>, bypass materialized-preview mode while
+respecting an active retained sync (<code>views.py:1205</code>), reuse the rebuild branch (<code>views.py:1212</code>),
+and return to the selected trace without replaying the original mutation.</p>
+<h3 id="accepted-limitations-recorded-not-fixed">Accepted limitations, recorded not fixed</h3>
+<ol>
+<li><strong>A uniformly wrong family is not diagnosed.</strong> Two <code>1000base-t</code> interfaces with a resolved policy
+   of <code>mmf-om4</code> produce one observed family, so no mismatch. <code>_Termination</code> carries no port type
+   (<code>cable_target.py:112</code>), policy validation checks offered values and cardinality only
+   (<code>models.py:596</code>), and NetBox <code>Cable.clean()</code> does not compare Cable media to termination media.
+   This is the port-compatibility check that both designs put out of scope. The block choice would
+   have missed it too, so it is not a consequence of warn. Split candidate, see section 10.</li>
+<li><strong>The execution record does not preserve the warning.</strong> A trace carrying a media warning can be
+   synchronized, and the Import Execution stores change identities and deletion snapshots, not the
+   selected units' warnings (<code>import_engine.py:272</code>). The accepted plan survives in the Job data
+   (<code>views.py:1549</code>), but the results page says nothing. Follow-up, see section 10.</li>
+</ol>
+<h2 id="10-first-increment-and-follow-ups">10. First increment, and follow-ups</h2>
+<p><strong>First increment: edit an existing CableClass default from the trace workspace.</strong> Existing form and
+model, a scoped POST, the profile lock, the freshness comparison, a whole-document replan, revision
+rotation, and a refreshed policy display on the segment. It needs neither the override model nor
+any media diagnostic.</p>
+<p>Acceptance: upload a real workbook with an unmapped CableClass through the HTTP import flow, save
+both dimensions from the workspace, assert the trace reaches <code>actionable</code>, then execute and assert
+the persisted Cable Type and Profile. Red before, green after.</p>
+<p>The split is valid: the later slices depend on the policy semantics that already exist, not on this
+editor. The editor stands alone.</p>
+<p>Then, in order:</p>
+<ol>
+<li>The override slice: <code>CableSegmentOverride</code>, precedence, pair identity, shared-conflict
+   reconciliation, the payload change, and override-loss handling. These belong together.</li>
+<li>The media slice: assessment, the warning, fingerprinted <code>Diagnostic.evidence</code>, the plan schema
+   bump and its recovery route.</li>
+<li>Follow-up: persist selected-unit warnings in the execution audit (limitation 2).</li>
+<li>Split candidate: a conservative port-compatibility diagnostic for known contradictions, without
+   inferring converters and without claiming multimode or single-mode from an LC connector
+   (limitation 1).</li>
+</ol>
+<h2 id="11-increment-1-as-built">11. Increment 1, as built</h2>
+<p>Route <code>trace-workspace/cable-policy/</code>, view <code>TraceCablePolicyView</code>, workspace command
+<code>save_cable_class_mapping_and_replan</code>.</p>
+<ul>
+<li>The view validates the CableClass against <code>_workspace_cable_classes(workspace)</code>, so a command
+  answers a question the preview asked.</li>
+<li>The workspace command reads the row under <code>locked_profile_policy</code>, binds <code>CableClassMappingForm</code>
+  with the CableClass fixed server-side, writes through <code>save_permission_scoped_object</code>, replans the
+  whole document, and rotates the preview revision through <code>record_recalculated_preview</code>.</li>
+<li>The page lists each CableClass the selected trace states, with the policy in force and a Save
+  form built from <code>CableClassMappingForm</code>, so the runtime choices and the tri-state control values
+  have one definition.</li>
+<li><code>cable.cableclass_unmapped</code> no longer says "Map it on the import profile", because it is no
+  longer the only place.</li>
+</ul>
+<p><strong>One design change made during the build.</strong> The first attempt added a <code>cable_policies</code> key to the
+plan's trace display. A cached plan predates that key, so the live page said "This trace states no
+CableClass" for a trace that states four. The CableClass values now come from the plan's own
+<code>segments</code>, which every cached plan already carries, and the policy row is read live beside them.
+No plan-shape change, no cached-plan skew.</p>
+<p>Verified on a live instance: all four CableClass values of the worked example render, each
+unresolved, each with its own Save form.</p>
+<p>Tests: three end-to-end tests in <code>TraceWorkspaceCablePolicyTest</code>. The first uploads a workbook with
+an unmapped CableClass through the real HTTP flow, saves the policy from the workspace, asserts the
+trace becomes <code>actionable</code>, then runs the real execution and asserts the persisted Cable <code>type</code> and
+<code>profile</code>. The other two cover an invented CableClass and a stale preview revision, and both assert
+nothing was written.</p>
+<p>Full suite 2700 passed. <code>ruff format --check</code>, <code>ruff check</code> and <code>mypy</code> clean.</p>
+<h2 id="12-increment-2-as-built-the-override-slice">12. Increment 2, as built: the override slice</h2>
+<p>Route <code>trace-workspace/segment-policy/</code>, view <code>TraceCableSegmentPolicyView</code>, workspace commands
+<code>save_cable_segment_override_and_replan</code> and <code>clear_cable_segment_override_and_replan</code>.</p>
+<ul>
+<li><code>CableSegmentOverride</code> is keyed <code>(Import Profile, segment key)</code>, where the segment key is
+  <code>_DesiredSegment.key</code>: the direction-independent pair of resolved termination identities. It is a
+  <code>CharField</code>, not a digest-indexed <code>TextField</code> like the other decision tables, because the planner
+  derives it from NetBox object types and ids rather than from unbounded source text.</li>
+<li>The row decides both dimensions. Its presence is the resolution, so it carries no resolved flags.</li>
+<li><code>cable_policy.py</code> owns the runtime choices, <code>policy_choice_errors</code> (renamed from
+  <code>cable_class_mapping_choice_errors</code>) and <code>policy_in_force</code>. The originals are deleted from
+  <code>models.py</code>. <code>scripts/check_spec_diagnostics.py</code> reads the new module, or the two codes it emits
+  would read as spec rows no planner emits.</li>
+<li>Precedence is one line in <code>policy_in_force</code>, and both rows answer <code>decided_policy()</code>.
+  <code>_attribute_drift</code> reads the same row, so a reused Cable is compared against the policy actually in
+  force rather than against the CableClass row alone.</li>
+<li><code>cable.resolved_segment_conflict</code> is <code>blocked</code> and compares effective Cable Type and Cable Profile
+  only. <code>cable_class</code> left the shared create payload, and the source-level label check left
+  <code>_cross_trace_conflicts</code>: two labels that resolve to one policy are no longer a source
+  disagreement.</li>
+<li><code>cable.cableclass_stale_mapping</code> is renamed <code>cable.policy_stale</code>, with no alias.</li>
+<li>Override loss: the override records the Source Trace and the segment position it was decided from.
+  A replan that resolves that position to a different pair notes <code>cable.segment_override_lost</code>. Both
+  causes are covered: an operator re-pick, and a PortMapping edit that moves the unique mapped peer.</li>
+</ul>
+<p><strong>One design change made during the build.</strong> The proposed-topology panel needs planner knowledge the
+display did not carry: the resolved pair, whether the plan retains that pair, and the policy in force.
+Adding those keys changes the plan shape, so <code>SCHEMA_VERSION</code> went to 3. That pulls r2 finding 3
+forward from the media slice: <code>_rebuild_schema_rejected_preview</code> rebuilds the preview from the stored
+Source Document when, and only when, the cached plan is rejected for its schema version. It preserves
+<code>import_context</code>, refuses while a retained sync holds the preview, refuses for an adapter this release
+cannot plan for, and rotates the preview revision, so a command posted against the old plan is refused
+rather than replayed. Without it every operator mid-review would have been sent back to setup by the
+upgrade, which is exactly what finding 3 described.</p>
+<p>The alternative, reading the new keys defensively, was rejected: it reproduces the cached-plan skew
+increment 1 had to correct, where a live page silently states less than the trace does.</p>
+<p>Tests: <code>CableSegmentOverrideTest</code> covers precedence, unblocking an unmapped CableClass, a stale
+override value, two labels agreeing through one override with one shared payload, and both causes of
+override loss. <code>TraceWorkspaceSegmentOverrideTest</code> runs the HTTP flow end to end: one CableClass
+writes two media after one segment is forced, clearing returns the segment to its CableClass policy, a
+retained segment refuses the override and names the NetBox remedy, an invented segment and a half-made
+decision are refused, and a cached plan this release cannot read is rebuilt rather than discarded.</p>
+<h2 id="13-increment-3-as-built-the-media-slice">13. Increment 3, as built: the media slice</h2>
+<p>No new route and no new model. Planning gained one pass, and the plan gained one diagnostic field.</p>
+<ul>
+<li><code>cable_policy.py</code> answers two new questions from the running instance: which family it groups a
+  Cable Type under, and whether a Cable Profile fans one Cable out into runs the path does not state.
+  The fan-out test is <code>not cable_profile_accepts_one_termination_per_side</code>, so it needs no profile
+  family list. Only the indeterminate media group is named in source, as one constant with its
+  reason, because no structural property distinguishes an active optical assembly.</li>
+<li><code>_TraceAnalysis.joined</code> records the boundaries a verified PortMapping proved, and <code>_media_spans</code>
+  reads it. Today every boundary of a surviving trace is verified, because the adapter refuses a path
+  whose consecutive rows do not share a device and cards label and the planner refuses an unproven
+  pass-through. The set is kept anyway: the span is defined by verified continuity, not by the
+  adapter's linearity rule holding somewhere else, and <code>CableModule.plan</code> accepts a Source Trace from
+  any adapter. <code>test_two_segments_no_mapping_joins_are_two_runs</code> builds exactly that trace.</li>
+<li><code>cable.media_family_mismatch</code> is a WARNING and changes no disposition, so a trace carrying one can
+  still be synchronized. The message names each stated segment, its Cable Type, its family and
+  whether the value comes from a Cable the import keeps, and it names the remedy. Where every stated
+  segment is retained, the remedy is the NetBox correction, because no override can change those
+  Cables (r2 section 8.2).</li>
+<li><code>Diagnostic.evidence</code> carries the facts the finding rests on, and <code>fingerprint_data</code> includes it.
+  Without it a live Cable could change medium under an accepted plan with no change to the
+  fingerprint. <code>test_the_media_facts_alone_change_the_unit_fingerprint</code> moves one retained Cable from
+  one fiber family to another and asserts the codes are identical while the fingerprint differs.</li>
+<li>The workspace marks a warning finding with a badge. A finding the operator reads as another note is
+  the same as no finding.</li>
+</ul>
+<p><strong>No second schema bump.</strong> Version 3 has not shipped, so <code>evidence</code> joins the same version the
+override slice introduced, and the recovery route built there covers both.</p>
+<p>Limitations 1 and 2 of section 9 stand, unchanged and still not fixed: a uniformly wrong family is
+not diagnosed, and the execution record does not preserve the warning.</p>
+<h2 id="14-review-of-increments-2-and-3">14. Review of increments 2 and 3</h2>
+<p>Reviewer <code>gpt-6-astra</code>, effort high, read-only, scope <code>origin/develop...eb7d1429</code>. Six findings, all
+reproduced here before fixing, all fixed in the same change with a red test each and a mutation
+check.</p>
+<ol>
+<li><strong>An old form could overwrite another operator's newer policy.</strong> Divergence 11's fingerprint
+   comparison under the lock was specified in r1 and never built. A preview revision is per session,
+   so A's token stays valid while B edits the profile. All three Cable policy commands now compare
+   the reviewed plan's <code>profile_fingerprint</code> with <code>planning_fingerprint</code> under the lock and refuse.</li>
+<li><strong>The media warning disclosed a Cable the actor may not view.</strong> It read a retained Cable's type
+   and printed it, bypassing <code>_cable_diagnostic_disclosure</code>. A hidden Cable now still decides the
+   run, and states nothing about itself: the message says "a Cable you cannot view" and neither the
+   display nor the evidence carries its type or family. The consequence, recorded not fixed: a hidden
+   Cable's medium can change without moving the fingerprint, exactly as its attribute drift already
+   does.</li>
+<li><strong>Media families were keyed by a translated group label.</strong> NetBox group labels are lazy
+   translations, so <code>str()</code> made classification depend on the reader's language: under German the
+   indeterminate group stopped matching and <code>cat6 / aoc / cat6</code> warned falsely, and a genuine
+   mismatch fingerprinted differently per language, against spec section 4.3. A family is now keyed
+   by the smallest Cable Type value in its group, the indeterminate group is found through <code>aoc</code>
+   rather than through its label, and the label is resolved for display only.</li>
+<li><strong>A renumbered segment was reported as a lost override.</strong> A trace identity names its endpoints, so
+   inserting a panel earlier renumbers every later segment while the override still governs its pair.
+   Loss is now decided by pair membership, not by position.</li>
+<li><strong>Schema recovery crashed when the preview's profile had been deleted.</strong> <code>SourceDocument.profile</code>
+   is <code>SET_NULL</code>, so the document survives and <code>filter(profile=None)</code> finds it. Recovery now refuses
+   a missing profile before it reads the document.</li>
+<li><strong>A retained sync starting during recovery answered 500.</strong> <code>record_recalculated_preview</code> raises
+   <code>PreviewLocked</code>, and the call sat outside the handler. The stale plan now stays where it is.</li>
+</ol>
+<p>The reviewer's "checked and clean" list covered the override key and its complete replacement, the
+absence of a route from a stale override to a Cable write, <code>_attribute_drift</code> reading the effective
+row, the shared payload and preconditions, the consequences of removing the label check, the endpoint
+scope rules, successful schema recovery, the verified-join and fan-out boundaries, and the query
+counts.</p>
+<h2 id="15-review-round-2">15. Review round 2</h2>
+<p>Same reviewer, read-only, scope the round 1 fixes plus a fresh pass over the branch. It confirmed
+that all six edits are present and reported three more. One was a real defect and is fixed; two are
+recorded here instead, with their reasons.</p>
+<p><strong>Fixed. Two overrides decided at one position hid one another.</strong> The loss index was keyed by
+<code>(trace identity, segment position)</code>, but uniqueness is by pair, so one trace and one position can
+own several overrides at once. The later row displaced the earlier one and its loss went unreported.
+Overrides are now grouped by originating trace, and every one of them is compared against the pairs
+the trace states. <code>test_two_overrides_decided_at_one_position_each_report_their_own_loss</code> fails
+against the previous fix.</p>
+<p><strong>Recorded, not fixed: a cached plan keeps a redaction made under the permissions of its own
+planning.</strong> Revoking Cable view permission after a preview leaves the cached finding as it was
+rendered. This is a property of the cached preview rather than of the media warning: a
+<code>cable.segment_reused</code> note carries the Cable's display name under exactly the same conditions. The
+workspace does not let that stale plan be synchronized, because the live plan's fingerprint differs
+from the reviewed one, and it differs precisely because the media evidence is fingerprinted. Fixing
+it properly means re-deriving every display from live permissions on each render, which is a change
+to the review workspace rather than to this design.</p>
+<p><strong>Recorded, not fixed: policy rows are read without an object-permission restriction.</strong> Planning
+reads the whole profile policy whatever the actor may view, or two operators would plan two different
+imports from one profile. Restricting only the page would make it state "Unresolved" for a segment
+the plan decided, and the Import Plan is the authority on state. The honest fix says "a policy you
+cannot view" in place of the values, on the profile page, the CableClass table and the segment panel
+alike. That is a follow-up across three surfaces, and the write path is already permission scoped.</p>
+<p>The reviewer's "checked and clean" list for this round covers the fingerprint comparison against the
+operator's own consecutive saves and a no-op replan, the empty-fingerprint default failing closed,
+the freshly planned hidden-Cable redaction including identities, the family keys across the 4.6.10
+and 4.7.0 choice tables including singleton groups, pair-membership loss for a lone renumbered
+override, and the recovery route's single revision rotation.</p>
+<h2 id="16-review-round-3-closure">16. Review round 3 closure</h2>
+<p>This change closes the three findings that sections 14 and 15 left open.</p>
+<h3 id="161-lost-override-reporting-after-topology-classification">16.1 Lost override reporting after topology classification</h3>
+<p><code>_decide</code> now reports a lost override before it stops a blocked trace. It reports only when the
+source states no Segment Evidence, or when every stated segment resolved. These cases confirm that
+the stored pair no longer governs the trace. A source path that did not resolve does not confirm a
+loss, because the same pair can govern after the resolution problem is corrected. An occupied
+replacement port therefore reports both <code>cable.termination_occupied</code> and
+<code>cable.segment_override_lost</code>, stays blocked, and produces no changes. An endpoint-only trace also
+reports the loss. An unresolved stated path does not.</p>
+<h3 id="162-live-cable-disclosure">16.2 Live Cable disclosure</h3>
+<p>Plan schema 4 records a disclosure source beside each visible Cable value. A value redacted during
+planning records no source, so a later grant cannot reveal it. <code>ReviewWorkspace</code> requires a live
+viewer and resolves every referenced Cable primary key with one restricted query per render. It
+redacts a cached value when the viewer lost access or the row no longer exists. The same module owns
+the diagnostic keys, redaction shapes, and media sentence used by planning and presentation.</p>
+<p>The planner now stores structured media segments. Presentation translates Cable Type and media
+family labels and composes <code>cable.media_family_mismatch</code> for the reader. Schema 3 is rejected and
+rebuilt through the existing recovery route. The recovery keeps the source document, import context,
+and current preview flow.</p>
+<p>Disclosure sources stay in <code>display</code>. They do not enter <code>Diagnostic.fingerprint_data</code> or
+<code>SynchronizationUnit.fingerprint_data</code>. Rendering one accepted plan under different live Cable
+permissions does not mutate its fingerprint. A Cable hidden during planning still contributes no
+identity or media facts, so its drift still does not move the fingerprint. Section 14 item 2 records
+that trade, and this change does not alter it.</p>
+<h3 id="163-live-cable-policy-disclosure">16.3 Live Cable policy disclosure</h3>
+<p>The same disclosure module also owns the two policy row kinds, the diagnostic registry, and the
+shared text <code>a policy you cannot view</code>. The planner still reads all <code>CableClassMapping</code> and
+<code>CableSegmentOverride</code> rows without restriction. It uses them for disposition, changes, evidence,
+and fingerprints. It records a row identity only when the planning viewer may read the display
+value. The renderer then rechecks those identities on every workspace render.</p>
+<p>The profile detail table, workspace CableClass table, and segment panel keep the policy listed but
+replace both values with the shared text when the deciding row is not viewable. Hidden rows provide
+no form initial values. Their controls and buttons are disabled with the same reason. The save,
+force, and clear commands repeat the view check under the profile policy lock and refuse the write
+with that reason. A deleted row redacts cached text. A later grant does not reveal a value the
+planner redacted.</p>
+<p>Policy-based media evidence keeps its unrestricted Cable Type and stable media-family key. Only its
+display is redacted. The plan therefore keeps the same disposition, changes, diagnostic evidence,
+and fingerprint when the same actor loses policy view access. The media-family key remains the
+smallest Cable Type value in the NetBox group.</p>
+<p>The diagnostic registry enumerates policy-derived display for
+<code>cable.media_family_mismatch</code>, <code>cable.resolved_segment_conflict</code>, and
+<code>cable.segment_override_lost</code>. The segment panel and workspace CableClass table use plan fields from
+the same disclosure vocabulary.</p>
+<p>Section 15 was correct that the child write paths used NetBox object-permission scoping for change
+and delete. It omitted a separate read condition. A user with change or delete access but no view
+access could open the edit or delete page and read the row. Both child views now require view access
+in addition to their existing write scope. The workspace commands also needed an explicit view
+check to prevent a blind overwrite. Thus the statement that the write path was already scoped was
+true for write authority, but incomplete for the disclosure and blind-write rule.</p>
+<h2 id="17-review-round-4-closure">17. Review round 4 closure</h2>
+<p>The adversarial review of section 16 found seven defects or incomplete guards. The revised design was
+ratified after the registry, form binding, and deletion fingerprint received a second review.</p>
+<h3 id="171-live-policy-rows-and-explicit-presentation-state">17.1 Live policy rows and explicit presentation state</h3>
+<p>The workspace now authorizes the live policy row that a form would bind. A row created after planning
+cannot borrow disclosure authority from a cached <code>Unresolved</code> value or from a different deciding row.
+An invisible row produces the shared hidden display and refusal reason. A visible row whose identity
+does not match the cached disclosure produces a blank, disabled form with the same stale-policy reason
+that the POST command returns.</p>
+<p><code>policy_visible</code> carries the presentation fact. <code>_redact_policy</code> sets it to false, and every form
+builder reads it. No reader compares policy prose to decide whether a control is safe. The table-cell
+text remains <code>a policy you cannot view</code>. The write refusal is the sentence <code>You cannot change a policy
+you cannot view.</code> These values have different grammatical roles and no longer share one string.</p>
+<h3 id="172-deleted-cable-audit-data">17.2 Deleted Cable audit data</h3>
+<p>A deleted Cable has no live row against which a later execution reader can receive view permission.
+Delete permission authorizes the deletion, not future disclosure. <code>ImportExecution.applied_changes</code>
+therefore records only the deleted object's type and database id. The API returns that identity. The
+results page reads only the applied-change count. The execution list reads no applied-change data.
+The native Job receives a presentation copy of the accepted plan with deleted Cable display removed.</p>
+<p>The former delete payload also protected the accepted plan against changes to the reviewed Cable
+metadata. Removing it without replacement would weaken the stale-plan check. The delete precondition
+now carries a digest of the Cable display, description, and sorted tag names. Planning and execution
+use one helper. Execution recomputes the digest under the Cable row lock. The readable values do not
+enter the queued plan or execution audit, but a metadata change still moves the plan fingerprint and
+blocks the accepted plan. Sections 9.2 and 10.7 of the architecture specification now state this
+identity-only audit contract. Their earlier requirement to retain readable deleted-row metadata was
+wrong because no surviving row could authorize it.</p>
+<h3 id="173-fail-closed-disclosure-schemas">17.3 Fail-closed disclosure schemas</h3>
+<p>The renderer treats a visible claim as untrusted unless it carries a well-formed source of the row
+kind that produced it and that row is live and viewable. Missing, null, string, unknown-kind, and
+wrong-kind sources all redact. A policy row cannot authorize a Cable observation.</p>
+<p>The disclosure module now registers the complete display schema of every <code>cable.*</code> diagnostic, not
+only the diagnostics already known to disclose rows. Every Cable diagnostic passes through that
+validator. Cable and policy fields require their visibility flag and a matching source when visible.
+The media diagnostic also validates every nested segment field and source. The producer test derives
+its expected diagnostic codes from <code>cable_target.py</code> and from <code>policy_choice_errors</code>, so a new producer
+cannot remain unregistered. Policy validation diagnostics no longer store a generic <code>message</code> field;
+the presentation layer owns their wording.</p>
+<h3 id="174-cableclass-table-query">17.4 CableClass table query</h3>
+<p><code>CableClassMappingTable</code> always uses <code>restrict(viewer, "view")</code>. NetBox already returns all rows for a
+superuser, so the separate superuser branch was dead and made this table disagree with the other
+permission-scoped presentation paths.</p>
+<h3 id="175-fingerprint-determinism">17.5 Fingerprint determinism</h3>
+<p>The intermittent language test did not expose translated plan data. It planned from two workbooks
+that the test helper generated separately. OpenPyXL wrote the current time into ZIP entry timestamps
+and <code>docProps/core.xml</code>, and the source workbook fingerprint reaches every Cable creation payload.
+Two calls in one timestamp interval passed; calls across an interval failed. Worker placement changed
+that timing and made the failure look language-dependent.</p>
+<p>The helper now fixes workbook properties, every ZIP entry timestamp, and the core modified value. The
+language test stores one Source Document, forces the German catalog to load by checking a known NetBox
+translation, and compares the complete fingerprint structures under English and German. No production
+fingerprint code changed. This defect predates the three implementation commits and existed only in
+the generated test workbook.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
