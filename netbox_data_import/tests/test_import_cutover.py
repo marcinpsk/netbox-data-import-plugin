@@ -230,7 +230,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         from netbox_data_import.plan import ImportPlan
         from netbox_data_import.review_workspace import ReviewWorkspace
 
-        workspace = ReviewWorkspace(ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY]))
+        workspace = ReviewWorkspace(ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY]), self.actor)
         return next(unit.action for unit in workspace.units if unit.row_number == row_number)
 
     def _job(self, *, status="pending", data=None, user=True, queue_name="default"):
@@ -422,7 +422,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertContains(progress, "Completed 3 of 8 plan steps")
 
     def test_failed_job_restores_its_plan_without_replacing_a_newer_preview(self):
-        """A failed accepted plan is resumable only when another preview is not pending."""
+        """A failed Job replans its stored source only when another preview is not pending."""
         self._upload()
         accepted_plan = self.client.session[PREVIEW_PLAN_SESSION_KEY]
         context_data = self.client.session["import_context"]
@@ -430,7 +430,6 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         failed = self._job(
             status="failed",
             data={
-                "accepted_plan": accepted_plan,
                 "context_data": context_data,
                 "source_document_id": document_id,
                 "message": "The accepted plan changed.",
@@ -443,12 +442,18 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         session = self.client.session
         session["import_preview_pending"] = False
+        session.pop(PREVIEW_PLAN_SESSION_KEY, None)
         session.save()
         restored = self.client.get(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": failed.pk}))
 
         self.assertContains(restored, "Review preview")
         self.assertEqual(self.client.session["import_preview_source_job_id"], failed.pk)
-        self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], accepted_plan)
+        self.assertNotIn(PREVIEW_PLAN_SESSION_KEY, self.client.session)
+        review = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        self.assertEqual(review.status_code, 200)
+        self.assertEqual(
+            self.client.session[PREVIEW_PLAN_SESSION_KEY]["source_fingerprint"], accepted_plan["source_fingerprint"]
+        )
 
     def test_progress_restores_an_execution_beside_a_newer_preview(self):
         """An older result remains available without destroying an unsubmitted preview."""
@@ -597,11 +602,12 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         no_user.refresh_from_db()
         self.assertIn("user", no_user.data["message"].lower())
 
-        missing_profile = self._job()
+        missing_profile = self._job(data={"accepted_plan": {"policy": {"cable_type": "mmf-om4"}}})
         with self.assertRaises(JobFailed):
             ImportJobRunner(missing_profile).run(999999, 1, {}, ["device:1"], "missing-profile")
         missing_profile.refresh_from_db()
         self.assertIn("profile", missing_profile.data["message"].lower())
+        self.assertNotIn("accepted_plan", missing_profile.data)
 
         missing_source = self._job()
         with self.assertRaises(JobFailed):

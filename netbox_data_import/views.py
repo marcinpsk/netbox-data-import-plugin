@@ -25,8 +25,10 @@ from utilities.permissions import get_permission_for_model
 from utilities.views import ConditionalLoginRequiredMixin
 
 from .filters import ImportProfileFilterSet
+from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, POLICY_WRITE_REFUSED, policy_row_is_disclosed
 from .forms import (
     CableClassMappingForm,
+    CableSegmentOverrideForm,
     InferenceBackendForm,
     ClassRoleMappingForm,
     ColumnMappingForm,
@@ -36,6 +38,7 @@ from .forms import (
     ImportProfileForm,
     ImportProfileImportForm,
     ImportSetupForm,
+    cable_policy_form_initial,
 )
 from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS, OutputKind
 from .values import (
@@ -50,6 +53,7 @@ from .values import (
 from . import __version__ as _plugin_version
 from .models import (
     CableClassMapping,
+    CableSegmentOverride,
     InferenceBackend,
     locked_profile_policy,
     locked_resolution_policy,
@@ -103,7 +107,6 @@ from .preview_row_actions import (
     mark_preview_dirty,
     pending_preview_payload,
     record_recalculated_preview,
-    restore_preview_plan,
     retained_sync_block_reason,
     retire_preview_revision,
     start_new_preview,
@@ -119,10 +122,16 @@ from .import_engine import (
 from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
 from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
-from .plan import ImportPlan, PlanError, fingerprint_of
+from .plan import ImportPlan, PlanError, PlanSchemaMismatch, fingerprint_of
 from .review_workspace import (
     IneligibleDeviceSelection,
+    PROFILE_POLICY_MOVED,
+    ProfilePolicyMoved,
     ReviewWorkspace,
+    UnacceptableCablePolicy,
+    clear_cable_segment_override_and_replan,
+    save_cable_class_mapping_and_replan,
+    save_cable_segment_override_and_replan,
     save_termination_resolution_and_replan,
     save_trace_device_resolution_and_replan,
 )
@@ -220,7 +229,7 @@ def _contact_candidate_context(request, profile_id, source_id):
     """Return Contact candidates and row state for one active preview row."""
     plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY) or {}
     try:
-        workspace = ReviewWorkspace.from_dict(plan_data)
+        workspace = ReviewWorkspace.from_dict(plan_data, request.user)
     except PlanError as exc:
         raise ValidationError("The active Import Plan is no longer readable.") from exc
     result_rows = [
@@ -507,7 +516,7 @@ class ImportProfileView(generic.ObjectView):
         class_role_table = ClassRoleMappingTable(instance.class_role_mappings.all())
         device_type_table = DeviceTypeMappingTable(instance.device_type_mappings.all())
         transform_table = ColumnTransformRuleTable(instance.column_transform_rules.all())
-        cable_class_table = CableClassMappingTable(instance.cable_class_mappings.all())
+        cable_class_table = CableClassMappingTable(instance.cable_class_mappings.all(), viewer=request.user)
         applicable_policy_sections = frozenset(
             section.key for section in POLICY_SECTIONS if section.applies_to(instance.output_kinds)
         )
@@ -892,12 +901,26 @@ class CableClassMappingEditView(_ProfileChildEditView):
     template_name = "netbox_data_import/cableclassmapping_edit.html"
     permission_required = "netbox_data_import.change_cableclassmapping"
 
+    def get_object(self, **kwargs):
+        """Refuse an edit form that would disclose a row through its initial values."""
+        obj = super().get_object(**kwargs)
+        if obj.pk and not self.request.user.has_perm("netbox_data_import.view_cableclassmapping", obj):
+            raise PermissionDenied
+        return obj
+
 
 class CableClassMappingDeleteView(_ProfileChildDeleteView):
     """Delete a CableClass mapping."""
 
     queryset = CableClassMapping.objects.all()
     permission_required = "netbox_data_import.delete_cableclassmapping"
+
+    def get_object(self, **kwargs):
+        """Refuse a delete page that would disclose the row it names."""
+        obj = super().get_object(**kwargs)
+        if not self.request.user.has_perm("netbox_data_import.view_cableclassmapping", obj):
+            raise PermissionDenied
+        return obj
 
 
 # ---------------------------------------------------------------------------
@@ -998,7 +1021,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
             messages.error(request, f"Failed to parse file: {exc}")
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
-        workspace = ReviewWorkspace(plan)
+        workspace = ReviewWorkspace(plan, request.user)
         start_new_preview(request.session, plan)
         request.session["import_rows"] = workspace.source_rows
         request.session["import_context"] = context_data
@@ -1219,7 +1242,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             if not isinstance(planned, ImportPlan):
                 return planned
             plan = planned
-        result = ReviewWorkspace(plan)
+        result = ReviewWorkspace(plan, request.user)
         rows = result.source_rows
         request.session["import_rows"] = rows
 
@@ -1460,9 +1483,7 @@ def _import_job_progress(job, preview_blocked=False, source_rows_available=False
         "is_active": job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES,
         "is_completed": job.status == JobStatusChoices.STATUS_COMPLETED,
         "is_failed": job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED),
-        "preview_available": bool(data.get("accepted_plan"))
-        and isinstance(data.get("context_data"), dict)
-        and source_rows_available,
+        "preview_available": isinstance(data.get("context_data"), dict) and source_rows_available,
         "preview_blocked": preview_blocked,
         "message": data.get("message") or "",
     }
@@ -1476,16 +1497,17 @@ def _restore_import_session(request, job):
     if request.session.get("import_background_job_id") != job.pk:
         request.session["import_background_job_id"] = job.pk
     preview_is_pending = request.session.get("import_preview_pending") is True
-    failed_preview_available = job.status in (
-        JobStatusChoices.STATUS_FAILED,
-        JobStatusChoices.STATUS_ERRORED,
-    ) and (
-        data.get("accepted_plan")
+    failed_preview_available = (
+        job.status
+        in (
+            JobStatusChoices.STATUS_FAILED,
+            JobStatusChoices.STATUS_ERRORED,
+        )
         and isinstance(data.get("context_data"), dict)
         and _import_source_rows_available(request, job)
     )
     if failed_preview_available and not preview_is_pending:
-        restore_preview_plan(request.session, data["accepted_plan"])
+        clear_preview_state(request.session)
         request.session["import_context"] = data["context_data"]
         request.session["import_preview_pending"] = True
         request.session["import_preview_source_job_id"] = job.pk
@@ -1519,6 +1541,9 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
     else:
         idempotency_key = request.session.get("import_idempotency_key") or uuid.uuid4().hex
         request.session["import_idempotency_key"] = idempotency_key
+    from .cable_disclosure import redact_deleted_cables
+
+    execution_plan_data = redact_deleted_cables(plan_data)
     _clear_restored_import_job(request)
     job = None
     try:
@@ -1533,7 +1558,7 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
                 job_timeout=3600,
                 profile_id=profile.pk,
                 source_document_id=document.pk,
-                accepted_plan=plan_data,
+                accepted_plan=execution_plan_data,
                 selection=selection,
                 idempotency_key=idempotency_key,
             )
@@ -1546,7 +1571,6 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
                 "profile_id": profile.pk,
                 "profile_name": profile.name,
                 "source_document_id": document.pk,
-                "accepted_plan": plan_data,
                 "context_data": ctx_data,
                 # What makes this Job hold the preview, so the guard finds it without the session.
                 "keeps_preview": keep_preview,
@@ -1639,7 +1663,7 @@ class ImportRunView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
             _discard_import_preview(request)
             messages.error(request, str(exc))
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        if ReviewWorkspace(accepted).has_errors:
+        if ReviewWorkspace(accepted, request.user).has_errors:
             messages.warning(request, "Resolve every preview error before importing.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
         selection = [unit.identity for unit in accepted.units if unit.disposition == "actionable"]
@@ -3022,7 +3046,8 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
                                 "location_id": ctx_data.get("location_id"),
                                 "tenant_id": ctx_data.get("tenant_id"),
                             },
-                        )
+                        ),
+                        request.user,
                     )
                     if _duplicate_serial_shown(current.units, row_number) != shown_serial:
                         refusal = f"No other row this import creates still claims serial '{shown_serial}'."
@@ -3662,6 +3687,189 @@ def _workspace_field_keys(workspace) -> set:
     return {item["field_key"] for trace in workspace.traces for item in trace.terminations}
 
 
+def _disable_policy_form(form) -> None:
+    for field in form.fields.values():
+        field.disabled = True
+
+
+def _visible_row_ids(model, viewer, rows) -> set[int]:
+    """Return the supplied row IDs this live viewer may read."""
+    row_ids = [row.pk for row in rows]
+    return set(model.objects.restrict(viewer, "view").filter(pk__in=row_ids).values_list("pk", flat=True))
+
+
+POLICY_SAVE_PERMISSION_REFUSED = "You do not have permission to save this CableClass policy."
+
+
+def _cable_policy_forms(profile, trace, viewer) -> list:
+    """Return the Cable policy in force for each CableClass the selected trace states, once each.
+
+    The CableClass values come from the plan's own segments, so a cached plan needs no new key.
+    """
+    if trace is None:
+        return []
+    planned = {policy["cable_class"]: policy for policy in trace.cable_policies}
+    stated = list(planned)
+    stored_rows = list(CableClassMapping.objects.filter(profile=profile, cable_class__in=stated))
+    rows = {row.cable_class: row for row in stored_rows}
+    visible_ids = _visible_row_ids(CableClassMapping, viewer, stored_rows)
+    forms = []
+    for index, cable_class in enumerate(stated):
+        row = rows.get(cable_class)
+        decision = planned[cable_class]
+        visible = row is None or row.pk in visible_ids
+        disclosed = row is not None and visible and policy_row_is_disclosed(decision, row)
+        hidden = decision.get(POLICY_VISIBLE) is False or not visible
+        moved = row is not None and visible and not disclosed
+        assessment = assess_permission_scoped_save_option(
+            viewer,
+            CableClassMapping,
+            {"profile": profile, "cable_class": cable_class},
+            {
+                "cable_type_resolved": False,
+                "cable_type": None,
+                "cable_profile_resolved": False,
+                "cable_profile": None,
+            },
+            unknown_fields={"cable_type_resolved", "cable_type", "cable_profile_resolved", "cable_profile"},
+        )
+        form = CableClassMappingForm(
+            instance=row if disclosed else CableClassMapping(profile=profile, cable_class=cable_class),
+            auto_id=f"id_%s_{index}",
+        )
+        if hidden or moved or not assessment.allowed:
+            _disable_policy_form(form)
+        forms.append(
+            {
+                "cable_class": cable_class,
+                "cable_type": POLICY_HIDDEN if hidden else decision["cable_type"],
+                "cable_profile": POLICY_HIDDEN if hidden else decision["cable_profile"],
+                "resolved": False if hidden else bool(decision["policy"]),
+                "form": form,
+                "reason": (
+                    POLICY_WRITE_REFUSED
+                    if hidden
+                    else PROFILE_POLICY_MOVED
+                    if moved
+                    else POLICY_SAVE_PERMISSION_REFUSED
+                    if not assessment.allowed
+                    else ""
+                ),
+            }
+        )
+    return forms
+
+
+RETAINED_SEGMENT_REASON = (
+    "This plan keeps the Cable that already proves this segment, and an override cannot change it. "
+    "Correct that Cable in NetBox, then re-read."
+)
+SEGMENT_FORCE_PERMISSION_REFUSED = "You do not have permission to force this segment policy."
+SEGMENT_CLEAR_PERMISSION_REFUSED = "You do not have permission to clear this segment policy."
+
+
+def _workspace_segment(workspace, unit_identity: str, position: str):
+    """Return the reviewed trace and the segment it states at *position*, or None for neither."""
+    try:
+        index = int(position)
+    except (TypeError, ValueError):
+        return None, None
+    trace = next((item for item in workspace.traces if item.identity == unit_identity), None)
+    if trace is None:
+        return None, None
+    return trace, next((segment for segment in trace.segments if segment["index"] == index), None)
+
+
+def _segment_policy_forms(profile, trace, viewer) -> list:
+    """Return each segment of the selected trace with the control that forces its Cable policy."""
+    if trace is None:
+        return []
+    keys = [segment["segment_key"] for segment in trace.segments if segment["segment_key"]]
+    stored_rows = list(CableSegmentOverride.objects.filter(profile=profile, segment_key__in=keys))
+    rows = {row.segment_key: row for row in stored_rows}
+    mappings = list(
+        CableClassMapping.objects.filter(
+            profile=profile,
+            cable_class__in={segment["cable_class"] for segment in trace.segments},
+        )
+    )
+    mappings_by_class = {row.cable_class: row for row in mappings}
+    visible_overrides = _visible_row_ids(CableSegmentOverride, viewer, stored_rows)
+    visible_mappings = _visible_row_ids(CableClassMapping, viewer, mappings)
+    forms = []
+    for segment in trace.segments:
+        stored = rows.get(segment["segment_key"])
+        deciding = stored or mappings_by_class.get(segment["cable_class"])
+        visible_ids = visible_overrides if stored is not None else visible_mappings
+        visible = deciding is None or deciding.pk in visible_ids
+        disclosed = deciding is not None and visible and policy_row_is_disclosed(segment, deciding)
+        hidden = segment.get(POLICY_VISIBLE) is False or not visible
+        moved = deciding is not None and visible and not disclosed
+        force_assessment = assess_permission_scoped_save_option(
+            viewer,
+            CableSegmentOverride,
+            {"profile": profile, "segment_key": segment["segment_key"]},
+            {
+                "cable_type": None,
+                "cable_profile": None,
+                "source_trace_identity": trace.trace_identity,
+                "segment_index": segment["index"],
+            },
+            unknown_fields={"cable_type", "cable_profile"},
+        )
+        form = CableSegmentOverrideForm(
+            instance=(
+                stored
+                if stored is not None and disclosed
+                else CableSegmentOverride(profile=profile, segment_key=segment["segment_key"])
+            ),
+            initial={} if hidden or moved else cable_policy_form_initial(segment["policy"]),
+            auto_id=f"id_%s_segment_{segment['index']}",
+        )
+        shared_reason = POLICY_WRITE_REFUSED if hidden else PROFILE_POLICY_MOVED if moved else ""
+        force_reason = (
+            shared_reason
+            or _segment_override_reason(segment)
+            or ("" if force_assessment.allowed else SEGMENT_FORCE_PERMISSION_REFUSED)
+        )
+        delete_permission = get_permission_for_model(CableSegmentOverride, "delete")
+        clear_reason = shared_reason or (
+            SEGMENT_CLEAR_PERMISSION_REFUSED
+            if stored is not None and viewer is not None and not viewer.has_perm(delete_permission, stored)
+            else ""
+        )
+        if force_reason:
+            _disable_policy_form(form)
+        forms.append(
+            {
+                **segment,
+                "cable_type": POLICY_HIDDEN if hidden else segment["cable_type"],
+                "cable_profile": POLICY_HIDDEN if hidden else segment["cable_profile"],
+                "position": segment["index"] + 1,
+                "reason": force_reason,
+                "clear_reason": clear_reason,
+                "form": form,
+            }
+        )
+    return forms
+
+
+def _segment_override_reason(segment) -> str:
+    """Return why one segment cannot take an override now, or an empty string when it can."""
+    if not segment["segment_key"]:
+        return "This trace has not resolved both ends of this segment."
+    if segment["retained"]:
+        return RETAINED_SEGMENT_REASON
+    return ""
+
+
+def _workspace_cable_classes(workspace) -> set:
+    """Return every CableClass value the reviewed preview's traces actually state."""
+    return {
+        segment["cable_class"] for trace in workspace.traces for segment in trace.segments if segment["cable_class"]
+    }
+
+
 def _workspace_device_questions(workspace) -> dict[str, dict]:
     """Return the active plan's Device questions, keyed by canonical source label."""
     questions: dict[str, dict] = {}
@@ -3678,7 +3886,7 @@ def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]
     messages: set[str] = set()
     unique: list[dict[str, str]] = []
     for finding in findings:
-        if finding["message"] not in messages:
+        if finding["code"] == "cable.segment_override_lost" or finding["message"] not in messages:
             messages.add(finding["message"])
             unique.append(finding)
     return unique
@@ -3689,6 +3897,54 @@ def _object_type_label(obj) -> str:
     return f"{obj._meta.app_label}.{obj._meta.model_name}"
 
 
+def _rebuild_schema_rejected_preview(request) -> None:
+    """Replace a cached plan this release cannot read, keeping the preview the operator is inside.
+
+    A plan schema change makes every cached plan unreadable at once. The stored Source Document is
+    still the authority, so the preview is rebuilt from it instead of ending at setup. The rebuilt
+    plan carries a new revision, so a command posted against the old one is refused rather than
+    replayed.
+    """
+    stored = request.session.get(PREVIEW_PLAN_SESSION_KEY)
+    if request.session.get("import_preview_pending") is not True or not isinstance(stored, dict):
+        return
+    try:
+        ImportPlan.from_dict(stored)
+    except PlanSchemaMismatch:
+        pass
+    except PlanError:
+        return
+    else:
+        return
+    context = request.session.get("import_context") or {}
+    profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=context.get("profile_id")).first()
+    # A deleted profile leaves its Source Document behind, so the document alone proves nothing.
+    if profile is None:
+        return
+    document = SourceDocument.objects.filter(pk=context.get("source_document_id"), profile=profile).first()
+    # A retained sync is mid-write, so NetBox is not authoritative and the plan must not move.
+    if document is None or _retained_sync_block_reason(request):
+        return
+    planning_context = {
+        "site_id": context.get("site_id"),
+        "location_id": context.get("location_id"),
+        "tenant_id": context.get("tenant_id"),
+    }
+    # A profile this release cannot plan for keeps its unreadable plan, and the view refuses it.
+    if _TraceWorkspaceMixin.unregistered_adapter_reason(profile) is not None:
+        return
+    try:
+        plan = ImportEngine.plan(profile, document, request.user, planning_context)
+    except (PlanError, PlanningTargetUnavailable, ValidationError):
+        return
+    try:
+        record_recalculated_preview(request.session, plan, user=request.user)
+    except PreviewLocked:
+        # A sync took the preview while this replan ran, so the stale plan stays where it is.
+        return
+    messages.info(request, "This preview was recalculated, because the plan format changed.")
+
+
 class _TraceWorkspaceMixin:
     """Load the reviewed preview a trace workspace request acts on."""
 
@@ -3697,6 +3953,7 @@ class _TraceWorkspaceMixin:
 
     def reviewed_preview(self, request):
         """Return the profile, the stored document and the reviewed workspace, or None."""
+        _rebuild_schema_rejected_preview(request)
         preview = load_cached_preview(
             request,
             profile_action=self.preview_profile_action,
@@ -3825,6 +4082,8 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                     for field in selected.terminations
                 ],
             )
+        cable_policy_forms = _cable_policy_forms(profile, selected, request.user)
+        segment_policy_forms = _segment_policy_forms(profile, selected, request.user)
         attention, settled = group_terminations(selected.terminations if selected else [])
         selected_devices = _with_device_resolution_permissions(
             profile,
@@ -3876,6 +4135,8 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "settled_devices": settled_devices,
                 "attention_terminations": attention,
                 "settled_terminations": settled,
+                "cable_policy_forms": cable_policy_forms,
+                "segment_policy_forms": segment_policy_forms,
                 "summary": summary,
                 "drift": drift,
                 "retained_sync_reason": retained_reason,
@@ -4164,6 +4425,128 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
         return redirect(next_url)
 
 
+class TraceCablePolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+    """Set the Cable policy for one CableClass the reviewed preview states, then replan."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Save the policy under the profile lock, so the decision and its replan commit together."""
+        next_url = _trace_workspace_url(request.POST.get("trace", ""))
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, workspace, planning_context = loaded
+        if stale_reason := _stale_preview_reason(request):
+            return _preview_action_error(request, next_url, stale_reason, status=409)
+        if retained_reason := _retained_sync_block_reason(request):
+            return _preview_action_error(request, next_url, retained_reason, status=409)
+        refusal = self.refuse_unregistered_adapter(request, profile)
+        if refusal is not None:
+            return refusal
+        cable_class = request.POST.get("cable_class", "").strip()
+        # A review command answers a question this preview asked, never one the caller invented.
+        if cable_class not in _workspace_cable_classes(workspace):
+            return _preview_action_error(
+                request, next_url, "This preview states no segment with that CableClass.", status=400
+            )
+        try:
+            with transaction.atomic():
+                plan = save_cable_class_mapping_and_replan(
+                    profile=profile,
+                    source_document=document,
+                    actor=request.user,
+                    planning_context=planning_context,
+                    cable_class=cable_class,
+                    data={
+                        "cable_type": request.POST.get("cable_type", ""),
+                        "cable_profile": request.POST.get("cable_profile", ""),
+                    },
+                    reviewed_fingerprint=workspace.plan.profile_fingerprint,
+                )
+                record_recalculated_preview(request.session, plan, user=request.user)
+        except ProfilePolicyMoved as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
+        except UnacceptableCablePolicy as exc:
+            return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
+        except PlanningTargetUnavailable:
+            return self.discard_unavailable_target(request)
+        except PreviewLocked as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
+        messages.success(request, f"Cable policy saved for CableClass '{cable_class}'.")
+        return redirect(next_url)
+
+
+class TraceCableSegmentPolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+    """Force one planned segment to its own Cable policy, or clear the override again."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Write the decision under the profile lock, so it and its replan commit together."""
+        next_url = _trace_workspace_url(request.POST.get("trace", ""))
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, workspace, planning_context = loaded
+        if stale_reason := _stale_preview_reason(request):
+            return _preview_action_error(request, next_url, stale_reason, status=409)
+        if retained_reason := _retained_sync_block_reason(request):
+            return _preview_action_error(request, next_url, retained_reason, status=409)
+        refusal = self.refuse_unregistered_adapter(request, profile)
+        if refusal is not None:
+            return refusal
+        trace, segment = _workspace_segment(workspace, request.POST.get("trace", ""), request.POST.get("segment", ""))
+        # A review command answers a question this preview asked, never one the caller invented.
+        if segment is None or not segment["segment_key"]:
+            return _preview_action_error(request, next_url, "This preview resolved no segment there.", status=400)
+        clearing = bool(request.POST.get("clear"))
+        # An override cannot decide a Cable the plan keeps, but the operator can still remove it.
+        if segment["retained"] and not clearing:
+            return _preview_action_error(request, next_url, RETAINED_SEGMENT_REASON, status=400)
+        try:
+            with transaction.atomic():
+                if clearing:
+                    plan = clear_cable_segment_override_and_replan(
+                        profile=profile,
+                        source_document=document,
+                        actor=request.user,
+                        planning_context=planning_context,
+                        segment_key=segment["segment_key"],
+                        reviewed_fingerprint=workspace.plan.profile_fingerprint,
+                    )
+                else:
+                    plan = save_cable_segment_override_and_replan(
+                        profile=profile,
+                        source_document=document,
+                        actor=request.user,
+                        planning_context=planning_context,
+                        segment_key=segment["segment_key"],
+                        trace_identity=trace.trace_identity,
+                        segment_index=segment["index"],
+                        cable_class=segment["cable_class"],
+                        data={
+                            "cable_type": request.POST.get("cable_type", ""),
+                            "cable_profile": request.POST.get("cable_profile", ""),
+                        },
+                        reviewed_fingerprint=workspace.plan.profile_fingerprint,
+                    )
+                record_recalculated_preview(request.session, plan, user=request.user)
+        except ProfilePolicyMoved as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
+        except UnacceptableCablePolicy as exc:
+            return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
+        except PlanningTargetUnavailable:
+            return self.discard_unavailable_target(request)
+        except PreviewLocked as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
+        settled = "cleared on" if clearing else "forced on"
+        messages.success(request, f"Cable policy {settled} segment {segment['index'] + 1}.")
+        return redirect(next_url)
+
+
 class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Record one operator termination decision and ask for a fresh Import Plan."""
 
@@ -4357,7 +4740,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             field = next(
                 (
                     item
-                    for trace in ReviewWorkspace(live).traces
+                    for trace in ReviewWorkspace(live, request.user).traces
                     for item in trace.terminations
                     if item["field_key"] == field_key
                 ),
@@ -5218,7 +5601,7 @@ class SyncSingleRowView(_AjaxPermissionView):
             accepted = ImportPlan.from_dict(plan_data)
         except PlanError as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=409)
-        workspace = ReviewWorkspace(accepted)
+        workspace = ReviewWorkspace(accepted, request.user)
         preview_unit = next(
             (
                 unit

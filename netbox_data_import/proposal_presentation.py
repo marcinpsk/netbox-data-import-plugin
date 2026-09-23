@@ -202,7 +202,8 @@ class ProposalPresentation:
         pending = proposal is not None and proposal.status in ProposalStatus.ACTIVE
         completed = proposal is not None and proposal.status == ProposalStatus.COMPLETED
         state = field["state"]
-        if proposal is not None and proposal.decision == ProposalDecision.ACCEPTED:
+        # The plan owns whether a field is resolved; acceptance only renames a state it already set.
+        if state != UNRESOLVED and proposal is not None and proposal.decision == ProposalDecision.ACCEPTED:
             resolution = proposal.written_resolution
             if resolution is not None and (
                 resolution.selected_object_type_id == proposal.selected_object_type_id
@@ -234,6 +235,8 @@ class ProposalPresentation:
             badge = "Proposal - stale, not applied" if stale_reason else "Proposal - not applied"
         if proposal is not None and proposal.decision:
             badge = proposal.get_decision_display()
+            if proposal.decision == ProposalDecision.ACCEPTED and state == UNRESOLVED:
+                badge = "Accepted resolution no longer applies"
         if state == UNRESOLVED and proposal is not None and not proposal.decision:
             if pending or proposal.outcome == ProposalOutcome.CANDIDATE:
                 state = "proposed"
@@ -241,7 +244,6 @@ class ProposalPresentation:
                 state = "stale"
             if proposal.status == ProposalStatus.FAILED:
                 state = ProposalStatus.FAILED
-        metadata = (proposal.backend_metadata or {}) if proposal is not None else {}
         return {
             "has_proposal": proposal is not None,
             "pending": pending,
@@ -252,12 +254,6 @@ class ProposalPresentation:
             "explanation": proposal.explanation if proposal is not None else "",
             "failure": proposal.get_failure_reason_display() if proposal is not None else "",
             "failure_code": proposal.failure_reason if proposal is not None else "",
-            "metadata": [
-                {"label": key.replace("_", " "), "value": value}
-                for key, value in metadata.items()
-                if key != "attempts" and isinstance(value, (str, int, float))
-            ],
-            "attempt_count": len(metadata.get("attempts", [])),
             "job_status": self.job_status(proposal) if pending else "",
             "job_note": self.job_note(proposal) if pending else "",
             "page_status": self.page_status(offered) if completed else "",

@@ -115,7 +115,7 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         )
         planning_context = {"site_id": self.site.pk, "location_id": None, "tenant_id": None}
         plan = ImportEngine.plan(self.profile, document, self.actor, planning_context)
-        workspace = ReviewWorkspace(plan)
+        workspace = ReviewWorkspace(plan, self.actor)
         session = self.client.session
         start_new_preview(session, plan)
         session["import_rows"] = workspace.source_rows

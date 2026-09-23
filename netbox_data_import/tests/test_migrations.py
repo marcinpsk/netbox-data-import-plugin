@@ -68,6 +68,7 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     # Django refuses to reverse these data migrations, so the walk back fakes each one, newest
     # first. The generated schema migrations between them still run their real reverse operations.
     irreversible_data_steps = (
+        ("0039_remove_job_plan_copies", "0038_cable_tag_integrity"),
         ("0035_retire_superseded_proposals", "0034_tracedeviceresolution"),
         ("0022_migrate_profile_adapter_config", "0021_importprofile_adapter_config"),
         ("0020_migrate_import_source_custom_field", "0019_deviceimportsource"),
@@ -289,3 +290,87 @@ class MigrationGraphResolvesWithoutReplacementTest(SimpleTestCase):
         self.assertEqual(
             reports, ["0002_later -> extras.9999_absent (initial=False, newest live extras ancestor=0001_squashed)"]
         )
+
+
+class CableTagIntegrityMigrationTest(TransactionTestCase):
+    """The Cable tag migration preserves existing associations and rejects orphans."""
+
+    def test_reverse_preserves_tag_rows_and_upgrade_backfills_cable_ids(self):
+        from netbox_data_import.tests.test_cable_module import CableTopologyMixin
+        from extras.models import Tag, TaggedItem
+
+        topology = CableTopologyMixin()
+        topology.build_topology()
+        cable = topology.connect(topology.eth0, topology.eth1)
+        tag = Tag.objects.create(name="Upgrade", slug="upgrade")
+        cable.tags.add(tag)
+        tagged_item = TaggedItem.objects.get(tag=tag, object_id=cable.pk)
+        previous = (APP, "0037_cablesegmentoverride")
+        leaf = (APP, "0038_cable_tag_integrity")
+        final = (APP, "0039_remove_job_plan_copies")
+        self.addCleanup(lambda: MigrationExecutor(connection).migrate([final]))
+
+        MigrationExecutor(connection).migrate([leaf], fake=True)
+        MigrationExecutor(connection).migrate([previous])
+
+        self.assertTrue(TaggedItem.objects.filter(pk=tagged_item.pk).exists())
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name = 'extras_taggeditem' AND column_name = 'ndi_cable_id'"
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)
+            cursor.execute(
+                "SELECT count(*) FROM pg_trigger WHERE tgname IN "
+                "('ndi_derive_cable_tag_id', 'ndi_guard_cable_content_type_identity')"
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)
+            cursor.execute(
+                "SELECT count(*) FROM pg_proc WHERE proname IN ('ndi_set_cable_tag_id', 'ndi_guard_cable_content_type')"
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)
+            cursor.execute("SELECT count(*) FROM pg_constraint WHERE conname = 'ndi_taggeditem_cable_fk'")
+            self.assertEqual(cursor.fetchone()[0], 0)
+            cursor.execute("SELECT count(*) FROM pg_indexes WHERE indexname = 'ndi_taggeditem_cable_id'")
+            self.assertEqual(cursor.fetchone()[0], 0)
+
+        MigrationExecutor(connection).migrate([leaf])
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT ndi_cable_id FROM extras_taggeditem WHERE id = %s", [tagged_item.pk])
+            self.assertEqual(cursor.fetchone()[0], cable.pk)
+
+    def test_orphan_cable_tag_refuses_upgrade_without_partial_schema(self):
+        from core.models import ObjectType
+        from dcim.models import Cable
+        from django.db import IntegrityError
+        from extras.models import Tag, TaggedItem
+
+        previous = (APP, "0037_cablesegmentoverride")
+        leaf = (APP, "0038_cable_tag_integrity")
+        final = (APP, "0039_remove_job_plan_copies")
+        orphan_pk = None
+
+        def restore_leaf():
+            if orphan_pk is not None:
+                TaggedItem.objects.filter(pk=orphan_pk).delete()
+            MigrationExecutor(connection).migrate([final])
+
+        self.addCleanup(restore_leaf)
+        tag = Tag.objects.create(name="Orphan upgrade", slug="orphan-upgrade")
+        cable_type = ObjectType.objects.get_for_model(Cable)
+        MigrationExecutor(connection).migrate([leaf], fake=True)
+        MigrationExecutor(connection).migrate([previous])
+        orphan_pk = TaggedItem.objects.create(tag=tag, content_type=cable_type, object_id=2_147_483_647).pk
+
+        with self.assertRaises(IntegrityError) as raised:
+            MigrationExecutor(connection).migrate([leaf])
+
+        self.assertEqual(getattr(raised.exception.__cause__, "sqlstate", None), "23503")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name = 'extras_taggeditem' AND column_name = 'ndi_cable_id'"
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)
+        self.assertTrue(TaggedItem.objects.filter(pk=orphan_pk).exists())

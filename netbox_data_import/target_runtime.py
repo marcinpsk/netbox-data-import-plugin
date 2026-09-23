@@ -8,8 +8,7 @@ on another.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .plan import PlannedChange, SynchronizationUnit
@@ -30,20 +29,16 @@ class ExecutionContext:
 
 @dataclass(frozen=True)
 class DeletedObject:
-    """One object a Planned Change removed, for the execution's deleted-object snapshot."""
+    """The stable audit identity of one object a Planned Change removed."""
 
     object_type: str
     object_id: int
-    display: str
-    detail: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Return the serialized form the audit row stores."""
         return {
             "object_type": self.object_type,
             "object_id": self.object_id,
-            "display": self.display,
-            "detail": dict(self.detail),
         }
 
 

@@ -43,7 +43,9 @@ class ImportJobRunner(JobRunner):
 
     def _save_data(self, **values):
         """Merge values into the native Job data."""
-        self.job.data = {**(self.job.data or {}), **values}
+        data = {**(self.job.data or {}), **values}
+        data.pop("accepted_plan", None)
+        self.job.data = data
         self.job.save(update_fields=["data"])
 
     def _fail(self, message) -> NoReturn:

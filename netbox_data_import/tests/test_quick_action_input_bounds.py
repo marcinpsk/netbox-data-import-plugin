@@ -339,7 +339,7 @@ class QuickActionInputBoundsTest(TransactionTestCase):
         )
         planning_context = {"site_id": self.site.pk, "location_id": None, "tenant_id": None}
         plan = ImportEngine.plan(self.profile, document, self.user, planning_context)
-        result = ReviewWorkspace(plan)
+        result = ReviewWorkspace(plan, self.user)
 
         session = self.client.session
         start_new_preview(session, plan)

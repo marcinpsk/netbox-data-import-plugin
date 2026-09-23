@@ -1420,7 +1420,39 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(data["badge"], "Accepted")
         self.assertIn("already resolved", data["actions"][0]["reason"])
 
-    def test_failed_card_retains_typed_reason_backend_and_attempt_count(self):
+    def test_a_written_resolution_the_plan_cannot_use_reopens_the_field(self):
+        """The plan owns the field state, so a deleted port must not still read as accepted."""
+        from netbox_data_import.tests.test_inference_backend import ALLOWLIST, FALLBACK
+
+        proposal = self.completed()
+        self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 200)
+        Interface.objects.create(device=self.device_a, name="eth9", type="1000base-t")
+        self.eth0.delete()
+        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
+        with override_settings(
+            PLUGINS_CONFIG={
+                "netbox_data_import": {
+                    "inference_backend": FALLBACK,
+                    "inference_backend_origin_allowlist": ALLOWLIST,
+                }
+            }
+        ):
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:trace_workspace_reread"),
+                {"preview_revision": before},
+                follow=True,
+            )
+
+        data = response.context["proposal_fields"][self.field_key]["presentation"]
+        self.assertEqual(data["field_state"], "unresolved")
+        self.assertEqual(data["state_style"], "unresolved")
+        self.assertEqual(data["badge"], "Accepted resolution no longer applies")
+        self.assertEqual(response.context["selected_trace"].disposition, "blocked")
+        # The reader must offer the request the writer accepts: see TraceRequestProposalView.
+        self.assertEqual(data["actions"][0]["reason"], "")
+        self.assertEqual(self.call("request_proposal", field_key=self.field_key).status_code, 200)
+
+    def test_failed_card_retains_its_typed_reason_without_backend_metadata(self):
         from netbox_data_import.models import ProposalFailureReason
         from netbox_data_import.resolution_proposals import fail_proposal
 
@@ -1435,8 +1467,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(data["failure_code"], ProposalFailureReason.BACKEND_REFUSAL)
         self.assertEqual(data["field_state"], ProposalStatus.FAILED)
         self.assertEqual(data["failure"], "Backend refusal")
-        self.assertEqual(data["attempt_count"], 1)
-        self.assertEqual(data["metadata"], [{"label": "backend model", "value": "fixture-model"}])
+        self.assertNotIn("attempt_count", data)
+        self.assertNotIn("metadata", data)
         self.assertEqual(data["actions"][0]["label"], "Ask AI again")
         for action in data["actions"][2:]:
             self.assertEqual(action["reason"], "The proposal failed: Backend refusal (backend_refusal).")

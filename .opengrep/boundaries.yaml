@@ -95,3 +95,13 @@ rules:
           - pattern: signal.signal(SIGALRM, ...)
           - pattern-not: signal.signal(SIGALRM, signal.SIG_DFL)
           - pattern-not: signal.signal(SIGALRM, SIG_DFL)
+
+  - id: nbdi-job-data-excludes-accepted-plan
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Keep the accepted plan in the queued worker arguments. NetBox exposes Job.data to Job readers.
+    paths:
+      exclude:
+        - "tests/"
+    pattern: '$JOB.data = {..., "accepted_plan": $PLAN, ...}'

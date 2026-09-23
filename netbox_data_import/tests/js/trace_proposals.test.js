@@ -77,8 +77,6 @@ it('renders candidate details as text and recent history attempts', () => {
   expect(node('candidate').textContent).toBe(initial.presentation.candidate);
   expect(node('candidate').children.length).toBe(0);
   expect(node('explanation').textContent).toBe('The labels name the same port.');
-  expect(node('attempts').textContent).toBe('Backend attempts: 2');
-  expect(node('metadata').textContent).toBe('backend model: fixture-model');
   expect([...node('history').children].map(row => row.textContent)).toEqual([
     '#7 · 2026-09-11T08:00:00+00:00 · Queued · No outcome',
     '#6 · earlier · Failed · No outcome · Timeout',
