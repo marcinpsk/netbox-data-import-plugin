@@ -343,6 +343,38 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         self.assertContains(response, "A PortMapping proves the stated pass-through.", count=1)
 
+    def test_lost_overrides_remain_distinct_in_the_workspace(self):
+        """The operator must identify each former decision after both pairs move."""
+        identity = self.identity_of(patched_path())
+        first = self.force(
+            self.panel_1_rear,
+            self.panel_2_rear,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            trace_identity=identity,
+            segment_index=1,
+        )
+        second = self.force(
+            self.eth0,
+            self.panel_1_fronts[0],
+            cable_type="smf-os2",
+            cable_profile="single-1c1p",
+            trace_identity=identity,
+            segment_index=1,
+        )
+
+        response = self.open_workspace(direct_path())
+
+        lost = [
+            item
+            for item in response.context["selected_trace"].findings
+            if item["code"] == "cable.segment_override_lost"
+        ]
+        self.assertEqual(len(lost), 2)
+        self.assertEqual(len({item["message"] for item in lost}), 2)
+        for override in (first, second):
+            self.assertTrue(any(f"override {override.pk}" in item["message"] for item in lost))
+
     def test_the_list_shows_every_trace_but_the_panels_show_one(self):
         """Section 10.2 is a trace list plus the three panels of the selected trace."""
         Interface.objects.create(device=self.make_device("SEL-A"), name="eth0", type="1000base-t")

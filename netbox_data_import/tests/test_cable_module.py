@@ -1807,6 +1807,18 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
         self.assertIn("cable.cableclass_unmapped", self.codes(unit))
         self.assertEqual(len(self.mismatches(unit)), 1)
 
+    def test_an_occupied_port_does_not_hide_verified_media_mismatch(self):
+        """An occupancy block leaves the path's known Cable policies available for review."""
+        self.force_first_segment("mmf-om4")
+        spare = Interface.objects.create(device=self.device_a, name="spare", type="1000base-t")
+        self.connect(self.eth0, spare)
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.termination_occupied", self.codes(unit))
+        self.assertEqual(len(self.mismatches(unit)), 1)
+
     def test_an_indeterminate_family_neither_agrees_nor_contradicts(self):
         """An active optical assembly states no terminated medium, so it decides nothing."""
         CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(cable_type="aoc")
