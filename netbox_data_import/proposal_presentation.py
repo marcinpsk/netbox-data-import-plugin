@@ -235,6 +235,8 @@ class ProposalPresentation:
             badge = "Proposal - stale, not applied" if stale_reason else "Proposal - not applied"
         if proposal is not None and proposal.decision:
             badge = proposal.get_decision_display()
+            if proposal.decision == ProposalDecision.ACCEPTED and state == UNRESOLVED:
+                badge = "Accepted resolution no longer applies"
         if state == UNRESOLVED and proposal is not None and not proposal.decision:
             if pending or proposal.outcome == ProposalOutcome.CANDIDATE:
                 state = "proposed"

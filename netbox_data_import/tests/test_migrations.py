@@ -317,6 +317,19 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
                 "WHERE table_name = 'extras_taggeditem' AND column_name = 'ndi_cable_id'"
             )
             self.assertEqual(cursor.fetchone()[0], 0)
+            cursor.execute(
+                "SELECT count(*) FROM pg_trigger WHERE tgname IN "
+                "('ndi_derive_cable_tag_id', 'ndi_guard_cable_content_type_identity')"
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)
+            cursor.execute(
+                "SELECT count(*) FROM pg_proc WHERE proname IN ('ndi_set_cable_tag_id', 'ndi_guard_cable_content_type')"
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)
+            cursor.execute("SELECT count(*) FROM pg_constraint WHERE conname = 'ndi_taggeditem_cable_fk'")
+            self.assertEqual(cursor.fetchone()[0], 0)
+            cursor.execute("SELECT count(*) FROM pg_indexes WHERE indexname = 'ndi_taggeditem_cable_id'")
+            self.assertEqual(cursor.fetchone()[0], 0)
 
         MigrationExecutor(connection).migrate([leaf])
 

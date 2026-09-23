@@ -1446,6 +1446,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         data = response.context["proposal_fields"][self.field_key]["presentation"]
         self.assertEqual(data["field_state"], "unresolved")
         self.assertEqual(data["state_style"], "unresolved")
+        self.assertEqual(data["badge"], "Accepted resolution no longer applies")
         self.assertEqual(response.context["selected_trace"].disposition, "blocked")
         # The reader must offer the request the writer accepts: see TraceRequestProposalView.
         self.assertEqual(data["actions"][0]["reason"], "")

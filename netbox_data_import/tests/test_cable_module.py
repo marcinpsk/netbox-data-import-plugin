@@ -3173,9 +3173,12 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
             with transaction.atomic():
                 with connection.cursor() as cursor:
                     cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    cursor.execute("SHOW transaction_isolation")
+                    self.assertEqual(cursor.fetchone()[0], "repeatable read")
                 ObjectType.objects.filter(pk=cable_type.pk).update(model="cable-elsewhere")
 
         self.assertEqual(getattr(raised.exception.__cause__, "sqlstate", None), "25001")
+        self.assertIn("Cable content type identity requires READ COMMITTED", str(raised.exception))
         self.assertEqual(ObjectType.objects.get(pk=cable_type.pk).model, "cable")
 
     def test_the_review_displays_the_tag_names_its_deletion_fingerprint_covers(self):

@@ -1165,9 +1165,13 @@ section 13.1. There is no separate administrator or superuser check.
 
 ## 9. Database changes and migration ownership
 
-Migrations are generated artifacts. Change a model, then generate the migration with the project's
-`makemigrations` helper. Never hand-edit a generated migration. The only exception is a data migration
-whose operations cannot be generated, and that migration contains data operations only.
+Schema migrations are generated artifacts. Change a model, then generate the migration with the
+project's `makemigrations` helper. Never hand-edit a generated migration. Write a data migration by
+hand when its operations cannot be generated. Keep only data operations in that migration.
+The ratified Cable tag integrity migration is a narrow `RunSQL` exception for NetBox 4.6 and 4.7.
+The planner cannot lock a new tag association before its row exists, so this migration enforces
+integrity in the database. Its reverse SQL removes the plugin's foreign key, triggers, functions,
+index, and projection column.
 
 ### 9.1 New models
 

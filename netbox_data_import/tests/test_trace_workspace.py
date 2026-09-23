@@ -2114,19 +2114,23 @@ class TraceWorkspaceCableDisclosureTest(CableTopologyMixin, TransactionTestCase)
 
     def revoke_cable_view(self):
         """Keep Cable writes permitted while removing the viewer's Cable read grant."""
+        from netbox_data_import.object_permissions import clear_user_permission_caches
         from users.models import ObjectPermission
 
         permission = ObjectPermission.objects.get(name__startswith="trace-cable-viewer Cable ")
         permission.actions = ["add", "delete"]
         permission.save(update_fields=("actions",))
+        clear_user_permission_caches(self.viewer)
 
     def grant_cable_view(self):
         """Restore the Cable read grant without changing the accepted cached plan."""
+        from netbox_data_import.object_permissions import clear_user_permission_caches
         from users.models import ObjectPermission
 
         permission = ObjectPermission.objects.get(name__startswith="trace-cable-viewer Cable ")
         permission.actions = ["view", "add", "delete"]
         permission.save(update_fields=("actions",))
+        clear_user_permission_caches(self.viewer)
 
     def test_revoking_cable_view_makes_the_cached_page_match_a_fresh_hidden_plan(self):
         """A cached Cable name must disappear on the first render after its view grant is revoked."""
@@ -2226,10 +2230,14 @@ class TraceWorkspaceCableDisclosureTest(CableTopologyMixin, TransactionTestCase)
                     remove_sources(child)
 
         remove_sources(without_sources)
-        ReviewWorkspace(plan, self.viewer)
+        visible = ReviewWorkspace(plan, self.viewer).traces[0].logical_cable
+        self.assertTrue(visible["visible"])
+        self.assertIn("Fingerprint link", visible["display"])
         self.revoke_cable_view()
 
-        ReviewWorkspace(plan, self.viewer)
+        hidden = ReviewWorkspace(plan, self.viewer).traces[0].logical_cable
+        self.assertFalse(hidden["visible"])
+        assert_absent_from(self, hidden, "Fingerprint link")
 
         self.assertEqual(plan.fingerprint, accepted)
         self.assertEqual(ImportPlan.from_dict(without_sources).fingerprint, accepted)
@@ -2330,19 +2338,11 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
 
     def revoke_mapping_view(self):
         """Keep mapping writes permitted while removing the viewer's read grant."""
-        from users.models import ObjectPermission
-
-        permission = ObjectPermission.objects.get(name__startswith="trace-policy-viewer CableClassMapping ")
-        permission.actions = ["add", "change", "delete"]
-        permission.save(update_fields=("actions",))
+        self.set_mapping_actions(["add", "change", "delete"])
 
     def grant_mapping_view(self):
         """Restore mapping read access without changing the accepted preview."""
-        from users.models import ObjectPermission
-
-        permission = ObjectPermission.objects.get(name__startswith="trace-policy-viewer CableClassMapping ")
-        permission.actions = ["view", "add", "change", "delete"]
-        permission.save(update_fields=("actions",))
+        self.set_mapping_actions(["view", "add", "change", "delete"])
 
     def set_mapping_actions(self, actions):
         """Replace the live CableClass Mapping actions for this viewer."""
@@ -2357,11 +2357,7 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
 
     def revoke_override_view(self):
         """Keep override writes permitted while removing the viewer's read grant."""
-        from users.models import ObjectPermission
-
-        permission = ObjectPermission.objects.get(name__startswith="trace-policy-viewer CableSegmentOverride ")
-        permission.actions = ["add", "change", "delete"]
-        permission.save(update_fields=("actions",))
+        self.set_override_actions(["add", "change", "delete"])
 
     def set_override_actions(self, actions):
         """Replace the live Cable Segment Override actions for this viewer."""
@@ -2373,6 +2369,17 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
         permission.actions = actions
         permission.save(update_fields=("actions",))
         clear_user_permission_caches(self.viewer)
+
+    def test_policy_permission_helpers_refresh_cached_grants(self):
+        self.assertTrue(self.viewer.has_perm("netbox_data_import.view_cableclassmapping"))
+        self.revoke_mapping_view()
+        self.assertFalse(self.viewer.has_perm("netbox_data_import.view_cableclassmapping"))
+        self.grant_mapping_view()
+        self.assertTrue(self.viewer.has_perm("netbox_data_import.view_cableclassmapping"))
+
+        self.assertTrue(self.viewer.has_perm("netbox_data_import.view_cablesegmentoverride"))
+        self.revoke_override_view()
+        self.assertFalse(self.viewer.has_perm("netbox_data_import.view_cablesegmentoverride"))
 
     def test_revoking_mapping_view_redacts_and_disables_all_policy_surfaces(self):
         """A cached decision cannot expose values or accept a blind overwrite after revocation."""

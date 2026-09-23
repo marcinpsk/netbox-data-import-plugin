@@ -198,7 +198,7 @@ def store_workbook_document(profile, headers, rows, uploaded_by, filename, *, sh
     )
 
 
-def plan_source_rows(rows, profile, site, *, actor=None, location=None, tenant=None):
+def plan_source_rows(rows, profile, site, *, actor, location=None, tenant=None):
     """Plan canonical flat-source rows through the registered Target Module interfaces."""
     from netbox_data_import import catalog, target_modules
     from netbox_data_import.adapters import FlatWorkbookAdapter, SourceBatch
@@ -207,7 +207,7 @@ def plan_source_rows(rows, profile, site, *, actor=None, location=None, tenant=N
     from netbox_data_import.review_workspace import ReviewWorkspace
     from netbox_data_import.source_resolution import derive_effective_rows
 
-    reader = NetBoxReader.for_actor(actor) if actor is not None else NetBoxReader.unrestricted()
+    reader = NetBoxReader.for_actor(actor)
     reader = reader.for_target(site=site, location=location, tenant=tenant)
     batch = SourceBatch(
         output_kinds=FlatWorkbookAdapter.output_kinds,
@@ -221,7 +221,7 @@ def plan_source_rows(rows, profile, site, *, actor=None, location=None, tenant=N
         units=tuple(units),
         source_fingerprint="0" * 64,
         profile_fingerprint=profile.planning_fingerprint,
-        actor=str(actor.pk) if actor is not None else "test-unrestricted",
+        actor=str(actor.pk),
         planning_context={
             "site_id": site.pk,
             "location_id": location.pk if location is not None else None,
@@ -231,7 +231,7 @@ def plan_source_rows(rows, profile, site, *, actor=None, location=None, tenant=N
     return ReviewWorkspace(plan, actor)
 
 
-def apply_source_rows(rows, profile, site, *, actor=None, location=None, tenant=None):
+def apply_source_rows(rows, profile, site, *, actor, location=None, tenant=None):
     """Apply canonical rows through Target Module runtimes and return their accepted workspace."""
     from django.db import transaction
 
@@ -248,7 +248,7 @@ def apply_source_rows(rows, profile, site, *, actor=None, location=None, tenant=
         location=location,
         tenant=tenant,
     )
-    reader = NetBoxReader.for_actor(actor) if actor is not None else NetBoxReader.unrestricted()
+    reader = NetBoxReader.for_actor(actor)
     reader = reader.for_target(site=site, location=location, tenant=tenant)
     context = ExecutionContext(actor=actor, reader=reader, profile=profile)
     with transaction.atomic():
