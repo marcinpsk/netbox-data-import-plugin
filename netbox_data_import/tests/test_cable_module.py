@@ -2477,6 +2477,39 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
         self.assertTrue(observed, "the execution reached no Cable write")
         self.assertEqual(blocked, [True], "the competing write did not wait for the execution")
 
+    def assert_competing_tag_write_is_blocked(self, plan, logical, competing_write):
+        """Require a precise lock-timeout result from a tag write during Cable deletion."""
+        from django.db import OperationalError, connection
+        from django.db.models.signals import pre_delete
+
+        observed = []
+        blocked_sqlstates = []
+
+        def contend_during_delete(sender, instance, **kwargs):
+            if instance.pk != logical.pk or observed:
+                return
+            observed.append(True)
+
+            def contend():
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout TO '750ms'")
+                try:
+                    competing_write()
+                except OperationalError as exc:
+                    blocked_sqlstates.append(getattr(exc.__cause__, "sqlstate", None))
+
+            with run_on_separate_connection(contend):
+                pass
+
+        pre_delete.connect(contend_during_delete, sender=Cable, weak=False)
+        try:
+            self.execute(plan)
+        finally:
+            pre_delete.disconnect(contend_during_delete, sender=Cable)
+
+        self.assertTrue(observed, "the Logical Cable deletion was not reached")
+        self.assertEqual(blocked_sqlstates, ["55P03"])
+
     def test_one_execution_replaces_the_path_and_writes_provenance(self):
         """The logical cable goes, every segment arrives, and each created Cable earns one row."""
         logical = self.connect(self.eth0, self.eth1)
@@ -3047,41 +3080,26 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
 
     def test_deletion_holds_existing_tag_associations_through_the_review(self):
         """An existing Cable tag cannot be removed after execution reviews it."""
-        from django.db import OperationalError, connection
-        from django.db.models.signals import pre_delete
-
         logical = self.connect(self.eth0, self.eth1)
         tag = Tag.objects.create(name="Reviewed", slug="reviewed")
         logical.tags.add(tag)
         association = TaggedItem.objects.get(content_type=ObjectType.objects.get_for_model(Cable), object_id=logical.pk)
         plan = self.plan(patched_path())
-        observed = []
-        blocked_sqlstates = []
+        self.assert_competing_tag_write_is_blocked(
+            plan, logical, lambda: TaggedItem.objects.filter(pk=association.pk).delete()
+        )
 
-        def remove_tag_during_delete(sender, instance, **kwargs):
-            if instance.pk != logical.pk or observed:
-                return
-            observed.append(True)
+    def test_deletion_holds_reviewed_tag_names(self):
+        """A shared Tag cannot be renamed after deletion reviews its name."""
+        logical = self.connect(self.eth0, self.eth1)
+        tag = Tag.objects.create(name="Reviewed", slug="reviewed")
+        logical.tags.add(tag)
+        plan = self.plan(patched_path())
 
-            def remove_tag():
-                with connection.cursor() as cursor:
-                    cursor.execute("SET lock_timeout TO '750ms'")
-                try:
-                    TaggedItem.objects.filter(pk=association.pk).delete()
-                except OperationalError as exc:
-                    blocked_sqlstates.append(getattr(exc.__cause__, "sqlstate", None))
-
-            with run_on_separate_connection(remove_tag):
-                pass
-
-        pre_delete.connect(remove_tag_during_delete, sender=Cable, weak=False)
-        try:
-            self.execute(plan)
-        finally:
-            pre_delete.disconnect(remove_tag_during_delete, sender=Cable)
-
-        self.assertTrue(observed, "the Logical Cable deletion was not reached")
-        self.assertEqual(blocked_sqlstates, ["55P03"])
+        self.assert_competing_tag_write_is_blocked(
+            plan, logical, lambda: Tag.objects.filter(pk=tag.pk).update(name="Late")
+        )
+        self.assertEqual(Tag.objects.get(pk=tag.pk).name, "Reviewed")
 
     def test_the_review_displays_the_tag_names_its_deletion_fingerprint_covers(self):
         """A rename between planning reads cannot change only the operator's review."""
