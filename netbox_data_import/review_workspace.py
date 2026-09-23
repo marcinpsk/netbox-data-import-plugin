@@ -452,7 +452,19 @@ def _states_a_trace(unit: SynchronizationUnit) -> bool:
 
 def _diagnostic_message(diagnostic) -> str:
     """Return the operator wording for one diagnostic."""
-    return str(diagnostic.display.get("message") or "") or _DIAGNOSTIC_MESSAGES.get(diagnostic.code, diagnostic.code)
+    message = str(diagnostic.display.get("message") or "") or _DIAGNOSTIC_MESSAGES.get(diagnostic.code, diagnostic.code)
+    if diagnostic.code == "cable.segment_override_lost":
+        from .cable_disclosure import CABLE_SEGMENT_OVERRIDE_ROW, DISCLOSURE_SOURCE, POLICY_VISIBLE
+
+        source = diagnostic.display.get(DISCLOSURE_SOURCE)
+        if (
+            diagnostic.display.get(POLICY_VISIBLE) is True
+            and isinstance(source, dict)
+            and source.get("kind") == CABLE_SEGMENT_OVERRIDE_ROW
+            and type(source.get("pk")) is int
+        ):
+            return f"Stored Cable policy override {source['pk']}: {message}"
+    return message
 
 
 def _detail(unit: SynchronizationUnit, action: str, object_type: str, name: str) -> str:

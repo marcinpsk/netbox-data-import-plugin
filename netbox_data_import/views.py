@@ -3889,7 +3889,7 @@ def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]
     messages: set[str] = set()
     unique: list[dict[str, str]] = []
     for finding in findings:
-        if finding["message"] not in messages:
+        if finding["code"] == "cable.segment_override_lost" or finding["message"] not in messages:
             messages.add(finding["message"])
             unique.append(finding)
     return unique

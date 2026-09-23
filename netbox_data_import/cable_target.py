@@ -1189,7 +1189,7 @@ class _CableBatch:
     def _media_observation(self, analysis: _TraceAnalysis, segment: _DesiredSegment) -> dict:
         """Return what one segment says about the medium of the run it belongs to."""
         from .cable_disclosure import DISCLOSURE_SOURCE, disclosed_policy
-        from .cable_policy import cable_profile_splits_a_span, decisive_media_family
+        from .cable_policy import cable_profile_splits_a_span, decisive_media_family, policy_choice_errors
 
         proven = analysis.proven.get(segment.index)
         visible = True
@@ -1201,9 +1201,14 @@ class _CableBatch:
             source = disclosure.get("disclosure_source")
             origin = "cable"
         else:
-            policy = analysis.policies.get(segment.index) or {}
-            cable_type, cable_profile = policy.get("cable_type") or "", ""
             row = self._policy_row(segment)
+            policy = analysis.policies.get(segment.index)
+            if policy is None and row is not None:
+                decided = row.decided_policy()
+                if decided is not None and not policy_choice_errors(decided["cable_type"], decided["cable_profile"]):
+                    policy = decided
+            policy = policy or {}
+            cable_type, cable_profile = policy.get("cable_type") or "", policy.get("cable_profile") or ""
             disclosure = disclosed_policy(row, self.actor, {}) if row is not None else {}
             visible = DISCLOSURE_SOURCE in disclosure
             source = disclosure.get(DISCLOSURE_SOURCE)
