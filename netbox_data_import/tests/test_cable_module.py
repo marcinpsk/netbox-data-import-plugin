@@ -24,10 +24,11 @@ from dcim.models import (
 )
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.test import SimpleTestCase, TestCase, TransactionTestCase
 from django.utils import translation
 from django.urls import reverse
-from extras.models import Tag
+from extras.models import Tag, TaggedItem
 
 from netbox_data_import.adapters import SourceBatch, TraceWorkbookAdapter
 from netbox_data_import.cable_policy import (
@@ -2961,6 +2962,22 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
 
         deleted = execution.applied_changes["deleted"]
         self.assertEqual(deleted, [{"object_type": "dcim.cable", "object_id": logical.pk}])
+
+    def test_a_deleted_logical_cable_cannot_gain_a_tag_association(self):
+        """A tag writer cannot commit a generic relation to a deleted Logical Cable."""
+        logical = self.connect(self.eth0, self.eth1)
+        tag = Tag.objects.create(name="Late", slug="late")
+        self.execute(self.plan(patched_path()))
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                logical.tags.add(tag)
+
+        self.assertFalse(
+            TaggedItem.objects.filter(
+                content_type=ObjectType.objects.get_for_model(Cable), object_id=logical.pk
+            ).exists()
+        )
 
     def test_deletion_holds_its_termination_rows_through_the_snapshot(self):
         """A Logical Cable termination cannot move after deletion records its reviewed state."""
