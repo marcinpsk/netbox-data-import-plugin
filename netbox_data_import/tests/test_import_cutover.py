@@ -602,11 +602,12 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         no_user.refresh_from_db()
         self.assertIn("user", no_user.data["message"].lower())
 
-        missing_profile = self._job()
+        missing_profile = self._job(data={"accepted_plan": {"policy": {"cable_type": "mmf-om4"}}})
         with self.assertRaises(JobFailed):
             ImportJobRunner(missing_profile).run(999999, 1, {}, ["device:1"], "missing-profile")
         missing_profile.refresh_from_db()
         self.assertIn("profile", missing_profile.data["message"].lower())
+        self.assertNotIn("accepted_plan", missing_profile.data)
 
         missing_source = self._job()
         with self.assertRaises(JobFailed):

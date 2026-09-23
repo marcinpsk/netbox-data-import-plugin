@@ -68,6 +68,7 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     # Django refuses to reverse these data migrations, so the walk back fakes each one, newest
     # first. The generated schema migrations between them still run their real reverse operations.
     irreversible_data_steps = (
+        ("0039_remove_job_plan_copies", "0038_cable_tag_integrity"),
         ("0035_retire_superseded_proposals", "0034_tracedeviceresolution"),
         ("0022_migrate_profile_adapter_config", "0021_importprofile_adapter_config"),
         ("0020_migrate_import_source_custom_field", "0019_deviceimportsource"),
@@ -306,8 +307,10 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
         tagged_item = TaggedItem.objects.get(tag=tag, object_id=cable.pk)
         previous = (APP, "0037_cablesegmentoverride")
         leaf = (APP, "0038_cable_tag_integrity")
-        self.addCleanup(lambda: MigrationExecutor(connection).migrate([leaf]))
+        final = (APP, "0039_remove_job_plan_copies")
+        self.addCleanup(lambda: MigrationExecutor(connection).migrate([final]))
 
+        MigrationExecutor(connection).migrate([leaf], fake=True)
         MigrationExecutor(connection).migrate([previous])
 
         self.assertTrue(TaggedItem.objects.filter(pk=tagged_item.pk).exists())
@@ -345,16 +348,18 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
 
         previous = (APP, "0037_cablesegmentoverride")
         leaf = (APP, "0038_cable_tag_integrity")
+        final = (APP, "0039_remove_job_plan_copies")
         orphan_pk = None
 
         def restore_leaf():
             if orphan_pk is not None:
                 TaggedItem.objects.filter(pk=orphan_pk).delete()
-            MigrationExecutor(connection).migrate([leaf])
+            MigrationExecutor(connection).migrate([final])
 
         self.addCleanup(restore_leaf)
         tag = Tag.objects.create(name="Orphan upgrade", slug="orphan-upgrade")
         cable_type = ObjectType.objects.get_for_model(Cable)
+        MigrationExecutor(connection).migrate([leaf], fake=True)
         MigrationExecutor(connection).migrate([previous])
         orphan_pk = TaggedItem.objects.create(tag=tag, content_type=cable_type, object_id=2_147_483_647).pk
 
