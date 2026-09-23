@@ -27,7 +27,7 @@ from netbox_data_import.models import (
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.object_permissions import ObjectPermissionDenied
 from netbox_data_import.proposal_decisions import accept_proposal, proposal_staleness, reject_proposal
-from netbox_data_import.proposal_tasks import proposal_task
+from netbox_data_import.proposal_tasks import TOO_MANY_CANDIDATES, proposal_task
 from netbox_data_import.resolution_proposals import (
     cancel_proposal,
     claim_proposal,
@@ -175,6 +175,15 @@ class ProposalFreshnessTest(DecisionInventory, TestCase):
             Interface(device=self.device, name=f"Ethernet ceiling {number}")
             for number in range(proposal_eligible_set_limit() + 1 - existing)
         )
+
+        inventory = self.task.inventory(
+            profile=self.profile,
+            field_key=self.field_key,
+            netbox_reader=self.reader(),
+            limit=proposal_eligible_set_limit(),
+        )
+        self.assertIsNone(inventory.candidate_snapshot)
+        self.assertEqual(inventory.candidate_error.reason, TOO_MANY_CANDIDATES)
 
         self.assert_candidates_stale(proposal)
 
