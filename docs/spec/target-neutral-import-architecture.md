@@ -527,7 +527,7 @@ existing Cables, PortMapping rows) and cannot be detected during source interpre
 | `Trace List` contradicts the path rows | `trace.corroboration_mismatch` | `invalid` | Source Adapter |
 | Same identity stated with differing evidence | `trace.duplicate_conflict` | `invalid` | Source Adapter |
 | Pass-Through Claim whose entry or exit carries an interface-kind PortClass | `trace.pass_through_at_interface` | `invalid` | Source Adapter |
-| Same termination claimed by different traces, or same segment pair with different CableClass | `trace.cross_trace_conflict` | `invalid` on every involved trace | Source Adapter |
+| Same termination claimed by different traces for different segments | `trace.cross_trace_conflict` | `invalid` on every involved trace | Source Adapter |
 | A PortClass value outside the adapter's fixed vocabulary | `trace.unknown_port_class` | `invalid` | Source Adapter |
 | Raw export metadata longer than the provenance column that stores it | `trace.metadata_too_long` | `invalid` | Source Adapter |
 | The resolved object is not an Interface, FrontPort, or RearPort | `cable.unsupported_termination_kind` | `invalid` | Cable Target Module |
@@ -547,10 +547,12 @@ cards. The adapter records the claimed entry and exit pair verbatim. Same-port c
 evidence, including a trunk and a patch recorded on one rear port. Whether NetBox's front-to-rear
 mapping can realize it is planning-time work (section 6).
 
-An identical shared segment across traces (same termination pair, same CableClass) is allowed. It
-dedupes at Planned Change identity per ADR 0001. The cross-trace occupancy check counts claims from
-distinct traces only. A termination repeated inside one trace is either the legal same-port
-continuation or part of an already-invalid structure.
+An identical shared segment across traces (same termination pair) is allowed, whatever CableClass
+each trace states. Planning compares the effective Cable policy of that segment instead
+(`cable.resolved_segment_conflict`, section 6.7). The shared segment dedupes at Planned Change
+identity per ADR 0001. The cross-trace occupancy check counts claims from distinct traces only. A
+termination repeated inside one trace is either the legal same-port continuation or part of an
+already-invalid structure.
 
 ### 5.7 Binding and provenance persistence
 
@@ -581,7 +583,7 @@ blank-row layout, empty-string cells, and sheet dimensions.
 | --- | --- |
 | Copper trace workbook | 20 blocks per sheet collapse to 10 Source Traces, zero duplicate conflicts, all 10 valid with 3 Segment Evidence entries each, empty `Trace List` corroborates nothing |
 | Fiber trace workbook | 20 blocks per sheet collapse to 10 Source Traces, zero duplicate conflicts, 8 valid with 4 to 9 segments, 4 ending at a rear port, every `Trace List` corroboration passing, 1 `trace.non_linear_path`, 1 `trace.pass_through_at_interface`, and one accepted legal same-rear-port continuation |
-| Both | Zero shared terminations and zero CableClass conflicts between distinct traces |
+| Both | Zero shared terminations between distinct traces |
 
 ## 6. Patched Path Replacement planning and transaction behavior
 
@@ -1720,7 +1722,7 @@ T5 registers the key.
 - The fiber fixture produces 10 Source Traces, 8 valid with 4 to 9 segments and 4 ending at a rear
   port, exactly one `trace.non_linear_path` and exactly one `trace.pass_through_at_interface`, and
   zero duplicate conflicts.
-- Cross-trace checks report zero shared terminations and zero CableClass conflicts on both fixtures.
+- Cross-trace checks report zero shared terminations on both fixtures.
 - A reversed re-statement of a trace collapses into the same Source Trace and leaves the content
   fingerprint unchanged.
 - Two labels that differ only in separator characters produce different canonical JSON identities.
