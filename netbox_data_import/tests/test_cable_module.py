@@ -3101,6 +3101,34 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
         )
         self.assertEqual(Tag.objects.get(pk=tag.pk).name, "Reviewed")
 
+    def test_cable_content_type_cannot_change_identity_while_it_has_tags(self):
+        """An identity change cannot make stored Cable tag projections stale."""
+        logical = self.connect(self.eth0, self.eth1)
+        tag = Tag.objects.create(name="Identity", slug="identity")
+        logical.tags.add(tag)
+        cable_type = ObjectType.objects.get_for_model(Cable)
+
+        with self.assertRaises(IntegrityError) as raised:
+            with transaction.atomic():
+                ObjectType.objects.filter(pk=cable_type.pk).update(model="cable-elsewhere")
+
+        self.assertEqual(getattr(raised.exception.__cause__, "sqlstate", None), "23514")
+        self.assertEqual(ObjectType.objects.get(pk=cable_type.pk).model, "cable")
+
+    def test_cable_content_type_identity_change_refuses_snapshot_isolation(self):
+        """A stale transaction snapshot cannot bypass the content-type guard."""
+        from django.db import DatabaseError, connection
+
+        cable_type = ObjectType.objects.get_for_model(Cable)
+        with self.assertRaises(DatabaseError) as raised:
+            with transaction.atomic():
+                with connection.cursor() as cursor:
+                    cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                ObjectType.objects.filter(pk=cable_type.pk).update(model="cable-elsewhere")
+
+        self.assertEqual(getattr(raised.exception.__cause__, "sqlstate", None), "25001")
+        self.assertEqual(ObjectType.objects.get(pk=cable_type.pk).model, "cable")
+
     def test_the_review_displays_the_tag_names_its_deletion_fingerprint_covers(self):
         """A rename between planning reads cannot change only the operator's review."""
         from django.db import connection
