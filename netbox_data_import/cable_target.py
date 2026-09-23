@@ -1180,7 +1180,7 @@ class _CableBatch:
     def _assess_media(self) -> None:
         """Report each run of verified pass-throughs whose segments state two known media."""
         for analysis in self.analyses:
-            if analysis.stopped or not analysis.endpoints:
+            if not analysis.topology_read or not analysis.segment_pairs_resolved or not analysis.endpoints:
                 continue
             observations = [self._media_observation(analysis, segment) for segment in analysis.segments]
             for span in self._media_spans(analysis, observations):

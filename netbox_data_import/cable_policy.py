@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (C) 2026 Marcin Zieba <marcinpsk@gmail.com>
+# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Own the Cable policy question: the runtime choices, and which stored decision is in force."""
 
 from django.core.exceptions import ValidationError

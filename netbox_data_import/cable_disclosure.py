@@ -373,11 +373,13 @@ def _unit(unit, visible_row_ids: dict[str, set[int]]):
                 (CABLE_CLASS_MAPPING_ROW, CABLE_SEGMENT_OVERRIDE_ROW),
                 visible_row_ids,
             ):
+                segment.pop(DISCLOSURE_SOURCE, None)
                 segment.update(_redact_policy(segment))
         for policy in trace.get("cable_policies") or ():
             if policy.get(POLICY_VISIBLE) is True and not _source_is_visible(
                 policy.get(DISCLOSURE_SOURCE), (CABLE_CLASS_MAPPING_ROW,), visible_row_ids
             ):
+                policy.pop(DISCLOSURE_SOURCE, None)
                 policy.update(_redact_policy(policy))
     diagnostics = tuple(_diagnostic(item, visible_row_ids) for item in unit.diagnostics)
     return replace(unit, diagnostics=diagnostics, display=display)
