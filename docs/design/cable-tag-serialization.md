@@ -1,6 +1,6 @@
 # Cable tag state during Logical Cable replacement
 
-Status: RATIFIED at r5 by Astra high, after four adversarial rounds. Implementation pending.
+Status: RATIFIED at r5 by Astra high, after four adversarial rounds. Implemented on the Cable policy branch.
 
 ## Brief
 
@@ -77,9 +77,9 @@ identity at runtime, not an installation-specific numeric ID. An initially
 deferred foreign key to `dcim_cable(id)` uses `ON DELETE NO ACTION` and
 `ON UPDATE NO ACTION`. An index covers non-null projected IDs. The migration
 backfills existing associations, rejects any pre-existing Cable orphan, and
-keeps Django model state unchanged. It depends on migration nodes that exist
-on both NetBox 4.6 and 4.7, verified as `extras.0001_squashed` and
-`dcim.0001_squashed`. Reverse SQL removes only this FK, trigger, function,
+keeps Django model state unchanged. It depends on the `__first__` migration
+sentinel for `extras` and `dcim`, which resolves to the installed NetBox
+version's first migration. Reverse SQL removes only this FK, trigger, function,
 index, and column. DDL runs atomically; a lock timeout or validation failure
 rolls it all back.
 
@@ -193,7 +193,9 @@ rejects that transition before its association query. It also verified from
 PostgreSQL's row-lock executor that a stronger-isolation association writer
 which tries to lock a content-type row changed since its snapshot aborts with
 `40001`; it cannot commit an obsolete NULL Cable projection. The reviewer
-ratified r5 for the acceptance conditions above. The first implementable
-increment is a red ImportEngine test proving that a deleted Cable cannot gain
-a tag association. The migration, collector behavior, and concurrent writer
-tests on NetBox 4.6 and 4.7 remain required before push.
+ratified r5 for the acceptance conditions above. Red ImportEngine tests proved
+that a deleted Cable could gain a tag and that an existing tag association
+could change during deletion review. The migration and execution locks made
+both tests pass on NetBox 4.6 and 4.7. Separate tests cover a queued writer,
+Tag rename, content-type identity changes, and upgrade failure on an existing
+orphan. The complete test suites remain the final validation gate.

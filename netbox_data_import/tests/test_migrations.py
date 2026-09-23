@@ -292,7 +292,37 @@ class MigrationGraphResolvesWithoutReplacementTest(SimpleTestCase):
 
 
 class CableTagIntegrityMigrationTest(TransactionTestCase):
-    """The Cable tag migration rejects existing orphan relations atomically."""
+    """The Cable tag migration preserves existing associations and rejects orphans."""
+
+    def test_reverse_preserves_tag_rows_and_upgrade_backfills_cable_ids(self):
+        from netbox_data_import.tests.test_cable_module import CableTopologyMixin
+        from extras.models import Tag, TaggedItem
+
+        topology = CableTopologyMixin()
+        topology.build_topology()
+        cable = topology.connect(topology.eth0, topology.eth1)
+        tag = Tag.objects.create(name="Upgrade", slug="upgrade")
+        cable.tags.add(tag)
+        tagged_item = TaggedItem.objects.get(tag=tag, object_id=cable.pk)
+        previous = (APP, "0037_cablesegmentoverride")
+        leaf = (APP, "0038_cable_tag_integrity")
+        self.addCleanup(lambda: MigrationExecutor(connection).migrate([leaf]))
+
+        MigrationExecutor(connection).migrate([previous])
+
+        self.assertTrue(TaggedItem.objects.filter(pk=tagged_item.pk).exists())
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name = 'extras_taggeditem' AND column_name = 'ndi_cable_id'"
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)
+
+        MigrationExecutor(connection).migrate([leaf])
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT ndi_cable_id FROM extras_taggeditem WHERE id = %s", [tagged_item.pk])
+            self.assertEqual(cursor.fetchone()[0], cable.pk)
 
     def test_orphan_cable_tag_refuses_upgrade_without_partial_schema(self):
         from core.models import ObjectType
