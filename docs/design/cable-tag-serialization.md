@@ -84,7 +84,7 @@ index, and column. DDL runs atomically; a lock timeout or validation failure
 rolls it all back.
 
 Installation locks `django_content_type`, `dcim_cable`, then
-`extras_taggeditem` for writes in one migration transaction. It adds the
+`extras_taggeditem` in one migration transaction. It adds the
 column, installs the derivation trigger,
 backfills every Cable-typed association from its `object_id` without joining
 away missing Cable rows, adds the index, and validates the FK. A missing
@@ -98,6 +98,15 @@ refuses; if the identity change commits first, the association reads its new
 identity and derives the correct projection. This also covers an
 administrator's multirow content-type update. Migration reversal removes both
 triggers and both functions.
+
+The `extras_taggeditem` lock is `ACCESS EXCLUSIVE`, because `ADD COLUMN`
+requires it. It blocks tag reads as well as tag writes until the migration
+commits. This cost is accepted. The migration runs in the upgrade window, and
+one transaction keeps enforcement and backfill atomic. A staged migration could
+release reads earlier, but it cannot roll back as one unit. On PostgreSQL 18,
+with 5,000,000 tagged items of which 500,000 are on Cables, the migration held
+the lock for about 10.3 seconds. The backfill took 9.5 seconds of that time.
+The cost grows with the number of tagged items.
 
 The content-type identity trigger rejects any transition into or out of
 `dcim.cable` when `current_setting('transaction_isolation')` is not
