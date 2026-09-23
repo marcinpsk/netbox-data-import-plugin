@@ -2,6 +2,193 @@
 
 <!-- version list -->
 
+## v2.6.0 (2026-09-23)
+
+### Bug Fixes
+
+- Cover keyword patches and pending proposal status
+  ([`2f3a2b6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2f3a2b6a43250649031d7e448912a290ad6a00f7))
+
+- Detect policy replacement through patch.multiple
+  ([`4ab848a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4ab848a32e2d2b875111366e11ea8ca8f145cba6))
+
+- **cable**: Preserve media warnings and remove hidden policy sources
+  ([`fbd9563`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/fbd9563aabb8263c322992aeaf2db44c14812252))
+
+- **cable**: Report every override one trace lost, not one per position
+  ([`621ac2e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/621ac2eb7ae36e1236c0bde7717b595c1307410b))
+
+- **cables**: Enforce tag references during deletion
+  ([`0a748cc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0a748cc60102b7e365262171db01173468ec3fc1))
+
+- **cables**: Identify lost overrides and preserve blocked media facts
+  ([`1a59fb0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1a59fb08dd5e041f198dce5615fc566df29f2b94))
+
+- **cables**: Lock reviewed tag associations
+  ([`7cf2b72`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7cf2b7292ae5eef3c2286d7a1c7eb7700c0fa0ab))
+
+- **cables**: Report blocked override loss
+  ([`fceb8d8`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/fceb8d85ec704d2761700792f501454921dd84a7))
+
+- **cables**: Report overrides lost to self-connections
+  ([`abeeb30`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/abeeb305c7b5f1699d48254990ca6748b1e249ec))
+
+- **cables**: Retain resolved pairs when a segment self-connects
+  ([`01a3f4e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/01a3f4ed1717e76f991cd27da47706e0faeec8bb))
+
+- **cables**: Share reviewed metadata with deletion fingerprint
+  ([`553af14`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/553af1461b06cc68c39801265ed2ca43252c8c64))
+
+- **import**: Keep accepted plans out of Job data
+  ([`e00d05d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e00d05d961f40f38e206a544bf71fb098af97ffb))
+
+- **import**: Purge legacy Job plan copies
+  ([`278b04c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/278b04cdab81bfeb5c5df8848f066f25a87474be))
+
+- **proposals**: Address review findings
+  ([`ff78953`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ff78953d6a0c129d749371ecf794e66dbe81487a))
+
+- **proposals**: Let the plan reopen a field an accepted proposal resolved
+  ([`7d1a87e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7d1a87e9319ce7790b134972cbcf0540dd9045e6))
+
+- **trace**: Address review findings
+  ([`4995c36`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4995c36eeb14fd0e17ac1e4564f9d79c12b508a6))
+
+- **trace**: Address second review round
+  ([`20c294d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/20c294d52ce3c29b9bd40cbf3b8ab2cd0391f849))
+
+- **trace**: Align review state and permission tests
+  ([`c536bfa`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c536bfa24ea429cb4904c3af04a8b69128661e9d))
+
+- **trace-workspace**: Close six defects an adversarial review found
+  ([`5545bda`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/5545bda546279caf05c7b4a9fd92f1c6d6596b00))
+
+- **trace-workspace**: Drop the dangling "row" when a trace states no row number
+  ([`ada3f7c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ada3f7cb2322b9d11912761297dd840bafe1641d))
+
+- **workspace**: Close disclosure review gaps
+  ([`99d6c55`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/99d6c55cac8385bc05a288942c6f68fdf6c1f81b))
+
+- **workspace**: Honor policy row permissions
+  ([`0f81a28`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0f81a282bf3b5717ac4dc26a63b06011741f82ae))
+
+- **workspace**: Let retained overrides clear
+  ([`db25bdd`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/db25bdd01aedd9a9d9dcd966b2917e1dc9b2a17e))
+
+- **workspace**: Prevent browser history snapshots of trace reviews
+  ([`f87e678`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f87e67877a3602bc8d31b9828d27250f648803e8))
+
+- **workspace**: Protect policy disclosures
+  ([`1b52a93`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1b52a934af7e3357c787954bb4f30a970d67d419))
+
+- **workspace**: Recheck cable disclosures
+  ([`50f752f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/50f752f2cb294a068288f2f7173c53c2984ec6ba))
+
+### Chores
+
+- **deps**: Bump the github-actions group with 3 updates
+  ([`be721fe`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/be721fe17b81d9af8e3eb58789dc4b899ccb652d))
+
+- **deps-dev**: Bump build from 1.6.0 to 1.6.1
+  ([`2104216`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2104216095e85c64fb149bd91eed8ea064c5f477))
+
+- **deps-dev**: Bump ruff from 0.16.6 to 0.16.7
+  ([`23603a6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/23603a648571a230b8ca3677a355e9fe9dd2d8c3))
+
+- **deps-dev**: Bump vitest from 5.0.0 to 5.0.1
+  ([`ef6b2ce`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ef6b2ce946cba0fb92c6b43c851ee62dc9cc7ff7))
+
+### Code Style
+
+- **trace-workspace**: Keep a long path readable in the segment panel
+  ([`a51f8dc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a51f8dca1c9c07b1f4be55f37e0c5079e474a1fe))
+
+### Documentation
+
+- **cables**: State that the tag integrity migration blocks tag reads
+  ([`0642016`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/06420164858647228f711c69eec44005b0ced6b5))
+
+- **spec**: Drop the CableClass condition from the cross-trace rules
+  ([`54d8d8f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/54d8d8f5677952b454326c42c8445409a8959f8b))
+
+- **spec**: The proposal card states no backend metadata of its own
+  ([`e624fb9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e624fb9bce504b2ed9a08d0774733c7677a3af65))
+
+### Features
+
+- **cable**: Warn where one verified run states two media families
+  ([`4963b35`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4963b357fcc69888e2c8c7d496fad04b743ebf26))
+
+- **trace-workspace**: Force one segment to its own Cable policy
+  ([`43dd7ed`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/43dd7edabfc24f19c5aa9155baeb5e924ff67a5d))
+
+- **trace-workspace**: Set a Cable policy without leaving the trace
+  ([`fbc3a77`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/fbc3a77c58e555c16d4878a093d8bf5bf6d16381))
+
+### Performance Improvements
+
+- **trace**: Decide the schema recovery on the version alone
+  ([`0274ea0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0274ea04333c936b117d337127a1dc92d2fefefd))
+
+### Refactoring
+
+- **proposals**: Drop the backend metadata and attempt count from the card
+  ([`791cd1f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/791cd1f25e93a4e1329eeaa1a4cb66e51a4a2f65))
+
+### Testing
+
+- Replace cached-plan parse-count mock with workspace trace identity assertion
+  ([`f0f1d72`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f0f1d723f8c44b65e6f9849184ba4f1393542a91))
+
+- **cable**: Preserve workspace redaction and media findings
+  ([`b1dfe95`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b1dfe954b145e337287036b27cb32be8201a7002))
+
+- **cables**: Compare decoded strings in disclosure checks
+  ([`cdf0038`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/cdf00388fa068b8c0897942e660bde27124c03e2))
+
+- **cables**: Compare reviewed tag names as values
+  ([`e4e2a07`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e4e2a0766950dc0db7c071aad2b211b22f958830))
+
+- **cables**: Cover disclosure boundaries
+  ([`42fd5bb`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/42fd5bb4ecd2f5509b84e0c46e5234a9baa315b3))
+
+- **cables**: Cover tag removal during replacement
+  ([`907a6e4`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/907a6e4d88386418f9e77b112bd13e05d238afb0))
+
+- **cables**: Cover tag writer queued behind deletion
+  ([`bc07a05`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/bc07a059a4dd4e9a751463210c7bed8c304890c8))
+
+- **cables**: Guard tag content type identity
+  ([`fa83f6f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/fa83f6f4938866910b2790d0bac7855b80052ce7))
+
+- **cables**: Hold reviewed tag names through deletion
+  ([`2385a5d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2385a5d31ce00de67343a198cbc15924b5a526e5))
+
+- **cables**: Keep review tags aligned with deletion fingerprint
+  ([`1c15c63`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1c15c63036380942928db9db527697966fa7a732))
+
+- **cables**: Keep unaffected override through self-connection
+  ([`98e345d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/98e345d6ebd18502539c37e003097f9c52108a28))
+
+- **cables**: Reject orphan tags during migration
+  ([`85cca0b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/85cca0b87bfac9cfaca5ae7a4fa0cc3acffcdac2))
+
+- **cables**: Reject tags on deleted logical cables
+  ([`6c116d1`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6c116d1aa72ea10bba939b5b7f147df1866c24d3))
+
+- **cables**: Retain distinct lost decisions and blocked media facts
+  ([`9515f07`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9515f078b67b766af7eca299798d3b1637a98916))
+
+- **migrations**: Verify Cable tag projection round trip
+  ([`b4c50ee`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b4c50eec02925d7aac859657046dcb06177286a1))
+
+- **proposals**: Pin a candidate limit below the pre-paging candidate count
+  ([`843c3bc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/843c3bc5851d968e8c9d003339f713ef42e9401c))
+
+- **proposals**: Prove ceiling rejection causes stale inventory
+  ([`9127a10`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9127a1069dff3614ef37e5d2d8cef5bd9279a4f5))
+
+
 ## v2.5.0 (2026-09-21)
 
 ### Bug Fixes
