@@ -130,6 +130,21 @@ def test_flags_keyword_form_policy_patches():
     ]
 
 
+def test_flags_policy_members_in_patch_multiple():
+    src = (
+        "from unittest.mock import DEFAULT, patch\n"
+        "from netbox_data_import import inference_backend\n"
+        "import requests\n"
+        "patch.multiple(inference_backend, proposal_eligible_set_limit=lambda: 1)\n"
+        "patch.multiple(target='netbox_data_import.inference_backend', proposal_eligible_set_limit=DEFAULT)\n"
+        "patch.multiple(requests, proposal_eligible_set_limit=lambda: 1)\n"
+    )
+    assert [(hit.kind, hit.mock) for hit in scan_source(src)] == [
+        ("policy-patch", "inference_backend.proposal_eligible_set_limit"),
+        ("policy-patch", "netbox_data_import.inference_backend.proposal_eligible_set_limit"),
+    ]
+
+
 def test_flags_keyword_form_first_party_patch_targets():
     src = (
         "from unittest.mock import DEFAULT, patch\n"

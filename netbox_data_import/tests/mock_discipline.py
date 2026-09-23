@@ -282,6 +282,14 @@ class _Scanner(ast.NodeVisitor):
     def _patched_deterministic_policy(self, node: ast.Call) -> str | None:
         """Return a first-party policy target that tests must exercise with real inputs."""
         func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "multiple":
+            if not self._is_patch(func.value):
+                return None
+            name = self._first_party_multiple_target(node)
+            if name is None:
+                return None
+            members = (f"{name}.{item.arg}" for item in node.keywords if item.arg in _REAL_BEHAVIOR_PATCH_TARGETS)
+            return ", ".join(members) or None
         if isinstance(func, ast.Attribute) and func.attr == "object":
             if not self._is_patch(func.value):
                 return None
@@ -351,19 +359,8 @@ class _Scanner(ast.NodeVisitor):
         """Return the first-party members ``patch.multiple`` leaves as a fabricating mock."""
         if not self._is_patch(func.value) or self._is_patch_bounded(node, new_position=None):
             return None
-        patched = self._call_argument(node, 0, "target")
-        if patched is None:
-            return None
-        base = patched
-        while isinstance(base, ast.Attribute):
-            base = base.value
-        if isinstance(patched, ast.Constant) and isinstance(patched.value, str):
-            if patched.value.split(".")[0] != _FIRST_PARTY:
-                return None
-            name = patched.value
-        elif self._canonical_binding(base) == _FIRST_PARTY_BINDING:
-            name = ast.unparse(patched)
-        else:
+        name = self._first_party_multiple_target(node)
+        if name is None:
             return None
         # Every other keyword names a patched member; these are patch.multiple's own arguments.
         members = (
@@ -373,6 +370,22 @@ class _Scanner(ast.NodeVisitor):
             and self._is_mock_default(kw.value)
         )
         return ", ".join(members) or None
+
+    def _first_party_multiple_target(self, node: ast.Call) -> str | None:
+        """Name a first-party patch.multiple target in either call form."""
+        patched = self._call_argument(node, 0, "target")
+        if patched is None:
+            return None
+        base = patched
+        while isinstance(base, ast.Attribute):
+            base = base.value
+        if isinstance(patched, ast.Constant) and isinstance(patched.value, str):
+            if patched.value.split(".")[0] != _FIRST_PARTY:
+                return None
+            return patched.value
+        elif self._canonical_binding(base) == _FIRST_PARTY_BINDING:
+            return ast.unparse(patched)
+        return None
 
     @staticmethod
     def _call_argument(node: ast.Call, position: int, keyword: str) -> ast.expr | None:
