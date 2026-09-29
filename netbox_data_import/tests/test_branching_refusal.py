@@ -165,6 +165,23 @@ class AnonymousRefusalTest(TransactionTestCase):
         self.assertContains(response, "data-branch-refusal", status_code=409)
         self.assertNotContains(response, self.branch.name, status_code=409)
 
+    def test_a_branch_parameter_leaves_no_message_that_names_the_branch(self):
+        unready = Branch(name="closed work")
+        unready.save(provision=False)
+        Branch.objects.filter(pk=unready.pk).update(status=BranchStatusChoices.MERGED)
+        list_url = reverse("plugins:netbox_data_import:importprofile_list")
+
+        for branch in (self.branch, unready):
+            with self.subTest(branch=branch.name):
+                response = self.client.get(list_url, {"_branch": branch.schema_id})
+                following = self.client.get(reverse("login"))
+
+                self.assertContains(response, "data-branch-refusal", status_code=409)
+                for page in (response, following):
+                    body = page.content.decode()
+                    self.assertNotIn(branch.name, body)
+                    self.assertNotIn("not ready for use", body)
+
 
 class ScriptRequestRefusalTest(SuperuserClientMixin, TransactionTestCase):
     """A plugin page's own JSON request gets a JSON refusal that its script shows as an error."""

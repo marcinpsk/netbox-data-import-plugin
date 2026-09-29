@@ -6,6 +6,7 @@ netbox-branching is optional. Without it, every function here is a no-op.
 """
 
 from django.apps import apps
+from django.contrib.messages import get_messages
 from django.core.exceptions import ImproperlyConfigured, MiddlewareNotUsed
 from django.db import models
 from django.http import JsonResponse
@@ -128,9 +129,17 @@ class BranchRefusalMiddleware:
         # The plugin's scripts ask for JSON and show the `error` of an `ok: false` envelope.
         if request.get_preferred_type(["text/html", "application/json"]) == "application/json":
             return JsonResponse({"ok": False, "error": message, "code": REFUSAL_CODE}, status=409)
+        if request.user.is_authenticated:
+            return render(request, "netbox_data_import/branch_refused.html", {"message": message}, status=409)
+        # netbox-branching queues messages that name the branch; reading them here deletes them unseen.
+        list(get_messages(request))
         # The full layout shows the branch selector, so an anonymous caller gets the bare page.
-        template = "branch_refused.html" if request.user.is_authenticated else "branch_refused_anonymous.html"
-        return render(request, f"netbox_data_import/{template}", {"message": message}, status=409)
+        return render(
+            request,
+            "netbox_data_import/branch_refused_anonymous.html",
+            {"message": message, "messages": ()},
+            status=409,
+        )
 
 
 def is_branchable(model: type[models.Model]) -> bool | None:
