@@ -9,7 +9,10 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("netbox_branching", exc_type=ModuleNotFoundError)
+from netbox_data_import import branching
+
+if not branching.installed():
+    pytest.skip("netbox-branching is not an installed app", allow_module_level=True)
 
 from core.models import ObjectType
 from dcim.models import Cable, Device, Interface, RackType
@@ -26,7 +29,6 @@ from netbox_branching.choices import BranchStatusChoices
 from netbox_branching.models import Branch
 from netbox_branching.utilities import activate_branch, supports_branching
 
-from netbox_data_import import branching
 from netbox_data_import.models import (
     CableImportSource,
     ClassRoleMapping,

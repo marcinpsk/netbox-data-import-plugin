@@ -5,13 +5,12 @@
 import sys
 
 import pytest
-from django.apps import apps
 from django.test import SimpleTestCase
 
 from netbox_data_import import branching
 
-if apps.is_installed("netbox_branching"):
-    pytest.skip("netbox-branching is installed: test_branching.py covers this run", allow_module_level=True)
+if branching.installed():
+    pytest.skip("netbox-branching is an installed app: test_branching.py covers this run", allow_module_level=True)
 
 
 class WithoutBranchingTest(SimpleTestCase):

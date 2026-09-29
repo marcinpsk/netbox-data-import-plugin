@@ -13,13 +13,14 @@ APP_LABEL = "netbox_data_import"
 BRANCHING_APP_LABEL = "netbox_branching"
 
 
-def _branching_installed() -> bool:
+def installed() -> bool:
+    """Return whether netbox-branching is an installed app."""
     return apps.is_installed(BRANCHING_APP_LABEL)
 
 
 def active_branch():
     """Return the active Branch, or None when no branch is active or netbox-branching is absent."""
-    if not _branching_installed():
+    if not installed():
         return None
     from netbox_branching.contextvars import active_branch as branch_context
 
@@ -46,7 +47,7 @@ def is_branchable(model: type[models.Model]) -> bool | None:
 
 def register() -> None:
     """Register the resolver with netbox-branching, and refuse a configuration that overrides it."""
-    if not _branching_installed():
+    if not installed():
         return
     try:
         from netbox_branching.utilities import register_branching_resolver, supports_branching
