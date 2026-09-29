@@ -37,6 +37,7 @@ from netbox_data_import.preview_row_actions import (
 from netbox_data_import.tests.helpers import (
     recorded_updates,
     run_on_separate_connection,
+    update_webhook_rule,
     user_with_object_permission,
     workbook_bytes,
 )
@@ -336,21 +337,11 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
     def test_the_worker_records_updates_under_its_job_and_runs_their_event_rules(self):
         """The queued import writes ObjectChanges as its Job, and an event rule gets a request it can copy."""
-        from core.models import ObjectType
         from dcim.models import Device
         from django_rq import get_queue
-        from extras.models import EventRule, Webhook
 
         existing, before, after = self._existing_server()
-        webhook = Webhook.objects.create(name="Import hook", payload_url="http://127.0.0.1:9/")
-        rule = EventRule.objects.create(
-            name="Device updates",
-            event_types=["object_updated"],
-            action_type="webhook",
-            action_object_type=ObjectType.objects.get_for_model(Webhook),
-            action_object_id=webhook.pk,
-        )
-        rule.object_types.set([ObjectType.objects.get_for_model(Device)])
+        update_webhook_rule(Device)
         self._upload()
         self.client.post(reverse("plugins:netbox_data_import:import_run"))
         job = Job.objects.get(data__job_type=ImportJobRunner.job_type)

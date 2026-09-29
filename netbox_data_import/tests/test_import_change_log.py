@@ -15,7 +15,12 @@ from netbox_data_import.import_engine import ImportEngine
 from netbox_data_import.jobs import ImportJobRunner
 from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile
 from netbox_data_import.plan import Disposition
-from netbox_data_import.tests.helpers import make_dcim_objects, recorded_updates, store_workbook_document
+from netbox_data_import.tests.helpers import (
+    make_dcim_objects,
+    recorded_updates,
+    store_workbook_document,
+    update_webhook_rule,
+)
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 _HEADERS = ["Source ID", "Class", "Name", "Rack", "Make", "Model", "Height", "Serial", "Primary IPv4", "Contact"]
@@ -191,22 +196,12 @@ class ImportJobEventTest(IsolatedRQQueueTestMixin, ImportJobTestBase):
     """Event rules see only the changes a successful import commits."""
 
     def test_a_failed_import_sends_no_events_for_its_rolled_back_writes(self):
-        from core.models import ObjectType
         from dcim.models import Device, Rack
         from django.core.exceptions import ValidationError
         from django.db.models.signals import pre_save
         from django_rq import get_queue
-        from extras.models import EventRule, Webhook
 
-        webhook = Webhook.objects.create(name="Rack hook", payload_url="http://127.0.0.1:9/")
-        rule = EventRule.objects.create(
-            name="Rack updates",
-            event_types=["object_updated"],
-            action_type="webhook",
-            action_object_type=ObjectType.objects.get_for_model(Webhook),
-            action_object_id=webhook.pk,
-        )
-        rule.object_types.set([ObjectType.objects.get_for_model(Rack)])
+        update_webhook_rule(Rack)
 
         def refuse_the_device(sender, instance, **kwargs):
             raise ValidationError("The device write is refused after the rack write.")

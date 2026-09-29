@@ -588,3 +588,20 @@ def recorded_updates(obj):
             action="update",
         ).order_by("pk")
     )
+
+
+def update_webhook_rule(model):
+    """Enable a webhook EventRule for updates of *model*; its unroutable URL fails fast if the job runs."""
+    from core.models import ObjectType
+    from extras.models import EventRule, Webhook
+
+    webhook = Webhook.objects.create(name=f"{model._meta.model_name} hook", payload_url="http://127.0.0.1:9/")
+    rule = EventRule.objects.create(
+        name=f"{model._meta.model_name} updates",
+        event_types=["object_updated"],
+        action_type="webhook",
+        action_object_type=ObjectType.objects.get_for_model(Webhook),
+        action_object_id=webhook.pk,
+    )
+    rule.object_types.set([ObjectType.objects.get_for_model(model)])
+    return rule
