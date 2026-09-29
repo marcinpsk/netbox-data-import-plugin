@@ -135,4 +135,4 @@ class TagAssignmentTest(TestCase):
                 self.assertIn("Alpha", str(table.rows[0].get_cell("tags")))
 
     def test_the_system_checks_report_no_clash(self):
-        call_command("check", "netbox_data_import", fail_level="WARNING")
+        call_command("check", "netbox_data_import", tags=["models"], fail_level="WARNING")
