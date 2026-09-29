@@ -64,6 +64,8 @@ dev = [
     "types-openpyxl",
     "cryptography>=42",
 ]
+# The CI job that runs the plugin beside netbox-branching installs this group next to `test`.
+branching = ["netboxlabs-netbox-branching==1.2.1"]
 docs = [
     "mkdocs>=1,<2",
     "mkdocs-material>=9,<10",

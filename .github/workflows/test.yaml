@@ -143,3 +143,113 @@ jobs:
           name: coverage-report
           path: coverage-report/
           retention-days: 7
+
+  test-netbox-branching:
+    # netbox-branching 1.2.x supports NetBox 4.7 only, so this job has one row.
+    name: test-netbox-branching (3.12, v4.7.0)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    services:
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: netbox
+          POSTGRES_PASSWORD: netbox
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: netbox-data-import-plugin
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Checkout NetBox
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: "netbox-community/netbox"
+          path: netbox
+          ref: v4.7.0
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y libpq-dev
+
+      - name: Install NetBox, netbox-branching and plugin
+        working-directory: netbox-data-import-plugin
+        run: |
+          uv pip install --system -r ../netbox/requirements.txt
+          uv pip install --system --group test --group branching
+          uv pip install --system -e .
+
+      - name: Set up NetBox configuration
+        working-directory: netbox
+        run: |
+          cat > netbox/netbox/configuration.py << 'EOF'
+          import os
+
+          from netbox_branching.utilities import DynamicSchemaDict
+
+          ALLOWED_HOSTS = ['*']
+          DATABASES = DynamicSchemaDict({
+              'default': {
+                  'NAME': 'netbox',
+                  'USER': 'netbox',
+                  'PASSWORD': 'netbox',
+                  'HOST': 'localhost',
+                  'PORT': '',
+                  'CONN_MAX_AGE': 300,
+                  'ENGINE': 'django.db.backends.postgresql'
+              }
+          })
+          DATABASE_ROUTERS = ['netbox_branching.database.BranchAwareRouter']
+          REDIS = {
+              'tasks': {
+                  'HOST': os.environ.get('REDIS_HOST', 'localhost'),
+                  'PORT': 6379,
+                  'DATABASE': int(os.environ.get('REDIS_DATABASE', '0')),
+              },
+              'caching': {
+                  'HOST': os.environ.get('REDIS_CACHE_HOST', 'localhost'),
+                  'PORT': 6379,
+                  'DATABASE': int(os.environ.get('REDIS_CACHE_DATABASE', '1')),
+              },
+          }
+          SECRET_KEY = 'test-secret-key-not-for-production-1234567890123456'
+          API_TOKEN_PEPPERS = {0: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}
+          # netbox-branching must be the last plugin.
+          PLUGINS = ['netbox_data_import', 'netbox_branching']
+          EOF
+
+      - name: Run the branching tests
+        working-directory: netbox-data-import-plugin
+        env:
+          NETBOX_CONFIGURATION: netbox.configuration
+          PYTHONPATH: ${{ github.workspace }}/netbox/netbox
+          TEST_DB_NAME: test_netbox_data_import_branching_ci
+          TEST_REDIS_HOST: localhost
+        # One module cannot meet the suite-wide coverage gate, and the plain rows publish coverage.
+        run: >-
+          pytest netbox_data_import/tests/test_branching.py --no-cov --dist loadscope --disable-warnings
+          -o pythonpath=../netbox/netbox
