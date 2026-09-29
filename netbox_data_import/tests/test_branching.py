@@ -119,6 +119,9 @@ class SuiteConfigurationTest(SimpleTestCase):
         base_settings = getattr(base, "PLUGINS_CONFIG", {}).get("netbox_branching", {})
         suite_settings = settings.PLUGINS_CONFIG["netbox_branching"]
 
+        self.assertTrue(
+            base_settings, "Set one netbox_branching setting in the base configuration, or this passes empty."
+        )
         self.assertEqual({key: suite_settings.get(key) for key in base_settings}, base_settings)
 
 

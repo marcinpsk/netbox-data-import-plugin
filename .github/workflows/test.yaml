@@ -240,6 +240,8 @@ jobs:
           API_TOKEN_PEPPERS = {0: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}
           # netbox-branching must be the last plugin.
           PLUGINS = ['netbox_data_import', 'netbox_branching']
+          # One non-default setting, so the suite can check that it keeps the base plugin settings.
+          PLUGINS_CONFIG = {'netbox_branching': {'stale_warning_threshold': 14}}
           EOF
 
       - name: Run the branching tests
