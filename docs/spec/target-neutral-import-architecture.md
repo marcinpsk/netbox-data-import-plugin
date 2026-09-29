@@ -589,8 +589,9 @@ blank-row layout, empty-string cells, and sheet dimensions.
 
 The Cable Target Module verifies pass-throughs against the PortMapping model, which NetBox 4.5
 introduced in place of the single rear-port reference on a front port. The plugin's minimum NetBox
-version is 4.6.0, for this feature and for the plugin as a whole, because 4.6 is the oldest release
-the test matrix covers.
+version is 4.6.9, for this feature and for the plugin as a whole, because 4.6 is the oldest release
+the test matrix covers. Within 4.6, 4.6.9 is the first release whose `event_tracking` resets the
+request context when a job fails.
 
 ### 6.1 Port resolution
 

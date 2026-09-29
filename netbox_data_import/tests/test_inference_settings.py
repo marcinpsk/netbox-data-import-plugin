@@ -323,7 +323,7 @@ class PluginConfigStartupGateTest(SimpleTestCase):
         """Run the plugin's own startup validation over one PLUGINS_CONFIG entry."""
         from netbox_data_import import NetBoxDataImportConfig
 
-        NetBoxDataImportConfig.validate(config, "4.6.0")
+        NetBoxDataImportConfig.validate(config, NetBoxDataImportConfig.min_version)
 
     def test_a_valid_configuration_starts(self):
         self.validate(settings_with())

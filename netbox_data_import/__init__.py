@@ -17,7 +17,7 @@ class NetBoxDataImportConfig(PluginConfig):
     base_url = "data-import"
     author = "Marcin Zieba"
     author_email = "marcinpsk@gmail.com"
-    min_version = "4.6.0"
+    min_version = "4.6.9"
     graphql_schema = "graphql.schema.schema"
 
     default_settings: dict[str, Any] = {

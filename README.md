@@ -8,7 +8,7 @@ Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 [![Coverage](https://img.shields.io/endpoint?url=https://marcinpsk.github.io/netbox-data-import-plugin/coverage/badge.json)](https://marcinpsk.github.io/netbox-data-import-plugin/coverage/)
 [![License](https://img.shields.io/github/license/marcinpsk/netbox-data-import-plugin)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
-[![NetBox](https://img.shields.io/badge/NetBox-%E2%89%A54.6.0-blue)](https://github.com/netbox-community/netbox)
+[![NetBox](https://img.shields.io/badge/NetBox-%E2%89%A54.6.9-blue)](https://github.com/netbox-community/netbox)
 
 A NetBox plugin for importing device inventory and rack layouts from external DCIM systems via configurable field mappings.
 
@@ -27,7 +27,7 @@ Currently supports importing from Excel (`.xlsx`) workbooks with a flat, one-row
 
 ## Requirements
 
-- NetBox ≥ 4.6.0
+- NetBox ≥ 4.6.9
 - Python ≥ 3.12
 
 Cable trace import verifies each pass-through against the `PortMapping` model, which replaced the
