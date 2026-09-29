@@ -7,10 +7,11 @@ a version source it does not know about drifts silently until someone reads it.
 """
 
 import importlib.util
+import re
 import tomllib
 from pathlib import Path
 
-from netbox_data_import import __version__
+from netbox_data_import import NetBoxDataImportConfig, __version__
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -109,3 +110,20 @@ def test_a_version_bump_publishes_the_changed_range(monkeypatch):
     top = generator.compatibility_rows()[0]
 
     assert top == ("99.0.0", min_version, generator.newest_tested_netbox())
+
+
+NETBOX_FLOOR_STATEMENTS = {
+    "README.md": (r"NetBox-%E2%89%A5([\d.]+)-", r"NetBox ≥ ([\d.]+)", r"supports NetBox ([\d.]+) and later"),
+    "AGENTS.md": (r"Requires NetBox >= ([\d.]+)",),
+}
+
+
+def test_the_documents_state_the_declared_netbox_floor():
+    """A floor raise must update every document that restates the minimum NetBox version."""
+    stated = {}
+    for name, patterns in NETBOX_FLOOR_STATEMENTS.items():
+        text = (REPOSITORY_ROOT / name).read_text(encoding="utf-8")
+        for pattern in patterns:
+            stated[(name, pattern)] = re.findall(pattern, text)
+
+    assert stated == {key: [NetBoxDataImportConfig.min_version] for key in stated}
