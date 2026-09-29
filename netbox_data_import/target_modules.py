@@ -746,8 +746,7 @@ def _snapshot_saved_device(device) -> None:
 def _assign_ips(device, ip_fields, actor) -> dict:
     """Assign each placeable address and return the fields that remain unassigned."""
     unassigned = {}
-    changed = set()
-    _snapshot_saved_device(device)
+    changed = {}
     for field, address in ip_fields.items():
         try:
             target = ip_assignment.resolve(device, field, address)
@@ -756,12 +755,13 @@ def _assign_ips(device, ip_fields, actor) -> dict:
             continue
         if target.already_held:
             if getattr(device, f"{field}_id", None) != target.held.pk:
-                setattr(device, field, target.held)
-                changed.add(field)
+                changed[field] = target.held
             continue
-        setattr(device, field, ip_assignment.apply(target, actor))
-        changed.add(field)
+        changed[field] = ip_assignment.apply(target, actor)
     if changed:
+        _snapshot_saved_device(device)
+        for field, address in changed.items():
+            setattr(device, field, address)
         device.save(update_fields=sorted(changed))
     return unassigned
 
@@ -845,7 +845,7 @@ def _store_provenance(device, payload, unassigned, execution_context) -> None:
     if source_id:
         _bind_source(profile, source_id, device, asset_tag)
         custom_field = profile.adapter_settings.custom_field_name
-        if custom_field:
+        if custom_field and device.custom_field_data.get(custom_field) != source_id:
             _snapshot_saved_device(device)
             device.custom_field_data[custom_field] = source_id
             device.save(update_fields=["custom_field_data"])
