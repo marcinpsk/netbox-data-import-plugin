@@ -79,6 +79,22 @@ class TagsMigrationTest(TransactionTestCase):
                 )
         self.assertFalse(TaggedItem.objects.exists())
 
+    def test_rollback_drops_an_assignment_whose_object_is_gone(self):
+        tag = Tag.objects.create(name="Orphan", slug="orphan")
+        profile = ImportProfile.objects.create(name="Kept profile")
+        profile.tags.add(tag)
+        # A generic key has no foreign key, so an assignment can outlive its object.
+        TaggedItem.objects.create(
+            tag=tag, content_type=ContentType.objects.get_for_model(ImportProfile), object_id=2_147_483_647
+        )
+
+        executor = MigrationExecutor(connection)
+        executor.migrate([BEFORE])
+        links = executor.loader.project_state([BEFORE]).apps.get_model(APP, "ImportProfile").tags.through
+
+        self.assertEqual(list(links.objects.values_list("importprofile_id", "tag_id")), [(profile.pk, tag.pk)])
+        self.assertFalse(TaggedItem.objects.exists())
+
     def test_a_branch_migrate_fakes_the_move(self):
         module = importlib.import_module(f"{APP}.migrations.{DATA_MOVE}")
 

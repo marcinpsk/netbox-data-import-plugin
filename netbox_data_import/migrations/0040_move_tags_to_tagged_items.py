@@ -29,14 +29,15 @@ def move_tags_to_tagged_items(apps, schema_editor):
 
 
 def move_tagged_items_to_tags(apps, schema_editor):
-    """Copy the tag assignments of both models back into their through tables."""
+    """Copy the tag assignments of existing objects back into their through tables, and drop the rest."""
     TaggedItem = apps.get_model("extras", "TaggedItem")
     for model_name in TAGGED_MODELS:
         links = _tag_links(apps, model_name)
         items = TaggedItem.objects.filter(content_type__app_label=APP_LABEL, content_type__model=model_name)
+        existing = items.filter(object_id__in=apps.get_model(APP_LABEL, model_name).objects.values("pk"))
         links.objects.bulk_create(
             links(**{f"{model_name}_id": object_id, "tag_id": tag_id})
-            for object_id, tag_id in items.values_list("object_id", "tag_id")
+            for object_id, tag_id in existing.values_list("object_id", "tag_id")
         )
         items.delete()
 
