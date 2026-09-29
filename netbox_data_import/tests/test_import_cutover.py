@@ -317,6 +317,62 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertContains(results, "Import Complete")
         self.assertContains(results, "cutover.xlsx")
 
+    def _existing_server(self):
+        """Store server-a with a Device Type the workbook row replaces, and return both types."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack
+
+        rack = Rack.objects.create(name="rack-a", site=self.site, u_height=42)
+        other_type = DeviceType.objects.create(
+            manufacturer=Manufacturer.objects.get(slug="example"), model="Other", slug="example-other", u_height=1
+        )
+        existing = Device.objects.create(
+            name="server-a",
+            site=self.site,
+            rack=rack,
+            device_type=other_type,
+            role=DeviceRole.objects.get(slug="server"),
+        )
+        return existing, other_type, DeviceType.objects.get(slug="example-model")
+
+    def test_the_worker_records_updates_under_its_job_and_runs_their_event_rules(self):
+        """The queued import writes ObjectChanges as its Job, and an event rule gets a request it can copy."""
+        from core.models import ObjectType
+        from dcim.models import Device
+        from django_rq import get_queue
+        from extras.models import EventRule, Webhook
+
+        existing, before, after = self._existing_server()
+        webhook = Webhook.objects.create(name="Import hook", payload_url="http://127.0.0.1:9/")
+        rule = EventRule.objects.create(
+            name="Device updates",
+            event_types=["object_updated"],
+            action_type="webhook",
+            action_object_type=ObjectType.objects.get_for_model(Webhook),
+            action_object_id=webhook.pk,
+        )
+        rule.object_types.set([ObjectType.objects.get_for_model(Device)])
+        self._upload()
+        self.client.post(reverse("plugins:netbox_data_import:import_run"))
+        job = Job.objects.get(data__job_type=ImportJobRunner.job_type)
+
+        self.run_rq_jobs()
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, "completed", job.error)
+        (change,) = recorded_updates(existing)
+        self.assertEqual((change.user, change.request_id), (self.actor, job.job_id))
+        self.assertEqual(
+            (change.prechange_data["device_type"], change.postchange_data["device_type"]), (before.pk, after.pk)
+        )
+        queue = get_queue("default")
+        ran = [
+            queue.fetch_job(job_id)
+            for registry in (queue.finished_job_registry, queue.failed_job_registry)
+            for job_id in registry.get_job_ids()
+        ]
+        (sent,) = [item for item in ran if item.func_name == "extras.webhooks.send_webhook"]
+        self.assertEqual((sent.kwargs["request"].id, sent.kwargs["request"].user), (job.job_id, self.actor))
+
     def test_run_requires_an_active_clean_preview(self):
         """Missing, submitted, and dirty preview states never enqueue another Job."""
         run_url = reverse("plugins:netbox_data_import:import_run")

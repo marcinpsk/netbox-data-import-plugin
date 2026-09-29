@@ -11,7 +11,9 @@ from django.db import DatabaseError
 from rq import get_current_job
 
 from core.exceptions import JobFailed
+from netbox.context_managers import event_tracking
 from netbox.jobs import JobRunner, system_job
+from utilities.request import NetBoxFakeRequest
 
 from .adapters import SourceUnreadable, UnknownSourceAdapter
 from .import_engine import (
@@ -68,6 +70,23 @@ class ImportJobRunner(JobRunner):
         rq_job.meta.update({"processed": processed, "total": total, "phase": "importing"})
         rq_job.save_meta()
 
+    def _change_logging_request(self, user) -> NetBoxFakeRequest:
+        """Return the request NetBox records this Job's changes and events under, with the Job UUID as its id."""
+        return NetBoxFakeRequest(
+            {
+                "META": {},
+                "COOKIES": {},
+                "POST": {},
+                "GET": {},
+                "FILES": {},
+                "user": user,
+                "method": "POST",
+                "path": "",
+                "path_info": "",
+                "id": self.job.job_id,
+            }
+        )
+
     def run(self, profile_id, source_document_id, accepted_plan, selection, idempotency_key):
         """Execute one accepted Import Plan as the Job's actor."""
         user = self.job.user
@@ -93,39 +112,42 @@ class ImportJobRunner(JobRunner):
             progress.update(processed=processed, total=total)
             self._publish_progress(processed, total)
 
-        try:
-            execution = ImportEngine.execute(
-                profile,
-                source_document,
-                accepted_plan,
-                selection,
-                idempotency_key,
-                user,
-                job=self.job,
-                progress_callback=publish_progress,
-            )
-        except ImportProfile.DoesNotExist:
-            self._fail("The import profile is no longer available.")
-        except DatabaseError as exc:
-            logger.exception("Import execution failed with a database error")
-            self._fail(operator_failure_message(exc))
-        except (
-            EngineConfigurationError,
-            ObjectPermissionDenied,
-            PlanError,
-            PlanningTargetUnavailable,
-            PreconditionFailed,
-            SelectionError,
-            SourceUnreadable,
-            StalePlan,
-            StaleSourceDocument,
-            UnknownSourceAdapter,
-            ValidationError,
-        ) as exc:
-            self._fail(operator_failure_message(exc))
-        if execution.outcome != ExecutionOutcome.SUCCEEDED:
-            reason = (execution.failure_detail or {}).get("reason") or execution.outcome or "unknown"
-            self._fail(f"The accepted import execution did not succeed ({reason}).")
+        # Only event_tracking: the other request processors (netbox-branching) must not run in a worker.
+        with event_tracking(self._change_logging_request(user)):
+            try:
+                execution = ImportEngine.execute(
+                    profile,
+                    source_document,
+                    accepted_plan,
+                    selection,
+                    idempotency_key,
+                    user,
+                    job=self.job,
+                    progress_callback=publish_progress,
+                )
+            except ImportProfile.DoesNotExist:
+                self._fail("The import profile is no longer available.")
+            except DatabaseError as exc:
+                logger.exception("Import execution failed with a database error")
+                self._fail(operator_failure_message(exc))
+            except (
+                EngineConfigurationError,
+                ObjectPermissionDenied,
+                PlanError,
+                PlanningTargetUnavailable,
+                PreconditionFailed,
+                SelectionError,
+                SourceUnreadable,
+                StalePlan,
+                StaleSourceDocument,
+                UnknownSourceAdapter,
+                ValidationError,
+            ) as exc:
+                self._fail(operator_failure_message(exc))
+            # Raising here leaves the block before event_tracking flushes the queued events.
+            if execution.outcome != ExecutionOutcome.SUCCEEDED:
+                reason = (execution.failure_detail or {}).get("reason") or execution.outcome or "unknown"
+                self._fail(f"The accepted import execution did not succeed ({reason}).")
         self._save_data(
             phase="completed",
             processed=progress["processed"],

@@ -1426,7 +1426,7 @@ Synchronization Units and Planned Changes.
 | `ImportExecution` | Every selective and final execution, committed atomically on success |
 | Per-Device provenance row | The Device Target Module |
 | Per-Cable provenance row | The Cable Target Module, one row per (Cable, Import Profile, trace identity) |
-| NetBox changelog entries | NetBox, for every `NetBoxModel` write |
+| NetBox changelog entries | NetBox, for every `NetBoxModel` write; the import Job records its writes as its user, under its Job UUID |
 | Resolution Proposal row | Created by the request, completed or failed by the inference job, decided once by an operator |
 
 The Logical Cable removal is recorded only in the `ImportExecution` deleted-object snapshot

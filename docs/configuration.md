@@ -189,6 +189,8 @@ When you submit the import setup form, the page shows a loading indicator while 
 
 After you confirm a preview, the plugin queues a native NetBox background Job and opens its progress page. The page uses NetBox's HTMX support to show the number of processed source rows and update the progress bar automatically.
 
+The Job writes a NetBox change log record for each object that it creates, changes, or deletes. The record names the user who started the import, and its request ID is the Job UUID. Event rules and webhooks run for these changes after a successful import. A failed import sends no events.
+
 You can leave the progress page while the Job runs. Open **Run Import** and select **Resume import** to return to the latest active Job. The direct progress URL also restores a completed result or a refreshed preview after a safe validation failure.
 
 ## Device import record
