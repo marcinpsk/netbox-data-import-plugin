@@ -109,6 +109,19 @@ class BranchabilityRuleTest(SimpleTestCase):
         self.assertIsNone(branching.active_branch())
 
 
+class SuiteConfigurationTest(SimpleTestCase):
+    """The test settings keep the base configuration's netbox-branching settings."""
+
+    def test_the_suite_keeps_the_base_netbox_branching_settings(self):
+        from django.conf import settings
+        from netbox import configuration as base
+
+        base_settings = getattr(base, "PLUGINS_CONFIG", {}).get("netbox_branching", {})
+        suite_settings = settings.PLUGINS_CONFIG["netbox_branching"]
+
+        self.assertEqual({key: suite_settings.get(key) for key in base_settings}, base_settings)
+
+
 class StartupValidationTest(SimpleTestCase):
     """An exempt_models entry overrides the resolver, so startup refuses it."""
 
