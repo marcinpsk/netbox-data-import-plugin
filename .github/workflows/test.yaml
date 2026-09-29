@@ -249,7 +249,14 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/netbox/netbox
           TEST_DB_NAME: test_netbox_data_import_branching_ci
           TEST_REDIS_HOST: localhost
-        # One module cannot meet the suite-wide coverage gate, and the plain rows publish coverage.
+        # One module cannot meet the suite-wide gate, so the next step gates branching.py alone.
         run: >-
-          pytest netbox_data_import/tests/test_branching.py --no-cov --dist loadscope --disable-warnings
-          -o pythonpath=../netbox/netbox
+          pytest netbox_data_import/tests/test_branching.py --cov-report= --cov-fail-under=0
+          --dist loadscope --disable-warnings -o pythonpath=../netbox/netbox
+
+      - name: Require full coverage of branching.py
+        working-directory: netbox-data-import-plugin
+        # --omit replaces the report omit list, which leaves branching.py out of the plain rows' gate.
+        run: >-
+          coverage report --include=netbox_data_import/branching.py --omit='*/migrations/*'
+          --fail-under=100 --show-missing

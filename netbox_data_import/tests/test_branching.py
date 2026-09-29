@@ -123,16 +123,37 @@ class SuiteConfigurationTest(SimpleTestCase):
 
 
 class StartupValidationTest(SimpleTestCase):
-    """An exempt_models entry overrides the resolver, so startup refuses it."""
+    """register() refuses a configuration or a release that breaks the resolver."""
 
     def setUp(self):
-        resolvers = branching_utilities._branching_resolvers
-        self.addCleanup(resolvers.__setitem__, slice(None), list(resolvers))
+        self.resolvers = branching_utilities._branching_resolvers
+        self.addCleanup(self.resolvers.__setitem__, slice(None), list(self.resolvers))
 
     @override_settings(PLUGINS_CONFIG={"netbox_branching": {"exempt_models": ["netbox_data_import.*"]}})
     def test_an_exempt_plugin_fails_startup(self):
         with self.assertRaisesMessage(ImproperlyConfigured, "netbox_data_import.DeviceImportSource"):
             branching.register()
+
+    def test_a_release_without_the_resolver_hook_fails_startup(self):
+        hook = branching_utilities.register_branching_resolver
+        del branching_utilities.register_branching_resolver
+        self.addCleanup(setattr, branching_utilities, "register_branching_resolver", hook)
+
+        with self.assertRaisesMessage(ImproperlyConfigured, "register_branching_resolver"):
+            branching.register()
+
+    def test_without_the_installed_app_nothing_is_active_or_registered(self):
+        registered = list(self.resolvers)
+        apps.set_available_apps(
+            [config.name for config in apps.get_app_configs() if config.label != "netbox_branching"]
+        )
+        self.addCleanup(apps.unset_available_apps)
+
+        with activate_branch(Branch(name="not installed")):
+            self.assertIsNone(branching.active_branch())
+        branching.register()
+
+        self.assertEqual(self.resolvers, registered)
 
 
 class StoredFeaturesTest(TransactionTestCase):

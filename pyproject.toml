@@ -184,10 +184,12 @@ ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["netbox_data_import"]
-# branching.py runs only beside netbox-branching. The branching CI job tests it, and it runs no coverage.
-omit = ["*/migrations/*", "*/tests/*", "netbox_data_import/branching.py"]
+omit = ["*/migrations/*", "*/tests/*"]
 
 [tool.coverage.report]
+# branching.py runs only beside netbox-branching, so the plain rows leave it out of their gate. The
+# branching CI job measures it and requires 100% for that file.
+omit = ["*/migrations/*", "*/tests/*", "netbox_data_import/branching.py"]
 # Without `precision`, coverage.py compares the rounded total, so `fail_under = 98` enforced 97.5%.
 precision = 2
 fail_under = 97.5
