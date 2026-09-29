@@ -2,6 +2,7 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 from netbox.plugins import PluginTemplateExtension
 
+from . import branching
 from .models import stored_import_source
 
 IP_FIELD_LABELS = {
@@ -26,6 +27,8 @@ class DeviceImportDataExtension(PluginTemplateExtension):
         import_source = stored_import_source(obj)
         if import_source is None:
             return ""
+        if branching.active_branch() is not None:
+            return self.render("netbox_data_import/device_import_data_main_only.html")
 
         # Show which of the stored IPs NetBox now holds natively.
         ip_status = {}

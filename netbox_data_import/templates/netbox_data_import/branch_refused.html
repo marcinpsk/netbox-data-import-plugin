@@ -1,0 +1,22 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
+{% extends 'base/layout.html' %}
+
+{% block title %}Branch not supported{% endblock %}
+
+{% block content %}
+<div class="row my-5" data-branch-refusal>
+  <div class="col-lg-6 offset-lg-3">
+    <div class="card">
+      <h2 class="card-header">
+        <i class="mdi mdi-source-branch me-1"></i>
+        Branch not supported
+      </h2>
+      <div class="card-body">{{ message }}</div>
+      <div class="card-footer text-end">
+        <a href="{{ request.path }}?_branch=" class="btn btn-primary">Switch to main</a>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

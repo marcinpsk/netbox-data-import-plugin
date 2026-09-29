@@ -19,6 +19,7 @@ class NetBoxDataImportConfig(PluginConfig):
     author_email = "marcinpsk@gmail.com"
     min_version = "4.6.9"
     graphql_schema = "graphql.schema.schema"
+    middleware = ["netbox_data_import.branching.BranchRefusalMiddleware"]
 
     default_settings: dict[str, Any] = {
         # A deployment that names no allowlist reaches no origin, rather than every origin.

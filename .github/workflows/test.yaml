@@ -251,9 +251,10 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/netbox/netbox
           TEST_DB_NAME: test_netbox_data_import_branching_ci
           TEST_REDIS_HOST: localhost
-        # One module cannot meet the suite-wide gate, so the next step gates branching.py alone.
+        # Two modules cannot meet the suite-wide gate, so the next step gates branching.py alone.
         run: >-
-          pytest netbox_data_import/tests/test_branching.py --cov-report= --cov-fail-under=0
+          pytest netbox_data_import/tests/test_branching.py netbox_data_import/tests/test_branching_refusal.py
+          --cov-report= --cov-fail-under=0
           --dist loadscope --disable-warnings -o pythonpath=../netbox/netbox
 
       - name: Require full coverage of branching.py

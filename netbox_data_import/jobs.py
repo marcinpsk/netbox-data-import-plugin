@@ -15,6 +15,7 @@ from netbox.context_managers import event_tracking
 from netbox.jobs import JobRunner, system_job
 from utilities.request import NetBoxFakeRequest
 
+from . import branching
 from .adapters import SourceUnreadable, UnknownSourceAdapter
 from .import_engine import (
     EngineConfigurationError,
@@ -89,6 +90,11 @@ class ImportJobRunner(JobRunner):
 
     def run(self, profile_id, source_document_id, accepted_plan, selection, idempotency_key):
         """Execute one accepted Import Plan as the Job's actor."""
+        try:
+            branching.fail_job_in_branch(self)
+        except JobFailed as exc:
+            self._save_data(phase="failed", message=str(exc))
+            raise
         user = self.job.user
         if user is None:
             self._fail("The user who started this import is no longer available.")
@@ -170,6 +176,7 @@ class SourceDocumentRetentionJob(JobRunner):
 
     def run(self, *args, **kwargs):
         """Run one retention pass."""
+        branching.fail_job_in_branch(self)
         return self.purge()
 
 
@@ -185,6 +192,7 @@ class ResolutionProposalJob(JobRunner):
         """Resolve backend configuration on the worker after claiming the proposal."""
         from .proposal_jobs import run_proposal
 
+        branching.fail_job_in_branch(self)
         return run_proposal(proposal_id)
 
 

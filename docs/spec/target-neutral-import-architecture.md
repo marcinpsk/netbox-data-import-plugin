@@ -156,6 +156,10 @@ command never edits an Import Plan.
 | Jobs | `ImportEngine.execute`, the inference proposal service | Target Modules, plan mutation, safety recalculation |
 | Templates | The serialized Import Plan and view-supplied presentation data | ORM traversal into planning state |
 
+Every plugin entry point refuses inside a netbox-branching branch: the plugin operates on main only.
+`branching.py` owns that rule, and the [netbox-branching design record](../design/netbox-branching.md)
+holds the reasons.
+
 ## 3. Source Adapter and Import Profile contracts
 
 ### 3.1 Registry and selection

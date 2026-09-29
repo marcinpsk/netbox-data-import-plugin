@@ -18,14 +18,13 @@ from core.models import ObjectType
 from dcim.models import Cable, Device, Interface, RackType
 from django.apps import apps
 from django.contrib.auth import get_user_model
-from django.core.exceptions import ImproperlyConfigured
+from django.core.exceptions import ImproperlyConfigured, MiddlewareNotUsed
 from django.core.management import call_command
 from django.db import connection, models
 from django.test import RequestFactory, SimpleTestCase, TransactionTestCase, override_settings
 from extras.models import Tag, TaggedItem
 from netbox.context_managers import event_tracking
 from netbox_branching import utilities as branching_utilities
-from netbox_branching.choices import BranchStatusChoices
 from netbox_branching.models import Branch
 from netbox_branching.utilities import activate_branch, supports_branching
 
@@ -35,7 +34,7 @@ from netbox_data_import.models import (
     DeviceImportSource,
     ImportProfile,
 )
-from netbox_data_import.tests.helpers import make_dcim_objects
+from netbox_data_import.tests.helpers import make_dcim_objects, provision_branch
 
 APP_LABEL = "netbox_data_import"
 # Changing this set is a design decision: branches opened before the change lack the new table.
@@ -154,9 +153,12 @@ class StartupValidationTest(SimpleTestCase):
 
         with activate_branch(Branch(name="not installed")):
             self.assertIsNone(branching.active_branch())
+            branching.refuse_branch()
         branching.register()
 
         self.assertEqual(self.resolvers, registered)
+        with self.assertRaises(MiddlewareNotUsed):
+            branching.BranchRefusalMiddleware(lambda request: None)
 
 
 class StoredFeaturesTest(TransactionTestCase):
@@ -196,15 +198,6 @@ class BranchCascadeTest(TransactionTestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user("branch-user")
         self.profile = ImportProfile.objects.create(name="Branch profile")
-
-    def _branch(self, name):
-        branch = Branch(name=name)
-        branch.save(provision=False)
-        self.addCleanup(branch.deprovision)
-        branch.provision(user=None)
-        branch.refresh_from_db()
-        self.assertEqual(branch.status, BranchStatusChoices.READY)
-        return branch
 
     def _in_branch(self, branch, action):
         request = RequestFactory().get("/")
@@ -274,7 +267,7 @@ class BranchCascadeTest(TransactionTestCase):
         return (self._device_case, self._cable_case, self._rack_type_case, self._tag_case)
 
     def test_a_provisioned_branch_holds_the_plugin_tables(self):
-        branch = self._branch("tables")
+        branch = provision_branch(self, "tables")
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema = %s", [branch.schema_name]
@@ -291,7 +284,7 @@ class BranchCascadeTest(TransactionTestCase):
         for make_case in self._cases():
             case = make_case()
             with self.subTest(case=case.name):
-                branch = self._branch(f"delete {case.name}")
+                branch = provision_branch(self, f"delete {case.name}")
 
                 self._in_branch(branch, case.delete)
 
@@ -302,7 +295,7 @@ class BranchCascadeTest(TransactionTestCase):
         for make_case in self._cases():
             case = make_case()
             with self.subTest(case=case.name):
-                branch = self._branch(f"merge {case.name}")
+                branch = provision_branch(self, f"merge {case.name}")
                 self._in_branch(branch, case.delete)
                 self.assertEqual(case.observe(), case.kept, "the delete in the branch reached main before the merge")
 
@@ -314,7 +307,7 @@ class BranchCascadeTest(TransactionTestCase):
         for make_case in self._cases():
             case = make_case()
             with self.subTest(case=case.name):
-                branch = self._branch(f"discard {case.name}")
+                branch = provision_branch(self, f"discard {case.name}")
                 self._in_branch(branch, case.delete)
                 self.assertEqual(self._in_branch(branch, case.observe), case.deleted, "the branch copy is unchanged")
 

@@ -22,7 +22,7 @@ from .adapters import (
     get_adapter,
     output_kinds_for,
 )
-from . import plan
+from . import branching, plan
 from .cable_policy import cable_profile_label, cable_type_label, policy_choice_errors
 from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
 from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
@@ -170,6 +170,7 @@ def locked_profile_policy(*profile_ids):
     The rows lock in primary-key order, so two callers naming several profiles cannot deadlock by
     taking them in opposite orders.
     """
+    branching.refuse_branch()
     wanted = sorted({profile_id for profile_id in profile_ids if profile_id is not None})
     # Django short-circuits `pk__in=[]`, so an empty set would yield without ever taking a lock.
     if not wanted:
