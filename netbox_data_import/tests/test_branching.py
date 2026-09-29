@@ -79,6 +79,25 @@ class BranchabilityRuleTest(SimpleTestCase):
             "(docs/design/netbox-branching.md).",
         )
 
+    def test_no_plugin_model_references_a_branchable_plugin_model(self):
+        references = sorted(
+            f"{model._meta.label}.{field.name}"
+            for model in _plugin_models()
+            for field in model._meta.concrete_fields
+            if isinstance(field, models.ForeignKey)
+            and field.related_model._meta.app_label == APP_LABEL
+            and supports_branching(field.related_model)
+        )
+
+        self.assertEqual(
+            references,
+            [],
+            "These fields reference a branchable plugin model, and the rule does not follow them: a delete in "
+            "a branch cascades through the branch copy into main's table of the referencing model. Making that "
+            "model branchable leaves open branches without its table, so this needs a design decision "
+            "(docs/design/netbox-branching.md).",
+        )
+
     def test_the_resolver_defers_for_other_apps(self):
         self.assertIsNone(branching.is_branchable(Device))
 
