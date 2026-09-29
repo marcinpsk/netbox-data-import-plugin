@@ -149,6 +149,28 @@ class BranchSelectorTest(SuperuserClientMixin, TransactionTestCase):
 
         self.assertEqual((response.status_code, _json_code(response)), (409, branching.REFUSAL_CODE))
 
+    def test_graphql_refuses_a_stale_selector(self):
+        selectors = {
+            "cookie": ({COOKIE_NAME: self.stale.schema_id}, {}),
+            "header": ({}, {BRANCH_HEADER: self.stale.schema_id}),
+        }
+        for selector, (cookies, headers) in selectors.items():
+            with self.subTest(selector=selector):
+                self.client.cookies.clear()
+                self.client.force_login(self.user)
+                for name, value in cookies.items():
+                    self.client.cookies[name] = value
+
+                response = self.client.post(
+                    "/graphql/",
+                    data={"query": GRAPHQL_QUERIES["import_profile_list"]},
+                    content_type="application/json",
+                    headers=headers,
+                )
+
+                messages = [error["message"] for error in response.json().get("errors", [])]
+                self.assertEqual(messages, [branching.refusal_message(None)])
+
     def test_a_ui_request_ignores_the_branch_header(self):
         response = self.client.get(f"{self.list_url}?_branch=", headers={BRANCH_HEADER: self.stale.schema_id})
 

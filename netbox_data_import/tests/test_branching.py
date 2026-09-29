@@ -161,6 +161,7 @@ class StartupValidationTest(SimpleTestCase):
         with activate_branch(Branch(name="not installed")):
             self.assertIsNone(branching.active_branch())
             branching.refuse_branch()
+            self.assertIsNone(branching.request_refusal(RequestFactory().get("/", {"_branch": "any"})))
         branching.register()
 
         self.assertEqual(self.resolvers, registered)

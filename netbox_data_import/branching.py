@@ -82,6 +82,16 @@ def _selects_a_branch(request) -> bool:
     return COOKIE_NAME in request.COOKIES
 
 
+def request_refusal(request) -> str | None:
+    """Return the refusal message for a request that has a branch active or selected, else None."""
+    if not installed():
+        return None
+    branch = active_branch()
+    if branch is None and not _selects_a_branch(request):
+        return None
+    return refusal_message(branch)
+
+
 def _is_plugin_view(view_func) -> bool:
     owner = getattr(view_func, "view_class", None) or getattr(view_func, "cls", None) or view_func
     return owner.__module__ == APP_LABEL or owner.__module__.startswith(f"{APP_LABEL}.")
@@ -103,10 +113,9 @@ class BranchRefusalMiddleware:
         """Answer 409 in place of the plugin view: JSON for the REST API, a page for the UI."""
         if not _is_plugin_view(view_func):
             return None
-        branch = active_branch()
-        if branch is None and not _selects_a_branch(request):
+        message = request_refusal(request)
+        if message is None:
             return None
-        message = refusal_message(branch)
         if request.path_info.startswith(reverse("api-root")):
             return JsonResponse({"detail": message, "code": REFUSAL_CODE}, status=409)
         return render(request, "netbox_data_import/branch_refused.html", {"message": message}, status=409)

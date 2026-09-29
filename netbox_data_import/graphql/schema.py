@@ -13,11 +13,13 @@ from .types import CableClassMappingType, ImportProfileType
 
 
 class MainOnly(BasePermission):
-    """Refuse a plugin field while a netbox-branching branch is active."""
+    """Refuse a plugin field on the same terms as the plugin's REST and UI views."""
 
     def has_permission(self, source, info, **kwargs) -> bool:
-        """Raise BranchActive, whose message becomes the GraphQL error, when a branch is active."""
-        branching.refuse_branch()
+        """Raise BranchActive, whose message becomes the GraphQL error, for a refused request."""
+        message = branching.request_refusal(info.context.request)
+        if message is not None:
+            raise branching.BranchActive(message)
         return True
 
 
