@@ -7,7 +7,10 @@
 {% block layout %}
 <div class="page page-center">
   <div class="container container-tight py-4">
-    {% include 'netbox_data_import/inc/branch_refusal_card.html' %}
+    {# page-body gives the card NetBox's in-layout card styles. #}
+    <div class="page-body">
+      {% include 'netbox_data_import/inc/branch_refusal_card.html' %}
+    </div>
   </div>
 </div>
 {% endblock %}
