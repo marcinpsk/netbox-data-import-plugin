@@ -217,13 +217,6 @@ class ImportProfile(NetBoxModel):
         help_text="Scalar settings the selected Source Adapter declares.",
     )
 
-    # Override tags reverse accessor to avoid clashes with other plugins
-    tags = models.ManyToManyField(
-        to="extras.Tag",
-        related_name="+",
-        blank=True,
-    )
-
     class Meta:
         ordering = ["name"]
         verbose_name = "Import Profile"
@@ -1211,9 +1204,6 @@ class InferenceBackend(NetBoxModel):
         default=60, validators=[MinValueValidator(_inference_settings.TIMEOUT_MIN)]
     )
     enabled = models.BooleanField(default=False, help_text="Whether Ask AI may use this backend.")
-
-    # Override tags reverse accessor to avoid clashes with other plugins
-    tags = models.ManyToManyField(to="extras.Tag", related_name="+", blank=True)
 
     class Meta:
         ordering = ["backend_key"]
