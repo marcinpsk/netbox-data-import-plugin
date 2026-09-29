@@ -125,6 +125,9 @@ class BranchRefusalMiddleware:
             return None
         if is_api_request(request):
             return JsonResponse({"detail": message, "code": REFUSAL_CODE}, status=409)
+        # The plugin's scripts ask for JSON and show the `error` of an `ok: false` envelope.
+        if request.get_preferred_type(["text/html", "application/json"]) == "application/json":
+            return JsonResponse({"ok": False, "error": message, "code": REFUSAL_CODE}, status=409)
         # The full layout shows the branch selector, so an anonymous caller gets the bare page.
         template = "branch_refused.html" if request.user.is_authenticated else "branch_refused_anonymous.html"
         return render(request, f"netbox_data_import/{template}", {"message": message}, status=409)

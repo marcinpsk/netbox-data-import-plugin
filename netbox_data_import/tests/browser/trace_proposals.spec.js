@@ -162,6 +162,20 @@ test('HTTP action refusals are visible in the field', async ({page}) => {
   await expect(slot(page, 'error')).toBeVisible();
 });
 
+test('a netbox-branching refusal is visible in the field', async ({page}) => {
+  const refusal = {
+    ok: false,
+    error: 'NetBox Data Import runs on main only, and the active branch is \u201cfeature\u201d.',
+    code: 'branch_not_supported',
+  };
+  await page.route('**/accept/', route => route.fulfill({status: 409, json: refusal}));
+  await page.route('**/proposal/**', route => route.fulfill({status: 409, json: refusal}));
+  await mount(page, completed());
+  await action(page, 'accept').click();
+  await expect(slot(page, 'error')).toHaveText(refusal.error);
+  await expect(slot(page, 'error')).toBeVisible();
+});
+
 test('a saved acceptance explains why an active sync prevents the replan', async ({page}) => {
   await page.route('**/accept/', route => route.fulfill({json: {ok: true, preview_state: 'recalculation_required'}}));
   await serve(page, completed({badge: 'Accepted', field_state: 'accepted'}));

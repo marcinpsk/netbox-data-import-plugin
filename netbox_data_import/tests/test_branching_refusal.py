@@ -154,6 +154,29 @@ class AnonymousRefusalTest(TransactionTestCase):
         self.assertNotContains(response, self.branch.name, status_code=409)
 
 
+class ScriptRequestRefusalTest(SuperuserClientMixin, TransactionTestCase):
+    """A plugin page's own JSON request gets a JSON refusal that its script shows as an error."""
+
+    def test_a_json_request_to_a_ui_view_gets_a_json_refusal(self):
+        branch = provision_branch(self, "script request")
+        self.client.cookies[COOKIE_NAME] = branch.schema_id
+        requests = {
+            "trace_proposal": self.client.get,
+            "search_objects": self.client.get,
+            "trace_accept_proposal": self.client.post,
+            "quick_create_role": self.client.post,
+        }
+        for name, send in requests.items():
+            with self.subTest(view=name):
+                response = send(reverse(f"plugins:netbox_data_import:{name}"), headers={"Accept": "application/json"})
+
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(
+                    response.json(),
+                    {"ok": False, "error": branching.refusal_message(branch), "code": branching.REFUSAL_CODE},
+                )
+
+
 class BranchSelectorTest(SuperuserClientMixin, TransactionTestCase):
     """A branch selector without an active branch is refused, except the explicit switch to main."""
 
