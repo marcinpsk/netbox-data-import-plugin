@@ -70,10 +70,12 @@ def fail_job_in_branch(runner) -> None:
 
 
 def _selects_a_branch(request) -> bool:
-    """Return whether a request names a branch; `?_branch=` without the header is the switch to main."""
+    """Return whether a request names a branch, in netbox-branching's own order of precedence."""
     from netbox_branching.constants import BRANCH_HEADER, COOKIE_NAME, QUERY_PARAM
+    from netbox_branching.utilities import is_api_request
 
-    if BRANCH_HEADER in request.headers:
+    # netbox-branching reads the header on REST and GraphQL requests only.
+    if is_api_request(request) and BRANCH_HEADER in request.headers:
         return True
     if QUERY_PARAM in request.GET:
         return bool(request.GET[QUERY_PARAM])

@@ -149,6 +149,11 @@ class BranchSelectorTest(SuperuserClientMixin, TransactionTestCase):
 
         self.assertEqual((response.status_code, _json_code(response)), (409, branching.REFUSAL_CODE))
 
+    def test_a_ui_request_ignores_the_branch_header(self):
+        response = self.client.get(f"{self.list_url}?_branch=", headers={BRANCH_HEADER: self.stale.schema_id})
+
+        self.assertEqual(response.status_code, 200)
+
     def test_an_empty_branch_parameter_switches_to_main(self):
         ready = Branch(name="ready")
         ready.save(provision=False)
