@@ -1153,6 +1153,7 @@ dependencies = [
     { name = "defusedxml" },
     { name = "google-re2" },
     { name = "openpyxl" },
+    { name = "packaging" },
     { name = "pyyaml" },
     { name = "requests" },
 ]
@@ -1197,6 +1198,7 @@ requires-dist = [
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "google-re2", specifier = ">=1.1.20251105" },
     { name = "openpyxl", specifier = ">=3.1" },
+    { name = "packaging", specifier = ">=24" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "requests", specifier = ">=2.33.0" },
 ]

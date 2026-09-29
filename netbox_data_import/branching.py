@@ -17,7 +17,7 @@ APP_LABEL = "netbox_data_import"
 BRANCHING_APP_LABEL = "netbox_branching"
 REFUSAL_CODE = "branch_not_supported"
 # The design covers netbox-branching 1.2.x; 1.1.x also has register_branching_resolver.
-MINIMUM_BRANCHING_RELEASE = Version("1.2")
+MINIMUM_BRANCHING_RELEASE = (1, 2)
 
 
 class BranchActive(Exception):
@@ -59,12 +59,14 @@ def fail_job_in_branch(runner) -> None:
     """Fail a background job with the refusal in its log when its worker has a branch active."""
     from core.exceptions import JobFailed
 
-    branch = active_branch()
-    if branch is None:
+    try:
+        refuse_branch()
+    except BranchActive as exc:
+        refusal = exc
+    else:
         return
-    message = refusal_message(branch)
-    runner.logger.error(message)
-    raise JobFailed(message)
+    runner.logger.error(str(refusal))
+    raise JobFailed(str(refusal)) from refusal
 
 
 def _selects_a_branch(request) -> bool:
@@ -131,17 +133,13 @@ def register() -> None:
     if not installed():
         return
     release = apps.get_app_config(BRANCHING_APP_LABEL).version
-    if Version(release) < MINIMUM_BRANCHING_RELEASE:
+    # Compare the release segment only, so a 1.2 pre-release is not refused.
+    if Version(release).release < MINIMUM_BRANCHING_RELEASE:
         raise ImproperlyConfigured(
-            f"{APP_LABEL}: netbox-branching {release} is installed; this plugin needs {MINIMUM_BRANCHING_RELEASE} "
-            "or later."
+            f"{APP_LABEL}: netbox-branching {release} is installed; this plugin needs 1.2 or later."
         )
-    try:
-        from netbox_branching.utilities import register_branching_resolver, supports_branching
-    except ImportError as exc:
-        raise ImproperlyConfigured(
-            f"{APP_LABEL}: this netbox-branching release has no register_branching_resolver: {exc}"
-        ) from exc
+    from netbox_branching.utilities import register_branching_resolver, supports_branching
+
     register_branching_resolver(is_branchable)
     overridden = sorted(
         model._meta.label

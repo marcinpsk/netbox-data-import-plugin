@@ -136,14 +136,6 @@ class StartupValidationTest(SimpleTestCase):
         with self.assertRaisesMessage(ImproperlyConfigured, "netbox_data_import.DeviceImportSource"):
             branching.register()
 
-    def test_a_release_without_the_resolver_hook_fails_startup(self):
-        hook = branching_utilities.register_branching_resolver
-        del branching_utilities.register_branching_resolver
-        self.addCleanup(setattr, branching_utilities, "register_branching_resolver", hook)
-
-        with self.assertRaisesMessage(ImproperlyConfigured, "register_branching_resolver"):
-            branching.register()
-
     def test_a_release_older_than_1_2_fails_startup(self):
         config = apps.get_app_config("netbox_branching")
         self.addCleanup(setattr, config, "version", config.version)
@@ -151,6 +143,13 @@ class StartupValidationTest(SimpleTestCase):
 
         with self.assertRaisesMessage(ImproperlyConfigured, "1.1.1"):
             branching.register()
+
+    def test_a_1_2_release_candidate_starts(self):
+        config = apps.get_app_config("netbox_branching")
+        self.addCleanup(setattr, config, "version", config.version)
+        config.version = "1.2.0rc1"
+
+        branching.register()
 
     def test_without_the_installed_app_nothing_is_active_or_registered(self):
         registered = list(self.resolvers)
