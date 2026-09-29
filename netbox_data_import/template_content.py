@@ -23,12 +23,13 @@ class DeviceImportDataExtension(PluginTemplateExtension):
 
     def left_page(self):
         """Render import data card for the Device detail page left column."""
+        # A branch shows the notice on every Device, so the card reads no plugin data there.
+        if branching.active_branch() is not None:
+            return self.render("netbox_data_import/device_import_data_main_only.html")
         obj = self.context.get("object")
         import_source = stored_import_source(obj)
         if import_source is None:
             return ""
-        if branching.active_branch() is not None:
-            return self.render("netbox_data_import/device_import_data_main_only.html")
 
         # Show which of the stored IPs NetBox now holds natively.
         ip_status = {}

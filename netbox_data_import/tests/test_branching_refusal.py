@@ -85,6 +85,17 @@ def plugin_urls() -> list[str]:
     return urls
 
 
+def plugin_queries(branch, action):
+    """Run *action*, and return its result and every query it sends to a plugin table on main or in *branch*."""
+    with ExitStack() as stack:
+        captures = [
+            stack.enter_context(CaptureQueriesContext(connections[alias]))
+            for alias in ("default", branch.connection_name)
+        ]
+        result = action()
+    return result, [query["sql"] for capture in captures for query in capture if f"{APP_LABEL}_" in query["sql"]]
+
+
 def _json_code(response):
     if response.get("Content-Type") != "application/json":
         return None
@@ -251,6 +262,7 @@ class BranchReadSurfaceTest(SuperuserClientMixin, TransactionTestCase):
         super().setUp()
         site, _manufacturer, device_type, role = make_dcim_objects("Surface")
         self.device = Device.objects.create(name="surface-device", site=site, device_type=device_type, role=role)
+        self.plain_device = Device.objects.create(name="plain-device", site=site, device_type=device_type, role=role)
         profile = ImportProfile.objects.create(name="Surface profile", source_adapter="trace_workbook")
         DeviceImportSource.objects.create(
             device=self.device, profile=profile, source_id="row-7", extra_columns={"Rack Row": "Row-R7"}
@@ -274,10 +286,13 @@ class BranchReadSurfaceTest(SuperuserClientMixin, TransactionTestCase):
     def test_the_device_card_shows_a_main_only_notice_inside_a_branch(self):
         self.client.cookies[COOKIE_NAME] = self.branch.schema_id
 
-        response = self.client.get(self.device.get_absolute_url())
+        for device in (self.device, self.plain_device):
+            with self.subTest(device=device.name):
+                response, queries = plugin_queries(self.branch, partial(self.client.get, device.get_absolute_url()))
 
-        self.assertContains(response, "data-import-data-main-only")
-        self.assertNotContains(response, "Row-R7")
+                self.assertContains(response, "data-import-data-main-only")
+                self.assertNotContains(response, "Row-R7")
+                self.assertEqual(queries, [])
 
 
 class BackgroundRefusalTest(TransactionTestCase):
@@ -293,14 +308,12 @@ class BackgroundRefusalTest(TransactionTestCase):
 
     def _plugin_queries_in_branch(self, action):
         """Run *action* with the branch active, and return every query on a plugin table."""
-        with ExitStack() as stack:
-            captures = [
-                stack.enter_context(CaptureQueriesContext(connections[alias]))
-                for alias in ("default", self.branch.connection_name)
-            ]
-            stack.enter_context(activate_branch(self.branch))
-            action()
-        return [query["sql"] for capture in captures for query in capture if f"{APP_LABEL}_" in query["sql"]]
+
+        def in_branch():
+            with activate_branch(self.branch):
+                action()
+
+        return plugin_queries(self.branch, in_branch)[1]
 
     def test_each_job_refuses_before_it_reads_plugin_data(self):
         runs = {
