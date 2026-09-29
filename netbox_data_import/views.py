@@ -2101,12 +2101,21 @@ def _preview_field_intent(request, target_field):
     snapshots = row.extra_data.get("field_review_snapshots", {}).get(target_field)
     if not isinstance(snapshots, dict):
         return None, "The selected field has no authoritative preview value."
+    error = _field_baseline_error(row, device, target_field)
+    if error:
+        return None, error
+    return (row, device, snapshots.get("file", {}).get("canonical", "")), None
+
+
+def _field_baseline_error(row, device, target_field) -> str | None:
+    """Return why *device* no longer holds the preview baseline of one field, or None when it does."""
+    snapshots = row.extra_data["field_review_snapshots"][target_field]
     current = DeviceFieldReviewer.current_snapshot(device, target_field)
     if current is None or current.get("canonical") != snapshots.get("netbox", {}).get("canonical"):
-        return None, "The matched NetBox value changed. Recalculate the preview and try again."
+        return "The matched NetBox value changed. Recalculate the preview and try again."
     if target_field in {"u_position", "face"} and not _placement_matches_preview(device, row):
-        return None, "The matched NetBox placement changed. Recalculate the preview and try again."
-    return (row, device, snapshots.get("file", {}).get("canonical", "")), None
+        return "The matched NetBox placement changed. Recalculate the preview and try again."
+    return None
 
 
 def _placement_matches_preview(device, row) -> bool:
@@ -2123,7 +2132,7 @@ def _placement_matches_preview(device, row) -> bool:
     )
 
 
-def _locked_placement_device(request, device_pk):
+def _locked_device_for_update(request, device_pk):
     """Return the Device row locked and snapshotted for update, or None when it is gone or not permitted."""
     from dcim.models import Device
 
@@ -2554,7 +2563,15 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         try:
             # Nothing wraps this request, and a receiver on the model can require a transaction.
             with transaction.atomic():
-                display = self._apply_field(device, field, value, status_map(), request.user)
+                # The read above was unlocked, so the write and its snapshot use the locked row.
+                locked = _locked_device_for_update(request, device.pk)
+                if locked is None:
+                    # atomic-exit-safe: device-gone-before-write
+                    return JsonResponse({"ok": False, "error": "Device not found"}, status=409)
+                if is_preview_action and (error := _field_baseline_error(row, locked, field)):
+                    # atomic-exit-safe: baseline-moved-before-write
+                    return JsonResponse({"ok": False, "error": error}, status=409)
+                display = self._apply_field(locked, field, value, status_map(), request.user)
         except PreviewActionInvalid as exc:
             return JsonResponse({"ok": False, "error": str(exc)})
         except Exception:
@@ -2585,8 +2602,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         return text
 
     def _apply_field(self, device, field, value, status_map, user):
-        """Write one previewed value onto the device, through that field's own writer."""
-        device.snapshot()
+        """Write one previewed value onto the locked and snapshotted device, through that field's own writer."""
         if field in self._IP_FIELDS:
             return self._apply_ip_field(device, field, value, user)
         writer = {
@@ -2835,7 +2851,7 @@ class SyncPlacementView(_AjaxPermissionView):
 
         with transaction.atomic():
             # The baseline check above read the Device unlocked, so recheck it under the row lock.
-            device = _locked_placement_device(request, device.pk)
+            device = _locked_device_for_update(request, device.pk)
             if device is None:
                 # atomic-exit-safe: device-gone-before-write
                 return JsonResponse({"ok": False, "error": "Device not found"}, status=409)

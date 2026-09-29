@@ -27,6 +27,7 @@ from netbox_data_import.preview_row_actions import (
 )
 from netbox_data_import.tests.helpers import (
     assert_action_link_is_named,
+    competing_write_during,
     recorded_updates,
     run_on_separate_connection,
     set_import_source,
@@ -4422,6 +4423,38 @@ class RemoveExtraIpViewObjectPermissionTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(stored_import_source(self.permitted).unassigned_ips, {})
+
+
+class SyncDeviceFieldLockTest(TransactionTestCase):
+    """The field sync writes from the row it locks, not from its first unlocked read."""
+
+    def test_a_write_after_the_first_read_is_the_recorded_before_state(self):
+        from django.db.models.signals import post_init
+        from dcim.models import Device
+
+        from netbox_data_import.tests.helpers import make_dcim_objects
+
+        user = User.objects.create_superuser("field-lock", "field-lock@example.invalid", "testpass")
+        self.client.force_login(user)
+        site, _manufacturer, device_type, role = make_dcim_objects("field-lock-")
+        device = Device.objects.create(
+            name="lock-device", site=site, device_type=device_type, role=role, serial="SN-OLD"
+        )
+
+        with competing_write_during(
+            post_init, Device, lambda: Device.objects.filter(pk=device.pk).update(serial="SN-CONCURRENT")
+        ) as (observed, blocked):
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:sync_device_field"),
+                {"device_id": device.pk, "field": "serial", "value": "SN-NEW"},
+            )
+
+        self.assertEqual((observed, blocked), ([True], []), "the competing write did not land after the first read")
+        self.assertTrue(response.json()["ok"], response.json())
+        (change,) = recorded_updates(device)
+        self.assertEqual(
+            (change.prechange_data["serial"], change.postchange_data["serial"]), ("SN-CONCURRENT", "SN-NEW")
+        )
 
 
 class SyncDeviceFieldViewTests(TestCase):
