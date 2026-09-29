@@ -26,9 +26,10 @@ SCHEMA_VERSION = "0.1"
 PACKAGE_NAME = "netbox-data-import"
 
 # Each release below starts a supported range that holds until the release above it. Add a row when
-# the range changes. Both rows are read off the tags: 1.0.0 enforced 4.2.0 with CI on v4.3.7, and
-# 1.5.0 raised the floor to 4.6.0 with CI on v4.6.7.
+# the range changes. The rows are read off the tags: 1.0.0 enforced 4.2.0 with CI on v4.3.7,
+# 1.5.0 raised the floor to 4.6.0 with CI on v4.6.7, and 2.6.0 kept 4.6.0 with CI up to v4.7.0.
 RANGE_HISTORY = [
+    ("2.6.0", "4.6.0", "4.7.0"),
     ("1.5.0", "4.6.0", "4.6.7"),
     ("1.0.0", "4.2.0", "4.3.7"),
 ]
@@ -77,7 +78,8 @@ def compatibility_rows() -> list[tuple[str, str, str]]:
             f"the plugin requires at load. Raise the matrix or lower min_version."
         )
     _newest_release, newest_min, newest_max = RANGE_HISTORY[0]
-    if (min_version, netbox_max) == (newest_min, newest_max):
+    # A released version keeps its recorded range; a changed range appears once the release bumps the version.
+    if (min_version, netbox_max) == (newest_min, newest_max) or version in {row[0] for row in RANGE_HISTORY}:
         return list(RANGE_HISTORY)
     return [(version, min_version, netbox_max), *RANGE_HISTORY]
 

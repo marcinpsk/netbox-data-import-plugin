@@ -6,6 +6,7 @@ semantic-release writes only the files in its `version_toml` and `version_variab
 a version source it does not know about drifts silently until someone reads it.
 """
 
+import importlib.util
 import tomllib
 from pathlib import Path
 
@@ -80,3 +81,31 @@ def test_the_changelog_carries_the_insertion_flag():
     flag = _changelog_config().get("insertion_flag") or MARKDOWN_INSERTION_FLAG
 
     assert flag in _changelog_path().read_text(encoding="utf-8")
+
+
+def _compatibility_generator():
+    """Load scripts/gen_compatibility.py, which is a script and not a package module."""
+    spec = importlib.util.spec_from_file_location(
+        "gen_compatibility", REPOSITORY_ROOT / "scripts" / "gen_compatibility.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_compatibility_matrix_names_each_release_once():
+    """An unreleased floor change must not relabel the range of the version already released."""
+    releases = [release for release, _minimum, _maximum in _compatibility_generator().compatibility_rows()]
+
+    assert len(releases) == len(set(releases)), releases
+
+
+def test_a_version_bump_publishes_the_changed_range(monkeypatch):
+    """The release build regenerates the matrix after the bump, so the new range gets the new version."""
+    generator = _compatibility_generator()
+    _version, min_version = generator.read_plugin_config()
+    monkeypatch.setattr(generator, "read_plugin_config", lambda: ("99.0.0", min_version))
+
+    top = generator.compatibility_rows()[0]
+
+    assert top == ("99.0.0", min_version, generator.newest_tested_netbox())
