@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""With netbox-branching installed, a core delete in a branch changes only the branch copy of plugin data."""
+"""With netbox-branching installed, a core delete in a branch changes only the branch copy of plugin data.
+
+A revert of a merged branch that cannot restore plugin data is refused.
+"""
 
 import uuid
 from collections.abc import Callable
@@ -14,7 +17,8 @@ from netbox_data_import import branching
 if not branching.installed():
     pytest.skip("netbox-branching is not an installed app", allow_module_level=True)
 
-from core.models import ObjectType
+from core.models import ObjectChange, ObjectType
+from dcim.choices import RackFormFactorChoices
 from dcim.models import Cable, Device, Interface, RackType
 from django.apps import apps
 from django.contrib.auth import get_user_model
@@ -25,8 +29,10 @@ from django.test import RequestFactory, SimpleTestCase, TransactionTestCase
 from extras.models import Tag, TaggedItem
 from netbox.context_managers import event_tracking
 from netbox_branching import utilities as branching_utilities
+from netbox_branching.choices import BranchStatusChoices
 from netbox_branching.models import Branch
-from netbox_branching.utilities import activate_branch, supports_branching
+from netbox_branching.utilities import BranchActionIndicator, activate_branch, supports_branching
+from utilities.exceptions import AbortTransaction
 
 from netbox_data_import.models import (
     CableImportSource,
@@ -195,8 +201,8 @@ class CascadeCase:
     kept: Any
 
 
-class BranchCascadeTest(TransactionTestCase):
-    """A Device, Cable, RackType or Tag delete in a branch reaches main only through a merge."""
+class _BranchLifecycleTest(TransactionTestCase):
+    """Provisioned branches and the core deletes that reach plugin data."""
 
     @classmethod
     def setUpClass(cls):
@@ -208,12 +214,16 @@ class BranchCascadeTest(TransactionTestCase):
         self.user = get_user_model().objects.create_user("branch-user")
         self.profile = ImportProfile.objects.create(name="Branch profile")
 
-    def _in_branch(self, branch, action):
+    def _logged(self, action):
         request = RequestFactory().get("/")
         request.user = self.user
         request.id = uuid.uuid4()
-        with activate_branch(branch), event_tracking(request):
+        with event_tracking(request):
             return action()
+
+    def _in_branch(self, branch, action):
+        with activate_branch(branch):
+            return self._logged(action)
 
     def _device_case(self):
         site, _manufacturer, device_type, role = make_dcim_objects("Cascade")
@@ -246,7 +256,12 @@ class BranchCascadeTest(TransactionTestCase):
 
     def _rack_type_case(self):
         _site, manufacturer, _device_type, _role = make_dcim_objects("Rack")
-        rack_type = RackType.objects.create(manufacturer=manufacturer, model="Cascade rack", slug="cascade-rack")
+        rack_type = RackType.objects.create(
+            manufacturer=manufacturer,
+            model="Cascade rack",
+            slug="cascade-rack",
+            form_factor=RackFormFactorChoices.TYPE_4POST,
+        )
         mapping = ClassRoleMapping.objects.create(
             profile=self.profile, source_class="Cabinet", creates_rack=True, rack_type=rack_type
         )
@@ -274,6 +289,10 @@ class BranchCascadeTest(TransactionTestCase):
 
     def _cases(self):
         return (self._device_case, self._cable_case, self._rack_type_case, self._tag_case)
+
+
+class BranchCascadeTest(_BranchLifecycleTest):
+    """A Device, Cable, RackType or Tag delete in a branch reaches main only through a merge."""
 
     def test_a_provisioned_branch_holds_the_plugin_tables(self):
         branch = provision_branch(self, "tables")
@@ -323,3 +342,75 @@ class BranchCascadeTest(TransactionTestCase):
                 branch.delete()
 
                 self.assertEqual(case.observe(), case.kept, "the discarded delete reached main")
+
+
+class BranchRevertTest(_BranchLifecycleTest):
+    """A revert that cannot restore plugin data is refused, and any other revert proceeds."""
+
+    def _assert_revert_refused(self, branch, deleted_type):
+        changes = ObjectChange.objects.count()
+
+        indicator = branch.can_revert
+
+        self.assertFalse(indicator.permitted, "the revert is permitted")
+        self.assertEqual(
+            indicator.message,
+            f"NetBox Data Import data cannot be restored by a revert, and this branch deleted objects of these "
+            f"types: {deleted_type}.",
+        )
+        with self.assertRaisesMessage(Exception, "Reverting this branch is not permitted."):
+            branch.revert(user=self.user, commit=True)
+        branch.refresh_from_db()
+        self.assertEqual(branch.status, BranchStatusChoices.MERGED)
+        self.assertEqual(ObjectChange.objects.count(), changes, "the refused revert changed main")
+
+    def test_a_revert_after_a_merged_delete_is_refused(self):
+        for make_case in self._cases():
+            case = make_case()
+            with self.subTest(case=case.name):
+                branch = provision_branch(self, f"revert {case.name}")
+                self._in_branch(branch, case.delete)
+                branch.merge(user=self.user)
+
+                self._assert_revert_refused(branch, case.name)
+
+                self.assertEqual(case.observe(), case.deleted, "the refused revert changed main's plugin data")
+                with self.assertRaises(AbortTransaction, msg="the dry run was refused"):
+                    branch.revert(user=self.user, commit=False)
+
+    def test_a_revert_after_a_synced_plugin_row_delete_is_refused(self):
+        # Main deletes the core object, so the sync records a synthetic delete of the branch copy.
+        for make_case, synthetic in ((self._device_case, "Device Import Source"), (self._tag_case, "tagged item")):
+            case = make_case()
+            with self.subTest(case=case.name):
+                branch = provision_branch(self, f"sync {case.name}")
+                self._logged(case.delete)
+                branch.sync(user=self.user)
+                self.assertEqual(self._in_branch(branch, case.observe), case.deleted, "the sync kept the branch copy")
+                branch.merge(user=self.user)
+
+                self._assert_revert_refused(branch, synthetic)
+
+    def test_a_revert_after_a_merged_edit_restores_main(self):
+        site, _manufacturer, device_type, role = make_dcim_objects("Edit")
+        device = Device.objects.create(
+            name="edited-device", site=site, device_type=device_type, role=role, description="before"
+        )
+        DeviceImportSource.objects.create(device=device, profile=self.profile, source_id="row-1")
+        branch = provision_branch(self, "revert edit")
+
+        def edit():
+            edited = Device.objects.get(pk=device.pk)
+            edited.snapshot()
+            edited.description = "after"
+            edited.save()
+
+        self._in_branch(branch, edit)
+        branch.merge(user=self.user)
+        self.assertEqual(Device.objects.get(pk=device.pk).description, "after")
+
+        self.assertEqual(branch.can_revert, BranchActionIndicator(True))
+        branch.revert(user=self.user, commit=True)
+
+        self.assertEqual(Device.objects.get(pk=device.pk).description, "before")
+        self.assertTrue(DeviceImportSource.objects.filter(device_id=device.pk).exists())
