@@ -96,18 +96,19 @@ def _compatibility_generator():
 
 def test_the_compatibility_matrix_names_each_release_once():
     """An unreleased floor change must not relabel the range of the version already released."""
-    releases = [release for release, _minimum, _maximum in _compatibility_generator().compatibility_rows()]
+    generator = _compatibility_generator()
+    rows = generator.compatibility_rows(*generator.read_plugin_config())
+    releases = [release for release, _minimum, _maximum in rows]
 
     assert len(releases) == len(set(releases)), releases
 
 
-def test_a_version_bump_publishes_the_changed_range(monkeypatch):
+def test_a_version_bump_publishes_the_changed_range():
     """The release build regenerates the matrix after the bump, so the new range gets the new version."""
     generator = _compatibility_generator()
     _version, min_version = generator.read_plugin_config()
-    monkeypatch.setattr(generator, "read_plugin_config", lambda: ("99.0.0", min_version))
 
-    top = generator.compatibility_rows()[0]
+    top = generator.compatibility_rows("99.0.0", min_version)[0]
 
     assert top == ("99.0.0", min_version, generator.newest_tested_netbox())
 
