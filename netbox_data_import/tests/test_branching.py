@@ -144,6 +144,14 @@ class StartupValidationTest(SimpleTestCase):
         with self.assertRaisesMessage(ImproperlyConfigured, "register_branching_resolver"):
             branching.register()
 
+    def test_a_release_older_than_1_2_fails_startup(self):
+        config = apps.get_app_config("netbox_branching")
+        self.addCleanup(setattr, config, "version", config.version)
+        config.version = "1.1.1"
+
+        with self.assertRaisesMessage(ImproperlyConfigured, "1.1.1"):
+            branching.register()
+
     def test_without_the_installed_app_nothing_is_active_or_registered(self):
         registered = list(self.resolvers)
         apps.set_available_apps(

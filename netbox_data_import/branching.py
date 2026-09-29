@@ -11,10 +11,13 @@ from django.db import models
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.urls import reverse
+from packaging.version import Version
 
 APP_LABEL = "netbox_data_import"
 BRANCHING_APP_LABEL = "netbox_branching"
 REFUSAL_CODE = "branch_not_supported"
+# The design covers netbox-branching 1.2.x; 1.1.x also has register_branching_resolver.
+MINIMUM_BRANCHING_RELEASE = Version("1.2")
 
 
 class BranchActive(Exception):
@@ -127,6 +130,12 @@ def register() -> None:
     """Register the resolver with netbox-branching, and refuse a configuration that overrides it."""
     if not installed():
         return
+    release = apps.get_app_config(BRANCHING_APP_LABEL).version
+    if Version(release) < MINIMUM_BRANCHING_RELEASE:
+        raise ImproperlyConfigured(
+            f"{APP_LABEL}: netbox-branching {release} is installed; this plugin needs {MINIMUM_BRANCHING_RELEASE} "
+            "or later."
+        )
     try:
         from netbox_branching.utilities import register_branching_resolver, supports_branching
     except ImportError as exc:
