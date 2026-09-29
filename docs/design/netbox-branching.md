@@ -51,9 +51,12 @@ enforces it.
   branch connection. `locked_profile_policy` (`models.py`) wraps every import this way.
 - `ImportJobRunner` and `ResolutionProposalJob` are plain `JobRunner`s. NetBox applies request
   processors (which activate the branch) only in `ScriptJob`, `AsyncViewJob` and `AsyncAPIJob`.
+  `ImportJobRunner` enters NetBox's `event_tracking` only, so it records ObjectChanges and
+  activates no branch.
 - Raw cursors on `django.db.connection` read tables at `object_permissions.py` (permission query)
   and `cable_target.py` (`extras_tag ... FOR SHARE`).
-- No code calls `obj.snapshot()` before it updates an existing NetBox object.
+- Plugin code calls `snapshot()` before it updates an existing change-logged object (#188). A
+  test-time guard (`tests/snapshot_guard.py`) fails a plugin write without a current snapshot.
 - Migration 0038 adds a column, trigger and foreign key on `extras_taggeditem` through `RunSQL`.
   Branch provisioning copies triggers, but not foreign keys.
 - The CI matrix runs NetBox 4.7.0 and 4.6.10, without netbox-branching.
@@ -273,8 +276,6 @@ A new `test.yaml` job: NetBox 4.7.0, netbox-branching 1.2.1, `DynamicSchemaDict`
 
 ### Out of scope
 
-- No code calls `snapshot()`, so main's changelog has no before-state for objects the plugin
-  updates. That is a main defect and needs its own ticket.
 - NetBox's `AsyncAPIJob` drops the branch selector (B3). Report it upstream.
 
 ## Next action
@@ -293,5 +294,4 @@ Implement in layers; each increment ends green in the new CI job.
    revert proceeds.
 4. **Migrations.** `fake_on_branch = True` on the eight data migrations, and guard 3.
 
-Follow-ups outside this design: `snapshot()` before plugin updates (main changelog), and the upstream
-report on `AsyncAPIJob` dropping the branch selector.
+Follow-up outside this design: the upstream report on `AsyncAPIJob` dropping the branch selector.
