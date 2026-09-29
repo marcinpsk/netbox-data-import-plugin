@@ -79,6 +79,25 @@ class TagsMigrationTest(TransactionTestCase):
                 )
         self.assertFalse(TaggedItem.objects.exists())
 
+    def test_the_data_move_alone_rolls_back_to_one_copy_of_each_assignment(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate([BEFORE])
+        old_apps = executor.loader.project_state([BEFORE]).apps
+        tag = old_apps.get_model("extras", "Tag").objects.create(name="Round trip", slug="round-trip")
+        profile = old_apps.get_model(APP, "ImportProfile").objects.create(name="Round trip profile")
+        profile.tags.add(tag)
+        backend = old_apps.get_model(APP, "InferenceBackend").objects.create(backend_key="round-trip", **BACKEND_FIELDS)
+        backend.tags.add(tag)
+
+        MigrationExecutor(connection).migrate([(APP, DATA_MOVE)])
+        MigrationExecutor(connection).migrate([BEFORE])
+
+        for model_name, pk in (("importprofile", profile.pk), ("inferencebackend", backend.pk)):
+            with self.subTest(model=model_name):
+                links = old_apps.get_model(APP, model_name).tags.through
+                self.assertEqual(list(links.objects.values_list(f"{model_name}_id", "tag_id")), [(pk, tag.pk)])
+        self.assertFalse(TaggedItem.objects.filter(content_type__app_label=APP).exists())
+
     def test_rollback_drops_an_assignment_whose_object_is_gone(self):
         tag = Tag.objects.create(name="Orphan", slug="orphan")
         profile = ImportProfile.objects.create(name="Kept profile")

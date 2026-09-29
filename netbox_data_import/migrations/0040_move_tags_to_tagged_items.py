@@ -15,17 +15,20 @@ def _tag_links(apps, model_name):
 
 
 def move_tags_to_tagged_items(apps, schema_editor):
-    """Copy every tags through-table row into NetBox's standard tag assignment table."""
+    """Move every tags through-table row into NetBox's standard tag assignment table."""
     ContentType = apps.get_model("contenttypes", "ContentType")
     TaggedItem = apps.get_model("extras", "TaggedItem")
     for model_name in TAGGED_MODELS:
-        links = list(_tag_links(apps, model_name).objects.values_list(f"{model_name}_id", "tag_id"))
+        rows = _tag_links(apps, model_name).objects.all()
+        links = list(rows.values_list(f"{model_name}_id", "tag_id"))
         if not links:
             continue
         content_type = ContentType.objects.get(app_label=APP_LABEL, model=model_name)
         TaggedItem.objects.bulk_create(
             TaggedItem(content_type=content_type, object_id=object_id, tag_id=tag_id) for object_id, tag_id in links
         )
+        # Each assignment lives in one table only, so a rollback of this migration alone does not duplicate it.
+        rows.delete()
 
 
 def move_tagged_items_to_tags(apps, schema_editor):
