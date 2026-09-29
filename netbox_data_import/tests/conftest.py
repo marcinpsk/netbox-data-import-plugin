@@ -27,7 +27,7 @@ def django_db_modify_db_settings(django_db_modify_db_settings):
 
 @pytest.fixture(scope="session", autouse=True)
 def changelog_snapshot_guard():
-    """Check every save in the session for a current prechange snapshot."""
+    """Check every save and many-to-many change in the session for a current prechange snapshot."""
     from netbox_data_import.tests import snapshot_guard
 
     snapshot_guard.connect()

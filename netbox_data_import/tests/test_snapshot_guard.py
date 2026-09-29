@@ -14,6 +14,10 @@ def _save(instance):
     instance.save()
 
 
+def _add_tag(instance, tag):
+    instance.tags.add(tag)
+
+
 def _create_cable(a_end, b_end):
     from dcim.models import Cable
 
@@ -28,6 +32,7 @@ def _from_module(function, module_name):
 _plugin_save = _from_module(_save, "netbox_data_import._guard_probe")
 _netbox_save = _from_module(_save, "dcim._guard_probe")
 _plugin_create_cable = _from_module(_create_cable, "netbox_data_import._guard_probe")
+_plugin_add_tag = _from_module(_add_tag, "netbox_data_import._guard_probe")
 
 
 class SnapshotGuardTest(TestCase):
@@ -54,7 +59,7 @@ class SnapshotGuardTest(TestCase):
         with self.assertRaises(MissingChangelogSnapshot) as raised:
             _plugin_save(site)
 
-        self.assertIn(f"dcim.Site pk={site.pk} was saved with no prechange snapshot", str(raised.exception))
+        self.assertIn(f"dcim.Site pk={site.pk} was written with no prechange snapshot", str(raised.exception))
         self.assertIn(f"{__file__}:", str(raised.exception))
         self.assertEqual(snapshot_guard.take_violations(), [str(raised.exception)])
 
@@ -67,7 +72,7 @@ class SnapshotGuardTest(TestCase):
         site.description = "changed"
 
         with self.assertRaisesMessage(
-            MissingChangelogSnapshot, "was saved with a stale prechange snapshot (differs in description)"
+            MissingChangelogSnapshot, "was written with a stale prechange snapshot (differs in description)"
         ):
             _plugin_save(site)
 
@@ -79,7 +84,7 @@ class SnapshotGuardTest(TestCase):
         site.description = "second"
 
         with self.assertRaisesMessage(
-            MissingChangelogSnapshot, "was saved with a stale prechange snapshot (differs in description)"
+            MissingChangelogSnapshot, "was written with a stale prechange snapshot (differs in description)"
         ):
             _plugin_save(site)
 
@@ -115,7 +120,7 @@ class SnapshotGuardTest(TestCase):
         _plugin_save(site)
         site.description = "changed"
 
-        with self.assertRaisesMessage(MissingChangelogSnapshot, "was saved with no prechange snapshot"):
+        with self.assertRaisesMessage(MissingChangelogSnapshot, "was written with no prechange snapshot"):
             _plugin_save(site)
 
     def test_netbox_saves_inside_a_plugin_call_are_not_the_plugin_update(self):
@@ -129,5 +134,37 @@ class SnapshotGuardTest(TestCase):
         b_end = Interface.objects.create(device=device, name="eth1", type="1000base-t")
 
         _plugin_create_cable(a_end, b_end)
+
+        self.assertEqual(snapshot_guard.take_violations(), [])
+
+
+class SnapshotGuardM2MTest(TestCase):
+    """A plugin change to a many-to-many field of an existing object needs a current snapshot too."""
+
+    def setUp(self):
+        from dcim.models import Site
+        from extras.models import Tag
+
+        Site.objects.create(name="Tagged Site", slug="tagged-site")
+        self.site = Site.objects.get(slug="tagged-site")
+        self.tag = Tag.objects.create(name="Guard Tag", slug="guard-tag")
+
+    def tearDown(self):
+        snapshot_guard.take_violations()
+        super().tearDown()
+
+    def test_a_plugin_tag_change_without_a_snapshot_fails(self):
+        with self.assertRaisesMessage(MissingChangelogSnapshot, "was written with no prechange snapshot"):
+            _plugin_add_tag(self.site, self.tag)
+
+    def test_a_plugin_tag_change_with_a_current_snapshot_passes(self):
+        self.site.snapshot()
+
+        _plugin_add_tag(self.site, self.tag)
+
+        self.assertEqual(snapshot_guard.take_violations(), [])
+
+    def test_a_test_tag_change_needs_no_snapshot(self):
+        _add_tag(self.site, self.tag)
 
         self.assertEqual(snapshot_guard.take_violations(), [])
