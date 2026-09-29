@@ -34,7 +34,12 @@ from netbox_data_import.preview_row_actions import (
     PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
     retire_preview_revision,
 )
-from netbox_data_import.tests.helpers import run_on_separate_connection, user_with_object_permission, workbook_bytes
+from netbox_data_import.tests.helpers import (
+    recorded_updates,
+    run_on_separate_connection,
+    user_with_object_permission,
+    workbook_bytes,
+)
 from netbox_data_import.views import NO_RACK_FILTER_VALUE
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
@@ -932,6 +937,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         existing.refresh_from_db()
         self.assertEqual(existing.device_type_id, expected_type.pk, "the update row did not reach NetBox")
+        (change,) = recorded_updates(existing)
+        self.assertEqual(change.prechange_data["device_type"], other_type.pk)
 
     def test_single_row_sync_refuses_an_adapter_with_no_target_module(self):
         """A changed profile can require a Target Module that this release cannot run."""

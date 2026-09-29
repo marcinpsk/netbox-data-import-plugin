@@ -652,6 +652,8 @@ def _scoped_write(
                 raise ObjectPermissionDenied(get_permission_for_model(model, "add"))
             # Before, so a row outside the user's scope cannot be taken over.
             enforce_saved_object_permission(instance, user, "change")
+            if hasattr(instance, "snapshot"):
+                instance.snapshot()
             for field_name, value in values.items():
                 setattr(instance, field_name, value)
             reject_overlong_fields(instance, model)

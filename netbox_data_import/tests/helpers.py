@@ -575,3 +575,16 @@ def cables_on(*terminations):
             terminations__termination_id=termination.pk,
         )
     return found
+
+
+def recorded_updates(obj):
+    """Return the update ObjectChanges NetBox recorded for *obj*, oldest first."""
+    from core.models import ObjectChange, ObjectType
+
+    return list(
+        ObjectChange.objects.filter(
+            changed_object_type=ObjectType.objects.get_for_model(type(obj)),
+            changed_object_id=obj.pk,
+            action="update",
+        ).order_by("pk")
+    )

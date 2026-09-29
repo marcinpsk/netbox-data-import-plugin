@@ -478,12 +478,14 @@ class PrimaryContactResolver:
             assignment = None
             if action == "replace":
                 assignment = ContactAssignment.objects.get(pk=plan["primary_assignment_id"])
+                assignment.snapshot()
                 assignment.contact = contact
                 assignment.full_clean()
                 assignment.save(update_fields=["contact"])
                 enforce_saved_object_permission(assignment, user, "change")
             elif action == "demote_and_promote":
                 previous = ContactAssignment.objects.get(pk=plan["primary_assignment_id"])
+                previous.snapshot()
                 previous.priority = "secondary"
                 previous.full_clean()
                 previous.save(update_fields=["priority"])
@@ -498,6 +500,7 @@ class PrimaryContactResolver:
                 assignment.save()
                 enforce_saved_object_permission(assignment, user, "add")
             elif assignment.priority != "primary":
+                assignment.snapshot()
                 assignment.priority = "primary"
                 assignment.full_clean()
                 assignment.save(update_fields=["priority"])

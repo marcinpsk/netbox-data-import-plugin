@@ -2124,17 +2124,20 @@ def _placement_matches_preview(device, row) -> bool:
 
 
 def _locked_placement_device(request, device_pk):
-    """Return the Device row locked for update, or None when it is gone or not permitted."""
+    """Return the Device row locked and snapshotted for update, or None when it is gone or not permitted."""
     from dcim.models import Device
 
     # PostgreSQL refuses FOR UPDATE on a nullable outer join, so `of` locks the Device row alone.
-    return (
+    device = (
         Device.objects.restrict(request.user, "change")
         .select_for_update(of=("self",))
         .select_related("site", "location", "rack", "device_type")
         .filter(pk=device_pk)
         .first()
     )
+    if device is not None:
+        device.snapshot()
+    return device
 
 
 def _placement_action_intent(request):
@@ -2583,6 +2586,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
 
     def _apply_field(self, device, field, value, status_map, user):
         """Write one previewed value onto the device, through that field's own writer."""
+        device.snapshot()
         if field in self._IP_FIELDS:
             return self._apply_ip_field(device, field, value, user)
         writer = {

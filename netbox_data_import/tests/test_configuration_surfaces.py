@@ -27,6 +27,7 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.tests.helpers import (
     make_dcim_objects,
+    recorded_updates,
     run_on_separate_connection,
     user_with_object_permission,
     wait_until_a_lock_is_blocked,
@@ -992,6 +993,22 @@ class ProfileYamlSurfaceTest(TestCase):
         self.assertContains(response, "Duplicate column_transform_rules identity: Device label")
         self.assertEqual(rule.pattern, r"^(.+)$")
         self.assertEqual(ColumnTransformRule.objects.filter(profile=profile).count(), 1)
+
+    def test_updating_a_profile_records_its_stored_state(self):
+        """A YAML update of an existing profile records what the profile held before it."""
+        profile = ImportProfile.objects.create(name="Changelog profile", description="before", adapter_config={})
+        upload = BytesIO(
+            yaml.safe_dump({"profile": {"name": profile.name, "description": "after", "adapter_config": {}}}).encode()
+        )
+        upload.name = "changelog-profile.yaml"
+
+        response = self.client.post(reverse("plugins:netbox_data_import:import_profile_yaml"), {"yaml_file": upload})
+
+        self.assertEqual(response.status_code, 302, response.content)
+        (change,) = recorded_updates(profile)
+        self.assertEqual(
+            (change.prechange_data["description"], change.postchange_data["description"]), ("before", "after")
+        )
 
     def test_import_rejects_pre_cutover_profile_fields(self):
         """Profile YAML has one current shape and no legacy adapter compatibility path."""

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
-"""Pytest fixtures for isolated parallel test workers."""
+"""Pytest fixtures for isolated parallel test workers and the changelog snapshot guard."""
 
 import os
 
@@ -23,3 +23,25 @@ def django_db_modify_db_settings(django_db_modify_db_settings):
         os.environ.get("PYTEST_XDIST_WORKER"),
     )
     settings.DATABASES["default"]["TEST"] = test_config
+
+
+@pytest.fixture(scope="session", autouse=True)
+def changelog_snapshot_guard():
+    """Check every save in the session for a current prechange snapshot."""
+    from netbox_data_import.tests import snapshot_guard
+
+    snapshot_guard.connect()
+    yield
+    snapshot_guard.disconnect()
+
+
+@pytest.fixture(autouse=True)
+def changelog_snapshot_violations(changelog_snapshot_guard):
+    """Fail a test whose code swallowed a snapshot guard failure."""
+    from netbox_data_import.tests import snapshot_guard
+
+    snapshot_guard.take_violations()
+    yield
+    violations = snapshot_guard.take_violations()
+    if violations:
+        pytest.fail("\n".join(violations), pytrace=False)

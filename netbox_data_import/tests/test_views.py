@@ -27,6 +27,7 @@ from netbox_data_import.preview_row_actions import (
 )
 from netbox_data_import.tests.helpers import (
     assert_action_link_is_named,
+    recorded_updates,
     run_on_separate_connection,
     set_import_source,
     setup_preview_with_device_matches,
@@ -4484,6 +4485,40 @@ class SyncDeviceFieldViewTests(TestCase):
         self.device.refresh_from_db()
         self.assertEqual(self.device.serial, "SN-12345")
 
+    def test_a_field_sync_records_the_stored_value(self):
+        """The changelog shows what the device held before the sync, not an empty before-state."""
+        self.device.serial = "SN-OLD"
+        self.device.save()
+
+        self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "SN-NEW"})
+
+        (change,) = recorded_updates(self.device)
+        self.assertEqual((change.prechange_data["serial"], change.postchange_data["serial"]), ("SN-OLD", "SN-NEW"))
+        self.assertEqual(change.user, self.user)
+
+    def test_an_ip_field_sync_records_the_stored_address_and_device(self):
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        interface = Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        address = IPAddress.objects.create(address="198.18.0.30/32")
+
+        response = self.client.post(
+            self.url, {"device_id": self.device.pk, "field": "primary_ip4", "value": "198.18.0.30"}
+        )
+
+        self.assertTrue(response.json()["ok"], response.json())
+        (moved,) = recorded_updates(address)
+        self.assertEqual(
+            (moved.prechange_data["assigned_object_id"], moved.postchange_data["assigned_object_id"]),
+            (None, interface.pk),
+        )
+        (device_change,) = recorded_updates(self.device)
+        self.assertEqual(
+            (device_change.prechange_data["primary_ip4"], device_change.postchange_data["primary_ip4"]),
+            (None, address.pk),
+        )
+
     def test_sync_asset_tag(self):
         """Set asset_tag on device via SyncDeviceFieldView."""
         response = self.client.post(self.url, {"device_id": self.device.pk, "field": "asset_tag", "value": "AT-001"})
@@ -5034,6 +5069,22 @@ class SyncRackAndPlacementTests(TestCase):
         self.assertTrue(data["ok"], data)
         self.device_no_loc.refresh_from_db()
         self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
+
+    def test_a_placement_sync_records_the_stored_placement(self):
+        """The changelog shows the device before it was racked, not an empty before-state."""
+        self.client.post(
+            self.placement_url,
+            {"device_id": self.device_no_loc.pk, "rack_name": "R1", "u_position": "5", "face": "front"},
+        )
+
+        (change,) = recorded_updates(self.device_no_loc)
+        self.assertEqual(
+            (change.prechange_data["rack"], change.prechange_data["position"], change.prechange_data["face"]),
+            (None, None, None),
+        )
+        self.assertEqual(
+            (change.postchange_data["rack"], change.postchange_data["face"]), (self.rack_no_loc.pk, "front")
+        )
 
     def test_rack_name_sync_with_location(self):
         """Device with location matches rack in same location (via placement)."""
