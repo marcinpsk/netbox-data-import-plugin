@@ -31,8 +31,11 @@ from netbox_data_import.tests.helpers import (
     recorded_updates,
     run_on_separate_connection,
     set_import_source,
+    queued_webhooks,
     setup_preview_with_device_matches,
+    update_webhook_rule,
 )
+from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 User = get_user_model()
 
@@ -4423,6 +4426,58 @@ class RemoveExtraIpViewObjectPermissionTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(stored_import_source(self.permitted).unassigned_ips, {})
+
+
+class RolledBackSyncEventsTest(IsolatedRQQueueTestMixin, TransactionTestCase):
+    """A sync that rolls back its Device write sends no event for that write."""
+
+    def setUp(self):
+        super().setUp()
+        from dcim.models import Device, Rack
+
+        from netbox_data_import.tests.helpers import make_dcim_objects
+
+        self.client.force_login(User.objects.create_superuser("sync-events", "sync-events@example.invalid", "x"))
+        site, _manufacturer, device_type, role = make_dcim_objects("sync-events-")
+        self.rack = Rack.objects.create(name="Events Rack", site=site, u_height=42)
+        self.device = Device.objects.create(name="events-device", site=site, device_type=device_type, role=role)
+        update_webhook_rule(Device)
+
+    def _refused_after_the_write(self, post, data):
+        """Post while a receiver refuses each Device save after NetBox has queued its event."""
+        from django.db.models.signals import post_save
+        from dcim.models import Device
+
+        def refuse(sender, instance, **kwargs):
+            raise RuntimeError("refused after the write")
+
+        post_save.connect(refuse, sender=Device, weak=False)
+        try:
+            with self.assertLogs("netbox_data_import.views", level="ERROR"):
+                return post(data)
+        finally:
+            post_save.disconnect(refuse, sender=Device)
+
+    def _assert_only_the_committed_sync_sends_an_event(self, url, data):
+        refused = self._refused_after_the_write(lambda posted: self.client.post(url, posted), data)
+
+        self.assertEqual(refused.status_code, 500, refused.content)
+        self.assertEqual(queued_webhooks(), [], "an event was sent for a rolled-back write")
+        committed = self.client.post(url, data)
+        self.assertTrue(committed.json()["ok"], committed.json())
+        self.assertEqual(len(queued_webhooks()), 1)
+
+    def test_a_refused_field_sync_sends_no_event(self):
+        self._assert_only_the_committed_sync_sends_an_event(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            {"device_id": self.device.pk, "field": "serial", "value": "SN-NEW"},
+        )
+
+    def test_a_refused_placement_sync_sends_no_event(self):
+        self._assert_only_the_committed_sync_sends_an_event(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            {"device_id": self.device.pk, "rack_name": self.rack.name},
+        )
 
 
 class SyncDeviceFieldLockTest(TransactionTestCase):

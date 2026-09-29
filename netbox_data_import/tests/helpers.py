@@ -591,7 +591,10 @@ def recorded_updates(obj):
 
 
 def update_webhook_rule(model):
-    """Enable a webhook EventRule for updates of *model*; its unroutable URL fails fast if the job runs."""
+    """Enable a webhook EventRule for updates of *model*; its unroutable URL fails fast if the job runs.
+
+    django-rq enqueues on database commit, so a test that reads the queue must be a TransactionTestCase.
+    """
     from core.models import ObjectType
     from extras.models import EventRule, Webhook
 
@@ -605,3 +608,10 @@ def update_webhook_rule(model):
     )
     rule.object_types.set([ObjectType.objects.get_for_model(model)])
     return rule
+
+
+def queued_webhooks():
+    """Return the webhook jobs waiting in the default RQ queue."""
+    from django_rq import get_queue
+
+    return [job for job in get_queue("default").jobs if job.func_name == "extras.webhooks.send_webhook"]

@@ -18,6 +18,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
+from core.signals import clear_events
 from netbox.views import generic
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -2561,17 +2562,22 @@ class SyncDeviceFieldView(_AjaxPermissionView):
                 return JsonResponse({"ok": False, "error": "Device not found"})
 
         try:
-            # Nothing wraps this request, and a receiver on the model can require a transaction.
-            with transaction.atomic():
-                # The read above was unlocked, so the write and its snapshot use the locked row.
-                locked = _locked_device_for_update(request, device.pk)
-                if locked is None:
-                    # atomic-exit-safe: device-gone-before-write
-                    return JsonResponse({"ok": False, "error": "Device not found"}, status=409)
-                if is_preview_action and (error := _field_baseline_error(row, locked, field)):
-                    # atomic-exit-safe: baseline-moved-before-write
-                    return JsonResponse({"ok": False, "error": error}, status=409)
-                display = self._apply_field(locked, field, value, status_map(), request.user)
+            try:
+                # Nothing wraps this request, and a receiver on the model can require a transaction.
+                with transaction.atomic():
+                    # The read above was unlocked, so the write and its snapshot use the locked row.
+                    locked = _locked_device_for_update(request, device.pk)
+                    if locked is None:
+                        # atomic-exit-safe: device-gone-before-write
+                        return JsonResponse({"ok": False, "error": "Device not found"}, status=409)
+                    if is_preview_action and (error := _field_baseline_error(row, locked, field)):
+                        # atomic-exit-safe: baseline-moved-before-write
+                        return JsonResponse({"ok": False, "error": error}, status=409)
+                    display = self._apply_field(locked, field, value, status_map(), request.user)
+            except Exception:
+                # The block rolled back, so NetBox must not send the events its writes queued.
+                clear_events.send(sender=self)
+                raise
         except PreviewActionInvalid as exc:
             return JsonResponse({"ok": False, "error": str(exc)})
         except Exception:
@@ -2884,12 +2890,14 @@ class SyncPlacementView(_AjaxPermissionView):
             except ValidationError as exc:
                 # full_clean sends post_clean, whose receivers may write before raising.
                 transaction.set_rollback(True)
+                clear_events.send(sender=self)
                 return JsonResponse(
                     {"ok": False, "error": f"Validation failed: {_placement_error_text(exc)}"}, status=400
                 )
             except Exception:
                 logger.exception("SyncPlacementView full_clean failed for device_id=%s", device.pk)
                 transaction.set_rollback(True)
+                clear_events.send(sender=self)
                 return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
             try:
@@ -2898,6 +2906,7 @@ class SyncPlacementView(_AjaxPermissionView):
                 logger.exception("SyncPlacementView save failed for device_id=%s", device.pk)
                 # A receiver raising after the UPDATE would otherwise commit a write reported as failed.
                 transaction.set_rollback(True)
+                clear_events.send(sender=self)
                 return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
         parts = [f"rack={rack.name}"]
@@ -5587,6 +5596,14 @@ class SyncSingleRowView(_AjaxPermissionView):
 
     permission_required = "netbox_data_import.change_importprofile"
 
+    def _execute_unit(self, profile, document, plan_data, identity, user) -> None:
+        """Execute one unit, and drop the events its writes queued when the engine rolls them back."""
+        try:
+            ImportEngine.execute(profile, document, plan_data, [identity], uuid.uuid4().hex, user)
+        except Exception:
+            clear_events.send(sender=self)
+            raise
+
     def post(self, request):
         """Execute one selected Synchronization Unit and return JSON."""
         ctx_data = request.session.get("import_context")
@@ -5647,14 +5664,7 @@ class SyncSingleRowView(_AjaxPermissionView):
             )
 
         try:
-            ImportEngine.execute(
-                profile,
-                document,
-                plan_data,
-                [preview_unit.identity],
-                uuid.uuid4().hex,
-                request.user,
-            )
+            self._execute_unit(profile, document, plan_data, preview_unit.identity, request.user)
         except (
             PlanError,
             PlanningTargetUnavailable,

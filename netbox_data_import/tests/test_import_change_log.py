@@ -17,6 +17,7 @@ from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportPro
 from netbox_data_import.plan import Disposition
 from netbox_data_import.tests.helpers import (
     make_dcim_objects,
+    queued_webhooks,
     recorded_updates,
     store_workbook_document,
     update_webhook_rule,
@@ -199,7 +200,6 @@ class ImportJobEventTest(IsolatedRQQueueTestMixin, ImportJobTestBase):
         from dcim.models import Device, Rack
         from django.core.exceptions import ValidationError
         from django.db.models.signals import pre_save
-        from django_rq import get_queue
 
         update_webhook_rule(Rack)
 
@@ -216,9 +216,9 @@ class ImportJobEventTest(IsolatedRQQueueTestMixin, ImportJobTestBase):
         self.rack.refresh_from_db()
         self.assertEqual(self.rack.u_height, 20, "the rack write did not roll back")
         self.assertEqual(recorded_updates(self.rack), [])
-        self.assertEqual(get_queue("default").count, 0)
+        self.assertEqual(queued_webhooks(), [])
 
         self._run_import(self._cabinet_row(), self._server_row())
 
         self.assertEqual(len(recorded_updates(self.rack)), 1)
-        self.assertEqual(get_queue("default").count, 1)
+        self.assertEqual(len(queued_webhooks()), 1)

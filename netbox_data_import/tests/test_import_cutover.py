@@ -35,6 +35,7 @@ from netbox_data_import.preview_row_actions import (
     retire_preview_revision,
 )
 from netbox_data_import.tests.helpers import (
+    queued_webhooks,
     recorded_updates,
     run_on_separate_connection,
     update_webhook_rule,
@@ -986,6 +987,30 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertEqual(existing.device_type_id, expected_type.pk, "the update row did not reach NetBox")
         (change,) = recorded_updates(existing)
         self.assertEqual(change.prechange_data["device_type"], other_type.pk)
+
+    def test_a_refused_single_row_sync_sends_no_event(self):
+        """The engine rolls the row back, so the event NetBox queued for it must not be sent."""
+        from dcim.models import Device
+        from django.db.models.signals import post_save
+
+        self._existing_server()
+        update_webhook_rule(Device)
+        self._upload()
+
+        def refuse(sender, instance, **kwargs):
+            raise ValidationError("The Device write is refused after it ran.")
+
+        post_save.connect(refuse, sender=Device, weak=False)
+        try:
+            refused = self._sync_single_row({"row_number": 3})
+        finally:
+            post_save.disconnect(refuse, sender=Device)
+
+        self.assertEqual(refused.status_code, 400, refused.content[:400])
+        self.assertEqual(queued_webhooks(), [], "an event was sent for a rolled-back write")
+        committed = self._sync_single_row({"row_number": 3})
+        self.assertEqual(committed.status_code, 200, committed.content[:400])
+        self.assertEqual(len(queued_webhooks()), 1)
 
     def test_single_row_sync_refuses_an_adapter_with_no_target_module(self):
         """A changed profile can require a Target Module that this release cannot run."""
