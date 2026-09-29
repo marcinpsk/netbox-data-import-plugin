@@ -1313,6 +1313,7 @@ class ProposalFailureReason:
     CREDENTIAL_DENIED = "credential_denied"
     CREDENTIAL_INVALID = "credential_invalid"
     SUPERSEDED_REQUEST = "superseded_request"
+    BRANCH_ACTIVE = "branch_active"
 
     CHOICES = (
         (BACKEND_REFUSAL, "Backend refusal"),
@@ -1327,6 +1328,7 @@ class ProposalFailureReason:
         (CREDENTIAL_DENIED, "Credential denied"),
         (CREDENTIAL_INVALID, "Invalid credential reference or secret"),
         (SUPERSEDED_REQUEST, "Superseded by a newer request contract"),
+        (BRANCH_ACTIVE, "Refused inside a netbox-branching branch"),
     )
 
     #: Section 7.5: these retry at most twice inside the same proposal; every other reason fails at once.

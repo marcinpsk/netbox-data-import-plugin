@@ -16,7 +16,7 @@ if not branching.installed():
     pytest.skip("netbox-branching is not an installed app", allow_module_level=True)
 
 from core.choices import JobStatusChoices
-from core.models import Job
+from core.models import Job, ObjectType
 from dcim.models import Device
 from django.contrib.auth import get_user_model
 from django.db import connections
@@ -325,7 +325,6 @@ class BackgroundRefusalTest(TransactionTestCase):
                 "selection": [],
                 "idempotency_key": "branch-refusal",
             },
-            ResolutionProposalJob: {"proposal_id": 1},
             SourceDocumentRetentionJob: {},
         }
         for runner, kwargs in runs.items():
@@ -349,6 +348,40 @@ class BackgroundRefusalTest(TransactionTestCase):
         job.refresh_from_db()
         self.assertEqual(job.status, JobStatusChoices.STATUS_COMPLETED)
         self.assertFalse(SourceDocument.objects.filter(pk=self.document.pk).exists())
+
+    def test_a_refused_proposal_job_fails_its_proposal_and_frees_the_field(self):
+        from netbox_data_import.field_keys import SELECT_TERMINATION_TASK
+        from netbox_data_import.proposal_tasks import CandidateSnapshot
+        from netbox_data_import.resolution_proposals import request_proposal
+
+        device_type = ObjectType.objects.get_for_model(Device)
+        ask = partial(
+            request_proposal,
+            profile=self.profile,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key="branch-refused-field",
+            source_evidence={},
+            resolved_device_type=device_type,
+            resolved_device_id=1,
+            prompt_version=1,
+            response_schema_version=1,
+            candidate_snapshot=CandidateSnapshot(entries=(), total=0),
+            requested_by=self.user,
+        )
+        proposal = ask()
+        job = Job.objects.create(name="Proposal in a branch", job_id=uuid.uuid4(), user=self.user)
+
+        queries = self._plugin_queries_in_branch(partial(ResolutionProposalJob.handle, job, proposal_id=proposal.pk))
+
+        proposal.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual((proposal.status, proposal.failure_reason), ("failed", "branch_active"))
+        self.assertEqual(
+            [query.split(" SET ")[0] for query in queries], ['UPDATE "netbox_data_import_resolutionproposal"']
+        )
+        self.assertEqual(job.status, JobStatusChoices.STATUS_FAILED)
+        self.assertIn(branching.refusal_message(self.branch), [entry["message"] for entry in job.log_entries])
+        self.assertNotEqual(ask().pk, proposal.pk)
 
     def _refusal_in_branch(self, action):
         """Run *action* with the branch active; return the exception it raised and its plugin queries."""

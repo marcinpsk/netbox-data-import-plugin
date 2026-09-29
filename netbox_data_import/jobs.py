@@ -26,7 +26,14 @@ from .import_engine import (
     StaleSourceDocument,
     operator_failure_message,
 )
-from .models import ExecutionOutcome, ImportExecution, ImportProfile, SourceDocument, validate_registered_adapter
+from .models import (
+    ExecutionOutcome,
+    ImportExecution,
+    ImportProfile,
+    ProposalFailureReason,
+    SourceDocument,
+    validate_registered_adapter,
+)
 from .netbox_reader import PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied
 from .plan import PlanError
@@ -191,8 +198,14 @@ class ResolutionProposalJob(JobRunner):
     def run(self, proposal_id):
         """Resolve backend configuration on the worker after claiming the proposal."""
         from .proposal_jobs import run_proposal
+        from .resolution_proposals import fail_proposal
 
-        branching.fail_job_in_branch(self)
+        try:
+            branching.fail_job_in_branch(self)
+        except JobFailed:
+            # The row is main-only, so this write lands in main and frees the field for a new request.
+            fail_proposal(proposal_id, reason=ProposalFailureReason.BRANCH_ACTIVE)
+            raise
         return run_proposal(proposal_id)
 
 
