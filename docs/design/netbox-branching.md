@@ -170,6 +170,9 @@ branch that predates it. R2-1, R2-2 and R2-N1 close with D8.
 
 ### Contract
 
+This contract covers NetBox 4.7 with netbox-branching 1.2.1, the combination that section 0 ratifies
+and the CI job runs. netbox-branching 1.1.x on NetBox 4.6 is outside it: no job tests that combination.
+
 The plugin operates on main only. With netbox-branching installed and a branch active:
 
 | Entry point | Outcome |
