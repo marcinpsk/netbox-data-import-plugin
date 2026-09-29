@@ -41,6 +41,10 @@ def active_branch():
     return branch if isinstance(branch, Branch) else None
 
 
+# An anonymous caller is refused without the name or the state of any branch.
+ANONYMOUS_REFUSAL = "NetBox Data Import runs on main only, and this request selects a branch."
+
+
 def refusal_message(branch) -> str:
     """Return the one message every refused entry point shows."""
     if branch is None:
@@ -90,6 +94,8 @@ def request_refusal(request) -> str | None:
     branch = active_branch()
     if branch is None and not _selects_a_branch(request):
         return None
+    if not request.user.is_authenticated:
+        return ANONYMOUS_REFUSAL
     return refusal_message(branch)
 
 
@@ -119,7 +125,9 @@ class BranchRefusalMiddleware:
             return None
         if is_api_request(request):
             return JsonResponse({"detail": message, "code": REFUSAL_CODE}, status=409)
-        return render(request, "netbox_data_import/branch_refused.html", {"message": message}, status=409)
+        # The full layout shows the branch selector, so an anonymous caller gets the bare page.
+        template = "branch_refused.html" if request.user.is_authenticated else "branch_refused_anonymous.html"
+        return render(request, f"netbox_data_import/{template}", {"message": message}, status=409)
 
 
 def is_branchable(model: type[models.Model]) -> bool | None:

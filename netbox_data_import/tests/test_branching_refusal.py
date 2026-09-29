@@ -130,6 +130,30 @@ class PluginCallbackRefusalTest(SuperuserClientMixin, TransactionTestCase):
                     self.assertContains(response, branching.refusal_message(branch), status_code=409)
 
 
+class AnonymousRefusalTest(TransactionTestCase):
+    """An anonymous request is refused too, but the refusal does not name the branch."""
+
+    def setUp(self):
+        self.branch = provision_branch(self, "private work")
+
+    def test_the_rest_refusal_hides_the_branch_name(self):
+        response = self.client.get(
+            reverse("plugins-api:netbox_data_import-api:importprofile-list"),
+            headers={BRANCH_HEADER: self.branch.schema_id},
+        )
+
+        self.assertEqual((response.status_code, _json_code(response)), (409, branching.REFUSAL_CODE))
+        self.assertNotIn(self.branch.name, response.content.decode())
+
+    def test_the_page_refusal_hides_the_branch_name(self):
+        self.client.cookies[COOKIE_NAME] = self.branch.schema_id
+
+        response = self.client.get(reverse("plugins:netbox_data_import:importprofile_list"))
+
+        self.assertContains(response, "data-branch-refusal", status_code=409)
+        self.assertNotContains(response, self.branch.name, status_code=409)
+
+
 class BranchSelectorTest(SuperuserClientMixin, TransactionTestCase):
     """A branch selector without an active branch is refused, except the explicit switch to main."""
 

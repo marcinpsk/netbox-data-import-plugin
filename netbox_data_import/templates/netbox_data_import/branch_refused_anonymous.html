@@ -1,12 +1,12 @@
 {# SPDX-License-Identifier: Apache-2.0 #}
 {# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
-{% extends 'base/layout.html' %}
+{% extends 'base/base.html' %}
 
 {% block title %}Branch not supported{% endblock %}
 
-{% block content %}
-<div class="row my-5">
-  <div class="col-lg-6 offset-lg-3">
+{% block layout %}
+<div class="page page-center">
+  <div class="container container-tight py-4">
     {% include 'netbox_data_import/inc/branch_refusal_card.html' %}
   </div>
 </div>
