@@ -166,6 +166,7 @@ module = [
     "extras.*",
     "ipam.*",
     "netbox.*",
+    "netbox_branching.*",
     "pytest",
     "redis.*",
     "rest_framework.*",
@@ -181,7 +182,8 @@ ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["netbox_data_import"]
-omit = ["*/migrations/*", "*/tests/*"]
+# branching.py runs only beside netbox-branching. The branching CI job tests it, and it runs no coverage.
+omit = ["*/migrations/*", "*/tests/*", "netbox_data_import/branching.py"]
 
 [tool.coverage.report]
 # Without `precision`, coverage.py compares the rounded total, so `fail_under = 98` enforced 97.5%.
