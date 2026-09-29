@@ -10,8 +10,8 @@ from django.core.exceptions import ImproperlyConfigured, MiddlewareNotUsed
 from django.db import models
 from django.http import JsonResponse
 from django.shortcuts import render
-from django.urls import reverse
 from packaging.version import Version
+from utilities.api import is_api_request
 
 APP_LABEL = "netbox_data_import"
 BRANCHING_APP_LABEL = "netbox_branching"
@@ -116,7 +116,7 @@ class BranchRefusalMiddleware:
         message = request_refusal(request)
         if message is None:
             return None
-        if request.path_info.startswith(reverse("api-root")):
+        if is_api_request(request):
             return JsonResponse({"detail": message, "code": REFUSAL_CODE}, status=409)
         return render(request, "netbox_data_import/branch_refused.html", {"message": message}, status=409)
 
