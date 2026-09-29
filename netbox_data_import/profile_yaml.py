@@ -11,6 +11,7 @@ from django.db import transaction
 from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
+from . import branching
 from .catalog import POLICY_SECTIONS, policy_section
 from .models import (
     CableClassMapping,
@@ -217,6 +218,7 @@ def _enforce_natural_key_view_permissions(schema: PolicyDocumentSchema, rows, ac
 
 def apply_profile_document(data: Any, actor=None) -> tuple[ImportProfile, dict[str, int]]:
     """Create or update one profile and reconcile each supplied policy section."""
+    branching.refuse_branch()
     profile_data, section_rows = _validate_document_shape(data)
     with transaction.atomic():
         profile_values = _profile_values(profile_data)

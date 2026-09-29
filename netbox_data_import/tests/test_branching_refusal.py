@@ -37,6 +37,7 @@ from netbox_data_import.models import (
     ImportProfile,
     SourceDocument,
     locked_profile_policy,
+    locked_resolution_policy,
 )
 from netbox_data_import.tests.helpers import make_dcim_objects, provision_branch, store_workbook_document
 
@@ -348,6 +349,59 @@ class BackgroundRefusalTest(TransactionTestCase):
         job.refresh_from_db()
         self.assertEqual(job.status, JobStatusChoices.STATUS_COMPLETED)
         self.assertFalse(SourceDocument.objects.filter(pk=self.document.pk).exists())
+
+    def _refusal_in_branch(self, action):
+        """Run *action* with the branch active; return the exception it raised and its plugin queries."""
+
+        def attempt():
+            try:
+                action()
+            except Exception as exc:  # noqa: BLE001 - the test inspects whichever exception comes first.
+                return exc
+            return None
+
+        def in_branch():
+            with activate_branch(self.branch):
+                return attempt()
+
+        return plugin_queries(self.branch, in_branch)
+
+    def test_each_policy_entry_refuses_before_it_reads_plugin_data(self):
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.netbox_reader import NetBoxReader
+        from netbox_data_import.plan import ImportPlan
+        from netbox_data_import.profile_yaml import apply_profile_document, serialize_profile
+        from netbox_data_import.proposal_decisions import accept_proposal, reject_proposal
+
+        site = make_dcim_objects("Entry")[0]
+        plan = ImportPlan(
+            source_fingerprint="0" * 64,
+            profile_fingerprint=self.profile.planning_fingerprint,
+            actor=str(self.user.pk),
+            planning_context={"site_id": site.pk, "location_id": None, "tenant_id": None},
+        )
+
+        def enter_resolution_lock():
+            with locked_resolution_policy(1):
+                pass
+
+        entries = {
+            "locked_resolution_policy": enter_resolution_lock,
+            "accept_proposal": partial(
+                accept_proposal, 1, operator=self.user, netbox_reader=NetBoxReader.for_actor(self.user)
+            ),
+            "reject_proposal": partial(reject_proposal, 1, operator=self.user),
+            "apply_profile_document": partial(apply_profile_document, serialize_profile(self.profile), actor=self.user),
+            "ImportEngine.execute": partial(
+                ImportEngine.execute, self.profile, self.document, plan.to_dict(), ["unit"], "entry", self.user
+            ),
+        }
+        for name, entry in entries.items():
+            with self.subTest(entry=name):
+                raised, queries = self._refusal_in_branch(entry)
+
+                self.assertIsInstance(raised, branching.BranchActive)
+                self.assertEqual(queries, [])
 
     def test_the_policy_lock_refuses_before_it_locks(self):
         def lock():

@@ -190,6 +190,7 @@ def locked_resolution_policy(resolution_pk):
     The row is read again under the lock, so the caller acts on a row that still exists and still
     belongs to the locked profile.
     """
+    branching.refuse_branch()
     gone = SourceResolution.DoesNotExist(f"No SourceResolution matches id {resolution_pk}.")
     profile_id = SourceResolution.objects.filter(pk=resolution_pk).values_list("profile_id", flat=True).first()
     if profile_id is None:
