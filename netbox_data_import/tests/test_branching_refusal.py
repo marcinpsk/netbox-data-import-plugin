@@ -20,7 +20,7 @@ from core.models import Job
 from dcim.models import Device
 from django.contrib.auth import get_user_model
 from django.db import connections
-from django.test import TransactionTestCase
+from django.test import SimpleTestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import NoReverseMatch, URLResolver, get_resolver, resolve, reverse
 from django.utils import timezone
@@ -90,6 +90,15 @@ def _json_code(response):
         return None
     payload = response.json()
     return payload.get("code") if isinstance(payload, dict) else None
+
+
+class RefusalMessageTest(SimpleTestCase):
+    """The refusal names the active branch so that it reads as a name."""
+
+    def test_the_branch_name_is_quoted(self):
+        message = branching.refusal_message(Branch(name="read surface"))
+
+        self.assertTrue(message.endswith("the active branch is \u201cread surface\u201d."), message)
 
 
 class SuperuserClientMixin:

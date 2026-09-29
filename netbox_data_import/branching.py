@@ -45,7 +45,8 @@ def refusal_message(branch) -> str:
     """Return the one message every refused entry point shows."""
     if branch is None:
         return "NetBox Data Import runs on main only, and this request selects a branch that is not active."
-    return f"NetBox Data Import runs on main only, and the active branch is {branch.name}."
+    # Typographic quotes need no HTML escaping, so the page, the REST detail and GraphQL show one text.
+    return f"NetBox Data Import runs on main only, and the active branch is \u201c{branch.name}\u201d."
 
 
 def refuse_branch() -> None:
