@@ -27,7 +27,7 @@ _DEPENDENCY_COMMENT_EXCEPTIONS = frozenset(
         "0022_migrate_profile_adapter_config",
         "0031_inferencebackend",
         "0036_resolutionproposal_job",
-        "0040_move_tags_to_tagged_items",
+        "0041_remove_importprofile_tags_and_more",
     }
 )
 

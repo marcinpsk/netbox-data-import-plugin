@@ -11,10 +11,12 @@ from django.test import TransactionTestCase
 from extras.models import Tag, TaggedItem
 
 from netbox_data_import.models import ImportProfile, InferenceBackend
+from netbox_data_import.tests.helpers import migrate_plugin_to_leaf
 
 APP = "netbox_data_import"
 BEFORE = (APP, "0039_remove_job_plan_copies")
-AFTER = (APP, "0040_move_tags_to_tagged_items")
+DATA_MOVE = "0040_move_tags_to_tagged_items"
+AFTER = (APP, "0041_remove_importprofile_tags_and_more")
 THROUGH_TABLES = ("netbox_data_import_importprofile_tags", "netbox_data_import_inferencebackend_tags")
 BACKEND_FIELDS = {
     "display_name": "Migrated backend",
@@ -36,7 +38,7 @@ class TagsMigrationTest(TransactionTestCase):
     """Keep every tag assignment across the upgrade and its rollback."""
 
     def setUp(self):
-        self.addCleanup(lambda: MigrationExecutor(connection).migrate([AFTER]))
+        self.addCleanup(migrate_plugin_to_leaf)
 
     def test_upgrade_moves_every_tag_link_to_a_tagged_item(self):
         executor = MigrationExecutor(connection)
@@ -78,7 +80,7 @@ class TagsMigrationTest(TransactionTestCase):
         self.assertFalse(TaggedItem.objects.exists())
 
     def test_a_branch_migrate_fakes_the_move(self):
-        module = importlib.import_module(f"{APP}.migrations.{AFTER[1]}")
+        module = importlib.import_module(f"{APP}.migrations.{DATA_MOVE}")
 
         self.assertIs(module.fake_on_branch, True)
 
