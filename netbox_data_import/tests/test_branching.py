@@ -5,6 +5,7 @@
 A revert of a merged branch that cannot restore plugin data is refused.
 """
 
+import importlib
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,12 +26,14 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ImproperlyConfigured, MiddlewareNotUsed
 from django.core.management import call_command
 from django.db import connection, models
+from django.db.migrations.loader import MigrationLoader
 from django.test import RequestFactory, SimpleTestCase, TransactionTestCase
 from extras.models import Tag, TaggedItem
 from netbox.context_managers import event_tracking
 from netbox_branching import utilities as branching_utilities
 from netbox_branching.choices import BranchStatusChoices
 from netbox_branching.models import Branch
+from netbox_branching.models.branches import _fake_for_branch
 from netbox_branching.utilities import BranchActionIndicator, activate_branch, supports_branching
 from utilities.exceptions import AbortTransaction
 
@@ -188,6 +191,25 @@ class StoredFeaturesTest(TransactionTestCase):
                     "features", flat=True
                 )
                 self.assertEqual("branching" in features.get(), model._meta.label in BRANCHABLE_MODELS)
+
+
+class BranchMigrateTest(SimpleTestCase):
+    """netbox-branching obeys each plugin migration's `fake_on_branch`, as guard 3 assumes."""
+
+    def test_a_branch_migrate_obeys_each_flag(self):
+        loader = MigrationLoader(None, load=False)
+        loader.load_disk()
+        flags = {
+            name: getattr(importlib.import_module(f"{APP_LABEL}.migrations.{name}"), "fake_on_branch", None)
+            for app_label, name in loader.disk_migrations
+            if app_label == APP_LABEL
+        }
+        flagged = sorted(name for name, flag in flags.items() if flag is not None)
+        self.assertTrue(flagged)
+
+        for name in flagged:
+            with self.subTest(migration=name):
+                self.assertIs(_fake_for_branch(loader.disk_migrations[(APP_LABEL, name)]), flags[name])
 
 
 @dataclass

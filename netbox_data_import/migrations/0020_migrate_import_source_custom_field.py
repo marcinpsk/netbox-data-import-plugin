@@ -4,7 +4,7 @@ import logging
 
 from django.db import migrations
 
-# A netbox-branching branch migrate fakes this data migration: see D7 in docs/design/netbox-branching.md.
+# A netbox-branching branch migrate fakes this migration: see D7 in docs/design/netbox-branching.md.
 fake_on_branch = True
 
 logger = logging.getLogger("netbox_data_import.migrations")
