@@ -79,25 +79,43 @@ class TagAssignmentTest(TestCase):
                 self.assertEqual(sorted(tag["slug"] for tag in response.json()["tags"]), ["alpha", "bravo"])
                 self.assertEqual(sorted(instance.tags.values_list("slug", flat=True)), ["alpha", "bravo"])
 
-    def test_the_profile_list_filters_by_tag(self):
-        tagged = ImportProfile.objects.create(name="Filter tagged profile")
+    def test_the_list_pages_filter_by_tag_from_the_filters_tab(self):
+        tagged_profile = ImportProfile.objects.create(name="Filter tagged profile")
         ImportProfile.objects.create(name="Filter untagged profile")
-        tagged.tags.add(self.bravo)
-
-        response = self.client.get(reverse("plugins:netbox_data_import:importprofile_list"), {"tag": "bravo"})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(list(response.context["table"].data), [tagged])
-
-    def test_the_backend_list_filters_by_tag(self):
-        tagged = _backend("filter-tagged")
+        tagged_backend = _backend("filter-tagged")
         _backend("filter-untagged")
-        tagged.tags.add(self.bravo)
+        tagged_profile.tags.add(self.bravo)
+        tagged_backend.tags.add(self.bravo)
+        targets = (
+            (tagged_profile, "plugins:netbox_data_import:importprofile_list"),
+            (tagged_backend, "plugins:netbox_data_import:inferencebackend_list"),
+        )
 
-        response = self.client.get(reverse("plugins:netbox_data_import:inferencebackend_list"), {"tag": "bravo"})
+        for tagged, route in targets:
+            with self.subTest(model=type(tagged).__name__):
+                response = self.client.get(reverse(route), {"tag": "bravo"})
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(list(response.context["table"].data), [tagged])
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(list(response.context["table"].data), [tagged])
+                self.assertContains(response, 'id="filters-form-tab"')
+                self.assertContains(response, '<option value="bravo" selected>Bravo (1)</option>', html=True)
+
+    def test_the_filter_forms_offer_only_fields_the_filtersets_apply(self):
+        for route in (
+            "plugins:netbox_data_import:importprofile_list",
+            "plugins:netbox_data_import:inferencebackend_list",
+        ):
+            with self.subTest(route=route):
+                response = self.client.get(reverse(route))
+                view = response.resolver_match.func.view_class
+                filter_form = response.context["filter_form"]
+
+                self.assertIsNotNone(filter_form)
+                self.assertIn("tag", filter_form.fields)
+                self.assertLessEqual(
+                    set(filter_form.fields) - {"filter_id"},
+                    set(view.filterset.base_filters),
+                )
 
     def test_the_rest_api_lists_filter_by_tag(self):
         tagged_profile = ImportProfile.objects.create(name="API filter tagged profile")

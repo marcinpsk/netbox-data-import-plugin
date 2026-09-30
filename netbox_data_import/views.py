@@ -30,12 +30,14 @@ from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, POLICY_WRITE_REFUSE
 from .forms import (
     CableClassMappingForm,
     CableSegmentOverrideForm,
+    InferenceBackendFilterForm,
     InferenceBackendForm,
     ClassRoleMappingForm,
     ColumnMappingForm,
     ColumnTransformRuleForm,
     DeviceTypeMappingForm,
     ImportProfileBulkEditForm,
+    ImportProfileFilterForm,
     ImportProfileForm,
     ImportProfileImportForm,
     ImportSetupForm,
@@ -498,6 +500,7 @@ class ImportProfileListView(generic.ObjectListView):
     queryset = ImportProfile.objects.prefetch_related("column_mappings", "class_role_mappings", "device_type_mappings")
     table = ImportProfileTable
     filterset = ImportProfileFilterSet
+    filterset_form = ImportProfileFilterForm
     template_name = "netbox_data_import/importprofile_list.html"
 
 
@@ -551,6 +554,7 @@ class InferenceBackendListView(generic.ObjectListView):
     queryset = InferenceBackend.objects.all()
     table = InferenceBackendTable
     filterset = InferenceBackendFilterSet
+    filterset_form = InferenceBackendFilterForm
 
 
 _INFERENCE_MODELS_SESSION_KEY = "netbox_data_import.inference_backend_models"
