@@ -1060,6 +1060,29 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             FailureReason.DATABASE,
         )
 
+    def test_single_row_sync_does_not_echo_why_the_stored_plan_is_unreadable(self):
+        """A malformed stored plan answers with a sentence this plugin wrote and logs the Python error."""
+        cases = (
+            ("units", None, "The serialized Import Plan is malformed.", "KeyError"),
+            ("display", float("nan"), "Synchronization Unit display must be JSON-serializable plan data.", "nan"),
+        )
+        for field, value, message, detail in cases:
+            with self.subTest(field=field):
+                self._upload()
+                session = self.client.session
+                plan = session[PREVIEW_PLAN_SESSION_KEY]
+                if field == "units":
+                    del plan["units"]
+                else:
+                    plan["units"][0]["display"]["broken"] = value
+                session.save()
+
+                with self.assertLogs("netbox_data_import.plan", level="WARNING") as logs:
+                    response = self._sync_single_row({"row_number": 2})
+
+                self.assertEqual((response.status_code, response.json()["error"]), (409, message))
+                self.assertIn(detail, "\n".join(logs.output))
+
     def test_single_row_sync_reports_a_refused_save_as_readable_text(self):
         """A NetBox validator's reason reads as its own text, not as the repr of a list."""
         from dcim.models import Rack

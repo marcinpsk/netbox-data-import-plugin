@@ -111,7 +111,10 @@ See [`docs/agents/domain.md`](docs/agents/domain.md).
   state.
 - A data migration is written by hand, because `makemigrations` generates no `RunPython`. Start it
   with `netbox-manage makemigrations netbox_data_import --empty`. Give it no reverse callable when
-  the change cannot be undone, so Django refuses the rollback instead of losing data.
+  the change cannot be undone, so Django refuses the rollback instead of losing data. Keep schema
+  operations out of it, and set `fake_on_branch = True` at module level: in a netbox-branching
+  branch migrate, `RunPython` also sees main's tables and would write them.
+  `DataMigrationsFakeOnBranchTest` enforces both.
 - The Cable tag integrity migration is a ratified `RunSQL` exception for NetBox 4.6 and 4.7.
   It guards new tag associations that have no row for the planner to lock. Its reverse SQL must
   remove the plugin's foreign key, triggers, functions, index, and projection column.

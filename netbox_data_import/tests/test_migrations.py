@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
-"""Migration tests for identity constraints."""
+"""Migration tests: identity constraints, the migration graph, cable tag integrity, and branch migrate faking."""
 
 import ast
+import importlib
+import sys
 import tokenize
+import types
 
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,7 +15,7 @@ from django.apps import apps
 from django.db import connection
 from django.db.migrations.autodetector import MigrationAutodetector
 from django.db.migrations.executor import MigrationExecutor
-from django.db.migrations import Migration
+from django.db.migrations import Migration, RemoveField, RunPython, RunSQL, SeparateDatabaseAndState
 from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.questioner import NonInteractiveMigrationQuestioner
 from django.db.migrations.state import ProjectState
@@ -396,3 +399,102 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
             cursor.execute(delete)
         MigrationExecutor(connection).migrate([leaf])
         self.assertFalse(TaggedItem.objects.filter(pk=orphan_pk).exists())
+
+
+# A migration listed here runs on every branch migrate and sets `fake_on_branch = False`: name the reason.
+RUN_ON_BRANCH: dict[str, str] = {}
+SET_THE_FLAG = "set fake_on_branch = True, or list it in RUN_ON_BRANCH with the reason"
+SET_FALSE = "listed in RUN_ON_BRANCH, so set fake_on_branch = False"
+SPLIT_IT = "a fake skips its schema operations on a branch, so move the data operations into their own migration"
+
+
+def _database_operations(operations):
+    for operation in operations:
+        if isinstance(operation, SeparateDatabaseAndState):
+            yield from _database_operations(operation.database_operations)
+        else:
+            yield operation
+
+
+def _branch_migrate_reports(disk, app_label, run_on_branch=RUN_ON_BRANCH):
+    """Return each migration whose branch migrate does not follow D7 in docs/design/netbox-branching.md.
+
+    netbox-branching imports `<app>.migrations.<name>` and obeys an explicit `fake_on_branch`. Without
+    it, it runs a migration that has SeparateDatabaseAndState, no model operation, or a model operation
+    on a branchable model, and it fakes the rest.
+    """
+    reports = []
+    for key in sorted(node for node in disk if node[0] == app_label):
+        migration = disk[key]
+        flag = getattr(importlib.import_module(f"{key[0]}.migrations.{key[1]}"), "fake_on_branch", None)
+        database = list(_database_operations(migration.operations))
+        holds_data = any(isinstance(operation, (RunPython, RunSQL)) for operation in database)
+        holds_schema = any(not isinstance(operation, (RunPython, RunSQL)) for operation in database)
+        separate = any(isinstance(operation, SeparateDatabaseAndState) for operation in migration.operations)
+        if key[1] in run_on_branch:
+            if flag is not False:
+                reports.append(f"{key[1]}: {SET_FALSE}")
+        elif flag is False or ((holds_data or separate) and flag is not True):
+            reports.append(f"{key[1]}: {SET_THE_FLAG}")
+        if flag is True and holds_schema:
+            reports.append(f"{key[1]}: {SPLIT_IT}")
+    return reports
+
+
+class DataMigrationsFakeOnBranchTest(SimpleTestCase):
+    """Guard 3: a branch migrate fakes each data migration and runs each schema operation."""
+
+    def test_every_migration_follows_the_branch_migrate_rule(self):
+        loader = MigrationLoader(None, load=False)
+        loader.load_disk()
+
+        self.assertEqual(_branch_migrate_reports(loader.disk_migrations, APP), [])
+
+    def _disk(self, name, operations, **module_attributes):
+        module = types.ModuleType(f"{APP}.migrations.{name}")
+        module.__dict__.update(module_attributes)
+        sys.modules[module.__name__] = module
+        self.addCleanup(sys.modules.pop, module.__name__)
+        migration = Migration(name, APP)
+        migration.operations = operations
+        return {(APP, name): migration}
+
+    def test_the_check_reports_every_flag_but_true(self):
+        disk = {
+            **self._disk("9901_absent", [RunPython(RunPython.noop)]),
+            **self._disk("9902_false", [RunPython(RunPython.noop)], fake_on_branch=False),
+            **self._disk("9903_truthy", [RunPython(RunPython.noop)], fake_on_branch=1),
+            **self._disk("9904_true", [RunPython(RunPython.noop)], fake_on_branch=True),
+        }
+
+        self.assertEqual(
+            _branch_migrate_reports(disk, APP),
+            [f"9901_absent: {SET_THE_FLAG}", f"9902_false: {SET_THE_FLAG}", f"9903_truthy: {SET_THE_FLAG}"],
+        )
+
+    def test_the_check_finds_sql_inside_a_separate_database_and_state(self):
+        disk = self._disk("9905_nested_sql", [SeparateDatabaseAndState(database_operations=[RunSQL("SELECT 1")])])
+
+        self.assertEqual(_branch_migrate_reports(disk, APP), [f"9905_nested_sql: {SET_THE_FLAG}"])
+
+    def test_a_separate_database_and_state_needs_a_decision(self):
+        # netbox-branching never fakes one on its own, whatever model it changes.
+        operation = SeparateDatabaseAndState(database_operations=[RemoveField("importprofile", "name")])
+        disk = self._disk("9906_separate_schema", [operation])
+
+        self.assertEqual(_branch_migrate_reports(disk, APP), [f"9906_separate_schema: {SET_THE_FLAG}"])
+
+    def test_a_faked_migration_holds_no_schema_operation(self):
+        operations = [RemoveField("deviceimportsource", "source_id"), RunPython(RunPython.noop)]
+        disk = self._disk("9907_mixed", operations, fake_on_branch=True)
+
+        self.assertEqual(_branch_migrate_reports(disk, APP), [f"9907_mixed: {SPLIT_IT}"])
+
+    def test_a_migration_that_runs_on_branches_sets_the_flag_false(self):
+        disk = {
+            **self._disk("9908_listed_unset", [RunPython(RunPython.noop)]),
+            **self._disk("9909_listed_false", [RunPython(RunPython.noop)], fake_on_branch=False),
+        }
+        listed = {"9908_listed_unset": "reason", "9909_listed_false": "reason"}
+
+        self.assertEqual(_branch_migrate_reports(disk, APP, listed), [f"9908_listed_unset: {SET_FALSE}"])
