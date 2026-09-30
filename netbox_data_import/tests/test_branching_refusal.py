@@ -20,12 +20,12 @@ from core.models import Job, ObjectType
 from dcim.models import Device
 from django.contrib.auth import get_user_model
 from django.db import connections
-from django.test import SimpleTestCase, TransactionTestCase
+from django.test import RequestFactory, SimpleTestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import NoReverseMatch, URLResolver, get_resolver, resolve, reverse
 from django.utils import timezone
 from netbox_branching.choices import BranchStatusChoices
-from netbox_branching.constants import BRANCH_HEADER, COOKIE_NAME
+from netbox_branching.constants import BRANCH_HEADER, COOKIE_NAME, QUERY_PARAM
 from netbox_branching.models import Branch
 from netbox_branching.utilities import activate_branch
 
@@ -55,7 +55,8 @@ GRAPHQL_QUERIES = {
 def _is_plugin_callback(callback) -> bool:
     """Restate the refusal scope: the module of the view function, view class or DRF viewset."""
     owner = getattr(callback, "view_class", None) or getattr(callback, "cls", None) or callback
-    return owner.__module__ == APP_LABEL or owner.__module__.startswith(f"{APP_LABEL}.")
+    module = getattr(owner, "__module__", None) or ""
+    return module == APP_LABEL or module.startswith(f"{APP_LABEL}.")
 
 
 def _plugin_patterns(patterns, namespace=()):
@@ -111,6 +112,22 @@ class RefusalMessageTest(SimpleTestCase):
         message = branching.refusal_message(Branch(name="read surface"))
 
         self.assertTrue(message.endswith("the active branch is \u201cread surface\u201d."), message)
+
+
+class ForeignViewTest(SimpleTestCase):
+    """The middleware passes a view with no module name through to the view."""
+
+    def test_a_view_without_a_module_name_is_not_refused(self):
+        def module_none(request):
+            return None
+
+        module_none.__module__ = None
+        request = RequestFactory().get("/", {QUERY_PARAM: "any"})
+        middleware = branching.BranchRefusalMiddleware(lambda request: None)
+
+        for view in (module_none, object().__str__):
+            with self.subTest(view=view):
+                self.assertIsNone(middleware.process_view(request, view, (), {}))
 
 
 class SuperuserClientMixin:

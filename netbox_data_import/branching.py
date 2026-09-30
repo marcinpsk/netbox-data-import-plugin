@@ -103,7 +103,8 @@ def request_refusal(request) -> str | None:
 
 def _is_plugin_view(view_func) -> bool:
     owner = getattr(view_func, "view_class", None) or getattr(view_func, "cls", None) or view_func
-    return owner.__module__ == APP_LABEL or owner.__module__.startswith(f"{APP_LABEL}.")
+    module = getattr(owner, "__module__", None) or ""
+    return module == APP_LABEL or module.startswith(f"{APP_LABEL}.")
 
 
 class BranchRefusalMiddleware:
