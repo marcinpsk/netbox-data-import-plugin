@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from collections import Counter
 from collections.abc import Mapping
@@ -21,6 +22,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 SCHEMA_VERSION = 4
+
+logger = logging.getLogger(__name__)
 
 _DIAGNOSTIC_CODE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*\.[a-z0-9]+(?:_[a-z0-9]+)*$")
 
@@ -118,7 +121,8 @@ def _frozen_json(value: Any, label: str) -> Any:
     try:
         return _freeze_json(json.loads(canonical_json(value)))
     except (TypeError, ValueError) as exc:
-        raise PlanInvalid(f"{label} must be JSON-serializable plan data: {exc}") from exc
+        logger.warning("%s is not JSON-serializable plan data.", label, exc_info=True)
+        raise PlanInvalid(f"{label} must be JSON-serializable plan data.") from exc
 
 
 def _plan_mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -463,7 +467,8 @@ class ImportPlan:
         except PlanError:
             raise
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
-            raise PlanInvalid(f"The serialized Import Plan is malformed: {exc!r}") from exc
+            logger.warning("Refused a malformed serialized Import Plan.", exc_info=True)
+            raise PlanInvalid("The serialized Import Plan is malformed.") from exc
 
 
 def executable_units(units) -> tuple[SynchronizationUnit, ...]:
