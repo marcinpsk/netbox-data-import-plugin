@@ -5,6 +5,7 @@
 netbox-branching is optional. Without it, every function here is a no-op.
 """
 
+from core.choices import ObjectChangeActionChoices
 from django.apps import apps
 from django.contrib.messages import get_messages
 from django.core.exceptions import ImproperlyConfigured, MiddlewareNotUsed
@@ -142,6 +143,19 @@ class BranchRefusalMiddleware:
         )
 
 
+def _branchable_references(model: type[models.Model]) -> set[type[models.Model]]:
+    """Return the branchable models outside the plugin that a concrete foreign key of the model references."""
+    from netbox_branching.utilities import supports_branching
+
+    return {
+        field.related_model
+        for field in model._meta.concrete_fields
+        if isinstance(field, models.ForeignKey)
+        and field.related_model._meta.app_label != APP_LABEL
+        and supports_branching(field.related_model)
+    }
+
+
 def is_branchable(model: type[models.Model]) -> bool | None:
     """Resolve branching support for a plugin model, and defer (None) for every other model.
 
@@ -151,17 +165,51 @@ def is_branchable(model: type[models.Model]) -> bool | None:
     """
     if model._meta.app_label != APP_LABEL:
         return None
-    from netbox_branching.utilities import supports_branching
+    return bool(_branchable_references(model))
 
-    return any(
-        supports_branching(field.related_model)
-        for field in model._meta.concrete_fields
-        if isinstance(field, models.ForeignKey) and field.related_model._meta.app_label != APP_LABEL
+
+def _unrevertable_models() -> set[type[models.Model]]:
+    """Return the models whose delete a revert cannot undo without losing plugin data."""
+    from extras.models import Tag, TaggedItem
+
+    # A Tag delete removes Import Profile assignments in main, and a sync records a TaggedItem delete.
+    unrevertable = {Tag, TaggedItem}
+    for model in apps.get_app_config(APP_LABEL).get_models():
+        if references := _branchable_references(model):
+            unrevertable |= {model, *references}
+    return unrevertable
+
+
+def validate_revert(branch):
+    """Refuse a revert of a branch that deleted an object the plugin's data depends on.
+
+    Revert replays the branch's ObjectChange rows, and plugin data has none, except the synthetic
+    deletes that a sync records. So a revert cannot restore the plugin data such a delete removed.
+    """
+    from django.contrib.contenttypes.models import ContentType
+    from netbox_branching.utilities import BranchActionIndicator
+
+    content_types = ContentType.objects.get_for_models(*_unrevertable_models())
+    models_by_type = {content_type.pk: model for model, content_type in content_types.items()}
+    deleted = (
+        branch.get_changes()
+        .filter(action=ObjectChangeActionChoices.ACTION_DELETE, changed_object_type__in=models_by_type)
+        .order_by()
+        .values_list("changed_object_type", flat=True)
+        .distinct()
+    )
+    names = sorted(str(models_by_type[type_id]._meta.verbose_name) for type_id in deleted)
+    if not names:
+        return BranchActionIndicator(True)
+    return BranchActionIndicator(
+        False,
+        "NetBox Data Import data cannot be restored by a revert, and this branch deleted objects of these "
+        f"types: {', '.join(names)}.",
     )
 
 
 def register() -> None:
-    """Register the resolver with netbox-branching, and refuse a configuration that overrides it."""
+    """Register the resolver and the revert validator, and refuse a configuration that overrides the resolver."""
     if not installed():
         return
     release = apps.get_app_config(BRANCHING_APP_LABEL).version
@@ -170,9 +218,11 @@ def register() -> None:
         raise ImproperlyConfigured(
             f"{APP_LABEL}: netbox-branching {release} is installed; this plugin needs 1.2 or later."
         )
+    from netbox_branching.models import Branch
     from netbox_branching.utilities import register_branching_resolver, supports_branching
 
     register_branching_resolver(is_branchable)
+    Branch.register_preaction_check(validate_revert, "revert")
     overridden = sorted(
         model._meta.label
         for model in apps.get_app_config(APP_LABEL).get_models()
