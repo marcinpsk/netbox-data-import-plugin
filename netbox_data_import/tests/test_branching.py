@@ -21,7 +21,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ImproperlyConfigured, MiddlewareNotUsed
 from django.core.management import call_command
 from django.db import connection, models
-from django.test import RequestFactory, SimpleTestCase, TransactionTestCase, override_settings
+from django.test import RequestFactory, SimpleTestCase, TransactionTestCase
 from extras.models import Tag, TaggedItem
 from netbox.context_managers import event_tracking
 from netbox_branching import utilities as branching_utilities
@@ -35,6 +35,7 @@ from netbox_data_import.models import (
     ImportProfile,
 )
 from netbox_data_import.tests.helpers import make_dcim_objects, provision_branch
+from netbox_data_import.tests.plugins_config import override_plugins_config
 
 APP_LABEL = "netbox_data_import"
 # Changing this set is a design decision: branches opened before the change lack the new table.
@@ -131,7 +132,7 @@ class StartupValidationTest(SimpleTestCase):
         self.resolvers = branching_utilities._branching_resolvers
         self.addCleanup(self.resolvers.__setitem__, slice(None), list(self.resolvers))
 
-    @override_settings(PLUGINS_CONFIG={"netbox_branching": {"exempt_models": ["netbox_data_import.*"]}})
+    @override_plugins_config(netbox_branching={"exempt_models": ["netbox_data_import.*"]})
     def test_an_exempt_plugin_fails_startup(self):
         with self.assertRaisesMessage(ImproperlyConfigured, "netbox_data_import.DeviceImportSource"):
             branching.register()

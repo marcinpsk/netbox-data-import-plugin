@@ -10,7 +10,7 @@ import yaml
 from django.contrib.auth import get_user_model
 from django.db import DatabaseError, transaction
 from django.db.models.signals import post_delete, post_save, pre_save
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 from dcim.models import Cable, Device, Interface
 
@@ -32,6 +32,7 @@ from netbox_data_import.tests.helpers import (
     user_with_object_permission,
     wait_until_a_lock_is_blocked,
 )
+from netbox_data_import.tests.plugins_config import override_plugins_config
 
 
 User = get_user_model()
@@ -495,7 +496,7 @@ class PolicyAPICreateSerializationTest(TransactionTestCase):
         self.assertEqual(created, 1)
 
 
-@override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_backend_origin_allowlist": INFERENCE_ALLOWLIST}})
+@override_plugins_config(netbox_data_import={"inference_backend_origin_allowlist": INFERENCE_ALLOWLIST})
 class InferenceBackendAPITest(TestCase):
     """Manage inference configuration without disclosing its credential reference."""
 

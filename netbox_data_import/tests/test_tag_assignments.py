@@ -5,12 +5,13 @@
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 from extras.models import Tag, TaggedItem
 
 from netbox_data_import.models import ImportProfile, InferenceBackend
 from netbox_data_import.tables import ImportProfileTable, InferenceBackendTable
+from netbox_data_import.tests.plugins_config import override_plugins_config
 
 INFERENCE_ALLOWLIST = ["https://backend.example.invalid:443"]
 
@@ -28,7 +29,7 @@ def _backend(backend_key="tagged-backend"):
     )
 
 
-@override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_backend_origin_allowlist": INFERENCE_ALLOWLIST}})
+@override_plugins_config(netbox_data_import={"inference_backend_origin_allowlist": INFERENCE_ALLOWLIST})
 class TagAssignmentTest(TestCase):
     """A tag assignment is an ``extras.TaggedItem`` row, which netbox-branching replicates."""
 
