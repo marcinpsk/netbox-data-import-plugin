@@ -25,7 +25,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from utilities.permissions import get_permission_for_model
 from utilities.views import ConditionalLoginRequiredMixin
 
-from .filters import ImportProfileFilterSet
+from .filters import ImportProfileFilterSet, InferenceBackendFilterSet
 from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, POLICY_WRITE_REFUSED, policy_row_is_disclosed
 from .forms import (
     CableClassMappingForm,
@@ -550,6 +550,7 @@ class InferenceBackendListView(generic.ObjectListView):
 
     queryset = InferenceBackend.objects.all()
     table = InferenceBackendTable
+    filterset = InferenceBackendFilterSet
 
 
 _INFERENCE_MODELS_SESSION_KEY = "netbox_data_import.inference_backend_models"

@@ -88,6 +88,71 @@ class TagAssignmentTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(list(response.context["table"].data), [tagged])
 
+    def test_the_backend_list_filters_by_tag(self):
+        tagged = _backend("filter-tagged")
+        _backend("filter-untagged")
+        tagged.tags.add(self.bravo)
+
+        response = self.client.get(reverse("plugins:netbox_data_import:inferencebackend_list"), {"tag": "bravo"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(list(response.context["table"].data), [tagged])
+
+    def test_the_rest_api_lists_filter_by_tag(self):
+        tagged_profile = ImportProfile.objects.create(name="API filter tagged profile")
+        ImportProfile.objects.create(name="API filter untagged profile")
+        tagged_backend = _backend("api-filter-tagged")
+        _backend("api-filter-untagged")
+        tagged_profile.tags.add(self.bravo)
+        tagged_backend.tags.add(self.bravo)
+        targets = (
+            (tagged_profile, "plugins-api:netbox_data_import-api:importprofile-list"),
+            (tagged_backend, "plugins-api:netbox_data_import-api:inferencebackend-list"),
+        )
+
+        for tagged, route in targets:
+            with self.subTest(model=type(tagged).__name__):
+                response = self.client.get(reverse(route), {"tag": "bravo"})
+
+                self.assertEqual(response.status_code, 200, response.content)
+                self.assertEqual([row["id"] for row in response.json()["results"]], [tagged.pk])
+
+    def test_the_rest_api_backend_list_searches_key_and_display_name(self):
+        by_key = _backend("search-by-key")
+        by_name = _backend("other-backend")
+        by_name.display_name = "Search by key"
+        by_name.save()
+        _backend("unmatched-backend")
+        route = reverse("plugins-api:netbox_data_import-api:inferencebackend-list")
+
+        response = self.client.get(route, {"q": "search-by-key"})
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual([row["id"] for row in response.json()["results"]], [by_key.pk])
+
+        response = self.client.get(route, {"q": "by key"})
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual([row["id"] for row in response.json()["results"]], [by_name.pk])
+
+    def test_the_detail_pages_show_the_tags_panel(self):
+        profile = ImportProfile.objects.create(name="Detail tagged profile")
+        backend = _backend("detail-tagged")
+        profile.tags.add(self.bravo)
+        backend.tags.add(self.bravo)
+        targets = (
+            (profile, "plugins:netbox_data_import:importprofile_list"),
+            (backend, "plugins:netbox_data_import:inferencebackend_list"),
+        )
+
+        for instance, list_route in targets:
+            with self.subTest(model=type(instance).__name__):
+                response = self.client.get(instance.get_absolute_url())
+
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, '<h2 class="card-header">Tags</h2>', html=True)
+                self.assertContains(response, f'href="{reverse(list_route)}?tag=bravo"')
+
     def test_the_ui_form_assigns_tags(self):
         profile = ImportProfile.objects.create(name="Form tagged profile")
 

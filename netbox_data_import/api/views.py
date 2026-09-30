@@ -8,6 +8,7 @@ from rest_framework import mixins, permissions, viewsets
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import DjangoModelPermissions
 
+from ..filters import ImportProfileFilterSet, InferenceBackendFilterSet
 from ..field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from ..models import (
     locked_profile_policy,
@@ -69,6 +70,7 @@ class ImportProfileViewSet(NetBoxModelViewSet):
         "tags", "column_mappings", "class_role_mappings", "device_type_mappings"
     )
     serializer_class = ImportProfileSerializer
+    filterset_class = ImportProfileFilterSet
 
 
 class _ProfileScopedQuerySetMixin(viewsets.GenericViewSet):
@@ -291,3 +293,4 @@ class InferenceBackendViewSet(NetBoxModelViewSet):
 
     queryset = InferenceBackend.objects.prefetch_related("tags")
     serializer_class = InferenceBackendSerializer
+    filterset_class = InferenceBackendFilterSet
