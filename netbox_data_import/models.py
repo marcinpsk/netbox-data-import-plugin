@@ -22,7 +22,7 @@ from .adapters import (
     get_adapter,
     output_kinds_for,
 )
-from . import plan
+from . import branching, plan
 from .cable_policy import cable_profile_label, cable_type_label, policy_choice_errors
 from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
 from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
@@ -170,6 +170,7 @@ def locked_profile_policy(*profile_ids):
     The rows lock in primary-key order, so two callers naming several profiles cannot deadlock by
     taking them in opposite orders.
     """
+    branching.refuse_branch()
     wanted = sorted({profile_id for profile_id in profile_ids if profile_id is not None})
     # Django short-circuits `pk__in=[]`, so an empty set would yield without ever taking a lock.
     if not wanted:
@@ -189,6 +190,7 @@ def locked_resolution_policy(resolution_pk):
     The row is read again under the lock, so the caller acts on a row that still exists and still
     belongs to the locked profile.
     """
+    branching.refuse_branch()
     gone = SourceResolution.DoesNotExist(f"No SourceResolution matches id {resolution_pk}.")
     profile_id = SourceResolution.objects.filter(pk=resolution_pk).values_list("profile_id", flat=True).first()
     if profile_id is None:
@@ -215,13 +217,6 @@ class ImportProfile(NetBoxModel):
         default=dict,
         blank=True,
         help_text="Scalar settings the selected Source Adapter declares.",
-    )
-
-    # Override tags reverse accessor to avoid clashes with other plugins
-    tags = models.ManyToManyField(
-        to="extras.Tag",
-        related_name="+",
-        blank=True,
     )
 
     class Meta:
@@ -1212,9 +1207,6 @@ class InferenceBackend(NetBoxModel):
     )
     enabled = models.BooleanField(default=False, help_text="Whether Ask AI may use this backend.")
 
-    # Override tags reverse accessor to avoid clashes with other plugins
-    tags = models.ManyToManyField(to="extras.Tag", related_name="+", blank=True)
-
     class Meta:
         ordering = ["backend_key"]
         constraints = [
@@ -1321,6 +1313,7 @@ class ProposalFailureReason:
     CREDENTIAL_DENIED = "credential_denied"
     CREDENTIAL_INVALID = "credential_invalid"
     SUPERSEDED_REQUEST = "superseded_request"
+    BRANCH_ACTIVE = "branch_active"
 
     CHOICES = (
         (BACKEND_REFUSAL, "Backend refusal"),
@@ -1335,6 +1328,7 @@ class ProposalFailureReason:
         (CREDENTIAL_DENIED, "Credential denied"),
         (CREDENTIAL_INVALID, "Invalid credential reference or secret"),
         (SUPERSEDED_REQUEST, "Superseded by a newer request contract"),
+        (BRANCH_ACTIVE, "Refused inside a netbox-branching branch"),
     )
 
     #: Section 7.5: these retry at most twice inside the same proposal; every other reason fails at once.

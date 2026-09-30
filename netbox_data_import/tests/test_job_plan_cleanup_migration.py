@@ -8,6 +8,8 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
+from netbox_data_import.tests.helpers import migrate_plugin_to_leaf
+
 
 APP = "netbox_data_import"
 BEFORE = (APP, "0038_cable_tag_integrity")
@@ -18,8 +20,11 @@ class JobPlanCleanupMigrationTest(TransactionTestCase):
     """Remove exposed plans from import Jobs without changing other Job data."""
 
     def test_upgrade_removes_only_import_job_plan_copies(self):
-        executor = MigrationExecutor(connection)
+        self.addCleanup(migrate_plugin_to_leaf)
         self.addCleanup(lambda: MigrationExecutor(connection).migrate([AFTER], fake=True))
+        # Reverse the later schema migrations for real, so the fake below skips only this data step.
+        MigrationExecutor(connection).migrate([AFTER])
+        executor = MigrationExecutor(connection)
         executor.migrate([BEFORE], fake=True)
         Job = executor.loader.project_state([BEFORE]).apps.get_model("core", "Job")
 

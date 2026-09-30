@@ -5,13 +5,14 @@
 
 import json
 
-from django.test import Client, TestCase, override_settings
+from django.test import Client, TestCase
 from django.urls import reverse
 from utilities.testing import APIViewTestCases, ViewTestCases
 
 from netbox_data_import.adapter_forms import FlatWorkbookConfigForm
 from netbox_data_import.models import ImportProfile, InferenceBackend
 from netbox_data_import.tests.helpers import user_with_object_permission
+from netbox_data_import.tests.plugins_config import override_plugins_config
 
 BASE_URL = "plugins:netbox_data_import:importprofile_{}"
 INFERENCE_BASE_URL = "plugins:netbox_data_import:inferencebackend_{}"
@@ -141,9 +142,7 @@ class ImportProfileAPIViewTestCase(APIViewTestCases.APIViewTestCase):
         cls.bulk_update_invalid_data = {"source_adapter": "no_such_adapter"}
 
 
-@override_settings(
-    PLUGINS_CONFIG={"netbox_data_import": {"inference_backend_origin_allowlist": list(INFERENCE_ALLOWLIST)}}
-)
+@override_plugins_config(netbox_data_import={"inference_backend_origin_allowlist": list(INFERENCE_ALLOWLIST)})
 class InferenceBackendViewTestCase(
     ViewTestCases.GetObjectViewTestCase,
     ViewTestCases.GetObjectChangelogViewTestCase,

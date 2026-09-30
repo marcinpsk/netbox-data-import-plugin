@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 from core.models import Job, ObjectChange
 from django.apps import apps
 from django.contrib.messages import get_messages
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 
 from netbox_data_import.inference_connection_test import run_connection_test
@@ -28,6 +28,8 @@ from netbox_data_import.models import ExecutionOutcome, ImportExecution, ImportP
 from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.tests.inference_http import issue_server_certificate, serving_tls
 from netbox_data_import.tests.test_inference_adapter import serving as serving_backend
+from netbox_data_import.tests.plugins_config import override_plugins_config
+from netbox_data_import.tests.test_inference_connection_test import settings_for
 
 SECRET = "sk-never-persisted-anywhere"
 REFERENCE = {"backend": "vault_kv_v2", "mount": "secret", "path": "inference/backend", "field": "api_key"}
@@ -62,19 +64,6 @@ def vault():
                 "connect_timeout": 2,
                 "read_timeout": 2,
             }
-
-
-def settings_for(vault_settings, *, inference_backend=None, origin_allowlist=None):
-    """Return a PLUGINS_CONFIG entry pointing the plugin at one Vault stand-in."""
-    settings = {
-        "netbox_data_import": {
-            "inference_backend_origin_allowlist": origin_allowlist or ["https://backend.example.invalid:443"],
-            "vault": vault_settings,
-        }
-    }
-    if inference_backend is not None:
-        settings["netbox_data_import"]["inference_backend"] = inference_backend
-    return settings
 
 
 def occurrences(value, expected) -> int:
@@ -120,7 +109,9 @@ class SecretContainmentTest(TestCase):
             self.row.api_root = root
             self.row.save(update_fields=("api_root",))
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     return run_connection_test(self.row.pk, "primary")
 
     @contextmanager
@@ -130,7 +121,9 @@ class SecretContainmentTest(TestCase):
             self.row.api_root = root
             self.row.save(update_fields=("api_root",))
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     yield
 
     def test_the_secret_resolves_so_the_sweep_is_meaningful(self):
@@ -264,7 +257,7 @@ class SecretContainmentTest(TestCase):
             ):
                 with vault() as vault_settings:
                     configuration = settings_for(vault_settings, origin_allowlist=allowlist)
-                    with override_settings(PLUGINS_CONFIG=configuration):
+                    with override_plugins_config(netbox_data_import=configuration):
                         edit_response = self.client.post(
                             reverse(
                                 "plugins:netbox_data_import:inferencebackend_edit",
@@ -297,7 +290,7 @@ class SecretContainmentTest(TestCase):
                             **persisted_state(),
                             "session": dict(self.client.session),
                             "logs": stream.getvalue(),
-                            "inference_backend_setting": configuration["netbox_data_import"].get("inference_backend"),
+                            "inference_backend_setting": configuration.get("inference_backend"),
                         }
         finally:
             root.removeHandler(handler)
@@ -326,11 +319,11 @@ class SecretContainmentTest(TestCase):
         self.row.delete()
         with vault() as vault_settings:
             configuration = settings_for(vault_settings, inference_backend=fallback)
-            with override_settings(PLUGINS_CONFIG=configuration):
+            with override_plugins_config(netbox_data_import=configuration):
                 active = resolve_active_backend()
                 state = {
                     **persisted_state(),
-                    "inference_backend_setting": configuration["netbox_data_import"]["inference_backend"],
+                    "inference_backend_setting": configuration["inference_backend"],
                 }
 
         self.assertEqual(active.source, "file-fallback")

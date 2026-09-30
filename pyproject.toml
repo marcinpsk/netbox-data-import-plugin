@@ -24,6 +24,7 @@ dependencies = [
     "defusedxml>=0.7.1",
     "google-re2>=1.1.20251105",
     "openpyxl>=3.1",
+    "packaging>=24",
     "pyyaml>=6",
     "requests>=2.33.0",
 ]
@@ -64,6 +65,8 @@ dev = [
     "types-openpyxl",
     "cryptography>=42",
 ]
+# The CI job that runs the plugin beside netbox-branching installs this group next to `test`.
+branching = ["netboxlabs-netbox-branching==1.2.1"]
 docs = [
     "mkdocs>=1,<2",
     "mkdocs-material>=9,<10",
@@ -166,6 +169,7 @@ module = [
     "extras.*",
     "ipam.*",
     "netbox.*",
+    "netbox_branching.*",
     "pytest",
     "redis.*",
     "rest_framework.*",
@@ -184,6 +188,9 @@ source = ["netbox_data_import"]
 omit = ["*/migrations/*", "*/tests/*"]
 
 [tool.coverage.report]
+# branching.py runs only beside netbox-branching, so the plain rows leave it out of their gate. The
+# branching CI job measures it and requires 100% for that file.
+omit = ["*/migrations/*", "*/tests/*", "netbox_data_import/branching.py"]
 # Without `precision`, coverage.py compares the rounded total, so `fail_under = 98` enforced 97.5%.
 precision = 2
 fail_under = 97.5

@@ -2,6 +2,7 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 from netbox.plugins import PluginTemplateExtension
 
+from . import branching
 from .models import stored_import_source
 
 IP_FIELD_LABELS = {
@@ -22,6 +23,9 @@ class DeviceImportDataExtension(PluginTemplateExtension):
 
     def left_page(self):
         """Render import data card for the Device detail page left column."""
+        # A branch shows the notice on every Device, so the card reads no plugin data there.
+        if branching.active_branch() is not None:
+            return self.render("netbox_data_import/device_import_data_main_only.html")
         obj = self.context.get("object")
         import_source = stored_import_source(obj)
         if import_source is None:

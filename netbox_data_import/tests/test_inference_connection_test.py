@@ -16,7 +16,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 
 from netbox_data_import.inference_connection_test import (
@@ -34,6 +34,7 @@ from netbox_data_import.tests.test_inference_adapter import (
     completion,
     serving as serving_backend,
 )
+from netbox_data_import.tests.plugins_config import override_plugins_config
 
 SECRET = "sk-connection-test-secret"
 REFERENCE = {"backend": "vault_kv_v2", "mount": "secret", "path": "inference/backend", "field": "api_key"}
@@ -184,14 +185,15 @@ def make_row(**overrides):
     return InferenceBackend.objects.create(**values)
 
 
-def settings_for(vault_settings, *, origin_allowlist=None):
+def settings_for(vault_settings, *, inference_backend=None, origin_allowlist=None):
     """Return a PLUGINS_CONFIG entry pointing the plugin at one Vault stand-in."""
-    return {
-        "netbox_data_import": {
-            "inference_backend_origin_allowlist": origin_allowlist or ["https://backend.example.invalid:443"],
-            "vault": vault_settings,
-        }
+    settings = {
+        "inference_backend_origin_allowlist": origin_allowlist or ["https://backend.example.invalid:443"],
+        "vault": vault_settings,
     }
+    if inference_backend is not None:
+        settings["inference_backend"] = inference_backend
+    return settings
 
 
 class ConnectionTestResultTest(TestCase):
@@ -201,7 +203,9 @@ class ConnectionTestResultTest(TestCase):
         with serving_backend() as (root, _seen, allowlist):
             row = make_row(api_root=root)
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "ok")
@@ -211,7 +215,9 @@ class ConnectionTestResultTest(TestCase):
         with serving_backend(models_payload=models_payload) as (root, seen, allowlist):
             row = make_row(api_root=root, model="model-a")
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "ok")
@@ -223,7 +229,9 @@ class ConnectionTestResultTest(TestCase):
         with serving_backend(models_status=404, models_payload={"detail": "not found"}) as (root, seen, allowlist):
             row = make_row(api_root=root)
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "ok")
@@ -234,7 +242,9 @@ class ConnectionTestResultTest(TestCase):
         with serving_backend(models_byte_delay=0.2) as (root, seen, allowlist):
             row = make_row(api_root=root, connect_timeout=1, read_timeout=1)
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "ok")
@@ -250,7 +260,9 @@ class ConnectionTestResultTest(TestCase):
         ):
             row = make_row(api_root=root)
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "authentication_failure")
@@ -265,7 +277,9 @@ class ConnectionTestResultTest(TestCase):
         ):
             row = make_row(api_root=root, model="unknown-model")
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "invalid_configuration")
@@ -278,7 +292,9 @@ class ConnectionTestResultTest(TestCase):
         with serving_backend(payload=completion(content=SECRET)) as (root, _seen, allowlist):
             row = make_row(api_root=root)
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "invalid_response")
@@ -295,7 +311,9 @@ class ConnectionTestResultTest(TestCase):
                     backend_key = f"primary-{index}"
                     row = make_row(api_root=root, backend_key=backend_key, enabled=index == 0)
                     with vault() as vault_settings:
-                        with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                        with override_plugins_config(
+                            netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                        ):
                             result = run_connection_test(row.pk, backend_key)
 
                 self.assertEqual(result.category, "invalid_response")
@@ -304,7 +322,7 @@ class ConnectionTestResultTest(TestCase):
     def test_a_denied_read_reports_credential_denied(self):
         row = make_row()
         with vault(status=403, payload={"errors": ["denied"]}) as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+            with override_plugins_config(netbox_data_import=settings_for(vault_settings)):
                 result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "credential_denied")
@@ -320,7 +338,7 @@ class ConnectionTestResultTest(TestCase):
                 "read_timeout": 1,
             }
 
-            with override_settings(PLUGINS_CONFIG=settings_for(unreachable)):
+            with override_plugins_config(netbox_data_import=settings_for(unreachable)):
                 result = run_connection_test(row.pk, "primary")
 
             self.assertEqual(result.category, "credential_unavailable")
@@ -329,7 +347,7 @@ class ConnectionTestResultTest(TestCase):
         row = make_row(connect_timeout=1, read_timeout=1)
 
         with vault(byte_delay=0.1) as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+            with override_plugins_config(netbox_data_import=settings_for(vault_settings)):
                 result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "timeout")
@@ -341,7 +359,7 @@ class ConnectionTestResultTest(TestCase):
 
         with patch.object(inference_trust, "DNS_WORKER_COMMAND", command):
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+                with override_plugins_config(netbox_data_import=settings_for(vault_settings)):
                     result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "timeout")
@@ -394,8 +412,8 @@ json.dump(list(dict.fromkeys(str(answer[4][0]) for answer in answers)), sys.stdo
                     with serving_backend() as (root, seen, allowlist):
                         row = make_row(api_root=root)
                         with vault() as vault_settings:
-                            with override_settings(
-                                PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)
+                            with override_plugins_config(
+                                netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
                             ):
                                 result = run_connection_test(row.pk, "primary")
 
@@ -413,7 +431,9 @@ json.dump(list(dict.fromkeys(str(answer[4][0]) for answer in answers)), sys.stdo
             row.api_root = root
             row.save(update_fields=("api_root",))
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     started = time.monotonic()
                     result = run_connection_test(row.pk, "primary")
                     elapsed = time.monotonic() - started
@@ -432,7 +452,7 @@ json.dump(list(dict.fromkeys(str(answer[4][0]) for answer in answers)), sys.stdo
                 "read_timeout": 1,
             }
 
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+            with override_plugins_config(netbox_data_import=settings_for(vault_settings)):
                 result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "invalid_configuration")
@@ -440,7 +460,7 @@ json.dump(list(dict.fromkeys(str(answer[4][0]) for answer in answers)), sys.stdo
     def test_an_empty_field_reports_invalid_secret_material(self):
         row = make_row()
         with vault(payload={"data": {"data": {"api_key": ""}}}) as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+            with override_plugins_config(netbox_data_import=settings_for(vault_settings)):
                 result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "invalid_secret_material")
@@ -448,14 +468,14 @@ json.dump(list(dict.fromkeys(str(answer[4][0]) for answer in answers)), sys.stdo
     def test_a_malformed_reference_reports_invalid_credential_reference(self):
         row = make_row(credential_reference={"backend": "vault_kv_v2"})
         with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+            with override_plugins_config(netbox_data_import=settings_for(vault_settings)):
                 result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "invalid_credential_reference")
 
     def test_a_missing_row_reports_invalid_configuration(self):
         with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+            with override_plugins_config(netbox_data_import=settings_for(vault_settings)):
                 result = run_connection_test(0, "primary")
 
         self.assertEqual(result.category, "invalid_configuration")
@@ -464,7 +484,9 @@ json.dump(list(dict.fromkeys(str(answer[4][0]) for answer in answers)), sys.stdo
         with serving_backend() as (root, _seen, allowlist):
             row = make_row(api_root=root)
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     self.assertIn(run_connection_test(row.pk, "primary").category, CONNECTION_TEST_CATEGORIES)
 
     def test_the_result_never_carries_the_secret_or_a_vault_body(self):
@@ -479,7 +501,7 @@ json.dump(list(dict.fromkeys(str(answer[4][0]) for answer in answers)), sys.stdo
         for case in cases:
             with self.subTest(case=case):
                 with vault(**case) as vault_settings:
-                    with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+                    with override_plugins_config(netbox_data_import=settings_for(vault_settings)):
                         result = run_connection_test(row.pk, "primary")
 
                 serialized = json.dumps(asdict(result))
@@ -490,7 +512,9 @@ json.dump(list(dict.fromkeys(str(answer[4][0]) for answer in answers)), sys.stdo
         with serving_backend() as (root, _seen, allowlist):
             row = make_row(api_root=root)
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     result = run_connection_test(row.pk, "primary")
 
         payload = asdict(result)
@@ -524,7 +548,9 @@ class SelectedBackendTest(TestCase):
             )
 
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     result = run_connection_test(row.pk, "selected")
 
         self.assertEqual(result.category, "ok")
@@ -549,9 +575,7 @@ class SelectedBackendTest(TestCase):
         }
 
         with vault() as vault_settings:
-            config = settings_for(vault_settings)
-            config["netbox_data_import"]["inference_backend"] = fallback
-            with override_settings(PLUGINS_CONFIG=config):
+            with override_plugins_config(netbox_data_import=settings_for(vault_settings, inference_backend=fallback)):
                 result = run_connection_test(pk, "file-fallback")
 
         self.assertEqual(result.category, "invalid_configuration")
@@ -563,7 +587,9 @@ class SelectedBackendTest(TestCase):
             row = make_row(backend_key="selected", display_name="Selected", enabled=False, api_root=root)
 
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     result = run_connection_test(row.pk, "selected")
 
         self.assertEqual(result.category, "ok")
@@ -573,7 +599,7 @@ class SelectedBackendTest(TestCase):
         make_row(backend_key="primary")
 
         with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+            with override_plugins_config(netbox_data_import=settings_for(vault_settings)):
                 result = run_connection_test(0, "gone")
 
         self.assertEqual(result.category, "invalid_configuration")
@@ -679,7 +705,9 @@ class BackendDetailPageTest(TestCase):
             self.row.model = "model-a"
             self.row.save(update_fields=("api_root", "model"))
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     response = self.client.post(
                         reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk]),
                         follow=True,
@@ -708,7 +736,7 @@ class BackendDetailPageTest(TestCase):
         from core.models import Job
 
         with vault(status=403, payload={"errors": ["denied"]}) as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+            with override_plugins_config(netbox_data_import=settings_for(vault_settings)):
                 response = self.client.post(
                     reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk]),
                     follow=True,
@@ -730,7 +758,9 @@ class BackendDetailPageTest(TestCase):
             self.row.api_root = root
             self.row.save(update_fields=("api_root",))
             with vault() as vault_settings:
-                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                with override_plugins_config(
+                    netbox_data_import=settings_for(vault_settings, origin_allowlist=allowlist)
+                ):
                     started = time.monotonic()
                     response = self.client.post(
                         reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk]),

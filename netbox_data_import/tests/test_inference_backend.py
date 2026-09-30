@@ -4,7 +4,7 @@
 
 from django.core.exceptions import ValidationError
 from django.db.utils import IntegrityError
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 
 from netbox_data_import.inference_backend import (
@@ -15,6 +15,7 @@ from netbox_data_import.inference_credentials import InvalidCredentialReference
 from netbox_data_import.inference_settings import FILE_FALLBACK_KEY, InvalidInferenceConfiguration
 from netbox_data_import.models import InferenceBackend
 from netbox_data_import.tests.helpers import user_with_object_permission
+from netbox_data_import.tests.plugins_config import override_plugins_config
 
 ALLOWLIST = ["https://backend.example.invalid:443"]
 REFERENCE = {"backend": "vault_kv_v2", "mount": "secret", "path": "inference/backend", "field": "api_key"}
@@ -55,7 +56,7 @@ def plugin_settings(**overrides):
     """Return a PLUGINS_CONFIG entry for the plugin with the named keys replaced."""
     config = {"inference_backend_origin_allowlist": ALLOWLIST}
     config.update(overrides)
-    return {"netbox_data_import": config}
+    return config
 
 
 class OneEnabledRowTest(TestCase):
@@ -105,7 +106,7 @@ class OneEnabledRowTest(TestCase):
 class RowValidationTest(TestCase):
     """A row validates against the same trust boundary and reference rules as the fallback."""
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings())
+    @override_plugins_config(netbox_data_import=plugin_settings())
     def test_an_api_root_outside_the_allowlist_is_refused(self):
         row = InferenceBackend(
             backend_key="a",
@@ -120,7 +121,7 @@ class RowValidationTest(TestCase):
 
         self.assertIn("api_root", caught.exception.message_dict)
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings())
+    @override_plugins_config(netbox_data_import=plugin_settings())
     def test_a_credential_reference_carrying_a_token_is_refused(self):
         row = InferenceBackend(
             backend_key="a",
@@ -135,7 +136,7 @@ class RowValidationTest(TestCase):
 
         self.assertIn("credential_reference", caught.exception.message_dict)
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings())
+    @override_plugins_config(netbox_data_import=plugin_settings())
     def test_an_unusable_port_is_a_field_error_rather_than_a_crash(self):
         """validate_backend_fields maps only InvalidInferenceConfiguration, so nothing else may escape."""
         row = InferenceBackend(
@@ -151,7 +152,7 @@ class RowValidationTest(TestCase):
 
         self.assertIn("api_root", caught.exception.message_dict)
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings())
+    @override_plugins_config(netbox_data_import=plugin_settings())
     def test_an_api_root_carrying_a_query_is_refused(self):
         """The adapter appends /chat/completions as text, so a query would swallow the suffix."""
         row = InferenceBackend(
@@ -167,7 +168,7 @@ class RowValidationTest(TestCase):
 
         self.assertIn("api_root", caught.exception.message_dict)
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings())
+    @override_plugins_config(netbox_data_import=plugin_settings())
     def test_a_zero_timeout_is_refused(self):
         """A zero timeout raises in the transport, so the row carries the fallback's floor."""
         for field in ("connect_timeout", "read_timeout"):
@@ -186,7 +187,7 @@ class RowValidationTest(TestCase):
 
                 self.assertIn(field, caught.exception.message_dict)
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings())
+    @override_plugins_config(netbox_data_import=plugin_settings())
     def test_a_valid_row_passes(self):
         row = InferenceBackend(
             backend_key="a",
@@ -202,7 +203,7 @@ class RowValidationTest(TestCase):
 class ActiveBackendResolutionTest(TestCase):
     """The enabled row is the active backend; the file fallback acts only when no row is enabled."""
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings(inference_backend=FALLBACK))
+    @override_plugins_config(netbox_data_import=plugin_settings(inference_backend=FALLBACK))
     def test_the_enabled_row_wins_over_the_file_fallback(self):
         make_row(backend_key="primary", enabled=True, model="row-model")
 
@@ -212,7 +213,7 @@ class ActiveBackendResolutionTest(TestCase):
         self.assertEqual(active.model, "row-model")
         self.assertEqual(active.source, "database")
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings(inference_backend=FALLBACK))
+    @override_plugins_config(netbox_data_import=plugin_settings(inference_backend=FALLBACK))
     def test_the_file_fallback_acts_when_no_row_is_enabled(self):
         make_row(backend_key="primary", enabled=False, model="row-model")
 
@@ -222,7 +223,7 @@ class ActiveBackendResolutionTest(TestCase):
         self.assertEqual(active.model, "fallback-model")
         self.assertEqual(active.source, "file-fallback")
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings(inference_backend=FALLBACK))
+    @override_plugins_config(netbox_data_import=plugin_settings(inference_backend=FALLBACK))
     def test_the_two_sources_are_never_merged_field_by_field(self):
         """A row missing nothing takes every field from itself, not one from the fallback."""
         make_row(backend_key="primary", enabled=True, model="row-model", display_name="Row display")
@@ -232,12 +233,12 @@ class ActiveBackendResolutionTest(TestCase):
         self.assertEqual(active.display_name, "Row display")
         self.assertNotEqual(active.model, FALLBACK["model"])
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings())
+    @override_plugins_config(netbox_data_import=plugin_settings())
     def test_no_row_and_no_fallback_has_no_active_backend(self):
         with self.assertRaises(NoActiveInferenceBackend):
             resolve_active_backend()
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings(inference_backend={"display_name": "broken"}))
+    @override_plugins_config(netbox_data_import=plugin_settings(inference_backend={"display_name": "broken"}))
     def test_a_malformed_fallback_fails_rather_than_selecting_another_backend(self):
         """Section 8.2.1: a malformed mapping is invalid_configuration, never a silent fallback."""
         make_row(backend_key="primary", enabled=False)
@@ -245,21 +246,23 @@ class ActiveBackendResolutionTest(TestCase):
         with self.assertRaises(InvalidInferenceConfiguration):
             resolve_active_backend()
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings(inference_backend=FALLBACK))
+    @override_plugins_config(netbox_data_import=plugin_settings(inference_backend=FALLBACK))
     def test_the_resolved_backend_carries_its_typed_credential_reference(self):
         active = resolve_active_backend()
 
         self.assertEqual(active.credential_reference.mount, "secret")
         self.assertEqual(active.credential_reference.field, "api_key")
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings())
+    @override_plugins_config(netbox_data_import=plugin_settings())
     def test_a_row_whose_reference_is_malformed_is_refused_at_resolution(self):
         make_row(backend_key="primary", enabled=True, credential_reference={"backend": "vault_kv_v2"})
 
         with self.assertRaises(InvalidCredentialReference):
             resolve_active_backend()
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings(inference_backend_origin_allowlist=["https://other.invalid:443"]))
+    @override_plugins_config(
+        netbox_data_import=plugin_settings(inference_backend_origin_allowlist=["https://other.invalid:443"])
+    )
     def test_a_row_whose_api_root_left_the_allowlist_is_refused_at_resolution(self):
         """Spec 8.3 validates a row and a setting alike, and a saved row outlives its allowlist."""
         make_row(backend_key="primary", enabled=True)
@@ -267,14 +270,14 @@ class ActiveBackendResolutionTest(TestCase):
         with self.assertRaises(InvalidInferenceConfiguration):
             resolve_active_backend()
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings(inference_backend=FALLBACK))
+    @override_plugins_config(netbox_data_import=plugin_settings(inference_backend=FALLBACK))
     def test_the_source_reaches_backend_metadata(self):
         """The worker records which source it used, so an operator can tell them apart."""
         make_row(backend_key="primary", enabled=True)
 
         self.assertEqual(resolve_active_backend().metadata()["backend_source"], "database")
 
-    @override_settings(PLUGINS_CONFIG=plugin_settings(inference_backend=FALLBACK))
+    @override_plugins_config(netbox_data_import=plugin_settings(inference_backend=FALLBACK))
     def test_backend_metadata_carries_no_credential_material(self):
         metadata = resolve_active_backend().metadata()
 

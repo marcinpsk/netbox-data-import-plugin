@@ -34,7 +34,14 @@ from netbox_data_import.preview_row_actions import (
     PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
     retire_preview_revision,
 )
-from netbox_data_import.tests.helpers import run_on_separate_connection, user_with_object_permission, workbook_bytes
+from netbox_data_import.tests.helpers import (
+    queued_webhooks,
+    recorded_updates,
+    run_on_separate_connection,
+    update_webhook_rule,
+    user_with_object_permission,
+    workbook_bytes,
+)
 from netbox_data_import.views import NO_RACK_FILTER_VALUE
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
@@ -311,6 +318,52 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         results = self.client.get(reverse("plugins:netbox_data_import:import_results"))
         self.assertContains(results, "Import Complete")
         self.assertContains(results, "cutover.xlsx")
+
+    def _existing_server(self):
+        """Store server-a with a Device Type the workbook row replaces, and return both types."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack
+
+        rack = Rack.objects.create(name="rack-a", site=self.site, u_height=42)
+        other_type = DeviceType.objects.create(
+            manufacturer=Manufacturer.objects.get(slug="example"), model="Other", slug="example-other", u_height=1
+        )
+        existing = Device.objects.create(
+            name="server-a",
+            site=self.site,
+            rack=rack,
+            device_type=other_type,
+            role=DeviceRole.objects.get(slug="server"),
+        )
+        return existing, other_type, DeviceType.objects.get(slug="example-model")
+
+    def test_the_worker_records_updates_under_its_job_and_runs_their_event_rules(self):
+        """The queued import writes ObjectChanges as its Job, and an event rule gets a request it can copy."""
+        from dcim.models import Device
+        from django_rq import get_queue
+
+        existing, before, after = self._existing_server()
+        update_webhook_rule(Device)
+        self._upload()
+        self.client.post(reverse("plugins:netbox_data_import:import_run"))
+        job = Job.objects.get(data__job_type=ImportJobRunner.job_type)
+
+        self.run_rq_jobs()
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, "completed", job.error)
+        (change,) = recorded_updates(existing)
+        self.assertEqual((change.user, change.request_id), (self.actor, job.job_id))
+        self.assertEqual(
+            (change.prechange_data["device_type"], change.postchange_data["device_type"]), (before.pk, after.pk)
+        )
+        queue = get_queue("default")
+        ran = [
+            queue.fetch_job(job_id)
+            for registry in (queue.finished_job_registry, queue.failed_job_registry)
+            for job_id in registry.get_job_ids()
+        ]
+        (sent,) = [item for item in ran if item.func_name == "extras.webhooks.send_webhook"]
+        self.assertEqual((sent.kwargs["request"].id, sent.kwargs["request"].user), (job.job_id, self.actor))
 
     def test_run_requires_an_active_clean_preview(self):
         """Missing, submitted, and dirty preview states never enqueue another Job."""
@@ -932,6 +985,32 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         existing.refresh_from_db()
         self.assertEqual(existing.device_type_id, expected_type.pk, "the update row did not reach NetBox")
+        (change,) = recorded_updates(existing)
+        self.assertEqual(change.prechange_data["device_type"], other_type.pk)
+
+    def test_a_refused_single_row_sync_sends_no_event(self):
+        """The engine rolls the row back, so the event NetBox queued for it must not be sent."""
+        from dcim.models import Device
+        from django.db.models.signals import post_save
+
+        self._existing_server()
+        update_webhook_rule(Device)
+        self._upload()
+
+        def refuse(sender, instance, **kwargs):
+            raise ValidationError("The Device write is refused after it ran.")
+
+        post_save.connect(refuse, sender=Device, weak=False)
+        try:
+            refused = self._sync_single_row({"row_number": 3})
+        finally:
+            post_save.disconnect(refuse, sender=Device)
+
+        self.assertEqual(refused.status_code, 400, refused.content[:400])
+        self.assertEqual(queued_webhooks(), [], "an event was sent for a rolled-back write")
+        committed = self._sync_single_row({"row_number": 3})
+        self.assertEqual(committed.status_code, 200, committed.content[:400])
+        self.assertEqual(len(queued_webhooks()), 1)
 
     def test_single_row_sync_refuses_an_adapter_with_no_target_module(self):
         """A changed profile can require a Target Module that this release cannot run."""

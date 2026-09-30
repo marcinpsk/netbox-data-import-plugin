@@ -27,10 +27,15 @@ from netbox_data_import.preview_row_actions import (
 )
 from netbox_data_import.tests.helpers import (
     assert_action_link_is_named,
+    competing_write_during,
+    recorded_updates,
     run_on_separate_connection,
     set_import_source,
+    queued_webhooks,
     setup_preview_with_device_matches,
+    update_webhook_rule,
 )
+from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 User = get_user_model()
 
@@ -4423,6 +4428,90 @@ class RemoveExtraIpViewObjectPermissionTests(TestCase):
         self.assertEqual(stored_import_source(self.permitted).unassigned_ips, {})
 
 
+class RolledBackSyncEventsTest(IsolatedRQQueueTestMixin, TransactionTestCase):
+    """A sync that rolls back its Device write sends no event for that write."""
+
+    def setUp(self):
+        super().setUp()
+        from dcim.models import Device, Rack
+
+        from netbox_data_import.tests.helpers import make_dcim_objects
+
+        self.client.force_login(User.objects.create_superuser("sync-events", "sync-events@example.invalid", "x"))
+        site, _manufacturer, device_type, role = make_dcim_objects("sync-events-")
+        self.rack = Rack.objects.create(name="Events Rack", site=site, u_height=42)
+        self.device = Device.objects.create(name="events-device", site=site, device_type=device_type, role=role)
+        update_webhook_rule(Device)
+
+    def _refused_after_the_write(self, post, data):
+        """Post while a receiver refuses each Device save after NetBox has queued its event."""
+        from django.db.models.signals import post_save
+        from dcim.models import Device
+
+        def refuse(sender, instance, **kwargs):
+            raise RuntimeError("refused after the write")
+
+        post_save.connect(refuse, sender=Device, weak=False)
+        try:
+            with self.assertLogs("netbox_data_import.views", level="ERROR"):
+                return post(data)
+        finally:
+            post_save.disconnect(refuse, sender=Device)
+
+    def _assert_only_the_committed_sync_sends_an_event(self, url, data):
+        refused = self._refused_after_the_write(lambda posted: self.client.post(url, posted), data)
+
+        self.assertEqual(refused.status_code, 500, refused.content)
+        self.assertEqual(queued_webhooks(), [], "an event was sent for a rolled-back write")
+        committed = self.client.post(url, data)
+        self.assertTrue(committed.json()["ok"], committed.json())
+        self.assertEqual(len(queued_webhooks()), 1)
+
+    def test_a_refused_field_sync_sends_no_event(self):
+        self._assert_only_the_committed_sync_sends_an_event(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            {"device_id": self.device.pk, "field": "serial", "value": "SN-NEW"},
+        )
+
+    def test_a_refused_placement_sync_sends_no_event(self):
+        self._assert_only_the_committed_sync_sends_an_event(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            {"device_id": self.device.pk, "rack_name": self.rack.name},
+        )
+
+
+class SyncDeviceFieldLockTest(TransactionTestCase):
+    """The field sync writes from the row it locks, not from its first unlocked read."""
+
+    def test_a_write_after_the_first_read_is_the_recorded_before_state(self):
+        from django.db.models.signals import post_init
+        from dcim.models import Device
+
+        from netbox_data_import.tests.helpers import make_dcim_objects
+
+        user = User.objects.create_superuser("field-lock", "field-lock@example.invalid", "testpass")
+        self.client.force_login(user)
+        site, _manufacturer, device_type, role = make_dcim_objects("field-lock-")
+        device = Device.objects.create(
+            name="lock-device", site=site, device_type=device_type, role=role, serial="SN-OLD"
+        )
+
+        with competing_write_during(
+            post_init, Device, lambda: Device.objects.filter(pk=device.pk).update(serial="SN-CONCURRENT")
+        ) as (observed, blocked):
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:sync_device_field"),
+                {"device_id": device.pk, "field": "serial", "value": "SN-NEW"},
+            )
+
+        self.assertEqual((observed, blocked), ([True], []), "the competing write did not land after the first read")
+        self.assertTrue(response.json()["ok"], response.json())
+        (change,) = recorded_updates(device)
+        self.assertEqual(
+            (change.prechange_data["serial"], change.postchange_data["serial"]), ("SN-CONCURRENT", "SN-NEW")
+        )
+
+
 class SyncDeviceFieldViewTests(TestCase):
     """Tests for SyncDeviceFieldView."""
 
@@ -4483,6 +4572,40 @@ class SyncDeviceFieldViewTests(TestCase):
         self.assertTrue(data["ok"])
         self.device.refresh_from_db()
         self.assertEqual(self.device.serial, "SN-12345")
+
+    def test_a_field_sync_records_the_stored_value(self):
+        """The changelog shows what the device held before the sync, not an empty before-state."""
+        self.device.serial = "SN-OLD"
+        self.device.save()
+
+        self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "SN-NEW"})
+
+        (change,) = recorded_updates(self.device)
+        self.assertEqual((change.prechange_data["serial"], change.postchange_data["serial"]), ("SN-OLD", "SN-NEW"))
+        self.assertEqual(change.user, self.user)
+
+    def test_an_ip_field_sync_records_the_stored_address_and_device(self):
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        interface = Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        address = IPAddress.objects.create(address="198.18.0.30/32")
+
+        response = self.client.post(
+            self.url, {"device_id": self.device.pk, "field": "primary_ip4", "value": "198.18.0.30"}
+        )
+
+        self.assertTrue(response.json()["ok"], response.json())
+        (moved,) = recorded_updates(address)
+        self.assertEqual(
+            (moved.prechange_data["assigned_object_id"], moved.postchange_data["assigned_object_id"]),
+            (None, interface.pk),
+        )
+        (device_change,) = recorded_updates(self.device)
+        self.assertEqual(
+            (device_change.prechange_data["primary_ip4"], device_change.postchange_data["primary_ip4"]),
+            (None, address.pk),
+        )
 
     def test_sync_asset_tag(self):
         """Set asset_tag on device via SyncDeviceFieldView."""
@@ -5034,6 +5157,22 @@ class SyncRackAndPlacementTests(TestCase):
         self.assertTrue(data["ok"], data)
         self.device_no_loc.refresh_from_db()
         self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
+
+    def test_a_placement_sync_records_the_stored_placement(self):
+        """The changelog shows the device before it was racked, not an empty before-state."""
+        self.client.post(
+            self.placement_url,
+            {"device_id": self.device_no_loc.pk, "rack_name": "R1", "u_position": "5", "face": "front"},
+        )
+
+        (change,) = recorded_updates(self.device_no_loc)
+        self.assertEqual(
+            (change.prechange_data["rack"], change.prechange_data["position"], change.prechange_data["face"]),
+            (None, None, None),
+        )
+        self.assertEqual(
+            (change.postchange_data["rack"], change.postchange_data["face"]), (self.rack_no_loc.pk, "front")
+        )
 
     def test_rack_name_sync_with_location(self):
         """Device with location matches rack in same location (via placement)."""

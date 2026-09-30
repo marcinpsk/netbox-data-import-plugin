@@ -284,6 +284,8 @@ def apply(target: IPTarget, user=None):
     action = "change" if address is not None else "add"
     if address is None:
         address = IPAddress(address=target.address, vrf=target.interface.vrf)
+    else:
+        address.snapshot()
     address.assigned_object = target.interface
     address.full_clean()
     address.save()
