@@ -154,6 +154,23 @@ class TagAssignmentTest(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual([row["id"] for row in response.json()["results"]], [by_name.pk])
 
+    def test_the_profile_list_searches_the_name(self):
+        matching = ImportProfile.objects.create(name="Search Profile Alpha")
+        ImportProfile.objects.create(name="Unmatched profile")
+
+        for route in (
+            "plugins-api:netbox_data_import-api:importprofile-list",
+            "plugins:netbox_data_import:importprofile_list",
+        ):
+            with self.subTest(route=route):
+                response = self.client.get(reverse(route), {"q": "profile alpha"})
+
+                self.assertEqual(response.status_code, 200)
+                if route.startswith("plugins-api:"):
+                    self.assertEqual([row["id"] for row in response.json()["results"]], [matching.pk])
+                else:
+                    self.assertEqual([row.pk for row in response.context["table"].data], [matching.pk])
+
     def test_the_detail_pages_show_the_tags_panel(self):
         profile = ImportProfile.objects.create(name="Detail tagged profile")
         backend = _backend("detail-tagged")
