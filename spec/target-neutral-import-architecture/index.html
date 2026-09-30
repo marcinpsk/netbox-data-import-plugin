@@ -1845,6 +1845,9 @@ command never edits an Import Plan.</p>
 </tr>
 </tbody>
 </table>
+<p>Every plugin entry point refuses inside a netbox-branching branch: the plugin operates on main only.
+<code>branching.py</code> owns that rule, and the <a href="../../design/netbox-branching/">netbox-branching design record</a>
+holds the reasons.</p>
 <h2 id="3-source-adapter-and-import-profile-contracts">3. Source Adapter and Import Profile contracts</h2>
 <h3 id="31-registry-and-selection">3.1 Registry and selection</h3>
 <p>The Source Adapter registry is a static in-plugin mapping from a stable adapter key to the adapter
@@ -2358,8 +2361,9 @@ blank-row layout, empty-string cells, and sheet dimensions.</p>
 <h2 id="6-patched-path-replacement-planning-and-transaction-behavior">6. Patched Path Replacement planning and transaction behavior</h2>
 <p>The Cable Target Module verifies pass-throughs against the PortMapping model, which NetBox 4.5
 introduced in place of the single rear-port reference on a front port. The plugin's minimum NetBox
-version is 4.6.0, for this feature and for the plugin as a whole, because 4.6 is the oldest release
-the test matrix covers.</p>
+version is 4.6.9, for this feature and for the plugin as a whole, because 4.6 is the oldest release
+the test matrix covers. Within 4.6, 4.6.9 is the first release whose <code>event_tracking</code> resets the
+request context when a job fails.</p>
 <h3 id="61-port-resolution">6.1 Port resolution</h3>
 <p>Each Termination Reference resolves inside its resolved Device. Device resolution runs before port
 resolution begins. A saved <code>TraceDeviceResolution</code> maps the normalized source Device label to one
@@ -3451,7 +3455,7 @@ Synchronization Units and Planned Changes.</p>
 </tr>
 <tr>
 <td>NetBox changelog entries</td>
-<td>NetBox, for every <code>NetBoxModel</code> write</td>
+<td>NetBox, for every <code>NetBoxModel</code> write; the import Job records its writes as its user, under its Job UUID</td>
 </tr>
 <tr>
 <td>Resolution Proposal row</td>
@@ -3781,6 +3785,11 @@ transaction.</p>
 <td>Stored request below the current prompt or response contract</td>
 <td>Non-transient, typed reason <code>superseded_request</code></td>
 <td>Retire the queued or running row when the upgrade runs, so the operator asks again under the contract the release sends</td>
+</tr>
+<tr>
+<td>The worker runs with a netbox-branching branch active</td>
+<td>Non-transient, typed reason <code>branch_active</code></td>
+<td>Set the row to <code>failed</code> before any other read, so the operator can ask again on main</td>
 </tr>
 </tbody>
 </table>

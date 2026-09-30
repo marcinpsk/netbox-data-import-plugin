@@ -1,0 +1,1242 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://marcinpsk.github.io/netbox-data-import-plugin/design/netbox-branching/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Netbox branching - NetBox Data Import</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#netbox-branching-compatibility" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="NetBox Data Import" class="md-header__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Data Import
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Netbox branching
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="NetBox Data Import" class="md-nav__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    NetBox Data Import
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#0-review-record" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0. Review record
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#problem-brief" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Problem brief
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Problem brief">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Evidence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#constraints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Constraints
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#acceptance-conditions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Acceptance conditions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#divergence-table-blind-merge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Divergence table (blind merge)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Divergence table (blind merge)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#round-1-dispositions-r1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Round 1 dispositions (r1)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changes-r1-to-r2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changes r1 to r2
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#round-2-dispositions-r2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Round 2 dispositions (r2)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#operator-decision-after-round-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Operator decision after round 2
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changes-r2-to-r3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changes r2 to r3
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#round-3-dispositions-r3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Round 3 dispositions (r3)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changes-r3-to-r4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changes r3 to r4
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#design-r4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Design r4
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Design r4">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contract
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#owner-netbox_data_importbranchingpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Owner: netbox_data_import/branching.py
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#branchability-rule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Branchability rule
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#revert" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Revert
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#migrations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migrations
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mechanical-guards" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mechanical guards
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ci" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CI
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#out-of-scope" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Out of scope
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-action" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Next action
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<!--
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
+-->
+
+<h1 id="netbox-branching-compatibility">netbox-branching compatibility</h1>
+<h2 id="0-review-record">0. Review record</h2>
+<p>Round 4: RATIFY r4, for the current plugin models, NetBox 4.7.0 with netbox-branching 1.2.1, and
+branches created after this release. The ratification is by source inspection; the CI job in the
+design is what verifies it at runtime. Rounds 1 to 3: NOT RATIFIED (six, three and one blockers),
+each closed or withdrawn below. After round 2 the operator removed D8 from scope (constraint below).</p>
+<p>Blind co-design: Claude (Opus 5.5) drafted from the brief below. <code>gpt-6-astra</code> at reasoning effort
+high drafted in a fresh read-only context from the same brief and evidence pointers, without the
+Claude draft. Both chose main-only operation.</p>
+<p>Corrected before round 1 (not a reviewer finding):</p>
+<ul>
+<li>The Claude draft said migration 0038 must run on a branch. Refuted: branch migrate runs <code>RunSQL</code>
+  with the search path set to the branch schema only (<code>netbox_branching/models/branches.py</code>,
+  <code>_isolated_runsql</code>), so its <code>LOCK TABLE django_content_type</code> fails there. Reopen if branching
+  stops isolating <code>RunSQL</code>.</li>
+<li>The Claude draft missed that <code>ImportProfile.tags</code> and <code>InferenceBackend.tags</code> are plain
+  <code>ManyToManyField</code>s. Their auto-created through tables hold a database foreign key to
+  <code>extras_tag</code>, so a Tag delete in a branch cascades into main.</li>
+</ul>
+<h2 id="problem-brief">Problem brief</h2>
+<p>NetBox Branching (netbox-labs/netbox-branching, v1.2.1, NetBox 4.7 only; v1.1.x covers 4.4.1 to
+4.6) stages changes in a per-branch PostgreSQL schema. Its <code>BranchAwareRouter</code> sends queries for
+branchable models to a <code>schema_&lt;id&gt;</code> connection while a branch is active. The connection uses
+<code>search_path=&lt;branch&gt;,&lt;main&gt;</code>. A model is branchable when it inherits <code>ChangeLoggingMixin</code>, is in
+<code>INCLUDE_MODELS</code> (for example <code>extras.taggeditem</code>, <code>dcim.portmapping</code>), or a registered resolver
+says so. Merge and sync replay <code>ObjectChange</code> rows only. The plugin today has no code for
+branching, and a user can install both.</p>
+<p>The question is what the plugin guarantees when netbox-branching is installed, and what code
+enforces it.</p>
+<h3 id="evidence">Evidence</h3>
+<ul>
+<li>Only <code>ImportProfile</code> and <code>InferenceBackend</code> are change-logged (<code>NetBoxModel</code>). The 18 other models
+  are plain <code>models.Model</code>, and all of them have a foreign key to <code>ImportProfile</code>.</li>
+<li><code>DeviceImportSource.device</code> and <code>CableImportSource.cable</code> are <code>CASCADE</code> foreign keys into DCIM.
+  <code>ClassRoleMapping.rack_type</code> is <code>SET_NULL</code> into <code>dcim.RackType</code>. A Django cascade runs on the
+  deleting instance's connection, where a table absent from the branch schema resolves to main.</li>
+<li>About 25 <code>transaction.atomic()</code> calls pass no <code>using=</code>, so they open a transaction on <code>default</code>.
+  Inside them, <code>select_for_update()</code> runs on <code>ImportProfile</code> and on DCIM models, which route to the
+  branch connection. <code>locked_profile_policy</code> (<code>models.py</code>) wraps every import this way.</li>
+<li><code>ImportJobRunner</code> and <code>ResolutionProposalJob</code> are plain <code>JobRunner</code>s. NetBox applies request
+  processors (which activate the branch) only in <code>ScriptJob</code>, <code>AsyncViewJob</code> and <code>AsyncAPIJob</code>.
+  <code>ImportJobRunner</code> enters NetBox's <code>event_tracking</code> only, so it records ObjectChanges and
+  activates no branch.</li>
+<li>Raw cursors on <code>django.db.connection</code> read tables at <code>object_permissions.py</code> (permission query)
+  and <code>cable_target.py</code> (<code>extras_tag ... FOR SHARE</code>).</li>
+<li>Plugin code calls <code>snapshot()</code> before it updates an existing change-logged object (#188). A
+  test-time guard (<code>tests/snapshot_guard.py</code>) fails a plugin write without a current snapshot.</li>
+<li>Migration 0038 adds a column, trigger and foreign key on <code>extras_taggeditem</code> through <code>RunSQL</code>.
+  Branch provisioning copies triggers, but not foreign keys.</li>
+<li>The CI matrix runs NetBox 4.7.0 and 4.6.10, without netbox-branching.</li>
+</ul>
+<h3 id="constraints">Constraints</h3>
+<ul>
+<li>netbox-branching stays optional. Without it, behaviour does not change.</li>
+<li>No backwards-compatibility layers; this repository removes obsolete paths.</li>
+<li>Fail fast and visibly; no silent fallback to main.</li>
+<li>The plugin was never compatible with netbox-branching before this release, so a deployment runs
+  both only from this release on, and no branch predates it (operator decision after round 2).</li>
+</ul>
+<h3 id="acceptance-conditions">Acceptance conditions</h3>
+<ol>
+<li>With a branch active, every plugin entry point (UI view, REST API, background job) has one
+   documented outcome. No outcome is an unhandled 500, and none writes to a schema the user did not
+   choose.</li>
+<li>A NetBox core action executed in a branch (delete or edit a Device, Cable, RackType or Tag)
+   does not change the plugin's rows in main. A change to a global object (User, core.Job,
+   CustomField, ObjectType) lands in main, and so do its effects on plugin rows.</li>
+<li>After a branch merges or is discarded, main's plugin rows are consistent with main's NetBox
+   objects.</li>
+<li>A CI job with netbox-branching on NetBox 4.7 runs tests that fail when 1 to 3 regress.</li>
+<li>A mechanical guard stops a new call site from bypassing the chosen rule.</li>
+</ol>
+<h2 id="divergence-table-blind-merge">Divergence table (blind merge)</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Decision</th>
+<th>Claude</th>
+<th>Codex</th>
+<th>Evidence</th>
+<th>Disposition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>D1</td>
+<td>Support level</td>
+<td>Main only</td>
+<td>Main only</td>
+<td>Full support needs all 18 plain models change-logged, and a rework of the default-connection locks (<code>models.py</code> <code>locked_profile_policy</code>) and raw cursors</td>
+<td>Converged. Agreement is not verification</td>
+</tr>
+<tr>
+<td>D2</td>
+<td>Which plugin models are branchable</td>
+<td>Derived rule: a plugin model is branchable only when it has a database foreign key to a branchable model outside the plugin. Today: <code>DeviceImportSource</code>, <code>CableImportSource</code>, <code>ClassRoleMapping</code>, and the two <code>tags</code> through tables. The other 17, including <code>ImportProfile</code> and <code>InferenceBackend</code>, are forced non-branchable</td>
+<td>All 20 plus both through tables are branchable</td>
+<td>Every writer of plugin rows is a plugin view, API or job, and all of them are refused in a branch. So a branch copy of a policy row can only go stale. Sync selects by branchable type (<code>branches.py:424</code>), so main's profile edits are not replayed into branches. A core action reaches plugin rows only through a database foreign key from a plugin table</td>
+<td>Claude's rule, with the through tables added. Differs in test: under Claude's rule a branch cannot delete an Import Profile, and branch reads of profiles show main</td>
+</tr>
+<tr>
+<td>D3</td>
+<td>Branch revert</td>
+<td>Allow it. Document that <code>DeviceImportSource</code> rows removed by a merged delete are not restored</td>
+<td>Refuse every revert through a validator and a <code>pre_revert</code> backstop</td>
+<td>Revert replays <code>ObjectChange</code> only, and plugin rows have none</td>
+<td>Unresolved. Round 1 is to judge the r1 middle option (below)</td>
+</tr>
+<tr>
+<td>D4</td>
+<td>GraphQL and the Device card in a branch</td>
+<td>Allowed. GraphQL reads main (both exposed types are non-branchable under D2). The card reads the branch copy</td>
+<td>Guard GraphQL fields; the card shows a notice</td>
+<td><code>graphql/schema.py</code> exposes only <code>ImportProfile</code> and <code>CableClassMapping</code>, read-only</td>
+<td>Claude's, as a documented outcome. Round 1 may attack it</td>
+</tr>
+<tr>
+<td>D5</td>
+<td>Stale branch selection (a cookie for a merged or archived branch resolves to main)</td>
+<td>Not handled</td>
+<td>Refuse: a selection must not authorize a write to main</td>
+<td><code>BranchMiddleware</code> returns 400 for an unknown or unready branch. For a stale cookie it runs the request on main and clears the cookie</td>
+<td>Accepted in reduced form: refuse a plugin request that carries a branch selector while no branch is active, except the explicit switch to main (<code>?_branch=</code>)</td>
+</tr>
+<tr>
+<td>D6</td>
+<td>Jobs</td>
+<td><code>refuse_branch()</code> at job start and in <code>locked_profile_policy</code></td>
+<td>Payloads carry an explicit main scope; an AST check forbids direct enqueue</td>
+<td>Workers never activate a branch (<code>netbox/jobs.py</code> <code>JobRunner.handle</code>). The contextvar is the one fact; a payload field duplicates it</td>
+<td>Claude's. Rejected: a second representation of the same fact, with one adapter</td>
+</tr>
+<tr>
+<td>D7</td>
+<td>Data migrations on branch migrate</td>
+<td><code>fake_on_branch = True</code> on all seven</td>
+<td>True on 0020, 0038 and 0039; the other four unset</td>
+<td>0015, 0022, 0030 and 0035 write <code>DeviceExistingMatch</code>, <code>ImportProfile</code> and <code>ResolutionProposal</code>. Under D2 these stay in main, and <code>RunPython</code> runs with the full search path, so a branch migrate would rewrite main</td>
+<td>All seven <code>True</code>, following D2</td>
+</tr>
+<tr>
+<td>D8</td>
+<td>Branches that exist before the upgrade</td>
+<td>Release note</td>
+<td>Refuse to operate in them; validate the branch's physical tables first</td>
+<td>Their schemas lack the new branchable tables, so the cascade leak survives in them</td>
+<td>Unresolved. Round 1 is to choose (see r1)</td>
+</tr>
+<tr>
+<td>D9</td>
+<td>Cable-tag foreign key inside a branch</td>
+<td>None</td>
+<td>Add it during provisioning</td>
+<td>Branching excludes every foreign key from branch tables by design (<code>provisioning.py:262</code>). Nothing outside migrations reads <code>ndi_cable_id</code>, and the plugin never runs in a branch</td>
+<td>Codex's rejected</td>
+</tr>
+<tr>
+<td>D10</td>
+<td>Startup validation</td>
+<td>None</td>
+<td>Reject incompatible versions, and exemptions that override the resolver</td>
+<td>A resolver <code>True</code> does not override <code>exempt_models</code> (<code>utilities.py</code> <code>supports_branching</code>). <code>netbox_data_import.*</code> in <code>exempt_models</code> would restore the leak</td>
+<td>Codex's, accepted</td>
+</tr>
+<tr>
+<td>D11</td>
+<td>Owner and seam</td>
+<td><code>branching.py</code>; plugin middleware for requests, plus a guard in jobs and <code>locked_profile_policy</code></td>
+<td><code>branching.py</code> with <code>require_main(...)</code> at each call site</td>
+<td>Middleware scoped by URL namespace covers every current and future view with no per-view code</td>
+<td>Claude's</td>
+</tr>
+</tbody>
+</table>
+<h3 id="round-1-dispositions-r1">Round 1 dispositions (r1)</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Finding</th>
+<th>Verified by</th>
+<th>Disposition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>B1</td>
+<td>Provisioning copies an M2M table only through its parent's stored branchable ObjectType. NetBox creates ObjectTypes from <code>get_models()</code>, which excludes auto-created models. So resolver <code>True</code> never provisions the <code>tags</code> through tables</td>
+<td><code>netbox_branching/utilities.py:293-315</code>; NetBox <code>core/signals.py:52-75</code></td>
+<td>CLOSED in r2: <code>tags</code> moves to NetBox's standard <code>extras.TaggedItem</code>, which branching replicates (<code>INCLUDE_MODELS</code>). The through tables are deleted</td>
+</tr>
+<tr>
+<td>B2</td>
+<td>Core handlers write non-branchable plugin rows in main while a branch is active: CustomField rename or delete rewrites <code>custom_field_data</code>; User and Job deletes null plugin foreign keys</td>
+<td>NetBox <code>extras/signals.py</code>, <code>core/models/jobs.py</code>; <code>EXEMPT_MODELS</code> holds <code>core.*</code> and <code>extras.customfield</code></td>
+<td>REFUTED as a blocker. CustomField, Job and ObjectType are exempt, and User is not change-logged, so each change lands in main by design, and its effect on plugin rows lands with it. Under the rejected all-branchable shape, main's rows would instead keep stale keys. The r1 premise sentence was wrong; r2 restates it. Reopen if branching makes any of these objects branchable</td>
+</tr>
+<tr>
+<td>B3</td>
+<td>A background core API bulk delete (<code>?background=true</code>) loses the branch: <code>AsyncAPIJob._build_request()</code> copies neither the <code>X-NetBox-Branch</code> header nor cookies, so it deletes main's Device, and the plugin rows cascade with it</td>
+<td>NetBox <code>netbox/jobs.py:296-325</code>, <code>netbox/api/viewsets/mixins.py:340-350</code></td>
+<td>Mechanism confirmed. REFUTED as a plugin blocker: the Device itself is deleted from main, and the plugin rows stay consistent with main (condition 3). The plugin cannot intercept it. Follow-up: report it upstream. Reopen if the plugin gains a writer on that path</td>
+</tr>
+<tr>
+<td>B4</td>
+<td>Sync records synthetic DELETE ObjectChanges for cascaded branchable models, including non-change-logged plugin models. A revert validator keyed on core types alone misses them, and revert then fails in <code>full_clean()</code></td>
+<td><code>netbox_branching/models/branches.py:859-897</code></td>
+<td>CLOSED in r2: the validator also matches deletes of the plugin's branchable models</td>
+</tr>
+<tr>
+<td>B5</td>
+<td>A middleware check does not quarantine a branch: sync, merge and migrate run in jobs, and a queued <code>AsyncViewJob</code> skips middleware</td>
+<td><code>netbox_branching/jobs.py</code>; <code>models/branches.py</code> <code>migrate()</code> checks no validator itself</td>
+<td>CLOSED in r2: old branches are fenced through the pending-migrations gate. <code>sync()</code> and <code>merge()</code> raise unless the branch is READY, and activation needs READY. A migrate validator and a <code>pre_migrate</code> receiver refuse to migrate them</td>
+</tr>
+<tr>
+<td>B6</td>
+<td>Guards too weak: a namespace walk misses views outside the namespace; a <code>fake_on_branch</code> attribute check accepts <code>False</code>; a discard test passes with no protection</td>
+<td>Reading of the r1 guard list</td>
+<td>CLOSED in r2 (guards rewritten)</td>
+</tr>
+<tr>
+<td>N1</td>
+<td>GraphQL related fields (tags, journal, changelog) read the branch, so "returns main data" is wrong</td>
+<td>NetBox <code>core/graphql/mixins.py:23-29</code>; branching <code>database.py:41-45</code></td>
+<td>CLOSED in r2: the plugin's GraphQL fields refuse in a branch</td>
+</tr>
+<tr>
+<td>N2</td>
+<td>Resolver registration does not refresh stored <code>ObjectType.features</code>; only <code>post_migrate</code> does</td>
+<td>NetBox <code>core/signals.py:52-75</code></td>
+<td>CLOSED in r2: the release ships a migration, so <code>migrate</code> refreshes them, and a test asserts the stored features</td>
+</tr>
+</tbody>
+</table>
+<h3 id="changes-r1-to-r2">Changes r1 to r2</h3>
+<ol>
+<li><code>ImportProfile.tags</code> and <code>InferenceBackend.tags</code> use NetBox's standard <code>extras.TaggedItem</code>. A data migration moves the existing rows. The two through tables are dropped.</li>
+<li>The branchable plugin models are <code>DeviceImportSource</code>, <code>CableImportSource</code> and <code>ClassRoleMapping</code>.</li>
+<li>The D2 premise now says: a non-branchable plugin row changes only through a plugin entry point (refused in a branch) or through a change to a global object, which itself lands in main.</li>
+<li>The revert validator also matches deletes of the plugin's branchable models.</li>
+<li>D8: the r1 middleware table check is removed. The tags migration is the fence. A migrate validator and a <code>pre_migrate</code> receiver refuse branches where a fence migration is pending.</li>
+<li>D4: the plugin's GraphQL fields refuse in a branch, and the Device card shows a notice.</li>
+<li>The guards are rewritten (see below).</li>
+<li>Acceptance condition 2 now says "executed in a branch", and names global objects.</li>
+</ol>
+<h3 id="round-2-dispositions-r2">Round 2 dispositions (r2)</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Finding</th>
+<th>Verified by</th>
+<th>Disposition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R2-1</td>
+<td>The pending-migrations fence is not durable. <code>check_pending_migrations</code> scans only READY branches. Revert sets READY without checking migrations, and recovery resets SYNCING and MERGING to READY, also from the automatic recovery job</td>
+<td><code>netbox_branching/signal_receivers.py:276-292</code>; <code>models/branches.py:1228-1235</code>; <code>choices.py:68-86</code></td>
+<td>Accepted. It is the second blocker in the same mechanism (D8) after B5. D8 is the split candidate</td>
+</tr>
+<tr>
+<td>R2-2</td>
+<td>A plugin bulk edit queued as an <code>AsyncViewJob</code> before the upgrade runs later without middleware. A pending branch then resolves to no branch, so the edit lands in main</td>
+<td>NetBox <code>netbox/jobs.py:267-273</code>; branching <code>utilities.py:589-597</code></td>
+<td>Mechanism accepted. It needs a job queued before the upgrade: after it, middleware refuses every plugin request that carries an active branch or a stale selector, so no new such job is queued. Part of D8</td>
+</tr>
+<tr>
+<td>R2-3</td>
+<td>After a merge, NetBox's Tag <code>pre_delete</code> handler removes the tag from each non-branchable Import Profile, and records that change in main, not in the branch. So a revert restores the Tag without its assignments</td>
+<td>NetBox <code>core/signals.py:215-247</code>; taggit's manager adds a reverse many-to-many relation on Tag</td>
+<td>Accepted in r3: the revert validator also matches Tag deletes</td>
+</tr>
+<tr>
+<td>R2-N1</td>
+<td><code>BRANCHABLE_SINCE</code> equality does not validate its values, and conflicts with the CreateModel exception</td>
+<td>Reading of r2</td>
+<td>Part of D8</td>
+</tr>
+<tr>
+<td>R2-N2</td>
+<td>The brief says only <code>ScriptJob</code> applies request processors; <code>AsyncViewJob</code> and <code>AsyncAPIJob</code> do too</td>
+<td>NetBox <code>netbox/jobs.py:267-273,386-388</code></td>
+<td>Accepted: evidence line corrected</td>
+</tr>
+</tbody>
+</table>
+<p>Not usable as a fence: a plugin request processor. <code>apply_request_processors</code> swallows an exception
+raised on entry (NetBox <code>utilities/request.py:136-141</code>), so a processor cannot refuse; it could only
+switch to main silently.</p>
+<h3 id="operator-decision-after-round-2">Operator decision after round 2</h3>
+<p>D8 had produced a blocker in both rounds (B5, then R2-1 and R2-2). The operator ruled it out of
+scope: the plugin never worked with netbox-branching before this release, so no deployment has a
+branch that predates it. R2-1, R2-2 and R2-N1 close with D8.</p>
+<h3 id="changes-r2-to-r3">Changes r2 to r3</h3>
+<ol>
+<li>Constraint added: no branch predates this release.</li>
+<li>Removed: <code>BRANCHABLE_SINCE</code>, the migrate validator, the <code>pre_migrate</code> receiver, and the section
+   on branches that predate the upgrade.</li>
+<li>The revert validator also matches Tag deletes (R2-3).</li>
+<li>Guard 2 pins the branchable set in the test instead of deriving the fence from a mapping.</li>
+<li>The brief's evidence on request processors is corrected (R2-N2).</li>
+</ol>
+<h3 id="round-3-dispositions-r3">Round 3 dispositions (r3)</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Finding</th>
+<th>Verified by</th>
+<th>Disposition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R3-1</td>
+<td>Main deletes Tag T, and a branch syncs. Sync replays main changes only for branchable types (<code>branches.py:424</code>), so it skips main's removal of T from a non-branchable Import Profile. The branch copy of that <code>TaggedItem</code> then cascades, and sync records a synthetic <code>extras.TaggedItem</code> DELETE (<code>branches.py:859-897</code>) with no Tag DELETE. A revert re-creates the row against a missing Tag and fails in <code>full_clean()</code></td>
+<td>Branching <code>models/branches.py:424,859-897</code>; <code>models/changes.py:185-198</code></td>
+<td>Accepted. It is the second instance of one mechanism after B4. r4 states the general rule: the validator matches every delete that revert cannot restore for plugin data</td>
+</tr>
+<tr>
+<td>R3-N1</td>
+<td>Guard 1 asserts a <code>code</code> for every response, but only the REST contract has one</td>
+<td>Reading of r3</td>
+<td>Accepted: separate UI and REST assertions</td>
+</tr>
+</tbody>
+</table>
+<h3 id="changes-r3-to-r4">Changes r3 to r4</h3>
+<ol>
+<li>The revert validator matches deletes of the plugin's referenced types, of the plugin's branchable
+   models, and of <code>extras.TaggedItem</code> (the synthetic record of a tag assignment).</li>
+<li>Guard 1 asserts the UI page and the REST <code>code</code> separately.</li>
+<li>CI adds the case: main deletes a Tag, the branch syncs, merges, then a revert is refused.</li>
+</ol>
+<h2 id="design-r4">Design r4</h2>
+<h3 id="contract">Contract</h3>
+<p>This contract covers NetBox 4.7 with netbox-branching 1.2.1, the combination that section 0 ratifies
+and the CI job runs. netbox-branching 1.1.x on NetBox 4.6 is outside it: no job tests that combination.</p>
+<p>The plugin operates on main only. With netbox-branching installed and a branch active:</p>
+<table>
+<thead>
+<tr>
+<th>Entry point</th>
+<th>Outcome</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Plugin-owned URL callbacks (UI)</td>
+<td>HTTP 409 page naming the branch, with a link to switch to main</td>
+</tr>
+<tr>
+<td>Plugin-owned URL callbacks (REST API)</td>
+<td>HTTP 409, JSON <code>{"detail": ..., "code": "branch_not_supported"}</code></td>
+</tr>
+<tr>
+<td>Plugin GraphQL fields</td>
+<td>GraphQL error with the same message</td>
+</tr>
+<tr>
+<td>Device card</td>
+<td>A notice that import data shows on main only</td>
+</tr>
+<tr>
+<td><code>ImportJobRunner</code>, <code>ResolutionProposalJob</code>, <code>SourceDocumentRetentionJob</code></td>
+<td><code>JobFailed</code> before any domain read, if a branch is active in the worker</td>
+</tr>
+<tr>
+<td>Any code path that takes <code>locked_profile_policy</code> (Custom Scripts, <code>nbshell</code>)</td>
+<td><code>BranchActive</code> raised before the lock</td>
+</tr>
+</tbody>
+</table>
+<p>A plugin request that carries a branch selector while no branch is active is refused the same way.
+The exception is <code>?_branch=</code> with no value and no <code>X-NetBox-Branch</code> header: that is the explicit
+switch to main. The header takes precedence, as it does upstream (<code>utilities.py:559-587</code>).</p>
+<p>Without netbox-branching, every guard is a no-op and behaviour does not change.</p>
+<h3 id="owner-netbox_data_importbranchingpy">Owner: <code>netbox_data_import/branching.py</code></h3>
+<ul>
+<li><code>active_branch()</code>: the active Branch, or <code>None</code> when netbox-branching is absent.</li>
+<li><code>refuse_branch()</code>: raises <code>BranchActive</code> when a branch is active.</li>
+<li><code>is_branchable(model)</code>: the resolver. It answers only for this plugin's models and returns
+  <code>None</code> for every other model.</li>
+<li><code>BranchRefusalMiddleware</code>: in <code>PluginConfig.middleware</code>. It refuses when the resolved callback's
+  module is inside <code>netbox_data_import</code>. Branching activates the branch in <code>CoreMiddleware</code>'s
+  request processors, which run before plugin middleware (NetBox <code>netbox/middleware.py:62-64</code>,
+  <code>settings.py:1016-1019</code>).</li>
+<li><code>register()</code>: called from <code>ready()</code>. When <code>netbox_branching</code> imports, it registers the resolver
+  and the revert validator. It raises
+  <code>ImproperlyConfigured</code> if <code>register_branching_resolver</code> is missing, or if <code>supports_branching()</code>
+  disagrees with <code>is_branchable()</code> for any plugin model (an <code>exempt_models</code> entry).</li>
+</ul>
+<h3 id="branchability-rule">Branchability rule</h3>
+<p><code>is_branchable(model)</code> is <code>True</code> when the plugin model has a concrete <code>ForeignKey</code> or
+<code>OneToOneField</code> to a model outside the plugin that <code>supports_branching()</code> accepts, and <code>False</code>
+otherwise. Today: <code>DeviceImportSource</code> (Device, CASCADE), <code>CableImportSource</code> (Cable, CASCADE),
+<code>ClassRoleMapping</code> (RackType, SET_NULL).</p>
+<p>Rows of those three: provision copies them. A core delete in the branch cascades or nulls only the
+branch copy. Sync does not bring main's new rows (not change-logged; branch tables carry no foreign
+keys). When sync replays a main delete, it records a synthetic DELETE for the branch copy
+(<code>branches.py:859-897</code>). Merge replays the core delete in main, where Django's collector removes
+main's <code>DeviceImportSource</code> and <code>CableImportSource</code> rows, or nulls <code>ClassRoleMapping.rack_type</code>. Discard drops the copy.</p>
+<p>Every other plugin row is written only through a plugin entry point, refused in a branch, or
+through a change to a global object (User, core.Job, CustomField, ObjectType), which lands in main
+with its effects. Tags use <code>extras.TaggedItem</code>, which branching replicates.</p>
+<h3 id="revert">Revert</h3>
+<p>Revert replays the branch's <code>ObjectChange</code> rows only. Plugin data has none, except the synthetic
+DELETE rows that sync writes for cascaded branchable rows (<code>branches.py:859-897</code>). So revert cannot
+restore plugin data, and the validator refuses any revert that would need to. It refuses when
+<code>branch.get_changes()</code> holds a DELETE of:</p>
+<ul>
+<li>a type a branchable plugin model references (Device, Cable, RackType), computed from the same
+  <code>_meta</code> walk as the branchability rule;</li>
+<li>a branchable plugin model (a synthetic record);</li>
+<li>Tag, or <code>extras.TaggedItem</code> (a synthetic record of an assignment). NetBox's Tag delete handler
+  records the removal of a tag from a non-branchable Import Profile in main, not in the branch. And
+  sync does not replay that removal into the branch.</li>
+</ul>
+<p><code>revert()</code> checks <code>can_revert</code> whenever it commits, so the validator is the execution-time check. A
+dry run rolls back and is not refused.</p>
+<h3 id="migrations">Migrations</h3>
+<p><code>fake_on_branch = True</code> on 0015, 0020, 0022, 0030, 0035, 0038 and 0039. The new tags migration
+also gets <code>fake_on_branch = True</code>: it moves rows between main-only tables and <code>extras_taggeditem</code>.
+It runs before netbox-branching can be installed alongside the plugin, so no branch misses it.</p>
+<h3 id="mechanical-guards">Mechanical guards</h3>
+<ol>
+<li>A test walks the complete URL tree. For every callback whose module is inside
+   <code>netbox_data_import</code>, it sends an authenticated request with a real branch active and asserts the
+   409: for a UI callback, the refusal page; for a REST callback, the JSON <code>code</code>. A plugin view
+   registered under any URL is covered.</li>
+<li>A test computes the rule from <code>_meta</code> for every plugin model, asserts that <code>supports_branching()</code>
+   agrees, and asserts that the branchable set equals a set pinned in the test. A change to the set
+   fails the test. Its message says that open branches lack the new table, so the change needs a
+   design decision.</li>
+<li>A test fails when a migration module holds <code>RunPython</code> or <code>RunSQL</code> and <code>fake_on_branch is not True</code>.
+   A migration that must run on branches is listed in the test by name, with the reason.</li>
+<li>Lifecycle tests assert the branch-side effect before they assert main is unchanged.</li>
+</ol>
+<h3 id="ci">CI</h3>
+<p>A new <code>test.yaml</code> job: NetBox 4.7.0, netbox-branching 1.2.1, <code>DynamicSchemaDict</code>,
+<code>BranchAwareRouter</code>, both plugins. It runs the branching test module, which other jobs skip through
+<code>pytest.importorskip("netbox_branching")</code>. The tests provision a real branch, so they use
+<code>TransactionTestCase</code>. They cover:</p>
+<ul>
+<li>the refusal of each entry point;</li>
+<li>that a provisioned branch holds the three plugin tables and <code>extras_taggeditem</code>;</li>
+<li>a Device, Cable, RackType and Tag delete in a branch: the branch copy changes, main does not;</li>
+<li>merge removing main's <code>DeviceImportSource</code> and <code>CableImportSource</code> rows and nulling
+  <code>ClassRoleMapping.rack_type</code>, and discard keeping them;</li>
+<li>a revert refused after a Device, Cable, RackType or Tag delete, after a sync-recorded synthetic
+  plugin-row delete, and after main deletes a Tag assigned to an Import Profile and the branch syncs
+  and merges;</li>
+<li>stored <code>ObjectType.features</code> after <code>migrate</code>;</li>
+<li>startup validation under an <code>exempt_models</code> entry.</li>
+</ul>
+<h3 id="out-of-scope">Out of scope</h3>
+<ul>
+<li>NetBox's <code>AsyncAPIJob</code> drops the branch selector (B3). Report it upstream.</li>
+</ul>
+<h2 id="next-action">Next action</h2>
+<p>Implement in layers; each increment ends green in the new CI job.</p>
+<ol>
+<li><strong>Data integrity.</strong> The CI job with netbox-branching, <code>branching.py</code> with the resolver and startup
+   validation, the tags move to <code>extras.TaggedItem</code>, and guard 2. Done when, in a provisioned
+   branch, deleting a Device, Cable, RackType or Tag leaves main's plugin rows unchanged; merge
+   applies the effect to main; discard keeps main as it was; and each test fails with the resolver
+   removed.</li>
+<li><strong>Refusal.</strong> The middleware, GraphQL refusal, Device card notice, job and lock guards, and
+   guard 1. Done when every plugin-owned callback returns the 409 contract in a branch, and the
+   guard fails when the middleware is removed.</li>
+<li><strong>Revert validator.</strong> Done when each revert case in the CI list is refused, and an unrelated
+   revert proceeds.</li>
+<li><strong>Migrations.</strong> <code>fake_on_branch = True</code> on the eight data migrations, and guard 3.</li>
+</ol>
+<p>Follow-up outside this design: the upstream report on <code>AsyncAPIJob</code> dropping the branch selector.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
