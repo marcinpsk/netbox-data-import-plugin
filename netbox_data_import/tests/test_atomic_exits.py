@@ -73,6 +73,12 @@ AUDITED_EXITS = {
     ("UnignoreFieldDifferenceView.post", "binding-refused-before-delete"): (
         "The binding helper either wrote nothing or rolled back, and the delete has not run."
     ),
+    ("SyncDeviceFieldView.post", "device-gone-before-write"): (
+        "The locked re-read found no Device, so the block has written nothing."
+    ),
+    ("SyncDeviceFieldView.post", "baseline-moved-before-write"): (
+        "The locked baseline recheck refuses the sync before the field writer runs."
+    ),
     ("SyncPlacementView.post", "device-gone-before-write"): (
         "The locked re-read found no Device, so the block has written nothing."
     ),

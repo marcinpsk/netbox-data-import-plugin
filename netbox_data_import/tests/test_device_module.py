@@ -1443,6 +1443,20 @@ class DeviceModuleIPAssignmentTest(DeviceModulePlanTestBase):
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
         return DeviceModule().plan(self._batch(row), self.profile, CATALOG, reader)
 
+    def test_an_address_the_device_already_points_at_costs_no_device_read(self):
+        """Nothing is saved, so no stored-row snapshot is taken either."""
+        from netbox_data_import.target_modules import _assign_ips
+
+        self._interface_template()
+        device = self._device("srv-01", rack=self.rack)
+        self._assigned_address(device, "198.18.0.12/32")
+
+        with CaptureQueriesContext(connection) as queries:
+            unassigned = _assign_ips(device, {"primary_ip4": "198.18.0.12/32"}, self.actor)
+
+        self.assertEqual(unassigned, {})
+        self.assertFalse([query for query in queries if 'FROM "dcim_device"' in query["sql"]], queries.captured_queries)
+
     def test_a_create_carries_and_assigns_the_rows_address(self):
         """A created device gets its parsed address after its interface exists."""
         self._interface_template()

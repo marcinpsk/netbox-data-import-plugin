@@ -10,7 +10,7 @@ import yaml
 from django.contrib.auth import get_user_model
 from django.db import DatabaseError, transaction
 from django.db.models.signals import post_delete, post_save, pre_save
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 from dcim.models import Cable, Device, Interface
 
@@ -27,10 +27,12 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.tests.helpers import (
     make_dcim_objects,
+    recorded_updates,
     run_on_separate_connection,
     user_with_object_permission,
     wait_until_a_lock_is_blocked,
 )
+from netbox_data_import.tests.plugins_config import override_plugins_config
 
 
 User = get_user_model()
@@ -494,7 +496,7 @@ class PolicyAPICreateSerializationTest(TransactionTestCase):
         self.assertEqual(created, 1)
 
 
-@override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_backend_origin_allowlist": INFERENCE_ALLOWLIST}})
+@override_plugins_config(netbox_data_import={"inference_backend_origin_allowlist": INFERENCE_ALLOWLIST})
 class InferenceBackendAPITest(TestCase):
     """Manage inference configuration without disclosing its credential reference."""
 
@@ -992,6 +994,22 @@ class ProfileYamlSurfaceTest(TestCase):
         self.assertContains(response, "Duplicate column_transform_rules identity: Device label")
         self.assertEqual(rule.pattern, r"^(.+)$")
         self.assertEqual(ColumnTransformRule.objects.filter(profile=profile).count(), 1)
+
+    def test_updating_a_profile_records_its_stored_state(self):
+        """A YAML update of an existing profile records what the profile held before it."""
+        profile = ImportProfile.objects.create(name="Changelog profile", description="before", adapter_config={})
+        upload = BytesIO(
+            yaml.safe_dump({"profile": {"name": profile.name, "description": "after", "adapter_config": {}}}).encode()
+        )
+        upload.name = "changelog-profile.yaml"
+
+        response = self.client.post(reverse("plugins:netbox_data_import:import_profile_yaml"), {"yaml_file": upload})
+
+        self.assertEqual(response.status_code, 302, response.content)
+        (change,) = recorded_updates(profile)
+        self.assertEqual(
+            (change.prechange_data["description"], change.postchange_data["description"]), ("before", "after")
+        )
 
     def test_import_rejects_pre_cutover_profile_fields(self):
         """Profile YAML has one current shape and no legacy adapter compatibility path."""

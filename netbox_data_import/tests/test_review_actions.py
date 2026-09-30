@@ -410,6 +410,24 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         self.device.save(update_fields=["position"])
         self.assertIn("value changed", self._sync_field().json()["error"])
 
+    def test_inline_field_sync_rechecks_the_value_on_the_locked_row(self):
+        """A change after the unlocked baseline read is refused under the row lock."""
+        from django.db.models.signals import post_init
+        from dcim.models import Device
+
+        from netbox_data_import.tests.helpers import competing_write_during
+
+        with competing_write_during(
+            post_init, Device, lambda: Device.objects.filter(pk=self.device.pk).update(position=6)
+        ) as (observed, blocked):
+            response = self._sync_field()
+
+        self.assertEqual((observed, blocked), ([True], []), "the competing write did not land after the first read")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("value changed", response.json()["error"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.position, 6)
+
     def test_inline_position_sync_rejects_a_stale_rack(self):
         """Position sync refuses a Device that moved racks after the preview."""
         from dcim.models import Rack

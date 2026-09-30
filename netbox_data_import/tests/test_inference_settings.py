@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The three Inference Backend plugin settings and the startup shape gate (specification 8.2.1)."""
 
-from django.test import SimpleTestCase, override_settings
+from django.test import SimpleTestCase
 
 from netbox_data_import.inference_backend import proposal_candidate_limit
 from netbox_data_import.inference_settings import (
@@ -15,6 +15,7 @@ from netbox_data_import.inference_settings import (
     validate_plugin_settings,
     validate_proposal_candidate_limit,
 )
+from netbox_data_import.tests.plugins_config import override_plugins_config
 
 
 def settings_with(**overrides):
@@ -323,7 +324,7 @@ class PluginConfigStartupGateTest(SimpleTestCase):
         """Run the plugin's own startup validation over one PLUGINS_CONFIG entry."""
         from netbox_data_import import NetBoxDataImportConfig
 
-        NetBoxDataImportConfig.validate(config, "4.6.0")
+        NetBoxDataImportConfig.validate(config, NetBoxDataImportConfig.min_version)
 
     def test_a_valid_configuration_starts(self):
         self.validate(settings_with())
@@ -532,18 +533,18 @@ class ProposalCandidateLimitTest(SimpleTestCase):
             validate_plugin_settings({PROPOSAL_CANDIDATE_LIMIT_SETTING: 0})
 
     def test_the_default_applies_only_when_the_key_is_omitted(self):
-        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {}}):
+        with override_plugins_config(netbox_data_import={}):
             self.assertEqual(proposal_candidate_limit(), PROPOSAL_CANDIDATE_LIMIT_DEFAULT)
 
-        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {PROPOSAL_CANDIDATE_LIMIT_SETTING: 128}}):
+        with override_plugins_config(netbox_data_import={PROPOSAL_CANDIDATE_LIMIT_SETTING: 128}):
             self.assertEqual(proposal_candidate_limit(), 128)
 
     def test_a_configured_value_is_validated_when_it_is_read(self):
-        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {PROPOSAL_CANDIDATE_LIMIT_SETTING: True}}):
+        with override_plugins_config(netbox_data_import={PROPOSAL_CANDIDATE_LIMIT_SETTING: True}):
             with self.assertRaises(InvalidInferenceConfiguration):
                 proposal_candidate_limit()
 
     def test_an_oversized_candidate_limit_is_rejected_when_it_is_read(self):
-        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {PROPOSAL_CANDIDATE_LIMIT_SETTING: 1025}}):
+        with override_plugins_config(netbox_data_import={PROPOSAL_CANDIDATE_LIMIT_SETTING: 1025}):
             with self.assertRaises(InvalidInferenceConfiguration):
                 proposal_candidate_limit()

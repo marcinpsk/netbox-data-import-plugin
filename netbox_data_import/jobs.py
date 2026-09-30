@@ -11,8 +11,11 @@ from django.db import DatabaseError
 from rq import get_current_job
 
 from core.exceptions import JobFailed
+from netbox.context_managers import event_tracking
 from netbox.jobs import JobRunner, system_job
+from utilities.request import NetBoxFakeRequest
 
+from . import branching
 from .adapters import SourceUnreadable, UnknownSourceAdapter
 from .import_engine import (
     EngineConfigurationError,
@@ -23,7 +26,14 @@ from .import_engine import (
     StaleSourceDocument,
     operator_failure_message,
 )
-from .models import ExecutionOutcome, ImportExecution, ImportProfile, SourceDocument, validate_registered_adapter
+from .models import (
+    ExecutionOutcome,
+    ImportExecution,
+    ImportProfile,
+    ProposalFailureReason,
+    SourceDocument,
+    validate_registered_adapter,
+)
 from .netbox_reader import PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied
 from .plan import PlanError
@@ -68,8 +78,30 @@ class ImportJobRunner(JobRunner):
         rq_job.meta.update({"processed": processed, "total": total, "phase": "importing"})
         rq_job.save_meta()
 
+    def _change_logging_request(self, user) -> NetBoxFakeRequest:
+        """Return the request NetBox records this Job's changes and events under, with the Job UUID as its id."""
+        return NetBoxFakeRequest(
+            {
+                "META": {},
+                "COOKIES": {},
+                "POST": {},
+                "GET": {},
+                "FILES": {},
+                "user": user,
+                "method": "POST",
+                "path": "",
+                "path_info": "",
+                "id": self.job.job_id,
+            }
+        )
+
     def run(self, profile_id, source_document_id, accepted_plan, selection, idempotency_key):
         """Execute one accepted Import Plan as the Job's actor."""
+        try:
+            branching.fail_job_in_branch(self)
+        except JobFailed as exc:
+            self._save_data(phase="failed", message=str(exc))
+            raise
         user = self.job.user
         if user is None:
             self._fail("The user who started this import is no longer available.")
@@ -93,39 +125,42 @@ class ImportJobRunner(JobRunner):
             progress.update(processed=processed, total=total)
             self._publish_progress(processed, total)
 
-        try:
-            execution = ImportEngine.execute(
-                profile,
-                source_document,
-                accepted_plan,
-                selection,
-                idempotency_key,
-                user,
-                job=self.job,
-                progress_callback=publish_progress,
-            )
-        except ImportProfile.DoesNotExist:
-            self._fail("The import profile is no longer available.")
-        except DatabaseError as exc:
-            logger.exception("Import execution failed with a database error")
-            self._fail(operator_failure_message(exc))
-        except (
-            EngineConfigurationError,
-            ObjectPermissionDenied,
-            PlanError,
-            PlanningTargetUnavailable,
-            PreconditionFailed,
-            SelectionError,
-            SourceUnreadable,
-            StalePlan,
-            StaleSourceDocument,
-            UnknownSourceAdapter,
-            ValidationError,
-        ) as exc:
-            self._fail(operator_failure_message(exc))
-        if execution.outcome != ExecutionOutcome.SUCCEEDED:
-            reason = (execution.failure_detail or {}).get("reason") or execution.outcome or "unknown"
-            self._fail(f"The accepted import execution did not succeed ({reason}).")
+        # Only event_tracking: the other request processors (netbox-branching) must not run in a worker.
+        with event_tracking(self._change_logging_request(user)):
+            try:
+                execution = ImportEngine.execute(
+                    profile,
+                    source_document,
+                    accepted_plan,
+                    selection,
+                    idempotency_key,
+                    user,
+                    job=self.job,
+                    progress_callback=publish_progress,
+                )
+            except ImportProfile.DoesNotExist:
+                self._fail("The import profile is no longer available.")
+            except DatabaseError as exc:
+                logger.exception("Import execution failed with a database error")
+                self._fail(operator_failure_message(exc))
+            except (
+                EngineConfigurationError,
+                ObjectPermissionDenied,
+                PlanError,
+                PlanningTargetUnavailable,
+                PreconditionFailed,
+                SelectionError,
+                SourceUnreadable,
+                StalePlan,
+                StaleSourceDocument,
+                UnknownSourceAdapter,
+                ValidationError,
+            ) as exc:
+                self._fail(operator_failure_message(exc))
+            # Raising here leaves the block before event_tracking flushes the queued events.
+            if execution.outcome != ExecutionOutcome.SUCCEEDED:
+                reason = (execution.failure_detail or {}).get("reason") or execution.outcome or "unknown"
+                self._fail(f"The accepted import execution did not succeed ({reason}).")
         self._save_data(
             phase="completed",
             processed=progress["processed"],
@@ -148,6 +183,7 @@ class SourceDocumentRetentionJob(JobRunner):
 
     def run(self, *args, **kwargs):
         """Run one retention pass."""
+        branching.fail_job_in_branch(self)
         return self.purge()
 
 
@@ -162,7 +198,14 @@ class ResolutionProposalJob(JobRunner):
     def run(self, proposal_id):
         """Resolve backend configuration on the worker after claiming the proposal."""
         from .proposal_jobs import run_proposal
+        from .resolution_proposals import fail_proposal
 
+        try:
+            branching.fail_job_in_branch(self)
+        except JobFailed:
+            # The row is main-only, so this write lands in main and frees the field for a new request.
+            fail_proposal(proposal_id, reason=ProposalFailureReason.BRANCH_ACTIVE)
+            raise
         return run_proposal(proposal_id)
 
 

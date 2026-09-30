@@ -15,7 +15,7 @@ from typing import cast
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError
 
-from . import adapter_config, adapters, catalog, target_modules
+from . import adapter_config, adapters, branching, catalog, target_modules
 from .models import FailureReason, ImportExecution, SourceDocument, locked_profile_policy
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied, clear_user_permission_caches
@@ -159,6 +159,7 @@ class ImportEngine:
         progress_callback=None,
     ) -> ImportExecution:
         """Apply selected units from one accepted serialized plan and return their audit row."""
+        branching.refuse_branch()
         accepted = ImportPlan.from_dict(accepted_plan)
         selected_identities = tuple(selection)
         if not selected_identities:

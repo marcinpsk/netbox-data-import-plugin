@@ -17,8 +17,9 @@ class NetBoxDataImportConfig(PluginConfig):
     base_url = "data-import"
     author = "Marcin Zieba"
     author_email = "marcinpsk@gmail.com"
-    min_version = "4.6.0"
+    min_version = "4.6.9"
     graphql_schema = "graphql.schema.schema"
+    middleware = ["netbox_data_import.branching.BranchRefusalMiddleware"]
 
     default_settings: dict[str, Any] = {
         # A deployment that names no allowlist reaches no origin, rather than every origin.
@@ -40,10 +41,12 @@ class NetBoxDataImportConfig(PluginConfig):
             raise ImproperlyConfigured(f"Plugin {cls.__module__} has an invalid configuration: {exc}") from exc
 
     def ready(self):
-        """Import the modules NetBox does not load, so their job and task registrations run."""
+        """Import the modules NetBox does not load, and register with netbox-branching when it is installed."""
         super().ready()
 
-        from . import jobs, termination_proposal
+        from . import branching, jobs, termination_proposal
+
+        branching.register()
 
 
 config = NetBoxDataImportConfig

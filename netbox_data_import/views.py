@@ -18,23 +18,26 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
+from core.signals import clear_events
 from netbox.views import generic
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from utilities.permissions import get_permission_for_model
 from utilities.views import ConditionalLoginRequiredMixin
 
-from .filters import ImportProfileFilterSet
+from .filters import ImportProfileFilterSet, InferenceBackendFilterSet
 from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, POLICY_WRITE_REFUSED, policy_row_is_disclosed
 from .forms import (
     CableClassMappingForm,
     CableSegmentOverrideForm,
+    InferenceBackendFilterForm,
     InferenceBackendForm,
     ClassRoleMappingForm,
     ColumnMappingForm,
     ColumnTransformRuleForm,
     DeviceTypeMappingForm,
     ImportProfileBulkEditForm,
+    ImportProfileFilterForm,
     ImportProfileForm,
     ImportProfileImportForm,
     ImportSetupForm,
@@ -497,6 +500,7 @@ class ImportProfileListView(generic.ObjectListView):
     queryset = ImportProfile.objects.prefetch_related("column_mappings", "class_role_mappings", "device_type_mappings")
     table = ImportProfileTable
     filterset = ImportProfileFilterSet
+    filterset_form = ImportProfileFilterForm
     template_name = "netbox_data_import/importprofile_list.html"
 
 
@@ -549,6 +553,8 @@ class InferenceBackendListView(generic.ObjectListView):
 
     queryset = InferenceBackend.objects.all()
     table = InferenceBackendTable
+    filterset = InferenceBackendFilterSet
+    filterset_form = InferenceBackendFilterForm
 
 
 _INFERENCE_MODELS_SESSION_KEY = "netbox_data_import.inference_backend_models"
@@ -2101,12 +2107,21 @@ def _preview_field_intent(request, target_field):
     snapshots = row.extra_data.get("field_review_snapshots", {}).get(target_field)
     if not isinstance(snapshots, dict):
         return None, "The selected field has no authoritative preview value."
+    error = _field_baseline_error(row, device, target_field)
+    if error:
+        return None, error
+    return (row, device, snapshots.get("file", {}).get("canonical", "")), None
+
+
+def _field_baseline_error(row, device, target_field) -> str | None:
+    """Return why *device* no longer holds the preview baseline of one field, or None when it does."""
+    snapshots = row.extra_data["field_review_snapshots"][target_field]
     current = DeviceFieldReviewer.current_snapshot(device, target_field)
     if current is None or current.get("canonical") != snapshots.get("netbox", {}).get("canonical"):
-        return None, "The matched NetBox value changed. Recalculate the preview and try again."
+        return "The matched NetBox value changed. Recalculate the preview and try again."
     if target_field in {"u_position", "face"} and not _placement_matches_preview(device, row):
-        return None, "The matched NetBox placement changed. Recalculate the preview and try again."
-    return (row, device, snapshots.get("file", {}).get("canonical", "")), None
+        return "The matched NetBox placement changed. Recalculate the preview and try again."
+    return None
 
 
 def _placement_matches_preview(device, row) -> bool:
@@ -2123,18 +2138,21 @@ def _placement_matches_preview(device, row) -> bool:
     )
 
 
-def _locked_placement_device(request, device_pk):
-    """Return the Device row locked for update, or None when it is gone or not permitted."""
+def _locked_device_for_update(request, device_pk):
+    """Return the Device row locked and snapshotted for update, or None when it is gone or not permitted."""
     from dcim.models import Device
 
     # PostgreSQL refuses FOR UPDATE on a nullable outer join, so `of` locks the Device row alone.
-    return (
+    device = (
         Device.objects.restrict(request.user, "change")
         .select_for_update(of=("self",))
         .select_related("site", "location", "rack", "device_type")
         .filter(pk=device_pk)
         .first()
     )
+    if device is not None:
+        device.snapshot()
+    return device
 
 
 def _placement_action_intent(request):
@@ -2549,9 +2567,22 @@ class SyncDeviceFieldView(_AjaxPermissionView):
                 return JsonResponse({"ok": False, "error": "Device not found"})
 
         try:
-            # Nothing wraps this request, and a receiver on the model can require a transaction.
-            with transaction.atomic():
-                display = self._apply_field(device, field, value, status_map(), request.user)
+            try:
+                # Nothing wraps this request, and a receiver on the model can require a transaction.
+                with transaction.atomic():
+                    # The read above was unlocked, so the write and its snapshot use the locked row.
+                    locked = _locked_device_for_update(request, device.pk)
+                    if locked is None:
+                        # atomic-exit-safe: device-gone-before-write
+                        return JsonResponse({"ok": False, "error": "Device not found"}, status=409)
+                    if is_preview_action and (error := _field_baseline_error(row, locked, field)):
+                        # atomic-exit-safe: baseline-moved-before-write
+                        return JsonResponse({"ok": False, "error": error}, status=409)
+                    display = self._apply_field(locked, field, value, status_map(), request.user)
+            except Exception:
+                # The block rolled back, so NetBox must not send the events its writes queued.
+                clear_events.send(sender=self)
+                raise
         except PreviewActionInvalid as exc:
             return JsonResponse({"ok": False, "error": str(exc)})
         except Exception:
@@ -2582,7 +2613,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         return text
 
     def _apply_field(self, device, field, value, status_map, user):
-        """Write one previewed value onto the device, through that field's own writer."""
+        """Write one previewed value onto the locked and snapshotted device, through that field's own writer."""
         if field in self._IP_FIELDS:
             return self._apply_ip_field(device, field, value, user)
         writer = {
@@ -2831,7 +2862,7 @@ class SyncPlacementView(_AjaxPermissionView):
 
         with transaction.atomic():
             # The baseline check above read the Device unlocked, so recheck it under the row lock.
-            device = _locked_placement_device(request, device.pk)
+            device = _locked_device_for_update(request, device.pk)
             if device is None:
                 # atomic-exit-safe: device-gone-before-write
                 return JsonResponse({"ok": False, "error": "Device not found"}, status=409)
@@ -2864,12 +2895,14 @@ class SyncPlacementView(_AjaxPermissionView):
             except ValidationError as exc:
                 # full_clean sends post_clean, whose receivers may write before raising.
                 transaction.set_rollback(True)
+                clear_events.send(sender=self)
                 return JsonResponse(
                     {"ok": False, "error": f"Validation failed: {_placement_error_text(exc)}"}, status=400
                 )
             except Exception:
                 logger.exception("SyncPlacementView full_clean failed for device_id=%s", device.pk)
                 transaction.set_rollback(True)
+                clear_events.send(sender=self)
                 return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
             try:
@@ -2878,6 +2911,7 @@ class SyncPlacementView(_AjaxPermissionView):
                 logger.exception("SyncPlacementView save failed for device_id=%s", device.pk)
                 # A receiver raising after the UPDATE would otherwise commit a write reported as failed.
                 transaction.set_rollback(True)
+                clear_events.send(sender=self)
                 return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
         parts = [f"rack={rack.name}"]
@@ -5567,6 +5601,14 @@ class SyncSingleRowView(_AjaxPermissionView):
 
     permission_required = "netbox_data_import.change_importprofile"
 
+    def _execute_unit(self, profile, document, plan_data, identity, user) -> None:
+        """Execute one unit, and drop the events its writes queued when the engine rolls them back."""
+        try:
+            ImportEngine.execute(profile, document, plan_data, [identity], uuid.uuid4().hex, user)
+        except Exception:
+            clear_events.send(sender=self)
+            raise
+
     def post(self, request):
         """Execute one selected Synchronization Unit and return JSON."""
         ctx_data = request.session.get("import_context")
@@ -5627,14 +5669,7 @@ class SyncSingleRowView(_AjaxPermissionView):
             )
 
         try:
-            ImportEngine.execute(
-                profile,
-                document,
-                plan_data,
-                [preview_unit.identity],
-                uuid.uuid4().hex,
-                request.user,
-            )
+            self._execute_unit(profile, document, plan_data, preview_unit.identity, request.user)
         except (
             PlanError,
             PlanningTargetUnavailable,

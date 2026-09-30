@@ -6,9 +6,11 @@ from django import forms
 from django.utils.html import format_html
 from dcim.models import Site, Location
 from tenancy.models import Tenant
-from netbox.forms import NetBoxModelBulkEditForm, NetBoxModelForm, NetBoxModelImportForm
-from utilities.forms.fields import DynamicModelChoiceField
-from .adapters import get_adapter, selectable_adapter_choices
+from netbox.forms import NetBoxModelBulkEditForm, NetBoxModelFilterSetForm, NetBoxModelForm, NetBoxModelImportForm
+from utilities.forms import BOOLEAN_WITH_BLANK_CHOICES, add_blank_choice
+from utilities.forms.fields import DynamicModelChoiceField, TagFilterField
+from utilities.forms.rendering import FieldSet
+from .adapters import adapter_choices, get_adapter, selectable_adapter_choices
 from .catalog import CATALOG
 from .models import (
     CableClassMapping,
@@ -200,6 +202,18 @@ class ImportProfileBulkEditForm(NetBoxModelBulkEditForm):
     nullable_fields = ("description",)
 
 
+class ImportProfileFilterForm(NetBoxModelFilterSetForm):
+    """Filters tab of the Import Profile list."""
+
+    model = ImportProfile
+    fieldsets = (
+        FieldSet("q", "filter_id", "tag"),
+        FieldSet("source_adapter", name="Attributes"),
+    )
+    source_adapter = forms.ChoiceField(choices=lambda: add_blank_choice(adapter_choices()), required=False)
+    tag = TagFilterField(model)
+
+
 class ColumnMappingForm(forms.ModelForm):
     """Form for creating and editing ColumnMapping instances."""
 
@@ -379,6 +393,20 @@ class InferenceBackendForm(NetBoxModelForm):
                 "model suggestions when the endpoint supports them."
             ),
         }
+
+
+class InferenceBackendFilterForm(NetBoxModelFilterSetForm):
+    """Filters tab of the AI backend list."""
+
+    model = InferenceBackend
+    fieldsets = (
+        FieldSet("q", "filter_id", "tag"),
+        FieldSet("adapter_type", "response_mode", "enabled", name="Attributes"),
+    )
+    adapter_type = forms.ChoiceField(choices=add_blank_choice(InferenceBackend.ADAPTER_TYPES), required=False)
+    response_mode = forms.ChoiceField(choices=add_blank_choice(InferenceBackend.RESPONSE_MODES), required=False)
+    enabled = forms.NullBooleanField(required=False, widget=forms.Select(choices=BOOLEAN_WITH_BLANK_CHOICES))
+    tag = TagFilterField(model)
 
 
 class ImportSetupForm(forms.Form):

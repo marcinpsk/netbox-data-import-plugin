@@ -1,0 +1,239 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
+"""Import Profiles and AI backends hold their tags as NetBox's standard tag assignments."""
+
+from django.contrib.auth import get_user_model
+from django.contrib.contenttypes.models import ContentType
+from django.core.management import call_command
+from django.test import TestCase
+from django.urls import reverse
+from extras.models import Tag, TaggedItem
+
+from netbox_data_import.models import ImportProfile, InferenceBackend
+from netbox_data_import.tables import ImportProfileTable, InferenceBackendTable
+from netbox_data_import.tests.plugins_config import override_plugins_config
+
+INFERENCE_ALLOWLIST = ["https://backend.example.invalid:443"]
+
+
+def _backend(backend_key="tagged-backend"):
+    return InferenceBackend.objects.create(
+        backend_key=backend_key,
+        display_name="Tagged backend",
+        adapter_type="openai_compatible",
+        api_root=INFERENCE_ALLOWLIST[0],
+        model="tag-model",
+        authentication="bearer",
+        response_mode="prompt_json",
+        credential_reference={"backend": "vault_kv_v2", "mount": "secret", "path": "inference/tag", "field": "k"},
+    )
+
+
+@override_plugins_config(netbox_data_import={"inference_backend_origin_allowlist": INFERENCE_ALLOWLIST})
+class TagAssignmentTest(TestCase):
+    """A tag assignment is an ``extras.TaggedItem`` row, which netbox-branching replicates."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_superuser("tag-user", "tag@example.invalid", "testpass")
+        cls.alpha = Tag.objects.create(name="Alpha", slug="alpha")
+        cls.bravo = Tag.objects.create(name="Bravo", slug="bravo")
+
+    def setUp(self):
+        self.client.force_login(self.user)
+
+    def test_a_tag_assignment_is_a_tagged_item(self):
+        profile = ImportProfile.objects.create(name="Tagged profile")
+        backend = _backend()
+
+        for instance in (profile, backend):
+            with self.subTest(model=type(instance).__name__):
+                instance.tags.add(self.alpha)
+
+                self.assertEqual(
+                    list(
+                        TaggedItem.objects.filter(
+                            content_type=ContentType.objects.get_for_model(instance), object_id=instance.pk
+                        ).values_list("tag__slug", flat=True)
+                    ),
+                    ["alpha"],
+                )
+
+    def test_the_rest_api_assigns_tags_by_name(self):
+        profile = ImportProfile.objects.create(name="API tagged profile")
+        backend = _backend()
+        targets = (
+            (profile, "plugins-api:netbox_data_import-api:importprofile-detail"),
+            (backend, "plugins-api:netbox_data_import-api:inferencebackend-detail"),
+        )
+
+        for instance, route in targets:
+            with self.subTest(model=type(instance).__name__):
+                response = self.client.patch(
+                    reverse(route, args=[instance.pk]),
+                    data={"tags": [{"name": "Alpha"}, {"name": "Bravo"}]},
+                    content_type="application/json",
+                )
+
+                self.assertEqual(response.status_code, 200, response.content)
+                self.assertEqual(sorted(tag["slug"] for tag in response.json()["tags"]), ["alpha", "bravo"])
+                self.assertEqual(sorted(instance.tags.values_list("slug", flat=True)), ["alpha", "bravo"])
+
+    def test_the_list_pages_filter_by_tag_from_the_filters_tab(self):
+        tagged_profile = ImportProfile.objects.create(name="Filter tagged profile")
+        ImportProfile.objects.create(name="Filter untagged profile")
+        tagged_backend = _backend("filter-tagged")
+        _backend("filter-untagged")
+        tagged_profile.tags.add(self.bravo)
+        tagged_backend.tags.add(self.bravo)
+        targets = (
+            (tagged_profile, "plugins:netbox_data_import:importprofile_list"),
+            (tagged_backend, "plugins:netbox_data_import:inferencebackend_list"),
+        )
+
+        for tagged, route in targets:
+            with self.subTest(model=type(tagged).__name__):
+                response = self.client.get(reverse(route), {"tag": "bravo"})
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(list(response.context["table"].data), [tagged])
+                self.assertContains(response, 'id="filters-form-tab"')
+                self.assertContains(response, '<option value="bravo" selected>Bravo (1)</option>', html=True)
+
+    def test_the_filter_forms_offer_only_fields_the_filtersets_apply(self):
+        for route in (
+            "plugins:netbox_data_import:importprofile_list",
+            "plugins:netbox_data_import:inferencebackend_list",
+        ):
+            with self.subTest(route=route):
+                response = self.client.get(reverse(route))
+                view = response.resolver_match.func.view_class
+                filter_form = response.context["filter_form"]
+
+                self.assertIsNotNone(filter_form)
+                self.assertIn("tag", filter_form.fields)
+                self.assertLessEqual(
+                    set(filter_form.fields) - {"filter_id"},
+                    set(view.filterset.base_filters),
+                )
+
+    def test_the_rest_api_lists_filter_by_tag(self):
+        tagged_profile = ImportProfile.objects.create(name="API filter tagged profile")
+        ImportProfile.objects.create(name="API filter untagged profile")
+        tagged_backend = _backend("api-filter-tagged")
+        _backend("api-filter-untagged")
+        tagged_profile.tags.add(self.bravo)
+        tagged_backend.tags.add(self.bravo)
+        targets = (
+            (tagged_profile, "plugins-api:netbox_data_import-api:importprofile-list"),
+            (tagged_backend, "plugins-api:netbox_data_import-api:inferencebackend-list"),
+        )
+
+        for tagged, route in targets:
+            with self.subTest(model=type(tagged).__name__):
+                response = self.client.get(reverse(route), {"tag": "bravo"})
+
+                self.assertEqual(response.status_code, 200, response.content)
+                self.assertEqual([row["id"] for row in response.json()["results"]], [tagged.pk])
+
+    def test_the_rest_api_backend_list_searches_key_and_display_name(self):
+        by_key = _backend("search-by-key")
+        by_name = _backend("other-backend")
+        by_name.display_name = "Search by key"
+        by_name.save()
+        _backend("unmatched-backend")
+        route = reverse("plugins-api:netbox_data_import-api:inferencebackend-list")
+
+        response = self.client.get(route, {"q": "search-by-key"})
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual([row["id"] for row in response.json()["results"]], [by_key.pk])
+
+        response = self.client.get(route, {"q": "by key"})
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual([row["id"] for row in response.json()["results"]], [by_name.pk])
+
+    def test_the_profile_list_searches_the_name(self):
+        matching = ImportProfile.objects.create(name="Search Profile Alpha")
+        ImportProfile.objects.create(name="Unmatched profile")
+
+        for route in (
+            "plugins-api:netbox_data_import-api:importprofile-list",
+            "plugins:netbox_data_import:importprofile_list",
+        ):
+            with self.subTest(route=route):
+                response = self.client.get(reverse(route), {"q": "profile alpha"})
+
+                self.assertEqual(response.status_code, 200)
+                if route.startswith("plugins-api:"):
+                    self.assertEqual([row["id"] for row in response.json()["results"]], [matching.pk])
+                else:
+                    self.assertEqual([row.pk for row in response.context["table"].data], [matching.pk])
+
+    def test_the_detail_pages_show_the_tags_panel(self):
+        profile = ImportProfile.objects.create(name="Detail tagged profile")
+        backend = _backend("detail-tagged")
+        profile.tags.add(self.bravo)
+        backend.tags.add(self.bravo)
+        targets = (
+            (profile, "plugins:netbox_data_import:importprofile_list"),
+            (backend, "plugins:netbox_data_import:inferencebackend_list"),
+        )
+
+        for instance, list_route in targets:
+            with self.subTest(model=type(instance).__name__):
+                response = self.client.get(instance.get_absolute_url())
+
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, '<h2 class="card-header">Tags</h2>', html=True)
+                self.assertContains(response, f'href="{reverse(list_route)}?tag=bravo"')
+
+    def test_the_ui_form_assigns_tags(self):
+        profile = ImportProfile.objects.create(name="Form tagged profile")
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:importprofile_edit", args=[profile.pk]),
+            data={
+                "name": profile.name,
+                "source_adapter": profile.source_adapter,
+                "sheet_name": "Inventory",
+                "source_id_column": "Source ID",
+                "preview_view_mode": "rows",
+                "primary_contact_lookup_field": "email",
+                "tags": [self.alpha.pk, self.bravo.pk],
+            },
+        )
+
+        self.assertEqual(response.status_code, 302, response.content)
+        self.assertEqual(sorted(profile.tags.values_list("slug", flat=True)), ["alpha", "bravo"])
+
+    def test_graphql_returns_profile_tags(self):
+        profile = ImportProfile.objects.create(name="GraphQL tagged profile")
+        profile.tags.add(self.alpha)
+
+        response = self.client.post(
+            "/graphql/",
+            data={"query": f"{{ import_profile(id: {profile.pk}) {{ tags {{ name }} }} }}"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("errors", response.json(), response.json())
+        self.assertEqual(response.json()["data"]["import_profile"]["tags"], [{"name": "Alpha"}])
+
+    def test_the_tables_offer_a_tags_column(self):
+        profile = ImportProfile.objects.create(name="Table tagged profile")
+        backend = _backend()
+        profile.tags.add(self.alpha)
+        backend.tags.add(self.alpha)
+
+        for table_class, instance in ((ImportProfileTable, profile), (InferenceBackendTable, backend)):
+            with self.subTest(table=table_class.__name__):
+                table = table_class(type(instance).objects.filter(pk=instance.pk))
+                table.columns.show("tags")
+
+                self.assertIn("Alpha", str(table.rows[0].get_cell("tags")))
+
+    def test_the_system_checks_report_no_clash(self):
+        call_command("check", "netbox_data_import", tags=["models"], fail_level="WARNING")

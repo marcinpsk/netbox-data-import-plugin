@@ -542,6 +542,29 @@ def assert_action_link_is_named(test: TestCase, html: str, href: str, name: str)
 FAKED_REWIND_FLOOR = "0030_remove_device_type_creation_config"
 
 
+def provision_branch(test, name):
+    """Provision a real netbox-branching Branch, and drop its schema when *test* ends."""
+    from netbox_branching.choices import BranchStatusChoices
+    from netbox_branching.models import Branch
+
+    branch = Branch(name=name)
+    branch.save(provision=False)
+    test.addCleanup(branch.deprovision)
+    branch.provision(user=None)
+    branch.refresh_from_db()
+    test.assertEqual(branch.status, BranchStatusChoices.READY)
+    return branch
+
+
+def migrate_plugin_to_leaf():
+    """Apply every plugin migration up to the app's leaf node, whichever migration that is."""
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes("netbox_data_import"))
+
+
 def restore_plugin_migrations(floor=FAKED_REWIND_FLOOR):
     """Return the plugin app to its leaf state, faking above *floor* because the tables still exist."""
     from django.db import connection
@@ -575,3 +598,43 @@ def cables_on(*terminations):
             terminations__termination_id=termination.pk,
         )
     return found
+
+
+def recorded_updates(obj):
+    """Return the update ObjectChanges NetBox recorded for *obj*, oldest first."""
+    from core.models import ObjectChange, ObjectType
+
+    return list(
+        ObjectChange.objects.filter(
+            changed_object_type=ObjectType.objects.get_for_model(type(obj)),
+            changed_object_id=obj.pk,
+            action="update",
+        ).order_by("pk")
+    )
+
+
+def update_webhook_rule(model):
+    """Enable a webhook EventRule for updates of *model*; its unroutable URL fails fast if the job runs.
+
+    django-rq enqueues on database commit, so a test that reads the queue must be a TransactionTestCase.
+    """
+    from core.models import ObjectType
+    from extras.models import EventRule, Webhook
+
+    webhook = Webhook.objects.create(name=f"{model._meta.model_name} hook", payload_url="http://127.0.0.1:9/")
+    rule = EventRule.objects.create(
+        name=f"{model._meta.model_name} updates",
+        event_types=["object_updated"],
+        action_type="webhook",
+        action_object_type=ObjectType.objects.get_for_model(Webhook),
+        action_object_id=webhook.pk,
+    )
+    rule.object_types.set([ObjectType.objects.get_for_model(model)])
+    return rule
+
+
+def queued_webhooks():
+    """Return the webhook jobs waiting in the default RQ queue."""
+    from django_rq import get_queue
+
+    return [job for job in get_queue("default").jobs if job.func_name == "extras.webhooks.send_webhook"]

@@ -59,6 +59,7 @@ class ImportProfileTable(NetBoxTable):
         verbose_name="DT Mappings",
         orderable=False,
     )
+    tags = columns.TagColumn(url_name="plugins:netbox_data_import:importprofile_list")
     actions = columns.ActionsColumn(actions=("edit", "delete"))
 
     class Meta(NetBoxTable.Meta):
@@ -70,6 +71,7 @@ class ImportProfileTable(NetBoxTable):
             "column_mappings",
             "class_role_mappings",
             "device_type_mappings",
+            "tags",
             "actions",
         )
         default_columns = (
@@ -261,8 +263,9 @@ class InferenceBackendTable(NetBoxTable):
     backend_key = tables.Column(linkify=True)
     display_name = tables.Column()
     enabled = columns.BooleanColumn()
+    tags = columns.TagColumn()
 
     class Meta(NetBoxTable.Meta):
         model = InferenceBackend
-        fields = ("pk", "backend_key", "display_name", "adapter_type", "api_root", "model", "enabled")
+        fields = ("pk", "backend_key", "display_name", "adapter_type", "api_root", "model", "enabled", "tags")
         default_columns = ("backend_key", "display_name", "adapter_type", "model", "enabled")
