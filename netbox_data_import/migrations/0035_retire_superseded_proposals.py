@@ -3,6 +3,9 @@
 
 from django.db import migrations
 
+# A netbox-branching branch migrate fakes this data migration: see D7 in docs/design/netbox-branching.md.
+fake_on_branch = True
+
 #: The contract versions this release sends. A stored request below either one cannot be answered.
 PROMPT_VERSION = 2
 RESPONSE_SCHEMA_VERSION = 2

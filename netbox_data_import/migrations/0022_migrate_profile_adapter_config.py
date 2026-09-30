@@ -1,5 +1,8 @@
 from django.db import migrations
 
+# A netbox-branching branch migrate fakes this data migration: see D7 in docs/design/netbox-branching.md.
+fake_on_branch = True
+
 # The columns the flat-workbook adapter takes ownership of. Listing them here keeps the migration
 # reproducible after the model drops them in 0023.
 MOVED_COLUMNS = (

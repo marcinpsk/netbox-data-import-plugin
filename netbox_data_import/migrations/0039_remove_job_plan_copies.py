@@ -2,6 +2,9 @@
 
 from django.db import migrations
 
+# A netbox-branching branch migrate fakes this data migration: see D7 in docs/design/netbox-branching.md.
+fake_on_branch = True
+
 
 def remove_job_plan_copies(apps, schema_editor):
     """Remove plan copies from import Jobs while leaving queued worker input intact."""

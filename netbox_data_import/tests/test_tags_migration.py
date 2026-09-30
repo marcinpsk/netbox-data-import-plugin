@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The upgrade moves profile and backend tags from their own through tables into extras_taggeditem."""
 
-import importlib
-
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
@@ -113,11 +111,6 @@ class TagsMigrationTest(TransactionTestCase):
 
         self.assertEqual(list(links.objects.values_list("importprofile_id", "tag_id")), [(profile.pk, tag.pk)])
         self.assertFalse(TaggedItem.objects.exists())
-
-    def test_a_branch_migrate_fakes_the_move(self):
-        module = importlib.import_module(f"{APP}.migrations.{DATA_MOVE}")
-
-        self.assertIs(module.fake_on_branch, True)
 
     @staticmethod
     def _cable_projection():

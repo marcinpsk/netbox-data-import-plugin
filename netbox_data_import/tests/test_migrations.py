@@ -3,7 +3,10 @@
 """Migration tests for identity constraints."""
 
 import ast
+import importlib
+import sys
 import tokenize
+import types
 
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,7 +15,7 @@ from django.apps import apps
 from django.db import connection
 from django.db.migrations.autodetector import MigrationAutodetector
 from django.db.migrations.executor import MigrationExecutor
-from django.db.migrations import Migration
+from django.db.migrations import Migration, RunPython, RunSQL, SeparateDatabaseAndState
 from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.questioner import NonInteractiveMigrationQuestioner
 from django.db.migrations.state import ProjectState
@@ -396,3 +399,69 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
             cursor.execute(delete)
         MigrationExecutor(connection).migrate([leaf])
         self.assertFalse(TaggedItem.objects.filter(pk=orphan_pk).exists())
+
+
+# A migration here runs its RunPython or RunSQL again on every branch migrate: name the reason.
+RUN_ON_BRANCH: dict[str, str] = {}
+
+
+def _data_operations(operations):
+    for operation in operations:
+        if isinstance(operation, SeparateDatabaseAndState):
+            yield from _data_operations(operation.database_operations)
+        elif isinstance(operation, (RunPython, RunSQL)):
+            yield operation
+
+
+def _branch_rerun_reports(disk, app_label):
+    """Return each data migration that a netbox-branching branch migrate would run again.
+
+    netbox-branching imports `<app>.migrations.<name>` and reads `fake_on_branch` from it. Without the
+    flag, it runs every migration that has no model operation.
+    """
+    reports = []
+    for key in sorted(node for node in disk if node[0] == app_label):
+        if key[1] in RUN_ON_BRANCH or not any(_data_operations(disk[key].operations)):
+            continue
+        module = importlib.import_module(f"{key[0]}.migrations.{key[1]}")
+        if getattr(module, "fake_on_branch", None) is not True:
+            reports.append(key[1])
+    return reports
+
+
+class DataMigrationsFakeOnBranchTest(SimpleTestCase):
+    """Guard 3: a branch migrate must not run a data migration against main-only tables again."""
+
+    def test_every_data_migration_is_faked_on_a_branch_migrate(self):
+        loader = MigrationLoader(None, load=False)
+        loader.load_disk()
+
+        self.assertEqual(
+            _branch_rerun_reports(loader.disk_migrations, APP),
+            [],
+            "Set `fake_on_branch = True` at module level, or list the migration in RUN_ON_BRANCH with the reason.",
+        )
+
+    def test_the_check_reports_every_flag_but_true(self):
+        flags = {"9901_absent": None, "9902_false": False, "9903_truthy": 1, "9904_true": True}
+        disk = {}
+        for name, flag in flags.items():
+            module = types.ModuleType(f"{APP}.migrations.{name}")
+            if flag is not None:
+                module.fake_on_branch = flag
+            sys.modules[module.__name__] = module
+            self.addCleanup(sys.modules.pop, module.__name__)
+            migration = Migration(name, APP)
+            migration.operations = [RunPython(RunPython.noop)]
+            disk[(APP, name)] = migration
+
+        self.assertEqual(_branch_rerun_reports(disk, APP), ["9901_absent", "9902_false", "9903_truthy"])
+
+    def test_the_check_finds_sql_inside_a_separate_database_and_state(self):
+        name = "9905_nested_sql"
+        sys.modules[f"{APP}.migrations.{name}"] = types.ModuleType(f"{APP}.migrations.{name}")
+        self.addCleanup(sys.modules.pop, f"{APP}.migrations.{name}")
+        migration = Migration(name, APP)
+        migration.operations = [SeparateDatabaseAndState(database_operations=[RunSQL("SELECT 1")])]
+
+        self.assertEqual(_branch_rerun_reports({(APP, name): migration}, APP), [name])
