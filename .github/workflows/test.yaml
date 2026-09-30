@@ -244,18 +244,16 @@ jobs:
           PLUGINS_CONFIG = {'netbox_branching': {'stale_warning_threshold': 14}}
           EOF
 
-      - name: Run the branching tests
+      - name: Run tests with netbox-branching
         working-directory: netbox-data-import-plugin
         env:
           NETBOX_CONFIGURATION: netbox.configuration
           PYTHONPATH: ${{ github.workspace }}/netbox/netbox
           TEST_DB_NAME: test_netbox_data_import_branching_ci
           TEST_REDIS_HOST: localhost
-        # Two modules cannot meet the suite-wide gate, so the next step gates branching.py alone.
-        run: >-
-          pytest netbox_data_import/tests/test_branching.py netbox_data_import/tests/test_branching_refusal.py
-          --cov-report= --cov-fail-under=0
-          --dist loadscope --disable-warnings -o pythonpath=../netbox/netbox
+          # netbox-branching adds queries to list views; the plain rows assert the query-count baseline.
+          UPDATE_QUERY_COUNTS: "1"
+        run: pytest --dist loadscope --disable-warnings -o pythonpath=../netbox/netbox
 
       - name: Require full coverage of branching.py
         working-directory: netbox-data-import-plugin
