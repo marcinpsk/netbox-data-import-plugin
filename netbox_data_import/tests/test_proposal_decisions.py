@@ -10,7 +10,7 @@ from dcim.models import Device, Interface
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db import connection
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import TestCase, TransactionTestCase
 
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, termination_field_key
 from netbox_data_import.inference_backend import proposal_eligible_set_limit
@@ -41,6 +41,7 @@ from netbox_data_import.tests.helpers import (
     user_with_object_permission,
     wait_until_a_lock_is_blocked,
 )
+from netbox_data_import.tests.plugins_config import override_plugins_config
 
 User = get_user_model()
 
@@ -191,7 +192,7 @@ class ProposalFreshnessTest(DecisionInventory, TestCase):
         """The page is only what the prompt carried; freshness is still the whole eligible set."""
         proposal = self.proposal()
 
-        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_proposal_candidate_limit": 1}}):
+        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 1}):
             self.assertFalse(self.stale(proposal).is_stale)
 
     def test_staleness_is_recomputed_without_changing_the_proposal(self):

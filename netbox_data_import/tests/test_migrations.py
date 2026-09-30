@@ -18,6 +18,8 @@ from django.db.migrations.questioner import NonInteractiveMigrationQuestioner
 from django.db.migrations.state import ProjectState
 from django.test import SimpleTestCase, TransactionTestCase
 
+from netbox_data_import.tests.helpers import migrate_plugin_to_leaf
+
 APP = "netbox_data_import"
 _DEPENDENCY_COMMENT_EXCEPTIONS = frozenset(
     {
@@ -25,6 +27,7 @@ _DEPENDENCY_COMMENT_EXCEPTIONS = frozenset(
         "0022_migrate_profile_adapter_config",
         "0031_inferencebackend",
         "0036_resolutionproposal_job",
+        "0041_remove_importprofile_tags_and_more",
     }
 )
 
@@ -135,8 +138,7 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     def _restore_the_leaf_migrations(self):
         """Walk back up to the leaf and drop the legacy profile the walk down created."""
         with self._migration_apps():
-            executor = MigrationExecutor(connection)
-            executor.migrate(executor.loader.graph.leaf_nodes("netbox_data_import"))
+            migrate_plugin_to_leaf()
         if self.profile_pk is None:
             return
         from netbox_data_import.models import ImportProfile
@@ -315,8 +317,10 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
         previous = (APP, "0037_cablesegmentoverride")
         leaf = (APP, "0038_cable_tag_integrity")
         final = (APP, "0039_remove_job_plan_copies")
-        self.addCleanup(lambda: MigrationExecutor(connection).migrate([final]))
+        self.addCleanup(migrate_plugin_to_leaf)
 
+        # Reverse the later schema migrations for real, so the fake below skips only 0039's data step.
+        MigrationExecutor(connection).migrate([final])
         MigrationExecutor(connection).migrate([leaf], fake=True)
         MigrationExecutor(connection).migrate([previous])
 
@@ -361,11 +365,13 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
         def restore_leaf():
             if orphan_pk is not None:
                 TaggedItem.objects.filter(pk=orphan_pk).delete()
-            MigrationExecutor(connection).migrate([final])
+            migrate_plugin_to_leaf()
 
         self.addCleanup(restore_leaf)
         tag = Tag.objects.create(name="Orphan upgrade", slug="orphan-upgrade")
         cable_type = ObjectType.objects.get_for_model(Cable)
+        # Reverse the later schema migrations for real, so the fake below skips only 0039's data step.
+        MigrationExecutor(connection).migrate([final])
         MigrationExecutor(connection).migrate([leaf], fake=True)
         MigrationExecutor(connection).migrate([previous])
         orphan_pk = TaggedItem.objects.create(tag=tag, content_type=cable_type, object_id=2_147_483_647).pk

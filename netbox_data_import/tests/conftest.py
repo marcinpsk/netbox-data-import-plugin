@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
-"""Pytest fixtures for isolated parallel test workers and the changelog snapshot guard."""
+"""Pytest fixtures for isolated parallel test workers and the session guards."""
 
 import os
 
@@ -33,6 +33,16 @@ def changelog_snapshot_guard():
     snapshot_guard.connect()
     yield
     snapshot_guard.disconnect()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def plugins_config_guard():
+    """Fail every PLUGINS_CONFIG override in the session that drops the entry of another plugin."""
+    from netbox_data_import.tests import plugins_config
+
+    plugins_config.connect()
+    yield
+    plugins_config.disconnect()
 
 
 @pytest.fixture(autouse=True)

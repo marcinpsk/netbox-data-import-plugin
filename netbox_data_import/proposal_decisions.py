@@ -5,6 +5,7 @@
 from django.db import transaction
 from utilities.permissions import get_permission_for_model
 
+from . import branching
 from .inference_backend import proposal_eligible_set_limit
 from .models import (
     ImportProfile,
@@ -35,6 +36,7 @@ def proposal_staleness(proposal, *, netbox_reader=None, inventory=None):
 
 def accept_proposal(proposal_id, *, operator, netbox_reader) -> bool:
     """Write one fresh candidate decision under the profile, proposal, and resolution locks."""
+    branching.refuse_branch()
     if operator is None or netbox_reader.actor != operator:
         raise ValueError("Acceptance requires a reader scoped to the deciding operator.")
     profile_id = ResolutionProposal.objects.values_list("profile_id", flat=True).get(pk=proposal_id)
@@ -83,6 +85,7 @@ def reject_proposal(proposal_id, *, operator) -> bool:
     Rejection writes no Row Resolution, so it takes the workspace permission and not the permission
     to create one (specification 7.6).
     """
+    branching.refuse_branch()
     profile_id = ResolutionProposal.objects.values_list("profile_id", flat=True).get(pk=proposal_id)
     if not ImportProfile.objects.restrict(operator, "view").filter(pk=profile_id).exists():
         raise ObjectPermissionDenied(get_permission_for_model(ImportProfile, "view"))

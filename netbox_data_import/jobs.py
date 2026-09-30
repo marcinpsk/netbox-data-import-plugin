@@ -15,6 +15,7 @@ from netbox.context_managers import event_tracking
 from netbox.jobs import JobRunner, system_job
 from utilities.request import NetBoxFakeRequest
 
+from . import branching
 from .adapters import SourceUnreadable, UnknownSourceAdapter
 from .import_engine import (
     EngineConfigurationError,
@@ -25,7 +26,14 @@ from .import_engine import (
     StaleSourceDocument,
     operator_failure_message,
 )
-from .models import ExecutionOutcome, ImportExecution, ImportProfile, SourceDocument, validate_registered_adapter
+from .models import (
+    ExecutionOutcome,
+    ImportExecution,
+    ImportProfile,
+    ProposalFailureReason,
+    SourceDocument,
+    validate_registered_adapter,
+)
 from .netbox_reader import PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied
 from .plan import PlanError
@@ -89,6 +97,11 @@ class ImportJobRunner(JobRunner):
 
     def run(self, profile_id, source_document_id, accepted_plan, selection, idempotency_key):
         """Execute one accepted Import Plan as the Job's actor."""
+        try:
+            branching.fail_job_in_branch(self)
+        except JobFailed as exc:
+            self._save_data(phase="failed", message=str(exc))
+            raise
         user = self.job.user
         if user is None:
             self._fail("The user who started this import is no longer available.")
@@ -170,6 +183,7 @@ class SourceDocumentRetentionJob(JobRunner):
 
     def run(self, *args, **kwargs):
         """Run one retention pass."""
+        branching.fail_job_in_branch(self)
         return self.purge()
 
 
@@ -184,7 +198,14 @@ class ResolutionProposalJob(JobRunner):
     def run(self, proposal_id):
         """Resolve backend configuration on the worker after claiming the proposal."""
         from .proposal_jobs import run_proposal
+        from .resolution_proposals import fail_proposal
 
+        try:
+            branching.fail_job_in_branch(self)
+        except JobFailed:
+            # The row is main-only, so this write lands in main and frees the field for a new request.
+            fail_proposal(proposal_id, reason=ProposalFailureReason.BRANCH_ACTIVE)
+            raise
         return run_proposal(proposal_id)
 
 

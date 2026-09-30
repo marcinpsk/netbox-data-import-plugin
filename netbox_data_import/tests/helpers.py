@@ -542,6 +542,29 @@ def assert_action_link_is_named(test: TestCase, html: str, href: str, name: str)
 FAKED_REWIND_FLOOR = "0030_remove_device_type_creation_config"
 
 
+def provision_branch(test, name):
+    """Provision a real netbox-branching Branch, and drop its schema when *test* ends."""
+    from netbox_branching.choices import BranchStatusChoices
+    from netbox_branching.models import Branch
+
+    branch = Branch(name=name)
+    branch.save(provision=False)
+    test.addCleanup(branch.deprovision)
+    branch.provision(user=None)
+    branch.refresh_from_db()
+    test.assertEqual(branch.status, BranchStatusChoices.READY)
+    return branch
+
+
+def migrate_plugin_to_leaf():
+    """Apply every plugin migration up to the app's leaf node, whichever migration that is."""
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes("netbox_data_import"))
+
+
 def restore_plugin_migrations(floor=FAKED_REWIND_FLOOR):
     """Return the plugin app to its leaf state, faking above *floor* because the tables still exist."""
     from django.db import connection

@@ -25,17 +25,19 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from utilities.permissions import get_permission_for_model
 from utilities.views import ConditionalLoginRequiredMixin
 
-from .filters import ImportProfileFilterSet
+from .filters import ImportProfileFilterSet, InferenceBackendFilterSet
 from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, POLICY_WRITE_REFUSED, policy_row_is_disclosed
 from .forms import (
     CableClassMappingForm,
     CableSegmentOverrideForm,
+    InferenceBackendFilterForm,
     InferenceBackendForm,
     ClassRoleMappingForm,
     ColumnMappingForm,
     ColumnTransformRuleForm,
     DeviceTypeMappingForm,
     ImportProfileBulkEditForm,
+    ImportProfileFilterForm,
     ImportProfileForm,
     ImportProfileImportForm,
     ImportSetupForm,
@@ -498,6 +500,7 @@ class ImportProfileListView(generic.ObjectListView):
     queryset = ImportProfile.objects.prefetch_related("column_mappings", "class_role_mappings", "device_type_mappings")
     table = ImportProfileTable
     filterset = ImportProfileFilterSet
+    filterset_form = ImportProfileFilterForm
     template_name = "netbox_data_import/importprofile_list.html"
 
 
@@ -550,6 +553,8 @@ class InferenceBackendListView(generic.ObjectListView):
 
     queryset = InferenceBackend.objects.all()
     table = InferenceBackendTable
+    filterset = InferenceBackendFilterSet
+    filterset_form = InferenceBackendFilterForm
 
 
 _INFERENCE_MODELS_SESSION_KEY = "netbox_data_import.inference_backend_models"

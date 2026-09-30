@@ -15,7 +15,7 @@ from core.models import Job, ObjectType
 from dcim.models import Interface
 
 from django.db import connections
-from django.test import SimpleTestCase, TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TransactionTestCase
 
 from netbox_data_import import inference_adapter, inference_credentials, proposal_jobs
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK
@@ -35,6 +35,7 @@ from netbox_data_import.tests.test_inference_adapter import RecordingBackend, co
 from netbox_data_import.tests.test_inference_connection_test import make_row
 from netbox_data_import.tests.test_inference_credentials import SECRET, serving as serving_vault
 from netbox_data_import.tests.test_resolution_proposals import ProposalFixture
+from netbox_data_import.tests.plugins_config import override_plugins_config
 
 
 def answer(outcome="candidate", candidate_id="candidate-0001", **changes):
@@ -156,7 +157,7 @@ class WorkerFixture:
                 }
                 row.delete()
             try:
-                with override_settings(PLUGINS_CONFIG={"netbox_data_import": config}):
+                with override_plugins_config(netbox_data_import=config):
                     yield vault_seen
             finally:
                 if row.pk is not None:
@@ -761,7 +762,7 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
 
     def test_missing_backend_fails_with_absent_diagnostic(self):
         proposal = self.frozen_proposal()
-        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {}}):
+        with override_plugins_config(netbox_data_import={}):
             run_proposal(proposal.pk)
         proposal.refresh_from_db()
         self.assertEqual(proposal.status, ProposalStatus.FAILED)
