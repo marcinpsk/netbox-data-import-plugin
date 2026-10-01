@@ -302,9 +302,11 @@ def _validate_document_shape(data: Any) -> tuple[dict[str, Any], dict[str, list[
     """Validate the document container and return its profile and section mappings."""
     if not isinstance(data, dict) or "profile" not in data:
         raise ProfileDocumentInvalid("YAML must contain a top-level 'profile' key.")
+    _require_string_keys(data, "Top-level")
     profile_data = data["profile"]
     if not isinstance(profile_data, dict):
         raise ProfileDocumentInvalid("The 'profile' value must be a mapping (dict), not a scalar or list.")
+    _require_string_keys(profile_data, "'profile'")
     if not profile_data.get("name"):
         raise ProfileDocumentInvalid("Profile YAML must include a 'name' field.")
 
@@ -325,8 +327,16 @@ def _validate_document_shape(data: Any) -> tuple[dict[str, Any], dict[str, list[
         for index, row in enumerate(value, 1):
             if not isinstance(row, dict):
                 raise ProfileDocumentInvalid(f"'{key}[{index}]' must be a mapping, got {type(row).__name__}.")
+            _require_string_keys(row, f"'{key}[{index}]'")
         sections[key] = value
     return profile_data, sections
+
+
+def _require_string_keys(mapping: dict, label: str) -> None:
+    """Reject a key that is not a string: YAML also reads a number, a boolean or a date as a key."""
+    for key in mapping:
+        if not isinstance(key, str):
+            raise ProfileDocumentInvalid(f"{label} keys must be strings, got {key!r}.")
 
 
 def _profile_values(profile_data: dict[str, Any]) -> dict[str, Any]:
