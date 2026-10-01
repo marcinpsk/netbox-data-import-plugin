@@ -509,7 +509,11 @@ def eligible_terminations(
     for _exact, _name, order, pk in page:
         wanted_ids.setdefault(order, []).append(pk)
     loaded = {order: sources[order][1].in_bulk(ids) for order, ids in wanted_ids.items()}
-    return EligibleTerminations(candidates=tuple(loaded[order][pk] for _exact, _name, order, pk in page), total=total)
+    # A row deleted, moved, or renamed after the ranking query is no longer offered.
+    return EligibleTerminations(
+        candidates=tuple(loaded[order][pk] for _exact, _name, order, pk in page if pk in loaded[order]),
+        total=total,
+    )
 
 
 def _ranked_keys(rows, wanted: str, order: int):

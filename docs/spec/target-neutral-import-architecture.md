@@ -713,8 +713,8 @@ normalized name contains the normalized search text, and the database computes b
 name that differs only in whitespace or case is never filtered out. Names compare bytewise. Each
 model is counted in the database. A page has an offset into the combined order: the database orders
 the keys of every model as one set and returns only the page, and only the rows of that page load.
-A page at or past the count is empty and reads no row. A locking read locks the concrete models in
-one fixed global order.
+A page at or past the count is empty and reads no row. A row that leaves the set between the page
+query and its load is not offered. A locking read locks the concrete models in one fixed global order.
 
 Two resolved ends of one segment must be a pair NetBox can cable. The Cable Target Module reads that
 rule from NetBox's own compatible-termination table and never keeps a copy. It checks each segment

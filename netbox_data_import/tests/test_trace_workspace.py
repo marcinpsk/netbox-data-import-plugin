@@ -1589,6 +1589,50 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertEqual(response.json()["error"], CANDIDATE_OFFSET_INVALID)
 
+    def test_a_candidate_deleted_after_ranking_drops_out_of_the_read_and_the_write(self):
+        """A port deleted between the ranked page and its row load is not offered, and nothing fails."""
+        field_key = self.open_blocked_workspace()
+        gone = [
+            Interface.objects.create(device=self.device_a, name=f"race-gone-{number}", type="1000base-t")
+            for number in range(2)
+        ]
+        kept = Interface.objects.create(device=self.device_a, name="race-kept", type="1000base-t")
+        gone_ids = [port.pk for port in gone]
+
+        def delete_after_ranking(port):
+            ranked = []
+
+            def wrapper(execute, sql, params, many, context):
+                result = execute(sql, params, many, context)
+                # Only the ranking query orders the raw name by the bytewise collation.
+                if not ranked and '"name" COLLATE "C"' in sql:
+                    ranked.append(sql)
+                    port.delete()
+                return result
+
+            return wrapper
+
+        with connection.execute_wrapper(delete_after_ranking(gone[0])):
+            read = self.candidates(field_key, search="race")
+        with connection.execute_wrapper(delete_after_ranking(gone[1])):
+            saved = self.client.post(
+                reverse("plugins:netbox_data_import:trace_resolve_termination"),
+                {
+                    "field_key": field_key,
+                    "object_type": kept._meta.label_lower,
+                    "object_id": kept.pk,
+                    "search": "race",
+                    "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+                },
+                headers={"accept": "application/json"},
+            )
+
+        self.assertEqual(read.status_code, 200, read.content[:300])
+        self.assertEqual([item["id"] for item in read.json()["candidates"]], [gone_ids[1], kept.pk])
+        self.assertEqual(saved.status_code, 302, saved.content[:300])
+        self.assertEqual(TerminationResolution.objects.get(profile=self.profile).selected_object_id, kept.pk)
+        self.assertFalse(Interface.objects.filter(pk__in=gone_ids).exists())
+
     def test_the_largest_offset_reads_an_empty_page_and_an_overflowing_write_is_refused(self):
         """The bound leaves room for one page, and the write applies the same bound as the read."""
         field_key = self.open_blocked_workspace()

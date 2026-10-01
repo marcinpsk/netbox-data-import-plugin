@@ -2574,6 +2574,40 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         self.assertEqual(result.total, 61)
         self.assertEqual([sql for rows, sql in returned if rows > 3], [])
 
+    def test_a_candidate_that_leaves_the_page_after_ranking_is_left_out(self):
+        """A port deleted, moved, or renamed between the ranked page and its row load is not offered."""
+        from django.db import connection
+
+        changes = {
+            "deleted": lambda port: port.delete(),
+            "moved": lambda port: Interface.objects.filter(pk=port.pk).update(device=self.device_b),
+            "renamed": lambda port: Interface.objects.filter(pk=port.pk).update(name="elsewhere"),
+        }
+        field_key = termination_field_key(device="DEV-A", cards="", port="absent", kind="interface")
+        for change, apply in changes.items():
+            with self.subTest(change=change):
+                kept = Interface.objects.create(device=self.device_a, name=f"race-{change}-a", type="1000base-t")
+                leaving = Interface.objects.create(device=self.device_a, name=f"race-{change}-b", type="1000base-t")
+                ranked = []
+
+                def change_after_ranking(
+                    execute, sql, params, many, context, leaving=leaving, apply=apply, ranked=ranked
+                ):
+                    result = execute(sql, params, many, context)
+                    # Only the ranking query orders the raw name by the bytewise collation.
+                    if not ranked and '"name" COLLATE "C"' in sql:
+                        ranked.append(sql)
+                        apply(leaving)
+                    return result
+
+                with connection.execute_wrapper(change_after_ranking):
+                    result = eligible_terminations(
+                        field_key, self.reader(), profile=self.profile, search=f"race-{change}"
+                    )
+
+                self.assertTrue(ranked)
+                self.assertEqual(result.candidates, (kept,))
+
     def test_each_admitted_model_stays_inside_the_actor_view_scope(self):
         """The one set holds only the rows of each model the actor may view."""
         field_key = self.add_console_and_power_ports()
