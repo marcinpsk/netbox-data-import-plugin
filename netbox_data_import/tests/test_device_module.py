@@ -677,7 +677,7 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
 
         self.assertEqual(
             resolver.resolve("Dell  EMC", "R660"),
-            ("mapped-make", "mapped-type", True),
+            ("mapped-make", "mapped-type", True, ""),
         )
 
     def test_a_rack_the_row_names_but_netbox_does_not_have_is_blocked(self):

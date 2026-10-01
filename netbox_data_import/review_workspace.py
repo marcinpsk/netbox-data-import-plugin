@@ -448,6 +448,14 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
         "Add the Device Type in NetBox, or map the source make and model to an existing Device Type."
     ),
     "device.device_type_slug_collision": "A stored device type already uses the slug this model derives.",
+    "device.device_type_mapping_ambiguous": (
+        "Device Type mappings with this make and model name different Device Types. "
+        "Delete one of them, or make them name one Device Type."
+    ),
+    "device.manufacturer_mapping_ambiguous": (
+        "Manufacturer mappings with this make name different manufacturers. "
+        "Delete one of them, or make them name one manufacturer."
+    ),
     "device.duplicate_asset_tag": "The asset tag appears more than once in this import.",
     "device.duplicate_name": "The device name appears more than once in this import.",
     "device.duplicate_serial": "The serial number appears more than once in this import.",

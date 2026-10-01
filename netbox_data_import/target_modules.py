@@ -33,7 +33,7 @@ from .contact_resolution import (
     PrimaryContactResolver,
 )
 from .device_field_review import DeviceFieldReviewer
-from .device_identity import DeviceTypeIdentityResolver
+from .device_identity import DEVICE_TYPE_AMBIGUOUS, MANUFACTURER_AMBIGUOUS, DeviceTypeIdentityResolver
 from .identity import identity_expression, identity_in, identity_text
 from .netbox_reader import PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied, ProspectiveRelation, assess_permission_scoped_save
@@ -48,6 +48,11 @@ from .values import (
 )
 
 DEFAULT_RACK_HEIGHT = 42
+# Two mappings that share one name identity and name different targets leave the row for the operator.
+_AMBIGUOUS_MAPPING_CODES = {
+    DEVICE_TYPE_AMBIGUOUS: "device.device_type_mapping_ambiguous",
+    MANUFACTURER_AMBIGUOUS: "device.manufacturer_mapping_ambiguous",
+}
 
 
 class _RackComparison(Protocol):
@@ -1018,7 +1023,9 @@ class _DeviceBatch:
         for row in rows:
             make = " ".join((_source_text(row.get("make")) or "Unknown").split())
             model = " ".join((_source_text(row.get("model")) or "Unknown").split())
-            type_keys.add(self._identity.resolve(make, model)[:2])
+            resolved = self._identity.resolve(make, model)
+            if not resolved.ambiguous:
+                type_keys.add(resolved[:2])
 
         referenced_types = DeviceType.objects.select_related("manufacturer").filter(
             manufacturer__slug__in={mfg_slug for mfg_slug, _dt_slug in type_keys},
@@ -1219,7 +1226,11 @@ class _DeviceBatch:
         """Return existing relation objects and planned roles, or the first unmet dependency."""
         make = " ".join((_source_text(row.get("make")) or "Unknown").split())
         model = " ".join((_source_text(row.get("model")) or "Unknown").split())
-        mfg_slug, dt_slug, explicit = self._identity.resolve(make, model)
+        mfg_slug, dt_slug, explicit, ambiguous = self._identity.resolve(make, model)
+        if ambiguous:
+            return _Dependencies(
+                missing=(_AMBIGUOUS_MAPPING_CODES[ambiguous], {"source_make": make, "source_model": model})
+            )
         changes = []
         actor = self.reader.actor
         device_type = self._device_types.get((mfg_slug, dt_slug))

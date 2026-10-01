@@ -613,6 +613,11 @@ owns it, in Python and in PostgreSQL:
    locale `und-u-kn-true`. Every step before `UPPER` runs under the `C` collation, so the collation
    of the input column changes nothing.
 
+Mappings whose make, or make and model, share one identity are one mapping when they name one
+target. When they name different targets, a row with that make and model is blocked with
+`device.device_type_mapping_ambiguous` or `device.manufacturer_mapping_ambiguous`, whatever spelling
+the row uses, because no spelling can pick one of them.
+
 No step applies NFC or NFKC, so `e` with a combining acute accent and `é` are two identities. Keys
 compare bytewise. A source value is text when it reaches the identity: a Source Adapter reads a
 spreadsheet null word such as `none` or `N/A` as an empty cell before it builds a key, so a real name
