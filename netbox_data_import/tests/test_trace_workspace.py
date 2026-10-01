@@ -2273,6 +2273,52 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
         self.assertTrue(cables_on(second).exists())
         self.assertTrue(cables_on(other).exists())
 
+    def test_a_media_warning_on_a_blocked_trace_does_not_stop_an_independent_sync(self):
+        """The queued plan carries every unit, so a presentation-only display field would fail in the worker."""
+        from core.models import Job
+
+        from netbox_data_import.models import ExecutionOutcome, ImportExecution
+
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(cable_type="mmf-om4")
+        spare = Interface.objects.create(device=self.device_a, name="spare", type="1000base-t")
+        self.connect(self.eth0, spare)
+        second = Interface.objects.create(device=self.make_device("DEV-G"), name="eth0", type="1000base-t")
+        other = Interface.objects.create(device=self.make_device("DEV-H"), name="eth0", type="1000base-t")
+        independent = direct_path(
+            from_end=trace_termination("DEV-G", "", "eth0", "Port"),
+            to_end=trace_termination("DEV-H", "", "eth0", "Port"),
+        )
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(), independent)))
+        upload.name = "traces.xlsx"
+        self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        traces = {trace.endpoints["from"]: trace for trace in workspace.context["traces"]}
+        blocked = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY]).unit(
+            traces["DEV-A eth0"].identity
+        )
+        self.assertEqual(blocked.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.media_family_mismatch", [item.code for item in blocked.diagnostics])
+
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {
+                "identity": traces["DEV-G eth0"].identity,
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+        )
+        self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
+        self.run_rq_jobs()
+
+        execution = ImportExecution.objects.get()
+        self.assertEqual(execution.outcome, ExecutionOutcome.SUCCEEDED, execution.failure_detail)
+        self.assertTrue(cables_on(second, other).exists())
+        self.assertFalse(cables_on(self.eth0, self.panel_1_fronts[0]).exists())
+
     def test_a_replanned_trace_is_executed_again_rather_than_reported_done(self):
         """One trace identity spans two workbooks, so the execution key cannot be the selection alone."""
         from core.models import Job

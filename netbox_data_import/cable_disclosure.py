@@ -362,29 +362,6 @@ def _media_segment(segment: dict, visible_row_ids: dict[str, set[int]]) -> dict:
     }
 
 
-def _media_message(segments: list[dict]) -> str:
-    from .cable_policy import cable_media_family_label, cable_type_label
-
-    statements = []
-    for segment in segments:
-        position = segment["segment_index"] + 1
-        if not segment["visible"]:
-            hidden = POLICY_HIDDEN if segment.get("origin") == "policy" else "a Cable you cannot view"
-            statements.append(f"segment {position} uses {hidden}")
-            continue
-        family = cable_media_family_label(segment["family"])
-        statement = f"segment {position} is {cable_type_label(segment['cable_type'])} ({family})"
-        if segment["retained"]:
-            statement += ", on the Cable this import keeps"
-        statements.append(statement)
-    remedy = (
-        "Correct those Cables in NetBox, then re-read."
-        if all(segment["retained"] for segment in segments)
-        else "Force the segment that states the wrong medium, or correct the source."
-    )
-    return f"Verified pass-throughs join these segments, and {'; '.join(statements)}. {remedy}"
-
-
 def _redact_terminations(display: dict, keys: frozenset[str]) -> dict:
     for key in keys & set(display):
         display[key] = [] if isinstance(display[key], list) else TERMINATION_HIDDEN
@@ -404,17 +381,13 @@ def _visible_identities(identities, visible_row_ids: dict[str, set[int]]) -> tup
 def _diagnostic(diagnostic, visible_row_ids: dict[str, set[int]]):
     display = diagnostic.to_dict()["display"]
     if diagnostic.code == "cable.media_family_mismatch":
-        segments = [_media_segment(segment, visible_row_ids) for segment in display["segments"]]
-        display["segments"] = segments
-        display["families"] = sorted(
-            {_family_label(segment["family"]) for segment in segments if segment["visible"] and segment.get("family")}
-        )
-        display["message"] = _media_message(segments)
-    elif keys := CABLE_DIAGNOSTIC_DISCLOSURES.get(diagnostic.code):
-        if display.get("cable_visible") is True and not _source_is_visible(
-            display.get(DISCLOSURE_SOURCE), (CABLE_ROW,), visible_row_ids
-        ):
-            display = _redact_cable(display, keys)
+        display["segments"] = [_media_segment(segment, visible_row_ids) for segment in display["segments"]]
+    elif (
+        (keys := CABLE_DIAGNOSTIC_DISCLOSURES.get(diagnostic.code))
+        and display.get("cable_visible") is True
+        and not _source_is_visible(display.get(DISCLOSURE_SOURCE), (CABLE_ROW,), visible_row_ids)
+    ):
+        display = _redact_cable(display, keys)
     if (
         diagnostic.code in POLICY_DIAGNOSTIC_DISCLOSURES
         and display.get(POLICY_VISIBLE) is True
@@ -429,12 +402,6 @@ def _diagnostic(diagnostic, visible_row_ids: dict[str, set[int]]):
     if keys and not _terminations_are_visible(display.get(TERMINATION_SOURCES), visible_row_ids):
         display = _redact_terminations(display, keys)
     return replace(diagnostic, display=display, identities=_visible_identities(diagnostic.identities, visible_row_ids))
-
-
-def _family_label(family: str) -> str:
-    from .cable_policy import cable_media_family_label
-
-    return cable_media_family_label(family)
 
 
 def _unit(unit, visible_row_ids: dict[str, set[int]]):

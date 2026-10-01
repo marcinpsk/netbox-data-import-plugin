@@ -2012,6 +2012,56 @@ class CableDisclosureSchemaTest(SimpleTestCase):
         self.assertIs(presented.display[POLICY_VISIBLE], False)
         self.assertNotIn(DISCLOSURE_SOURCE, presented.display)
 
+    def test_every_redacted_diagnostic_stays_inside_its_registered_schema(self):
+        """A queued plan is read back by the worker, so redaction may remove a disclosure but never add a field."""
+        from netbox_data_import.cable_disclosure import (
+            _DIAGNOSTIC_DISCLOSURE_FIELDS,
+            CABLE_CLASS_MAPPING_ROW,
+            CABLE_ROW,
+            DISCLOSURE_SOURCE,
+            POLICY_VISIBLE,
+            TERMINATION_SOURCES,
+            _diagnostic,
+            redact_deleted_cables,
+        )
+        from netbox_data_import.plan import Diagnostic, ImportPlan, SynchronizationUnit
+
+        deleted = {"kind": CABLE_ROW, "pk": 9}
+        mapping = {"kind": CABLE_CLASS_MAPPING_ROW, "pk": 3}
+        media_segment = {"retained": True, "visible": True, "cable_type": "cat6", "family": "cat6"}
+        diagnostics = []
+        for code, (public, cable, policy, termination) in _DIAGNOSTIC_DISCLOSURE_FIELDS.items():
+            display = dict.fromkeys(public, "value")
+            if code == "cable.media_family_mismatch":
+                display["segments"] = [
+                    {**media_segment, "segment_index": 0, "origin": "cable", DISCLOSURE_SOURCE: deleted},
+                    {**media_segment, "segment_index": 1, "origin": "policy", DISCLOSURE_SOURCE: mapping},
+                ]
+            elif cable:
+                display.update(dict.fromkeys(cable, "Cable 9"), cable_visible=True, **{DISCLOSURE_SOURCE: deleted})
+            elif policy:
+                display.update(dict.fromkeys(policy, "cat6"), **{POLICY_VISIBLE: True, DISCLOSURE_SOURCE: mapping})
+            if termination:
+                display.update(dict.fromkeys(termination, "eth0"))
+                display[TERMINATION_SOURCES] = [{"kind": "dcim.interface", "pk": 5}]
+            diagnostics.append(Diagnostic(code=code, severity=Severity.ERROR, display=display))
+        delete = PlannedChange(
+            identity="cable:delete:9", target_module="cable", operation="delete", payload={"cable_id": 9}
+        )
+        plan = ImportPlan(
+            units=(SynchronizationUnit("cable:trace:x", Disposition.ACTIONABLE, (delete,), tuple(diagnostics)),)
+        )
+
+        queued = ImportPlan.from_dict(redact_deleted_cables(plan.to_dict()))
+
+        redacted = {item.code: item.display for item in queued.units[0].diagnostics}
+        self.assertIs(redacted["cable.segment_reused"]["cable_visible"], False)
+        self.assertIs(redacted["cable.media_family_mismatch"]["segments"][0]["visible"], False)
+        for diagnostic in diagnostics:
+            with self.subTest(code=diagnostic.code):
+                hidden = _diagnostic(diagnostic, {})
+                self.assertLessEqual(set(hidden.display), set(diagnostic.display))
+
     def test_disclosure_boundaries_reject_unsupported_callers(self):
         """Only policy models and a live workspace viewer may enter presentation."""
         from netbox_data_import.cable_disclosure import policy_row_kind, present_units

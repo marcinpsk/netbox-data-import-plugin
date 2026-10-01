@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from functools import cached_property
 from types import MappingProxyType
 from typing import Any
 
+from .cable_disclosure import CABLE_SEGMENT_OVERRIDE_ROW, DISCLOSURE_SOURCE, POLICY_HIDDEN, POLICY_VISIBLE
+from .cable_policy import cable_media_family_label, cable_type_label
 from .cable_target import UNRESOLVED, AskedTermination
 from .import_engine import ImportEngine
 from .models import (
@@ -347,7 +350,31 @@ def clear_trace_location_resolution_and_replan(
         return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
 
 
-_DIAGNOSTIC_MESSAGES = {
+def _media_family_message(display) -> str:
+    """Return the wording for one media mismatch from its redacted segments."""
+    segments = display["segments"]
+    statements = []
+    for segment in segments:
+        position = segment["segment_index"] + 1
+        if not segment["visible"]:
+            hidden = POLICY_HIDDEN if segment["origin"] == "policy" else "a Cable you cannot view"
+            statements.append(f"segment {position} uses {hidden}")
+            continue
+        family = cable_media_family_label(segment["family"])
+        statement = f"segment {position} is {cable_type_label(segment['cable_type'])} ({family})"
+        if segment["retained"]:
+            statement += ", on the Cable this import keeps"
+        statements.append(statement)
+    remedy = (
+        "Correct those Cables in NetBox, then re-read."
+        if all(segment["retained"] for segment in segments)
+        else "Force the segment that states the wrong medium, or correct the source."
+    )
+    return f"Verified pass-throughs join these segments, and {'; '.join(statements)}. {remedy}"
+
+
+# Operator wording per code: a sentence, or a function of the presented display.
+_DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     "cable.ambiguous_mapped_peer": (
         "NetBox maps this port to several peer ports. Choose the peer port this trace continues through."
     ),
@@ -356,10 +383,7 @@ _DIAGNOSTIC_MESSAGES = {
     "cable.incompatible_terminations": (
         "NetBox cannot cable these two terminations together. Choose another termination for the end that is wrong."
     ),
-    "cable.media_family_mismatch": (
-        "Verified pass-throughs join segments that state different media families. "
-        "Force the segment that states the wrong medium, or correct the Cable in NetBox."
-    ),
+    "cable.media_family_mismatch": _media_family_message,
     "cable.multi_termination_conflict": (
         "A Cable with several terminations on one side holds a port this trace needs. Correct that Cable in NetBox."
     ),
@@ -531,11 +555,12 @@ def _states_a_trace(unit: SynchronizationUnit) -> bool:
 
 
 def _diagnostic_message(diagnostic) -> str:
-    """Return the operator wording for one diagnostic."""
-    message = str(diagnostic.display.get("message") or "") or _DIAGNOSTIC_MESSAGES.get(diagnostic.code, diagnostic.code)
+    """Return the operator wording for one diagnostic, which must be a presentation copy."""
+    wording = _DIAGNOSTIC_MESSAGES.get(diagnostic.code, diagnostic.code)
+    message = str(diagnostic.display.get("message") or "") or (
+        wording(diagnostic.display) if callable(wording) else wording
+    )
     if diagnostic.code == "cable.segment_override_lost":
-        from .cable_disclosure import CABLE_SEGMENT_OVERRIDE_ROW, DISCLOSURE_SOURCE, POLICY_VISIBLE
-
         source = diagnostic.display.get(DISCLOSURE_SOURCE)
         if (
             diagnostic.display.get(POLICY_VISIBLE) is True
