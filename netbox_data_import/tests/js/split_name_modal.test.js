@@ -17,12 +17,12 @@ const SPLIT_FIELD_VALUES = { "cn-2": { device_name: ORIGINAL_VALUE, asset_tag: "
 
 let lookups;
 
-function render({ existingResolutions = {} } = {}) {
+function render({ existingResolutions = {}, original = ORIGINAL_VALUE, fieldValues = SPLIT_FIELD_VALUES } = {}) {
   lookups = [];
   window.EXISTING_RESOLUTIONS = existingResolutions;
   document.body.innerHTML = `
     <button id="trigger" data-ndi-modal="#splitNameModal" data-source-id="cn-2"
-            data-source-column="device_name" data-original-value="${ORIGINAL_VALUE}">Split</button>
+            data-source-column="device_name" data-original-value="${original}">Split</button>
     <div class="modal" id="splitNameModal">
       <form id="splitForm" data-check-device-url="/plugins/data-import/check-device/">
         <input type="hidden" id="res_source_id" name="source_id">
@@ -40,7 +40,7 @@ function render({ existingResolutions = {} } = {}) {
         <button type="submit">Save</button>
       </form>
     </div>
-    <script type="application/json" id="ndi-split-field-values">${JSON.stringify(SPLIT_FIELD_VALUES)}</script>
+    <script type="application/json" id="ndi-split-field-values">${JSON.stringify(fieldValues)}</script>
   `;
   /* The script binds once and looks every element up by id, so one evaluation serves every
    * render in this file. */
@@ -339,6 +339,55 @@ describe("a part that overwrites a value the file already carries", () => {
     document.getElementById("res_force_0").checked = true;
     document.getElementById("res_force_0").dispatchEvent(new Event("change"));
     expect(saveButton().disabled).toBe(false);
+  });
+});
+
+describe("the name identity of the split modal", () => {
+  /* Python writes this corpus from its own identity, and `test_identity` refuses a stale copy. */
+  const corpus = JSON.parse(
+    readFileSync(resolve(process.cwd(), "netbox_data_import/tests/js/identity_corpus.json"), "utf8"),
+  );
+
+  it("gives the Python key of every corpus value", () => {
+    render();
+
+    const differing = corpus.filter(([value, key]) => window.ndiIdentityText(value) !== key);
+
+    expect(corpus.length).toBeGreaterThan(400);
+    expect(differing).toEqual([]);
+  });
+});
+
+describe("a part compared with the value the file carries", () => {
+  /* The server compares names, asset tags, racks, makes and models by name identity, and serials exactly. */
+  function renderPart(field, fileValue, part) {
+    const original = `${part} - host-900`;
+    render({ original, fieldValues: { "cn-2": { device_name: original, [field]: fileValue } } });
+    setField(0, field);
+  }
+
+  function acknowledgementAsked() {
+    return document.getElementById("res_force_0") !== null;
+  }
+
+  it("asks to acknowledge an asset tag whose capital sharp s keeps another identity", () => {
+    renderPart("asset_tag", "STRA\u1E9EE", "Stra\u00DFe");
+
+    expect(acknowledgementAsked()).toBe(true);
+    expect(saveButton().disabled).toBe(true);
+  });
+
+  it("reads two spellings of one name identity as the value the file carries", () => {
+    renderPart("asset_tag", "STRASSE", "stra\u00DFe");
+
+    expect(acknowledgementAsked()).toBe(false);
+    expect(document.getElementById("res_part_preview_0").textContent).toContain("Matches file value");
+  });
+
+  it("asks to acknowledge a serial that differs only in case", () => {
+    renderPart("serial", "sn900", "SN900");
+
+    expect(acknowledgementAsked()).toBe(true);
   });
 });
 

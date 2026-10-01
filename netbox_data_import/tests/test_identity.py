@@ -9,6 +9,7 @@ import itertools
 import json
 import sys
 import unicodedata
+from pathlib import Path
 
 from django.db import connection
 from django.db.models import F, TextField
@@ -154,6 +155,22 @@ class IdentityTextTest(SimpleTestCase):
         }
 
         self.assertEqual({value: identity_text(value) for value in cases}, cases)
+
+
+JS_CORPUS = Path(__file__).resolve().parent / "js" / "identity_corpus.json"
+
+
+class JavaScriptIdentityCorpusTest(SimpleTestCase):
+    """The split modal compares names in the browser, and vitest checks its identity against this corpus."""
+
+    def test_the_corpus_states_the_python_key_of_every_composite(self):
+        expected = [[value, identity_text(value)] for value in COMPOSITES]
+
+        self.assertEqual(
+            json.loads(JS_CORPUS.read_text(encoding="utf-8")),
+            expected,
+            "Write [[value, identity_text(value)] for value in COMPOSITES] to tests/js/identity_corpus.json.",
+        )
 
 
 class IdentityAgreementTest(TestCase):

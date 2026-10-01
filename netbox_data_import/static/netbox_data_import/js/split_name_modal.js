@@ -15,6 +15,17 @@
     ['rack_name', 'Rack name'],
   ];
 
+  /* The name identity of `netbox_data_import/identity.py`: tests/js/identity_corpus.json holds its answers. */
+  var WHITESPACE_RUN = /[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/g;
+  /* The server compares a serial exactly and every other split target by name identity. */
+  var EXACT_FIELDS = ['serial'];
+
+  function identityText(value) {
+    return String(value).replace(WHITESPACE_RUN, ' ').replace(/^ | $/g, '').toUpperCase();
+  }
+
+  window.ndiIdentityText = identityText;
+
   /* The values this row already carries, so a part can say whether it overwrites one. */
   var fileValues = {};
   var deviceCheckRequest = 0;
@@ -91,6 +102,9 @@
     }
 
     var existingValue = (fileValues[field] || '').trim();
+    var same = EXACT_FIELDS.indexOf(field) !== -1
+      ? existingValue === splitValue
+      : identityText(existingValue) === identityText(splitValue);
 
     if (!existingValue) {
       previewDiv.style.cssText = 'background:#d1e7dd;border:1px solid #badbcc;color:#0a3622;';
@@ -98,7 +112,7 @@
       return;
     }
 
-    if (existingValue.toLowerCase() === splitValue.toLowerCase()) {
+    if (same) {
       previewDiv.style.cssText = 'background:#d1e7dd;border:1px solid #badbcc;color:#0a3622;';
       previewDiv.innerHTML =
         '<i class="mdi mdi-check-circle-outline"></i> Matches file value: <code>' + escHtml(existingValue) + '</code>';

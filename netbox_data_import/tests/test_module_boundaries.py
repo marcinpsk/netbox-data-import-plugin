@@ -4,6 +4,7 @@
 
 import ast
 import pathlib
+import re
 from tempfile import TemporaryDirectory
 
 from django.test import SimpleTestCase
@@ -89,6 +90,55 @@ def _name_folds(source: str) -> set[str]:
             isinstance(node, ast.Constant) and isinstance(node.value, str) and "__iexact" in node.value
         ):
             found.add("__iexact")
+    return found
+
+
+JS_FOLD = re.compile(
+    r"\.(toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase|localeCompare)\s*\(|Intl\.Collator"
+)
+# Each browser case fold that is not a name comparison, by file and stripped line, with the reason it may fold.
+JS_FOLD_ALLOWED = {
+    (
+        "static/netbox_data_import/js/split_name_modal.js",
+        "return String(value).replace(WHITESPACE_RUN, ' ').replace(/^ | $/g, '').toUpperCase();",
+    ): "the one browser name identity, which tests/js/identity_corpus.json checks against Python",
+    (
+        "static/netbox_data_import/js/contact_candidate_modal.js",
+        (
+            "blank.setCustomValidity('Give this row a ' + (ROLE_LABELS[role] || role).toLowerCase() + ', or select no "
+            "contact.');"
+        ),
+    ): "message text",
+    (
+        "static/netbox_data_import/js/preview_row_controls.js",
+        "var text = (filterInput ? filterInput.value : '').toLowerCase().trim();",
+    ): "free-text row filter of the rendered table",
+    (
+        "static/netbox_data_import/js/preview_row_controls.js",
+        "var action = (actionSelect ? actionSelect.value : '').toLowerCase();",
+    ): "action filter value",
+    (
+        "static/netbox_data_import/js/preview_row_controls.js",
+        "var textMatch = !text || row.textContent.toLowerCase().includes(text);",
+    ): "free-text row filter of the rendered table",
+    (
+        "static/netbox_data_import/js/preview_row_controls.js",
+        "var rowAction = (row.dataset.action || '').toLowerCase();",
+    ): "action filter value",
+    (
+        "templates/netbox_data_import/import_preview.html",
+        "var slug = name.toLowerCase()",
+    ): "slug suggestion for a new Contact Role",
+}
+
+
+def _js_folds(root: pathlib.Path) -> set[tuple[str, str]]:
+    """Return each browser case fold under *root*, as its file path and its stripped line."""
+    found = set()
+    for path in sorted([*root.glob("static/**/*.js"), *root.glob("templates/**/*.html")]):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if JS_FOLD.search(line):
+                found.add((str(path.relative_to(root)), line.strip()))
     return found
 
 
@@ -276,6 +326,29 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         )
 
         self.assertEqual(_name_folds(source), NAME_FOLDS)
+
+    def test_browser_code_folds_case_only_where_the_allowlist_says_why(self):
+        """A browser comparison that folds case its own way disagrees with the server's name identity."""
+        found = _js_folds(PACKAGE)
+
+        self.assertEqual(sorted(found - set(JS_FOLD_ALLOWED)), [], "compare names with ndiIdentityText")
+        self.assertEqual(sorted(set(JS_FOLD_ALLOWED) - found), [], "remove the allowlist entries that match nothing")
+
+    def test_the_browser_fold_guard_reads_scripts_and_templates(self):
+        with TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "static").mkdir()
+            (root / "templates").mkdir()
+            (root / "static" / "a.js").write_text("if (a.toLowerCase() === b.toUpperCase()) {}\n", encoding="utf-8")
+            (root / "templates" / "b.html").write_text(
+                "<script>names.sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));</script>\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                {path for path, _line in _js_folds(root)},
+                {"static/a.js", "templates/b.html"},
+            )
 
     def test_permission_constraint_parsing_has_one_owner(self):
         """Only the object permission module interprets NetBox constraint state."""
