@@ -1866,8 +1866,8 @@ variables.
 - Every action is always visible; an illegal action renders disabled with its reason.
 - The proposed panel shows a per-segment status of create, reuse existing, delete Logical Cable, or
   conflict.
-- The picker lists only eligible candidates of the claimed kind on the resolved Device and shows the
-  "N of M eligible" count.
+- The picker lists only eligible candidates of the models the claimed kind admits on the resolved
+  Device and shows the "N of M eligible" count.
 - A trace-only profile opens this workspace directly. An open source Device label offers a Device
   picker before its termination picker.
 - Selecting a Device writes one profile-owned `TraceDeviceResolution` and replans. A later source
@@ -2067,7 +2067,7 @@ Out of scope for this architecture:
 - Whole-preview batch inference processing.
 - Contact-field assistance through the Resolution Proposal lifecycle.
 - Creating missing Devices or ports.
-- Termination types other than Interface, FrontPort, and RearPort.
+- Termination types outside the Cable End Kinds (section 6.1), such as PowerFeed and CircuitTermination.
 - Any Inference Backend applying a change without explicit operator acceptance.
 - Creating or mutating CablePath state.
 - Creating a NetBox Cable Profile at run time.

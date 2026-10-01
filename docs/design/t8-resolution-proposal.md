@@ -109,9 +109,9 @@ validated at startup even when inference is otherwise unconfigured:
 `True` is the trap worth naming: it is numerically 1 and would silently admit a one-candidate set.
 The repository already excludes booleans this way in its integer timeout validation
 (`inference_settings.py:205`), and this setting follows it. Zero and negatives admit no set at all;
-`10**100` must never reach a database slice, because `eligible_terminations` materializes the slice
-before computing `total`. The hard ceiling is 1,024. The four supported NetBox termination models
-limit names to 64 characters. A compact candidate array at the ceiling stays below 1 MiB even when
+`10**100` must never reach a page cut, because `eligible_terminations` cuts its page from the whole
+admitted set it has read. The hard ceiling is 1,024. The seven NetBox termination models a claimed
+kind can admit (spec 6.1) limit names to 64 characters. A compact candidate array at the ceiling stays below 1 MiB even when
 every name needs worst-case JSON escaping. The default remains 64 because a hard process and request
 size ceiling does not promise that every configured backend accepts the largest prompt.
 
