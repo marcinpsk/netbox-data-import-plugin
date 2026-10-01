@@ -630,6 +630,41 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertIn("Source Alias absent-port", attention)
         self.assertIn(str(self.device_a), attention)
 
+    def test_a_device_on_a_later_page_is_offered_and_saved_from_that_page(self):
+        """The picker pages past the first twenty candidates, and the write rechecks the page it offered."""
+        spares = [self.make_device(f"Spare {number:02}") for number in range(1, 22)]
+        response = self.start_alias_preview()
+        revision = response.context["preview_revision"]
+        url = reverse("plugins:netbox_data_import:trace_device_candidates")
+        question = {"device_key": "source alias", "search": "Spare", "preview_revision": revision}
+
+        second = self.client.get(url, {**question, "offset": 20}).json()
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {**question, "device_id": spares[-1].pk},
+            headers={"accept": "application/json"},
+        )
+        malformed = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {**question, "device_id": spares[-1].pk, "offset": "next"},
+            headers={"accept": "application/json"},
+        )
+        saved = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {**question, "device_id": spares[-1].pk, "offset": 20},
+            headers={"accept": "application/json"},
+        )
+
+        self.assertEqual(
+            ([item["id"] for item in second["candidates"]], second["total"], second["offset"]),
+            ([spares[-1].pk], 21, 20),
+        )
+
+        self.assertEqual(refused.status_code, 400)
+        self.assertContains(malformed, "Candidate offset must be an integer of 0 or more.", status_code=400)
+        self.assertEqual(saved.status_code, 302, saved.content)
+        self.assertEqual(TraceDeviceResolution.objects.get(profile=self.profile).selected_device_id, spares[-1].pk)
+
     def test_an_unoffered_device_choice_is_rejected_as_request_input(self):
         response = self.start_alias_preview()
 
@@ -968,6 +1003,7 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
                 selected_device_id=self.device_a.pk,
                 search="DEV-A",
                 limit=20,
+                offset=0,
                 reviewed_fingerprint=self.profile.planning_fingerprint,
             )
 
@@ -1021,6 +1057,7 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
                 selected_device_id=self.device_b.pk,
                 search="DEV-B",
                 limit=20,
+                offset=0,
                 reviewed_fingerprint=self.profile.planning_fingerprint,
             )
 

@@ -4347,14 +4347,30 @@ class TraceSyncView(_PermissionScopedWriteMixin, _TraceWorkspaceMixin, Permissio
             return redirect(next_url)
 
 
-def _candidate_page_limit(raw_limit) -> int:
-    """Return one valid picker page limit."""
-    if raw_limit is None:
-        return ELIGIBLE_TERMINATION_LIMIT
-    limit = int(raw_limit)
+class InvalidCandidatePage(Exception):
+    """A picker request names a page the candidate endpoints do not serve."""
+
+
+CANDIDATE_LIMIT_INVALID = f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}."
+CANDIDATE_OFFSET_INVALID = "Candidate offset must be an integer of 0 or more."
+
+
+def _candidate_page(params) -> tuple[int, int]:
+    """Return the page limit and offset of one picker read, or of the write that rechecks its offer."""
+    raw_limit, raw_offset = params.get("limit"), params.get("offset")
+    try:
+        limit = ELIGIBLE_TERMINATION_LIMIT if raw_limit is None else int(raw_limit)
+    except (TypeError, ValueError) as exc:
+        raise InvalidCandidatePage(CANDIDATE_LIMIT_INVALID) from exc
     if not 1 <= limit <= ELIGIBLE_TERMINATION_LIMIT:
-        raise ValueError("Candidate limit is outside the supported range.")
-    return limit
+        raise InvalidCandidatePage(CANDIDATE_LIMIT_INVALID)
+    try:
+        offset = 0 if raw_offset in (None, "") else int(raw_offset)
+    except (TypeError, ValueError) as exc:
+        raise InvalidCandidatePage(CANDIDATE_OFFSET_INVALID) from exc
+    if offset < 0:
+        raise InvalidCandidatePage(CANDIDATE_OFFSET_INVALID)
+    return limit, offset
 
 
 class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
@@ -4375,17 +4391,13 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
                 {"ok": False, "error": "This preview asked no question about that termination."}, status=400
             )
         try:
-            limit = _candidate_page_limit(request.GET.get("limit"))
-        except (TypeError, ValueError):
-            return JsonResponse(
-                {
-                    "ok": False,
-                    "error": f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
-                },
-                status=400,
-            )
+            limit, offset = _candidate_page(request.GET)
+        except InvalidCandidatePage as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
         try:
-            found = self._eligible(request, profile, planning_context, field_key, request.GET.get("search", ""), limit)
+            found = self._eligible(
+                request, profile, planning_context, field_key, request.GET.get("search", ""), limit, offset
+            )
         except (PlanningTargetUnavailable, ValueError):
             return JsonResponse({"ok": False, "error": "That termination cannot be resolved here."}, status=400)
         return JsonResponse(
@@ -4404,14 +4416,16 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
                 ],
                 "shown": len(found.candidates),
                 "total": found.total,
+                "offset": offset,
+                "limit": limit,
             }
         )
 
     @staticmethod
-    def _eligible(request, profile, planning_context, field_key, search, limit):
+    def _eligible(request, profile, planning_context, field_key, search, limit, offset):
         """Return the eligible page, inside the caller's own read scope."""
         reader = _trace_reader(request, profile, planning_context)
-        return eligible_terminations(field_key, reader, profile=profile, search=search, limit=limit)
+        return eligible_terminations(field_key, reader, profile=profile, search=search, limit=limit, offset=offset)
 
 
 class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
@@ -4434,15 +4448,9 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
         if len(search) > 200:
             return JsonResponse({"ok": False, "error": "Device search must be 200 characters or fewer."}, status=400)
         try:
-            limit = _candidate_page_limit(request.GET.get("limit"))
-        except (TypeError, ValueError):
-            return JsonResponse(
-                {
-                    "ok": False,
-                    "error": f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
-                },
-                status=400,
-            )
+            limit, offset = _candidate_page(request.GET)
+        except InvalidCandidatePage as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
         try:
             evidence = DeviceEvidence.from_dict(question)
         except (TypeError, ValueError):
@@ -4450,7 +4458,7 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
         try:
             reader = _trace_reader(request, profile, planning_context)
             found = eligible_trace_devices(
-                profile=profile, reader=reader, evidence=evidence, search=search, limit=limit
+                profile=profile, reader=reader, evidence=evidence, search=search, limit=limit, offset=offset
             )
         except PlanningTargetUnavailable:
             return JsonResponse({"ok": False, "error": "That Device cannot be resolved here."}, status=400)
@@ -4472,6 +4480,8 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
                 ],
                 "shown": len(found.candidates),
                 "total": found.total,
+                "offset": offset,
+                "limit": limit,
             }
         )
 
@@ -4524,6 +4534,11 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
                 status=400,
             )
         try:
+            # The write rechecks the page that made the offer.
+            limit, offset = _candidate_page(request.POST)
+        except InvalidCandidatePage as exc:
+            return _preview_action_error(request, next_url, str(exc), status=400)
+        try:
             with transaction.atomic():
                 plan, chosen = save_trace_device_resolution_and_replan(
                     profile=profile,
@@ -4533,7 +4548,8 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
                     evidence=evidence,
                     selected_device_id=device_id,
                     search=search,
-                    limit=ELIGIBLE_TERMINATION_LIMIT,
+                    limit=limit,
+                    offset=offset,
                     reviewed_fingerprint=workspace.plan.profile_fingerprint,
                 )
                 record_recalculated_preview(request.session, plan, user=request.user)
@@ -4578,18 +4594,12 @@ class TraceLocationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin,
         if len(search) > 200:
             return JsonResponse({"ok": False, "error": "Location search must be 200 characters or fewer."}, status=400)
         try:
-            limit = _candidate_page_limit(request.GET.get("limit"))
-        except (TypeError, ValueError):
-            return JsonResponse(
-                {
-                    "ok": False,
-                    "error": f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
-                },
-                status=400,
-            )
+            limit, offset = _candidate_page(request.GET)
+        except InvalidCandidatePage as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
         try:
             found = eligible_trace_locations(
-                _trace_reader(request, profile, planning_context), search=search, limit=limit
+                _trace_reader(request, profile, planning_context), search=search, limit=limit, offset=offset
             )
         except PlanningTargetUnavailable:
             return JsonResponse({"ok": False, "error": "The import target is no longer available."}, status=400)
@@ -4602,6 +4612,8 @@ class TraceLocationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin,
                 ],
                 "shown": len(found.candidates),
                 "total": found.total,
+                "offset": offset,
+                "limit": limit,
             }
         )
 
@@ -4833,14 +4845,19 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
                 request, next_url, "This preview asked no question about that termination.", status=400
             )
         try:
+            limit, offset = _candidate_page(request.POST)
+        except InvalidCandidatePage as exc:
+            return _preview_action_error(request, next_url, str(exc), status=400)
+        try:
             reader = _trace_reader(request, profile, planning_context)
-            # The recheck repeats the query that made the offer, so a searched candidate still counts.
+            # The recheck repeats the query that made the offer, so a searched or paged candidate still counts.
             found = eligible_terminations(
                 field_key,
                 reader,
                 profile=profile,
                 search=request.POST.get("search", ""),
-                limit=ELIGIBLE_TERMINATION_LIMIT,
+                limit=limit,
+                offset=offset,
             )
         except (PlanningTargetUnavailable, ValueError):
             return _preview_action_error(request, next_url, "That termination cannot be resolved here.", status=400)

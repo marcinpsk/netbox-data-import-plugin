@@ -447,6 +447,7 @@ def eligible_trace_devices(
     evidence: DeviceEvidence,
     search: str = "",
     limit: int,
+    offset: int = 0,
     lock_rows: bool = False,
 ) -> DeviceCandidatePage:
     """Return a deterministic bounded page of visible Device candidates."""
@@ -471,14 +472,14 @@ def eligible_trace_devices(
     ).order_by("-_ndi_exact_name", "-_ndi_hint_score", "_ndi_conflict_score", "-_ndi_import_location", "name", "pk")
     total = devices.count()
     if lock_rows:
-        ranked_ids = tuple(devices.values_list("pk", flat=True)[:limit])
+        ranked_ids = tuple(devices.values_list("pk", flat=True)[offset : offset + limit])
         locked = {
             device.pk: device
             for device in devices.filter(pk__in=ranked_ids).order_by("pk").select_for_update(of=("self",))
         }
         selected = tuple(locked[pk] for pk in ranked_ids if pk in locked)
     else:
-        selected = tuple(devices[:limit])
+        selected = tuple(devices[offset : offset + limit])
     rack_names = dict(
         _site_racks(reader).filter(pk__in={device.rack_id for device in selected}).values_list("pk", "name")
     )

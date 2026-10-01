@@ -230,6 +230,7 @@ def save_trace_device_resolution_and_replan(
     selected_device_id,
     search,
     limit,
+    offset,
     reviewed_fingerprint,
 ):
     """Persist one offered Device selection, then request a fresh Import Plan."""
@@ -248,6 +249,7 @@ def save_trace_device_resolution_and_replan(
             evidence=evidence,
             search=search,
             limit=limit,
+            offset=offset,
             lock_rows=True,
         )
         chosen = next(

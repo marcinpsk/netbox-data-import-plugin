@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 from functools import partial
 import heapq
 from itertools import islice
-from operator import itemgetter
 from typing import Any
 
 from .cable_disclosure import (
@@ -468,6 +467,7 @@ def eligible_terminations(
     profile,
     search: str = "",
     limit: int = ELIGIBLE_TERMINATION_LIMIT,
+    offset: int = 0,
     _resolved_device=_RESOLVED_DEVICE_UNSET,
     _lock_rows: bool = False,
 ) -> EligibleTerminations:
@@ -502,13 +502,17 @@ def eligible_terminations(
         for _label, rows in sorted(sources, key=lambda source: source[0]):
             tuple(rows.order_by("pk").select_for_update(of=("self",)).values_list("pk", flat=True))
     total = sum(rows.count() for _label, rows in sources)
-    pages = (_ranked_page(rows, wanted, order, limit) for order, (_label, rows) in enumerate(sources))
-    merged = heapq.merge(*pages, key=itemgetter(0))
-    return EligibleTerminations(candidates=tuple(row for _key, row in islice(merged, limit)), total=total)
+    keys = (_ranked_keys(rows, wanted, order, offset + limit) for order, (_label, rows) in enumerate(sources))
+    page = list(islice(heapq.merge(*keys), offset, offset + limit))
+    wanted_ids: dict[int, list[int]] = {}
+    for key in page:
+        wanted_ids.setdefault(key[2], []).append(key[3])
+    loaded = {order: sources[order][1].in_bulk(ids) for order, ids in wanted_ids.items()}
+    return EligibleTerminations(candidates=tuple(loaded[key[2]][key[3]] for key in page), total=total)
 
 
-def _ranked_page(rows, wanted: str, order: int, limit: int) -> list[tuple[tuple, Any]]:
-    """Return one model's first *limit* rows in the combined order, each with its merge key.
+def _ranked_keys(rows, wanted: str, order: int, count: int) -> list[tuple[bool, bytes, int, int]]:
+    """Return the merge keys of one model's first *count* rows in the combined order, loading no row.
 
     The database orders names bytewise and the merge compares UTF-8 bytes, so both agree.
     """
@@ -520,8 +524,11 @@ def _ranked_page(rows, wanted: str, order: int, limit: int) -> list[tuple[tuple,
         rows = with_database_identity(rows)
     else:
         exact = Value(0, output_field=IntegerField())
-    ranked = rows.annotate(_ndi_exact=exact).order_by("-_ndi_exact", Collate("name", "C"), "pk")[:limit]
-    return [((not row._ndi_exact, row.name.encode(), order, row.pk), row) for row in ranked]
+    ranked = rows.annotate(_ndi_exact=exact).order_by("-_ndi_exact", Collate("name", "C"), "pk")
+    return [
+        (not exact_match, name.encode(), order, pk)
+        for pk, name, exact_match in ranked.values_list("pk", "name", "_ndi_exact")[:count]
+    ]
 
 
 class _CableBatch:

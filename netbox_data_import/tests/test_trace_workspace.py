@@ -1541,6 +1541,48 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         self.assertEqual(payload["shown"], 3)
         self.assertEqual(payload["total"], 7)
 
+    def test_a_termination_on_a_later_page_is_offered_and_saved_from_that_page(self):
+        """The picker pages past the first twenty candidates, and the write rechecks the page it offered."""
+        field_key = self.open_blocked_workspace()
+        spares = [
+            Interface.objects.create(device=self.device_a, name=f"spare-{number:02}", type="1000base-t")
+            for number in range(1, 22)
+        ]
+        choice = {
+            "field_key": field_key,
+            "object_type": "dcim.interface",
+            "object_id": spares[-1].pk,
+            "search": "spare",
+            "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+        }
+        url = reverse("plugins:netbox_data_import:trace_resolve_termination")
+
+        second = self.candidates(field_key, search="spare", offset=20).json()
+        refused = self.client.post(url, choice, headers={"accept": "application/json"})
+        malformed = self.client.post(url, {**choice, "offset": "-1"}, headers={"accept": "application/json"})
+        saved = self.client.post(url, {**choice, "offset": 20}, headers={"accept": "application/json"})
+
+        self.assertEqual(
+            ([item["id"] for item in second["candidates"]], second["total"], second["offset"]),
+            ([spares[-1].pk], 21, 20),
+        )
+
+        self.assertEqual(refused.status_code, 400)
+        self.assertContains(malformed, "Candidate offset must be an integer of 0 or more.", status_code=400)
+        self.assertEqual(saved.status_code, 302, saved.content)
+        self.assertEqual(TerminationResolution.objects.get(profile=self.profile).selected_object_id, spares[-1].pk)
+
+    def test_the_picker_rejects_invalid_offsets(self):
+        """A malformed or negative offset is an invalid request."""
+        field_key = self.open_blocked_workspace()
+
+        for offset in ("next", "-1"):
+            with self.subTest(offset=offset):
+                response = self.candidates(field_key, offset=offset)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["error"], "Candidate offset must be an integer of 0 or more.")
+
     def test_the_picker_rejects_invalid_limits(self):
         """A malformed or out-of-range limit is an invalid request."""
         field_key = self.open_blocked_workspace()

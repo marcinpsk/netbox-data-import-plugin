@@ -1717,16 +1717,16 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertFalse(payloads[second_key]["staleness"]["is_stale"])
         device_reads = [query for query in queries if 'FROM "dcim_device"' in query["sql"]]
         self.assertEqual(len(device_reads), 1)
-        # One inventory counts and pages each admitted model once, and the second field reads none again.
-        for table in (
-            "dcim_interface",
-            "dcim_consoleport",
-            "dcim_consoleserverport",
-            "dcim_powerport",
-            "dcim_poweroutlet",
+        # Each model is counted and ranked once, only interfaces load page rows, and the second field reads none.
+        for table, reads in (
+            ("dcim_interface", 3),
+            ("dcim_consoleport", 2),
+            ("dcim_consoleserverport", 2),
+            ("dcim_powerport", 2),
+            ("dcim_poweroutlet", 2),
         ):
             with self.subTest(table=table):
-                self.assertEqual(len([query for query in queries if f'FROM "{table}"' in query["sql"]]), 2)
+                self.assertEqual(len([query for query in queries if f'FROM "{table}"' in query["sql"]]), reads)
 
     def test_mapped_peer_has_a_manual_reason(self):
         from netbox_data_import.field_keys import MAPPED_PEER_ROLE

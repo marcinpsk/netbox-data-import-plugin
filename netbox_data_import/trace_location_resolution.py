@@ -60,12 +60,12 @@ class LocationCandidatePage:
     total: int
 
 
-def eligible_trace_locations(reader, *, search: str = "", limit: int) -> LocationCandidatePage:
+def eligible_trace_locations(reader, *, search: str = "", limit: int, offset: int = 0) -> LocationCandidatePage:
     """Return one bounded page of the selected Site's visible Locations, searched by normalized name."""
     from .database_identity import matching_search, search_identity
 
     locations = matching_search(site_locations(reader), search_identity(search)).order_by("name", "pk")
-    page = tuple(locations[:limit])
+    page = tuple(locations[offset : offset + limit])
     # Two Locations can share a name under different parents, so the visible parent tells them apart.
     parents = dict(
         site_locations(reader)

@@ -711,8 +711,9 @@ text first, then name, then match order of the model, then id. An exact-name sea
 reaches its candidate, whatever the other models hold. A search admits each candidate whose
 normalized name contains the normalized search text, and the database computes both forms, so a
 name that differs only in whitespace or case is never filtered out. Names compare bytewise. Each
-model is counted and cut to the bound in the database, then the pages merge into the combined
-order. A locking read locks the concrete models in one fixed global order.
+model is counted in the database. A page has an offset into the combined order: each model reads
+the order keys of its first offset-plus-bound rows, the keys merge, and only the rows of the chosen
+page load. A locking read locks the concrete models in one fixed global order.
 
 Two resolved ends of one segment must be a pair NetBox can cable. The Cable Target Module reads that
 rule from NetBox's own compatible-termination table and never keeps a copy. It checks each segment

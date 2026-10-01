@@ -677,6 +677,26 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         )
         self.assertEqual(searched["total"], 2)
 
+    def test_the_location_picker_reaches_the_twenty_first_location_of_one_name(self):
+        """Twenty-one visible 'Room' Locations under different parents fill more than one page."""
+        rooms = []
+        for number in range(1, 22):
+            hall = Location.objects.create(site=self.site, name=f"Hall {number:02}", slug=f"hall-{number:02}")
+            rooms.append(Location.objects.create(site=self.site, parent=hall, name="Room", slug=f"room-{number:02}"))
+        self.open_workspace()
+
+        first = self.location_candidates(search="Room").json()
+        second = self.location_candidates(search="Room", offset=20).json()
+        saved = self.post_mapping(location_id=rooms[-1].pk)
+
+        self.assertEqual((first["shown"], first["total"], first["offset"]), (20, 21, 0))
+        self.assertEqual(
+            (second["candidates"], second["shown"], second["total"], second["offset"]),
+            ([{"id": rooms[-1].pk, "name": "Room", "parent": "Hall 21"}], 1, 21, 20),
+        )
+        self.assertEqual(saved.status_code, 302, saved.content)
+        self.assertEqual(TraceLocationResolution.objects.get(profile=self.profile).selected_location_id, rooms[-1].pk)
+
     def test_the_location_picker_refuses_what_the_preview_did_not_ask(self):
         self.open_workspace()
         cases = (
@@ -684,6 +704,8 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
             ({"preview_revision": "obsolete"}, 409, "No current import preview matches this request."),
             ({"search": "x" * 201}, 400, "Location search must be 200 characters or fewer."),
             ({"limit": "0"}, 400, "Candidate limit must be an integer from 1 to 20."),
+            ({"offset": "-1"}, 400, "Candidate offset must be an integer of 0 or more."),
+            ({"offset": "next"}, 400, "Candidate offset must be an integer of 0 or more."),
         )
         for params, status, error in cases:
             with self.subTest(params=params):

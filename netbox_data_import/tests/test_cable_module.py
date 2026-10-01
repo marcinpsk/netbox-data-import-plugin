@@ -2508,6 +2508,35 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         self.assertEqual(result.total, 61)
         self.assertLessEqual(len(materialized), 3 * 2, materialized)
 
+    def test_pages_across_admitted_models_join_into_the_one_combined_order(self):
+        """An offset continues the merged order, and each page loads only the rows it returns."""
+        from django.db.models.signals import post_init
+
+        field_key = self.add_console_and_power_ports()
+        whole = eligible_terminations(field_key, self.reader(), profile=self.profile)
+        admitted = (Interface, ConsolePort, ConsoleServerPort, PowerPort, PowerOutlet)
+        materialized = []
+
+        def count(sender, instance, **kwargs):
+            materialized.append(sender)
+
+        pages = []
+        for model in admitted:
+            post_init.connect(count, sender=model)
+        try:
+            for offset in range(0, whole.total + 2, 2):
+                pages.append(
+                    eligible_terminations(field_key, self.reader(), profile=self.profile, limit=2, offset=offset)
+                )
+        finally:
+            for model in admitted:
+                post_init.disconnect(count, sender=model)
+
+        self.assertGreater(whole.total, 4)
+        self.assertEqual(tuple(row for page in pages for row in page.candidates), whole.candidates)
+        self.assertEqual({page.total for page in pages}, {whole.total})
+        self.assertEqual(len(materialized), whole.total)
+
     def test_each_admitted_model_stays_inside_the_actor_view_scope(self):
         """The one set holds only the rows of each model the actor may view."""
         field_key = self.add_console_and_power_ports()
