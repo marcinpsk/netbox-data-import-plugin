@@ -65,19 +65,13 @@ def _action(key, label, reason):
     }
 
 
-# Freshness reads NetBox from the source values the preview states, and this preview states none for the field.
-PROPOSAL_FRESHNESS_UNCHECKED = "This preview does not state this field's source values, so freshness is unchecked."
-
-
 class ProposalPresentation:
     """Read one profile's proposal display with one backend lookup per response."""
 
-    def __init__(self, *, profile, actor, reader, asked):
+    def __init__(self, *, profile, actor, reader):
         self.profile = profile
         self.actor = actor
         self.reader = reader
-        # The questions the preview asked, by field key, which every NetBox read starts from.
-        self.asked = asked
         self._inventory = {}
         self._write_assessments = {}
         self.preview_allowed = ImportProfile.objects.restrict(actor, "change").filter(pk=profile.pk).exists()
@@ -161,8 +155,6 @@ class ProposalPresentation:
         inventory = self.field_inventory(field) if proposal is not None or self.preview_allowed else None
         if self.reader is None:
             payload["staleness_error"] = "The saved import target is gone or outside your view scope."
-        elif proposal is not None and inventory is None:
-            payload["staleness_error"] = PROPOSAL_FRESHNESS_UNCHECKED
         elif proposal is not None:
             stale = proposal_staleness(proposal, inventory=inventory)
             payload["staleness"] = {
@@ -174,16 +166,15 @@ class ProposalPresentation:
         return payload
 
     def field_inventory(self, field):
-        """Return one cached inventory read for fields that share Device evidence, kind, and role."""
+        """Return one cached inventory read for fields that share device, kind, and role."""
         parsed = parse_termination_field_key(field["field_key"])
-        asked = self.asked.get(field["field_key"])
-        if self.reader is None or parsed["role"] != TERMINATION_ROLE or asked is None:
+        if self.reader is None or parsed["role"] != TERMINATION_ROLE:
             return None
-        key = (asked.device, parsed["kind"], parsed["role"])
+        key = (parsed["device"], parsed["kind"], parsed["role"])
         if key not in self._inventory:
             self._inventory[key] = proposal_task(SELECT_TERMINATION_TASK).inventory(
                 profile=self.profile,
-                asked=asked,
+                field_key=field["field_key"],
                 netbox_reader=self.reader,
                 limit=proposal_eligible_set_limit(),
             )

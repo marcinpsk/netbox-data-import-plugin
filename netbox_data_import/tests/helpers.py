@@ -332,19 +332,6 @@ def run_on_separate_connection(target):
             raise errors.get()
 
 
-def asked_termination(*, device, cards, port, kind, role="termination"):
-    """Return the termination question a plan asks for one source port, with its source spellings."""
-    from netbox_data_import.cable_target import AskedTermination
-    from netbox_data_import.field_keys import termination_field_key
-    from netbox_data_import.trace_device_resolution import DeviceEvidence, source_device_key
-
-    return AskedTermination(
-        field_key=termination_field_key(device=device, cards=cards, port=port, kind=kind, role=role),
-        device=DeviceEvidence(key=source_device_key(device), labels=(device,), locations=(), racks=(), u_positions=()),
-        port=port,
-    )
-
-
 @contextmanager
 def executed_sql():
     """Yield a list that keeps each SQL statement this connection runs inside the block.

@@ -53,7 +53,6 @@ from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.views import (
     CANDIDATE_OFFSET_INVALID,
     CANDIDATE_OFFSET_MAX,
-    TERMINATION_UNRESOLVABLE,
     _review_workspace_url,
     _trace_workspace_url,
 )
@@ -1604,7 +1603,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         return ports
 
     def test_a_mapped_peer_question_offers_the_peers_of_the_rear_port_the_plan_matched(self):
-        """A capital sharp s folds to "ss" in the field key, but the picker starts from the source spelling."""
+        """`STRA\u1e9eE` and `Stra\u00dfe` are two identities, so each question offers the peers of its own rear port."""
         Device.objects.filter(name="PANEL-1", site=self.site).delete()
         panel = self.make_device("PANEL-1")
         own = {
@@ -1637,7 +1636,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
                 )
 
     def test_a_device_named_with_a_capital_sharp_s_offers_its_ports(self):
-        """The resolved Device comes from the source label the plan matched, not from the folded key."""
+        """The field key keeps the capital sharp s, so the Device it names resolves from the key alone."""
         device = self.make_device("STRAẞE-SW")
         port = Interface.objects.create(device=device, name="uplink", type="1000base-t")
         self.open_workspace(
@@ -1677,24 +1676,6 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
             {("dcim.interface", AUTOMATICALLY_RESOLVED)},
         )
         self.assertEqual({item["selected"] for item in trace.terminations}, {str(capital_port), str(expanded_port)})
-
-    def test_a_cached_question_without_its_source_spelling_is_refused_rather_than_guessed(self):
-        """A plan cached before the record kept its source spelling names no port, so the read and the write refuse."""
-        field_key = self.open_blocked_workspace()
-        session = self.client.session
-        plan = session[PREVIEW_PLAN_SESSION_KEY]
-        for unit in plan["units"]:
-            for record in unit["display"].get("trace", {}).get("terminations", ()):
-                record.pop("source_port")
-        session[PREVIEW_PLAN_SESSION_KEY] = plan
-        session.save()
-
-        read = self.candidates(field_key)
-        write = self.resolve(field_key, self.eth0)
-
-        self.assertEqual((read.status_code, read.json()["error"]), (400, TERMINATION_UNRESOLVABLE))
-        self.assertContains(write, TERMINATION_UNRESOLVABLE, status_code=400)
-        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
 
     def test_a_candidate_deleted_after_ranking_drops_out_of_the_read_and_the_write(self):
         """A port deleted between the ranked page and its row load is not offered, and nothing fails."""

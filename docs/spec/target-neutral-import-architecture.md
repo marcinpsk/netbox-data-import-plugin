@@ -705,11 +705,6 @@ label, or count. Without this rule two actors would resolve one source port to t
 A saved selection that no longer answers its question, because it left the Device, is hidden, or names
 a model the claimed kind does not admit, reports its diagnostic without the saved display name: that
 name can belong to a port the actor cannot view, and no later render can recheck it.
-A candidate read, a proposal inventory and the write recheck start from the question the plan asked:
-the plan's Device evidence and the source port spelling the planner matched, never the field key
-alone. The field key holds casefolded text, and the database identity of casefolded text can name
-another row (`STRAẞE` folds to `strasse`, whose database identity matches `Straße`). A preview that
-does not state the spelling for a field key refuses the read instead of guessing.
 
 The optional Resolution Proposal flow (section 7) assists the same selection. The cards label is
 identity, display, and context for the operator and the Inference Backend. Deterministic matching

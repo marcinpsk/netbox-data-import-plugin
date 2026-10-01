@@ -289,6 +289,14 @@ def resolve_trace_devices(
     return outcomes
 
 
+def resolved_trace_device(*, profile, reader, key: str, lock_rows: bool = False):
+    """Return the Device one source Device key resolves to, or None when its decision is open."""
+    if not key:
+        return None
+    evidence = {key: DeviceEvidence(key=key, labels=(), locations=(), racks=(), u_positions=())}
+    return resolve_trace_devices(profile=profile, reader=reader, evidence=evidence, lock_rows=lock_rows)[key].device
+
+
 def _site_racks(reader):
     """Return the Racks the actor may view inside the selected Site."""
     racks = reader.racks()
@@ -480,5 +488,6 @@ __all__ = (
     "collect_trace_device_evidence",
     "eligible_trace_devices",
     "resolve_trace_devices",
+    "resolved_trace_device",
     "source_device_key",
 )
