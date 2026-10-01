@@ -152,9 +152,8 @@ def present_location_mappings(*, profile, viewer, reader, paths: Mapping[str, st
     """Return one workspace row per source Location path, each action permission-checked for *viewer*."""
     from utilities.permissions import get_permission_for_model
 
-    from .cable_disclosure import POLICY_WRITE_REFUSED
     from .models import TraceLocationResolution, index_digest
-    from .object_permissions import assess_permission_scoped_save_option
+    from .object_permissions import POLICY_WRITE_REFUSED, assess_permission_scoped_save_option
 
     mappings = trace_location_mappings(profile=profile, reader=reader, keys=paths)
     delete_permission = get_permission_for_model(TraceLocationResolution, "delete")

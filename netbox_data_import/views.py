@@ -26,7 +26,7 @@ from utilities.permissions import get_permission_for_model
 from utilities.views import ConditionalLoginRequiredMixin
 
 from .filters import ImportProfileFilterSet, InferenceBackendFilterSet
-from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, POLICY_WRITE_REFUSED, policy_row_is_disclosed
+from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, policy_row_is_disclosed
 from .forms import (
     CableClassMappingForm,
     CableSegmentOverrideForm,
@@ -91,6 +91,7 @@ from . import adapters, ip_assignment
 from .contact_resolution import PrimaryContactResolver, contact_identity, suggest_contact_roles
 from .device_field_review import DeviceFieldReviewer, sync_change_preview
 from .object_permissions import (
+    POLICY_WRITE_REFUSED,
     ObjectPermissionDenied,
     assess_permission_scoped_save_option,
     delete_permission_scoped_objects,

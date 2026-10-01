@@ -14,7 +14,6 @@ CABLE_SEGMENT_OVERRIDE_ROW = "netbox_data_import.cablesegmentoverride"
 DISCLOSURE_SOURCE = "disclosure_source"
 POLICY_HIDDEN = "a policy you cannot view"
 POLICY_VISIBLE = "policy_visible"
-POLICY_WRITE_REFUSED = "You cannot change a policy you cannot view."
 TERMINATION_HIDDEN = "a termination you cannot view"
 TERMINATION_SOURCES = "termination_sources"
 
@@ -505,7 +504,6 @@ __all__ = (
     "POLICY_DIAGNOSTIC_DISCLOSURES",
     "POLICY_HIDDEN",
     "POLICY_VISIBLE",
-    "POLICY_WRITE_REFUSED",
     "SEGMENT_END_SOURCES",
     "TERMINATION_DIAGNOSTIC_DISCLOSURES",
     "TERMINATION_HIDDEN",

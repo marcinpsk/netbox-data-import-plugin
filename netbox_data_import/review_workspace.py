@@ -21,7 +21,7 @@ from .models import (
     index_digest,
     locked_profile_policy,
 )
-from .object_permissions import delete_permission_scoped_objects, save_permission_scoped_object
+from .object_permissions import POLICY_WRITE_REFUSED, delete_permission_scoped_objects, save_permission_scoped_object
 from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
     effective_device_name,
@@ -98,8 +98,6 @@ def _refuse_blind_overwrite(actor, row) -> None:
     """Refuse a blind policy write against a row this actor cannot read."""
     if row is None or row.__class__.objects.restrict(actor, "view").filter(pk=row.pk).exists():
         return
-    from .cable_disclosure import POLICY_WRITE_REFUSED
-
     raise UnacceptablePolicyDecision([POLICY_WRITE_REFUSED])
 
 
