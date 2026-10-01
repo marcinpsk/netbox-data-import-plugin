@@ -1298,6 +1298,28 @@ class CableEndKindTest(CableTopologyMixin, TestCase):
                 self.assertIn(("dcim.interface", expected.pk), self.termination_pairs(unit.changes[0]))
                 self.assertEqual(ranked.candidates, (expected,))
 
+    def test_two_spellings_that_casefold_alike_are_two_terminations(self):
+        """One trace that names both ports keeps two records, each resolved to its own port."""
+        capital = Interface.objects.create(device=self.device_a, name="STRA\u1e9eE", type="1000base-t")
+        expanded = Interface.objects.create(device=self.device_a, name="Stra\u00dfe", type="1000base-t")
+
+        unit = self.unit(
+            direct_path(
+                from_end=trace_termination("DEV-A", "", "STRA\u1e9eE", "Port"),
+                to_end=trace_termination("DEV-A", "", "Stra\u00dfe", "Port"),
+            )
+        )
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+        self.assertEqual(
+            sorted(self.termination_pairs(unit.changes[0])),
+            sorted([("dcim.interface", capital.pk), ("dcim.interface", expanded.pk)]),
+        )
+        self.assertEqual(
+            sorted(item["source"]["port"] for item in unit.display["trace"]["terminations"]),
+            sorted(["STRA\u1e9eE", "Stra\u00dfe"]),
+        )
+
     def test_a_device_name_outside_ascii_resolves_to_its_namesake(self):
         """A stored name and a source value are compared under one collation, so 'Straße' finds 'Straße'."""
         device = self.make_device("Straße-1")
