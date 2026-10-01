@@ -30,7 +30,7 @@ STALE = "stale"
 
 _SERIALIZED_EVIDENCE_FIELDS = frozenset({"key", "labels", "locations", "racks", "u_positions"})
 _DEVICE_QUESTION_PRESENTATION_FIELDS = frozenset(
-    {"label", "state", "state_style", "selected", "selectable", "reason", "exact_match_count"}
+    {"label", "state", "state_style", "selected", "selectable", "reason", "exact_match_count", "disclosure_source"}
 )
 
 

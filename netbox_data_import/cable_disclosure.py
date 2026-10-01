@@ -11,6 +11,8 @@ from .field_keys import CABLE_END_KINDS
 CABLE_ROW = "dcim.cable"
 CABLE_CLASS_MAPPING_ROW = "netbox_data_import.cableclassmapping"
 CABLE_SEGMENT_OVERRIDE_ROW = "netbox_data_import.cablesegmentoverride"
+DEVICE_HIDDEN = "a Device you cannot view"
+DEVICE_ROW = "dcim.device"
 DISCLOSURE_SOURCE = "disclosure_source"
 POLICY_HIDDEN = "a policy you cannot view"
 POLICY_VISIBLE = "policy_visible"
@@ -18,7 +20,7 @@ TERMINATION_HIDDEN = "a termination you cannot view"
 TERMINATION_SOURCES = "termination_sources"
 
 # A segment names its two planned ends apart, so one hidden end leaves the other readable.
-SEGMENT_END_SOURCES = MappingProxyType({"left": "left_source", "right": "right_source"})
+SEGMENT_END_SOURCES = MappingProxyType({"left": "left_sources", "right": "right_sources"})
 
 _REFERENCE_FIELDS = frozenset({"device", "cards", "port", "port_class"})
 # These codes replace the source `port` with the NetBox port they resolved.
@@ -103,6 +105,16 @@ TERMINATION_DIAGNOSTIC_DISCLOSURES = MappingProxyType(
 def disclosure_source(row_kind: str, row_pk: int) -> dict:
     """Return the plan-side identity for one row that supplied display text."""
     return {"kind": row_kind, "pk": row_pk}
+
+
+def device_source(device_id: int) -> dict:
+    """Return the source a display needs when it names one resolved Device."""
+    return disclosure_source(DEVICE_ROW, device_id)
+
+
+def segment_end_sources(port: tuple[str, int], device_id: int) -> list:
+    """Return the rows that authorize one planned segment end, which names its Device and its port."""
+    return [disclosure_source(*port), device_source(device_id)]
 
 
 def termination_sources(*terminations) -> dict:
@@ -260,12 +272,23 @@ def _identity_key(identity) -> tuple[str, int] | None:
 
 def _row_sources(value: dict) -> list:
     """Return every row source one display mapping carries."""
-    sources = [value.get(DISCLOSURE_SOURCE), *(value.get(key) for key in SEGMENT_END_SOURCES.values())]
-    listed = value.get(TERMINATION_SOURCES)
-    # A frozen plan holds a list as a tuple.
-    if isinstance(listed, (list, tuple)):
-        sources.extend(listed)
+    sources = [value.get(DISCLOSURE_SOURCE)]
+    for key in (TERMINATION_SOURCES, *SEGMENT_END_SOURCES.values()):
+        listed = value.get(key)
+        # A frozen plan holds a list as a tuple.
+        if isinstance(listed, (list, tuple)):
+            sources.extend(listed)
     return sources
+
+
+def _end_is_visible(sources, visible_row_ids: dict[str, set[int]]) -> bool:
+    """Return whether a planned end's port and Device are both live and visible."""
+    return (
+        isinstance(sources, (list, tuple))
+        and len(sources) == 2
+        and _source_is_visible(sources[0], CABLE_END_KINDS, visible_row_ids)
+        and _source_is_visible(sources[1], (DEVICE_ROW,), visible_row_ids)
+    )
 
 
 def _row_ids(units) -> dict[str, set[int]]:
@@ -273,6 +296,7 @@ def _row_ids(units) -> dict[str, set[int]]:
         CABLE_ROW: set(),
         CABLE_CLASS_MAPPING_ROW: set(),
         CABLE_SEGMENT_OVERRIDE_ROW: set(),
+        DEVICE_ROW: set(),
         **{kind: set() for kind in sorted(CABLE_END_KINDS)},
     }
 
@@ -438,6 +462,12 @@ def _unit(unit, visible_row_ids: dict[str, set[int]]):
             ):
                 policy.pop(DISCLOSURE_SOURCE, None)
                 policy.update(_redact_policy(policy))
+        for question in trace.get("devices") or ():
+            if question.get("selected") and not _source_is_visible(
+                question.get(DISCLOSURE_SOURCE), (DEVICE_ROW,), visible_row_ids
+            ):
+                question.pop(DISCLOSURE_SOURCE, None)
+                question["selected"] = DEVICE_HIDDEN
         for field in trace.get("terminations") or ():
             if field.get("selected") and not _source_is_visible(
                 field.get(DISCLOSURE_SOURCE), CABLE_END_KINDS, visible_row_ids
@@ -449,7 +479,7 @@ def _unit(unit, visible_row_ids: dict[str, set[int]]):
             if not segment.get("segment_key"):
                 continue
             for end, source_key in SEGMENT_END_SOURCES.items():
-                if not _source_is_visible(segment.get(source_key), CABLE_END_KINDS, visible_row_ids):
+                if not _end_is_visible(segment.get(source_key), visible_row_ids):
                     segment.pop(source_key, None)
                     segment[end] = TERMINATION_HIDDEN
     diagnostics = tuple(_diagnostic(item, visible_row_ids) for item in unit.diagnostics)
@@ -498,6 +528,8 @@ __all__ = (
     "CABLE_DIAGNOSTIC_FIELDS",
     "CABLE_ROW",
     "CABLE_SEGMENT_OVERRIDE_ROW",
+    "DEVICE_HIDDEN",
+    "DEVICE_ROW",
     "DISCLOSURE_SOURCE",
     "POLICY_DIAGNOSTIC_DISCLOSURES",
     "POLICY_HIDDEN",
@@ -506,12 +538,14 @@ __all__ = (
     "TERMINATION_DIAGNOSTIC_DISCLOSURES",
     "TERMINATION_HIDDEN",
     "TERMINATION_SOURCES",
+    "device_source",
     "disclosed_cable",
     "disclosed_policy",
     "disclosure_source",
     "policy_row_is_disclosed",
     "present_units",
     "redact_deleted_cables",
+    "segment_end_sources",
     "termination_sources",
     "validate_diagnostic_disclosures",
 )

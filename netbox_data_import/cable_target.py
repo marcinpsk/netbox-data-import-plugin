@@ -27,9 +27,11 @@ from typing import Any
 from .cable_disclosure import (
     DISCLOSURE_SOURCE,
     SEGMENT_END_SOURCES,
+    device_source,
     disclosed_cable,
     disclosed_policy,
     disclosure_source,
+    segment_end_sources,
     termination_sources,
     validate_diagnostic_disclosures,
 )
@@ -670,7 +672,10 @@ class _CableBatch:
     def _resolve_one(self, analysis: _TraceAnalysis, reference) -> _Termination | None:
         """Return the NetBox object one Termination Reference names, or record the open decision."""
         resolution = self._device_resolutions[source_device_key(reference.device)]
-        analysis.devices.setdefault(resolution.evidence.key, resolution.to_question())
+        question = resolution.to_question()
+        if resolution.device is not None:
+            question[DISCLOSURE_SOURCE] = device_source(resolution.device.pk)
+        analysis.devices.setdefault(resolution.evidence.key, question)
         if resolution.device is None:
             code = "trace.device_resolution_stale" if resolution.state == DEVICE_STALE else "trace.device_unresolved"
             analysis.block(
@@ -1615,11 +1620,11 @@ class _CableBatch:
 
     @staticmethod
     def _end_sources(planned: _DesiredSegment | None) -> dict:
-        """Return the rows that authorize a planned segment's two NetBox port names."""
+        """Return the rows that authorize a planned segment's two NetBox Device and port names."""
         if planned is None:
             return {}
         return {
-            source_key: disclosure_source(*end.key)
+            source_key: segment_end_sources(end.key, end.device_id)
             for source_key, end in zip(SEGMENT_END_SOURCES.values(), planned.terminations, strict=True)
         }
 

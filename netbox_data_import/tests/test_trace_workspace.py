@@ -2610,6 +2610,32 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
         selected = {item["label"]: item["selected"] for item in cached.context["selected_trace"].terminations}
         self.assertEqual(selected["PDU-1 OUT1"], TERMINATION_HIDDEN)
 
+    def test_revoking_view_on_a_device_hides_its_cached_name_on_reload(self):
+        """A Device question and a planned end name the resolved Device only while the viewer may view it."""
+        from users.models import ObjectPermission
+
+        from netbox_data_import.cable_disclosure import DEVICE_HIDDEN
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+
+        # NetBox spells the Device apart from the source label, so the page shows it only where NetBox names it.
+        Device.objects.filter(pk=self.device_a.pk).update(name="Dev-A")
+        visible = self.open_workspace(patched_path())
+        self.assertContains(visible, "Dev-A")
+        permission = ObjectPermission.objects.get(name="trace-port-viewer Device view")
+        permission.constraints = {"name__in": ["DEV-B", "PANEL-1", "PANEL-2"]}
+        permission.save()
+        clear_user_permission_caches(self.viewer)
+
+        cached = self.reload()
+
+        self.assertNotContains(cached, "Dev-A")
+        devices = {item["key"]: item["selected"] for item in cached.context["selected_trace"].devices}
+        self.assertEqual(devices["dev-a"], DEVICE_HIDDEN)
+        self.assertEqual(devices["dev-b"], "DEV-B")
+        ends = [(segment["left"], segment["right"]) for segment in cached.context["segment_policy_forms"]]
+        self.assertEqual(ends[0][0], TERMINATION_HIDDEN)
+        self.assertNotIn(TERMINATION_HIDDEN, [end for pair in ends for end in pair][1:])
+
     def test_a_saved_selection_the_viewer_cannot_view_names_no_port_in_any_copy(self):
         """A saved decision's stored port name reaches neither the plan, the page, nor the queued Job."""
         from core.models import Job, ObjectType
@@ -2678,13 +2704,15 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
                 if source == "missing":
                     for mapping, key in (
                         (field, "disclosure_source"),
-                        (segment, "left_source"),
-                        (segment, "right_source"),
+                        (segment, "left_sources"),
+                        (segment, "right_sources"),
                     ):
                         mapping.pop(key, None)
                 else:
                     field["disclosure_source"] = source
-                    segment["left_source"] = segment["right_source"] = source
+                    # Each end keeps its valid Device source, so only the port source can hide it.
+                    for key in ("left_sources", "right_sources"):
+                        segment[key][0] = source
                 session = self.client.session
                 session[PREVIEW_PLAN_SESSION_KEY] = data
                 session.save()
@@ -2698,14 +2726,45 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
                 ends = response.context["segment_policy_forms"][0]
                 self.assertEqual((ends["left"], ends["right"]), (TERMINATION_HIDDEN, TERMINATION_HIDDEN))
 
+    def test_a_cached_device_name_without_an_authorizable_source_redacts_on_render(self):
+        """The workspace does not trust a cached Device name whose source is missing or malformed."""
+        from netbox_data_import.cable_disclosure import DEVICE_HIDDEN
+
+        self.open_workspace(power_path())
+        original = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        invalid_sources = (None, "1", {"kind": "dcim.interface", "pk": self.device_a.pk}, {"kind": "dcim.device"})
+
+        for source in (*invalid_sources, "missing"):
+            with self.subTest(source=source):
+                data = copy.deepcopy(original)
+                trace = data["units"][0]["display"]["trace"]
+                question = next(item for item in trace["devices"] if item["key"] == "dev-a")
+                ends = trace["segments"][0]["left_sources"]
+                if source == "missing":
+                    question.pop("disclosure_source")
+                    ends.pop()
+                else:
+                    question["disclosure_source"] = ends[1] = source
+                session = self.client.session
+                session[PREVIEW_PLAN_SESSION_KEY] = data
+                session.save()
+
+                response = self.reload()
+
+                devices = {item["key"]: item["selected"] for item in response.context["selected_trace"].devices}
+                self.assertEqual((devices["dev-a"], devices["pdu-1"]), (DEVICE_HIDDEN, "PDU-1"))
+                segment = response.context["segment_policy_forms"][0]
+                self.assertEqual(segment["left"], TERMINATION_HIDDEN)
+                self.assertEqual(segment["right"], f"PDU-1 {self.outlet.name}")
+
     def test_termination_sources_stay_out_of_the_accepted_fingerprint(self):
-        """Live presentation removes port names without moving any accepted decision input."""
+        """Live presentation removes port and Device names without moving any accepted decision input."""
         plan = self.plan(direct_path(from_end=SERVER_PSU, to_end=DEVICE_B), actor=self.viewer)
         stripped = plan.to_dict()
 
         def remove_sources(value):
             if isinstance(value, dict):
-                for key in ("disclosure_source", "left_source", "right_source", TERMINATION_SOURCES):
+                for key in ("disclosure_source", "left_sources", "right_sources", TERMINATION_SOURCES):
                     value.pop(key, None)
                 for child in value.values():
                     remove_sources(child)

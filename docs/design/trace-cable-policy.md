@@ -683,5 +683,9 @@ hidden, and its presented identities drop each hidden port. The accepted plan ke
 its fingerprint does not change. A command that renders nothing, such as re-read or sync, reads no
 visibility at all.
 
-Device names are out of this scope. A resolved Device question, and a planned segment end whose port
-stays visible, still show the Device name the planner saw.
+A resolved Device question and a planned segment end also name the resolved Device. The planner
+records a `dcim.device` source on each resolved Device question, and each planned end carries one
+list of two sources, its port and its Device, under `left_sources` and `right_sources`. A hidden,
+deleted, or unsourced Device shows `a Device you cannot view` in its question, and a planned end
+shows `a termination you cannot view` when its port or its Device is hidden. The same query per
+referenced model covers Devices, so this adds one query to a render.

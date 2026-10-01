@@ -1446,7 +1446,8 @@ without help.
 The searchable picker is scoped to eligible candidates of the admitted models on the resolved Device,
 shows each candidate's model, and shows a visible "N of M eligible" count. A resolved termination
 shows its selected object's own model, not the claimed kind. Each render rechecks view permission on
-every port a cached plan names: a hidden or deleted port shows neither its name nor its model.
+every port and every resolved Device a cached plan names: a hidden or deleted port shows neither its
+name nor its model, and a hidden or deleted Device shows no name.
 
 The workspace lists, at batch level and independent of the selected trace, each distinct source
 Location path of the batch with its state: unmapped, mapped (with the Location), or stale. With no
