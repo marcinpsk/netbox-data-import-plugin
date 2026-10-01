@@ -21,11 +21,6 @@ def source_text(value) -> str:
     return "" if text.lower() in _NONE_LIKE else text
 
 
-def identity_text(value) -> str:
-    """Return the case-insensitive comparison form of a source identity."""
-    return " ".join(source_text(value).split()).casefold()
-
-
 def source_position(value, default=None):
     """Return a finite rack position without losing half-unit precision."""
     text = source_text(value)
@@ -115,7 +110,6 @@ __all__ = (
     "comparison_key",
     "effective_device_name",
     "has_below_rack_position",
-    "identity_text",
     "normalize_for_compare",
     "source_position",
     "source_text",

@@ -32,13 +32,6 @@ from .cable_disclosure import (
     termination_sources,
 )
 from .catalog import OutputKind, TargetModuleKey
-from .database_identity import (
-    CANONICAL_NAME,
-    database_identities,
-    matching_search,
-    search_identity,
-    with_database_identity,
-)
 from .field_keys import (
     ADMITTED_TERMINATION_MODELS,
     CABLE_END_KINDS,
@@ -52,6 +45,7 @@ from .field_keys import (
     same_device_and_cards,
     termination_field_key,
 )
+from .identity import CANONICAL_NAME, identity_text, matching_search, with_name_identity
 from .object_permissions import enforce_saved_object_permission
 from .plan import (
     Diagnostic,
@@ -65,12 +59,14 @@ from .plan import (
 from .target_runtime import DeletedObject, PreconditionFailed
 from .trace_device_resolution import (
     STALE as DEVICE_STALE,
+)
+from .trace_device_resolution import (
     DeviceEvidence,
     collect_trace_device_evidence,
     resolve_trace_devices,
     source_device_key,
 )
-from .values import identity_text, source_text
+from .values import source_text
 
 CABLE_STATUS = "connected"
 ELIGIBLE_TERMINATION_LIMIT = 20
@@ -408,7 +404,7 @@ def _named_terminations(netbox_reader, label: str, device_id: int, identities) -
     from django.db.models import Exists, OuterRef
 
     rows = (
-        with_database_identity(_model_for_label(label).objects.filter(device_id=device_id))
+        with_name_identity(_model_for_label(label).objects.filter(device_id=device_id))
         .filter(**{f"{CANONICAL_NAME}__in": sorted(identities)})
         .annotate(actor_may_view=Exists(netbox_reader.terminations(label).filter(pk=OuterRef("pk"))))
         .order_by("pk")
@@ -457,7 +453,7 @@ def _mapped_peer_sources(parsed: dict, port: str, device, netbox_reader, profile
         .first()
     )
     if stored is None:
-        identity = database_identities((port,))[port]
+        identity = identity_text(port)
         base = _exact_name_match(
             parsed["kind"],
             identity,
@@ -516,8 +512,8 @@ def eligible_terminations(
             (label, netbox_reader.terminations(label).filter(device_id=device.pk))
             for label in ADMITTED_TERMINATION_MODELS[parsed["kind"]]
         )
-    wanted = search_identity(search)
-    sources = tuple((label, matching_search(rows, wanted)) for label, rows in sources)
+    wanted = identity_text(search)
+    sources = tuple((label, matching_search(rows, search)) for label, rows in sources)
     if _lock_rows:
         # One global order, object type then id, as the segment locks take it.
         for _label, rows in sorted(sources, key=lambda source: source[0]):
@@ -549,7 +545,7 @@ def _ranked_keys(rows, wanted: str, order: int):
 
     if wanted:
         exact = Case(When(**{CANONICAL_NAME: wanted}, then=Value(1)), default=Value(0), output_field=IntegerField())
-        rows = with_database_identity(rows)
+        rows = with_name_identity(rows)
     else:
         exact = Value(0, output_field=IntegerField())
     return (
@@ -577,7 +573,6 @@ class _CableBatch:
         self._objects: dict[tuple[str, int], Any] = {}
         self._visible: dict[tuple[str, int], bool] = {}
         self._named: dict[tuple[int, str], dict[str, list]] = {}
-        self._port_identities: dict[str, str] = {}
         self._asked_identities: dict[int, set[str]] = {}
         self._resolved: dict[str, dict[tuple, _Termination]] = {}
         self._mappings_by_front: dict[int, list] = {}
@@ -673,18 +668,14 @@ class _CableBatch:
         return {row.field_key: row for row in rows}
 
     def _collect_asked_ports(self) -> None:
-        """Compute in one query the name identity of every port the exact-name rule is asked about."""
-        asked = []
+        """Collect, per resolved Device, the name identity of every port the exact-name rule is asked about."""
         for analysis in self.analyses:
             if analysis.stopped:
                 continue
             for reference in self._references(analysis.trace):
                 device = self._device_resolutions[source_device_key(reference.device)].device
                 if device is not None and _field_key(reference) not in self._stored:
-                    asked.append((device.pk, source_text(reference.port)))
-        self._port_identities = database_identities(port for _device_id, port in asked)
-        for device_id, port in asked:
-            self._asked_identities.setdefault(device_id, set()).add(self._port_identities[port])
+                    self._asked_identities.setdefault(device.pk, set()).add(identity_text(reference.port))
 
     def _named_for(self, device_id: int, label: str) -> dict[str, list]:
         """Return one Device's asked rows of one model by name identity, read once per batch."""
@@ -740,7 +731,7 @@ class _CableBatch:
             return termination
         match = _exact_name_match(
             claimed_termination_kind(reference.port_class),
-            self._port_identities[source_text(reference.port)],
+            identity_text(reference.port),
             partial(self._named_for, device.pk),
         )
         if match is None:

@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .values import identity_text
+from .identity import identity_text, matching_search
 
 UNMAPPED = "unmapped"
 MAPPED = "mapped"
@@ -21,7 +21,7 @@ CLEAR_PERMISSION_REFUSED = "You do not have permission to clear this Location ma
 STALE_REASON = "The mapped Location is no longer available at this import target. Choose it again."
 
 
-def source_location_key(path: Any) -> str:
+def source_location_key(path: str) -> str:
     """Return the profile-wide identity of one opaque source Location path."""
     return identity_text(path)
 
@@ -62,9 +62,7 @@ class LocationCandidatePage:
 
 def eligible_trace_locations(reader, *, search: str = "", limit: int, offset: int = 0) -> LocationCandidatePage:
     """Return one bounded page of the selected Site's visible Locations, searched by normalized name."""
-    from .database_identity import matching_search, search_identity
-
-    locations = matching_search(site_locations(reader), search_identity(search)).order_by("name", "pk")
+    locations = matching_search(site_locations(reader), search).order_by("name", "pk")
     total = locations.count()
     page = tuple(locations[offset : offset + limit]) if offset < total else ()
     # Two Locations can share a name under different parents, so the visible parent tells them apart.

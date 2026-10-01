@@ -821,7 +821,7 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         )
 
         valid_unit, invalid_unit = CableModule().plan(batch, self.profile, None, reader)
-        device_evidence = next(item for item in valid_unit.display["trace"]["devices"] if item["key"] == "dev-a")
+        device_evidence = next(item for item in valid_unit.display["trace"]["devices"] if item["key"] == "DEV-A")
 
         self.assertEqual(valid_unit.disposition, Disposition.ACTIONABLE)
         self.assertEqual(device_evidence["racks"], ("Valid Rack",))
@@ -1282,12 +1282,12 @@ class CableEndKindTest(CableTopologyMixin, TestCase):
                 assert_absent_from(self, unit.to_dict(), f"dcim.interface:{hidden.pk}")
 
     def test_the_exact_name_rule_compares_names_as_the_picker_search_does(self):
-        """Python folds both 'ẞ' and 'ß' to 'ss' and PostgreSQL does not, so only the database decides a match."""
-        from netbox_data_import.database_identity import database_identities
+        """Uppercase keeps 'ẞ' apart from 'ß', which becomes 'SS', so each spelling finds only its own port."""
+        from netbox_data_import.identity import identity_text
 
         sharp = Interface.objects.create(device=self.device_a, name="Straße", type="1000base-t")
         capital = Interface.objects.create(device=self.device_a, name="STRAẞE", type="1000base-t")
-        self.assertNotEqual(*database_identities(("Straße", "STRAẞE")).values())
+        self.assertNotEqual(identity_text("Straße"), identity_text("STRAẞE"))
         asked = asked_termination(device="DEV-A", cards="", port="Straße", kind="interface")
 
         for port, expected in (("STRASSE", sharp), ("straẞe", capital)):

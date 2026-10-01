@@ -71,13 +71,13 @@ class DigestIndexedModelTest(TestCase):
             (
                 TraceDeviceResolution(
                     profile=self.profile,
-                    source_device_key="digest device",
+                    source_device_key="DIGEST DEVICE",
                     selected_device_id=self.device.pk,
                     selected_display_name="Original Device",
                 ),
                 "source_device_key",
                 "source_device_key_digest",
-                "moved digest device",
+                "MOVED DIGEST DEVICE",
                 "selected_display_name",
             ),
         )

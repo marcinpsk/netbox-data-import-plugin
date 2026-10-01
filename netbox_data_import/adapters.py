@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from .catalog import OutputKind, has_implemented_module
-from .values import identity_text
+from .identity import identity_text
 
 if TYPE_CHECKING:
     from .source_trace import SourceTrace

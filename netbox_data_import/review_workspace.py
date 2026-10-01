@@ -13,6 +13,7 @@ from typing import Any
 from .cable_disclosure import CABLE_SEGMENT_OVERRIDE_ROW, DISCLOSURE_SOURCE, POLICY_HIDDEN, POLICY_VISIBLE
 from .cable_policy import cable_media_family_label, cable_type_label
 from .cable_target import UNRESOLVED, AskedTermination
+from .identity import identity_in, identity_text
 from .import_engine import ImportEngine
 from .models import (
     CableClassMapping,
@@ -29,7 +30,6 @@ from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
     effective_device_name,
     has_below_rack_position,
-    identity_text,
     normalize_for_compare,
     source_position,
     source_text,
@@ -711,7 +711,7 @@ class AutoMatchSummary:
 def _resolve_strong_identity(devices, serial: str, asset_tag: str):
     """Resolve serial and asset tag to one device, or report ambiguity."""
     serial_matches = list(devices.filter(serial=serial)[:2]) if serial else []
-    asset_matches = list(devices.filter(asset_tag__iexact=asset_tag)[:2]) if asset_tag else []
+    asset_matches = list(devices.filter(identity_in("asset_tag", [identity_text(asset_tag)]))[:2]) if asset_tag else []
     if len(serial_matches) > 1 or len(asset_matches) > 1:
         return None, None, True
     serial_device = serial_matches[0] if serial_matches else None
@@ -732,7 +732,11 @@ def _match_existing_device(device_model, visible_devices, name, serial, asset_ta
         return None, None, True
     if device is None and name:
         tenant_filter = {"tenant_id": tenant_id} if tenant_id is not None else {"tenant__isnull": True}
-        matches = list(device_model.objects.filter(site=site, name__iexact=name, **tenant_filter)[:2])
+        matches = list(
+            device_model.objects.filter(site=site, **tenant_filter).filter(identity_in("name", [identity_text(name)]))[
+                :2
+            ]
+        )
         if len(matches) > 1:
             return None, None, True
         if matches:
@@ -1038,9 +1042,9 @@ class ReviewWorkspace:
 
     def auto_match_devices(self, profile, actor, target) -> AutoMatchSummary:  # noqa: C901
         """Save safe exact device matches for every eligible plan source row."""
+        from dcim.models import Device
         from django.core.exceptions import ValidationError
         from django.db import IntegrityError
-        from dcim.models import Device
 
         from .models import DeviceExistingMatch
         from .object_permissions import ObjectPermissionDenied, save_permission_scoped_object

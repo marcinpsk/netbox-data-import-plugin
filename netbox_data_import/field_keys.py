@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 
-from .values import identity_text
+from .identity import identity_text
 
 INTERFACE_PORT_CLASSES = frozenset({"NIC", "Switch Port", "Port"})
 FRONT_PORT_CLASSES = frozenset({"Position Front", "Fiber Pair Front"})

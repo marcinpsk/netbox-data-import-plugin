@@ -129,7 +129,7 @@ class TraceFieldKeyTest(SimpleTestCase):
             for name in node.names
         )
 
-        self.assertEqual(roots, {"__future__", "json", "values"})
+        self.assertEqual(roots, {"__future__", "json", "identity"})
 
     def test_unknown_port_class_has_no_claimed_kind(self):
         """A value outside the fixed vocabulary fails instead of claiming a target kind."""
@@ -148,7 +148,7 @@ class TraceFieldKeyTest(SimpleTestCase):
 
         self.assertEqual(
             key,
-            '{"cards":"line card a","device":"tor 1","kind":"interface","port":"ethernet 1/1","role":"termination"}',
+            '{"cards":"LINE CARD A","device":"TOR 1","kind":"interface","port":"ETHERNET 1/1","role":"termination"}',
         )
 
     def test_mapped_peer_role_produces_a_distinct_canonical_key(self):
@@ -231,8 +231,8 @@ class TracePolicyModelTest(TestCase):
         self.assertEqual(stored.task_type, "select_termination")
         self.assertEqual(
             stored.field_key,
-            '{"cards":"line card a","device":"trace device","kind":"interface",'
-            '"port":"ethernet 1/1","role":"termination"}',
+            '{"cards":"LINE CARD A","device":"TRACE DEVICE","kind":"interface",'
+            '"port":"ETHERNET 1/1","role":"termination"}',
         )
         self.assertEqual(stored.selected_object_type, self.interface_type)
         self.assertEqual(stored.selected_object_id, self.interface.pk)

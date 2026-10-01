@@ -29,7 +29,7 @@ from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from . import inference_settings as _inference_settings
 from .proposal_contract import OUTCOME_CANDIDATE, OUTCOME_CHOICES, OUTCOME_NO_MATCH
 from .trace_schema import TRACE_EXPORT_TIMESTAMP_MAX_LENGTH
-from .values import identity_text
+from .identity import identity_text
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})

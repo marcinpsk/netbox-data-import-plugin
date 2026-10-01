@@ -16,7 +16,7 @@ from extras.models import Tag
 
 from netbox_data_import.cable_disclosure import TERMINATION_HIDDEN, TERMINATION_SOURCES
 from netbox_data_import.cable_policy import cable_type_label
-from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
+from netbox_data_import.cable_target import AUTOMATICALLY_RESOLVED, ELIGIBLE_TERMINATION_LIMIT
 from netbox_data_import import adapters as adapter_registry
 from netbox_data_import.adapters import TraceWorkbookAdapter
 from netbox_data_import.catalog import OutputKind
@@ -1649,6 +1649,35 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(([item["id"] for item in payload["candidates"]], payload["total"]), ([port.pk], 1))
 
+    def test_each_sharp_s_spelling_resolves_its_own_device(self):
+        """\u1e9e keeps its own identity and \u00df becomes "SS", so two source Devices resolve to two Devices."""
+        capital = self.make_device("STRA\u1e9eE-SW")
+        expanded = self.make_device("STRASSE-SW")
+        capital_port = Interface.objects.create(device=capital, name="eth0", type="1000base-t")
+        expanded_port = Interface.objects.create(device=expanded, name="eth0", type="1000base-t")
+
+        self.open_workspace(
+            direct_path(
+                from_end=trace_termination("STRA\u1e9eE-SW", "", "eth0", "Port"),
+                to_end=trace_termination("Stra\u00dfe-SW", "", "eth0", "Port"),
+            )
+        )
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        trace = response.context["selected_trace"]
+
+        self.assertEqual(
+            {item["key"]: (item["state"], item["selected"]) for item in trace.devices},
+            {
+                "STRA\u1e9eE-SW": (AUTOMATICALLY_RESOLVED, str(capital)),
+                "STRASSE-SW": (AUTOMATICALLY_RESOLVED, str(expanded)),
+            },
+        )
+        self.assertEqual(
+            {(item["selected_type"], item["state"]) for item in trace.terminations},
+            {("dcim.interface", AUTOMATICALLY_RESOLVED)},
+        )
+        self.assertEqual({item["selected"] for item in trace.terminations}, {str(capital_port), str(expanded_port)})
+
     def test_a_cached_question_without_its_source_spelling_is_refused_rather_than_guessed(self):
         """A plan cached before the record kept its source spelling names no port, so the read and the write refuse."""
         field_key = self.open_blocked_workspace()
@@ -2872,8 +2901,8 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
 
         self.assertNotContains(cached, "Dev-A")
         devices = {item["key"]: item["selected"] for item in cached.context["selected_trace"].devices}
-        self.assertEqual(devices["dev-a"], DEVICE_HIDDEN)
-        self.assertEqual(devices["dev-b"], "DEV-B")
+        self.assertEqual(devices["DEV-A"], DEVICE_HIDDEN)
+        self.assertEqual(devices["DEV-B"], "DEV-B")
         ends = [(segment["left"], segment["right"]) for segment in cached.context["segment_policy_forms"]]
         self.assertEqual(ends[0][0], TERMINATION_HIDDEN)
         self.assertNotIn(TERMINATION_HIDDEN, [end for pair in ends for end in pair][1:])
@@ -3015,7 +3044,7 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
             with self.subTest(source=source):
                 data = copy.deepcopy(original)
                 trace = data["units"][0]["display"]["trace"]
-                question = next(item for item in trace["devices"] if item["key"] == "dev-a")
+                question = next(item for item in trace["devices"] if item["key"] == "DEV-A")
                 ends = trace["segments"][0]["left_sources"]
                 if source == "missing":
                     question.pop("disclosure_source")
@@ -3029,7 +3058,7 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
                 response = self.reload()
 
                 devices = {item["key"]: item["selected"] for item in response.context["selected_trace"].devices}
-                self.assertEqual((devices["dev-a"], devices["pdu-1"]), (DEVICE_HIDDEN, "PDU-1"))
+                self.assertEqual((devices["DEV-A"], devices["PDU-1"]), (DEVICE_HIDDEN, "PDU-1"))
                 segment = response.context["segment_policy_forms"][0]
                 self.assertEqual(segment["left"], TERMINATION_HIDDEN)
                 self.assertEqual(segment["right"], f"PDU-1 {self.outlet.name}")

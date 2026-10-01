@@ -8,11 +8,22 @@ import re
 
 from django.utils.text import slugify
 
+from .identity import identity_text
+
+
+def _decoded_escapes(value: str) -> str:
+    r"""Decode JavaScript-style \uXXXX escapes."""
+    return re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), value)
+
 
 def normalize_mapping_text(value: str) -> str:
     r"""Normalize whitespace and decode JavaScript-style \uXXXX escapes."""
-    value = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), value)
-    return " ".join(value.split())
+    return " ".join(_decoded_escapes(value).split())
+
+
+def mapping_identity(value: str) -> str:
+    """Return the name identity a make or model compares under, after its escapes are decoded."""
+    return identity_text(_decoded_escapes(value))
 
 
 def default_identity_slugs(make: str, model: str) -> tuple[str, str]:
@@ -32,12 +43,10 @@ class DeviceTypeIdentityResolver:
         self._device_types_by_make = {}
         for mapping in self.device_type_mappings:
             self._device_types_exact.setdefault((mapping.source_make, mapping.source_model), mapping)
-            normalized_make = normalize_mapping_text(mapping.source_make).casefold()
-            self._device_types_by_make.setdefault(normalized_make, []).append(mapping)
+            self._device_types_by_make.setdefault(mapping_identity(mapping.source_make), []).append(mapping)
         self._manufacturers_exact = {}
         for mapping in self.manufacturer_mappings:
-            normalized_make = normalize_mapping_text(mapping.source_make).casefold()
-            self._manufacturers_exact.setdefault(normalized_make, mapping)
+            self._manufacturers_exact.setdefault(mapping_identity(mapping.source_make), mapping)
 
     @classmethod
     def for_profile(cls, profile):
@@ -49,22 +58,20 @@ class DeviceTypeIdentityResolver:
 
     def resolve(self, make: str, model: str) -> tuple[str, str, bool]:
         """Return manufacturer slug, Device Type slug, and explicit status."""
-        normalized_make = normalize_mapping_text(make)
-        normalized_model = normalize_mapping_text(model)
         mapping = self._device_types_exact.get((make, model))
         if mapping is None:
             mapping = next(
                 (
                     candidate
-                    for candidate in self._device_types_by_make.get(normalized_make.casefold(), ())
-                    if normalize_mapping_text(candidate.source_model).casefold() == normalized_model.casefold()
+                    for candidate in self._device_types_by_make.get(mapping_identity(make), ())
+                    if mapping_identity(candidate.source_model) == mapping_identity(model)
                 ),
                 None,
             )
         if mapping is not None:
             return mapping.netbox_manufacturer_slug, mapping.netbox_device_type_slug, True
 
-        manufacturer_mapping = self._manufacturers_exact.get(normalized_make.casefold())
+        manufacturer_mapping = self._manufacturers_exact.get(mapping_identity(make))
         default_manufacturer_slug, default_device_type_slug = default_identity_slugs(make, model)
         manufacturer_slug = (
             manufacturer_mapping.netbox_manufacturer_slug

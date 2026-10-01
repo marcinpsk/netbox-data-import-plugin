@@ -13,15 +13,9 @@ from typing import Any
 
 from django.db.models import BigIntegerField, Case, F, IntegerField, Q, Value, When
 
-from .database_identity import (
-    CANONICAL_NAME,
-    database_identities,
-    matching_search,
-    search_identity,
-    with_database_identity,
-)
+from .identity import CANONICAL_NAME, identity_in, identity_text, matching_search, with_name_identity
 from .trace_location_resolution import MAPPED, site_locations, source_location_key, trace_location_mappings
-from .values import identity_text, normalize_for_compare, source_position, source_text
+from .values import normalize_for_compare, source_position
 
 AUTOMATICALLY_RESOLVED = "automatically resolved"
 MANUALLY_RESOLVED = "manually resolved"
@@ -155,18 +149,17 @@ class DeviceCandidatePage:
     total: int
 
 
-def source_device_key(label: Any) -> str:
+def source_device_key(label: str) -> str:
     """Return the profile-wide identity of one source Device label."""
     return identity_text(label)
 
 
-def _source_values(values: Iterable[Any]) -> tuple[str, ...]:
-    """Return distinct nonempty source text in stable comparison order."""
+def _source_values(values: Iterable[str]) -> tuple[str, ...]:
+    """Return one source spelling per nonempty identity, in identity order."""
     found: dict[str, str] = {}
     for value in values:
-        text = source_text(value)
-        if text:
-            found.setdefault(identity_text(text), text)
+        if key := identity_text(value):
+            found.setdefault(key, value)
     return tuple(found[key] for key in sorted(found))
 
 
@@ -248,30 +241,16 @@ def resolve_trace_devices(
         stored[row.source_device_key] = row
 
     # A stored key needs its name lookup too, so a stale choice can report the matches it now has.
-    source_labels = {
-        key: tuple(source_text(label) for label in facts.labels if source_text(label)) or (key,)
-        for key, facts in evidence.items()
-    }
-    database_values = database_identities(label for labels in source_labels.values() for label in labels)
-    source_keys_by_database_name: dict[str, set[str]] = {}
-    for key, labels in source_labels.items():
-        for label in labels:
-            source_keys_by_database_name.setdefault(database_values[label], set()).add(key)
-
-    target_devices = with_database_identity(_target_devices(reader))
-    device_ids = {row.selected_device_id for row in stored.values()}
-    lookup = Q(pk__in=device_ids)
-    if source_keys_by_database_name:
-        lookup |= Q(**{f"{CANONICAL_NAME}__in": source_keys_by_database_name})
-    devices = target_devices.filter(lookup)
+    devices = with_name_identity(_target_devices(reader)).filter(
+        Q(pk__in={row.selected_device_id for row in stored.values()}) | Q(identity_in("name", keys))
+    )
     if lock_rows:
         devices = devices.order_by("pk").select_for_update(of=("self",))
     by_id = {}
     by_name: dict[str, list[Any]] = {}
     for device in devices:
         by_id[device.pk] = device
-        for key in source_keys_by_database_name.get(getattr(device, CANONICAL_NAME), ()):
-            by_name.setdefault(key, []).append(device)
+        by_name.setdefault(getattr(device, CANONICAL_NAME), []).append(device)
 
     outcomes = {}
     for key, facts in evidence.items():
@@ -354,7 +333,7 @@ def _with_evidence(devices, reader, evidence, *, exact_names, matching_racks, ma
     positions = [Decimal(str(value)) for value in positions if value is not None]
     visible_racks = _site_racks(reader).values("pk")
     path_names = tuple(f"_ndi_location_path_{index}" for index in range(len(mapped_paths)))
-    devices = with_database_identity(devices).annotate(_ndi_placement_location=_placement_location(reader))
+    devices = with_name_identity(devices).annotate(_ndi_placement_location=_placement_location(reader))
     devices = devices.annotate(
         **{name: _flag(_in_subtree(location)) for name, (_path, location) in zip(path_names, mapped_paths, strict=True)}
     )
@@ -440,22 +419,15 @@ def eligible_trace_devices(
     lock_rows: bool = False,
 ) -> DeviceCandidatePage:
     """Return a deterministic bounded page of visible Device candidates."""
-    devices = matching_search(_target_devices(reader), search_identity(search))
-    exact_values = tuple(source_text(value) for value in evidence.labels if source_text(value)) or (evidence.key,)
-    rack_values = tuple(source_text(value) for value in evidence.racks if source_text(value))
-    database_values = database_identities((*exact_values, *rack_values))
-    wanted_racks = {database_values[value] for value in rack_values}
-    matching_racks = set(
-        with_database_identity(_site_racks(reader))
-        .filter(**{f"{CANONICAL_NAME}__in": wanted_racks})
-        .values_list("pk", flat=True)
-    )
+    devices = matching_search(_target_devices(reader), search)
+    wanted_racks = {identity_text(value) for value in evidence.racks} - {""}
+    matching_racks = set(_site_racks(reader).filter(identity_in("name", wanted_racks)).values_list("pk", flat=True))
     mapped_paths = _mapped_paths(profile, reader, evidence)
     devices = _with_evidence(
         devices,
         reader,
         evidence,
-        exact_names={database_values[value] for value in exact_values},
+        exact_names={evidence.key},
         matching_racks=matching_racks,
         mapped_paths=mapped_paths,
     ).order_by("-_ndi_exact_name", "-_ndi_hint_score", "_ndi_conflict_score", "-_ndi_import_location", "name", "pk")

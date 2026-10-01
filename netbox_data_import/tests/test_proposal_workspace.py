@@ -239,7 +239,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(proposal.status, ProposalStatus.QUEUED)
         self.assertEqual(proposal.field_key, self.field_key)
         self.assertEqual(proposal.resolved_device_id, self.device_a.pk)
-        self.assertEqual(proposal.source_evidence["port"], "absent-port")
+        self.assertEqual(proposal.source_evidence["port"], "ABSENT-PORT")
         self.assertEqual(proposal.candidate_snapshot["candidates"][0]["object_id"], self.eth0.pk)
         job = Job.objects.get(name=ResolutionProposalJob.Meta.name)
         queued = get_queue().fetch_job(str(job.job_id))

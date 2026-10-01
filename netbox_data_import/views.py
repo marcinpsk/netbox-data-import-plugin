@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from typing import NamedTuple
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+from core.signals import clear_events
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -18,20 +19,24 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
-from core.signals import clear_events
 from netbox.views import generic
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from utilities.permissions import get_permission_for_model
 from utilities.views import ConditionalLoginRequiredMixin
 
-from .filters import ImportProfileFilterSet, InferenceBackendFilterSet
+from . import __version__ as _plugin_version
+from . import adapters, ip_assignment
 from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, policy_row_is_disclosed
+from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
+from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS, OutputKind
+from .contact_resolution import PrimaryContactResolver, contact_identity, suggest_contact_roles
+from .device_field_review import DeviceFieldReviewer, sync_change_preview
+from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
+from .filters import ImportProfileFilterSet, InferenceBackendFilterSet
 from .forms import (
     CableClassMappingForm,
     CableSegmentOverrideForm,
-    InferenceBackendFilterForm,
-    InferenceBackendForm,
     ClassRoleMappingForm,
     ColumnMappingForm,
     ColumnTransformRuleForm,
@@ -41,25 +46,22 @@ from .forms import (
     ImportProfileForm,
     ImportProfileImportForm,
     ImportSetupForm,
+    InferenceBackendFilterForm,
+    InferenceBackendForm,
     cable_policy_form_initial,
 )
-from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS, OutputKind
-from .values import (
-    effective_device_name,
-    identity_text,
-    normalize_for_compare,
-    source_position,
-    source_text,
-    status_map,
-    translation_maps,
+from .identity import identity_in, identity_text
+from .import_engine import (
+    ImportEngine,
+    PreconditionFailed,
+    SelectionError,
+    StalePlan,
+    StaleSourceDocument,
+    operator_failure_message,
 )
-from . import __version__ as _plugin_version
 from .models import (
     CableClassMapping,
     CableSegmentOverride,
-    InferenceBackend,
-    locked_profile_policy,
-    locked_resolution_policy,
     ClassRoleMapping,
     ColumnMapping,
     ColumnTransformRule,
@@ -68,28 +70,19 @@ from .models import (
     IgnoredFieldDifference,
     ImportExecution,
     ImportProfile,
+    InferenceBackend,
     ManufacturerMapping,
     SourceDocument,
     SourceResolution,
+    locked_profile_policy,
+    locked_resolution_policy,
     stored_import_source,
-    validate_contact_candidate_resolution,
     validate_adapter_target_module,
+    validate_contact_candidate_resolution,
     validate_registered_adapter,
     validate_source_resolution_fields,
 )
-from .tables import (
-    CableClassMappingTable,
-    InferenceBackendTable,
-    ClassRoleMappingTable,
-    ColumnMappingTable,
-    ColumnTransformRuleTable,
-    DeviceTypeMappingTable,
-    ImportExecutionTable,
-    ImportProfileTable,
-)
-from . import adapters, ip_assignment
-from .contact_resolution import PrimaryContactResolver, contact_identity, suggest_contact_roles
-from .device_field_review import DeviceFieldReviewer, sync_change_preview
+from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .object_permissions import (
     POLICY_WRITE_REFUSED,
     ObjectPermissionDenied,
@@ -97,13 +90,7 @@ from .object_permissions import (
     delete_permission_scoped_objects,
     save_permission_scoped_object,
 )
-from .profile_yaml import (
-    DuplicateYamlKeyError,
-    ProfileDocumentInvalid,
-    apply_profile_document,
-    load_yaml_document,
-    serialize_profile,
-)
+from .plan import ImportPlan, PlanError, fingerprint_of, is_current_schema_version
 from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
@@ -121,22 +108,17 @@ from .preview_row_actions import (
     retire_preview_revision,
     start_new_preview,
 )
-from .import_engine import (
-    ImportEngine,
-    PreconditionFailed,
-    SelectionError,
-    StalePlan,
-    StaleSourceDocument,
-    operator_failure_message,
+from .profile_yaml import (
+    DuplicateYamlKeyError,
+    ProfileDocumentInvalid,
+    apply_profile_document,
+    load_yaml_document,
+    serialize_profile,
 )
-from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
-from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
-from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
-from .plan import ImportPlan, PlanError, fingerprint_of, is_current_schema_version
 from .review_workspace import (
+    PROFILE_POLICY_MOVED,
     IneligibleDeviceSelection,
     IneligibleLocationSelection,
-    PROFILE_POLICY_MOVED,
     ProfilePolicyMoved,
     ReviewWorkspace,
     UnacceptablePolicyDecision,
@@ -148,12 +130,30 @@ from .review_workspace import (
     save_trace_device_resolution_and_replan,
     save_trace_location_resolution_and_replan,
 )
+from .tables import (
+    CableClassMappingTable,
+    ClassRoleMappingTable,
+    ColumnMappingTable,
+    ColumnTransformRuleTable,
+    DeviceTypeMappingTable,
+    ImportExecutionTable,
+    ImportProfileTable,
+    InferenceBackendTable,
+)
 from .trace_device_resolution import DeviceEvidence, eligible_trace_devices, source_device_key
 from .trace_location_resolution import (
     eligible_trace_locations,
     present_location_mappings,
     site_locations,
     source_location_key,
+)
+from .values import (
+    effective_device_name,
+    normalize_for_compare,
+    source_position,
+    source_text,
+    status_map,
+    translation_maps,
 )
 
 
@@ -2577,9 +2577,8 @@ class SyncDeviceFieldView(_AjaxPermissionView):
 
     def post(self, request):
         """Apply one previewed field value to its matched Device."""
-        from django.http import JsonResponse
-
         from dcim.models import Device
+        from django.http import JsonResponse
 
         field = request.POST.get("field", "")
 
@@ -2985,7 +2984,11 @@ def _device_name_already_claimed(effective_rows, row_number, new_name, target):
         return f"Device name '{new_name}' is already used by another source row."
     tenant = target["tenant"]
     tenant_filter = {"tenant": tenant} if tenant is not None else {"tenant__isnull": True}
-    if Device.objects.filter(site=target["site"], name__iexact=new_name, **tenant_filter).exists():
+    if (
+        Device.objects.filter(site=target["site"], **tenant_filter)
+        .filter(identity_in("name", [identity_text(new_name)]))
+        .exists()
+    ):
         return f"Device name '{new_name}' already exists at the active import site."
     return None
 
