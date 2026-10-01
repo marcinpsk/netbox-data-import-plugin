@@ -72,6 +72,26 @@ def _imported_roots(path: pathlib.Path) -> set[str]:
     return roots
 
 
+NAME_FOLDS = frozenset({"casefold", "Upper", "Lower", "__iexact"})
+
+
+def _name_folds(source: str) -> set[str]:
+    """Return each way one module folds a name outside the identity module: casefold, Upper, Lower, iexact."""
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr == "casefold":
+            found.add("casefold")
+        elif isinstance(node, ast.Name) and node.id in NAME_FOLDS:
+            found.add(node.id)
+        elif isinstance(node, ast.alias) and node.name.rpartition(".")[2] in NAME_FOLDS:
+            found.add(node.name.rpartition(".")[2])
+        elif (isinstance(node, ast.keyword) and (node.arg or "").endswith("__iexact")) or (
+            isinstance(node, ast.Constant) and isinstance(node.value, str) and "__iexact" in node.value
+        ):
+            found.add("__iexact")
+    return found
+
+
 def _referenced_names(path: pathlib.Path) -> set[str]:
     """Return every name one module imports or reads, ignoring comments and docstrings."""
     names: set[str] = set()
@@ -234,6 +254,28 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         }
 
         self.assertEqual(_imported_roots(PACKAGE / "plan.py") & (first_party | FORBIDDEN_INTERPRETER_IMPORTS), set())
+
+    def test_only_the_identity_module_folds_names(self):
+        """A second case rule in Python or SQL lets a key and a database comparison disagree."""
+        offenders = {
+            str(path.relative_to(PACKAGE)): folds
+            for path in sorted(PACKAGE.rglob("*.py"))
+            if not {"tests", "migrations"} & set(path.relative_to(PACKAGE).parts) and path.name != "identity.py"
+            if (folds := _name_folds(path.read_text(encoding="utf-8")))
+        }
+
+        self.assertEqual(offenders, {})
+
+    def test_the_name_fold_guard_reads_every_form(self):
+        source = (
+            "from django.db.models.functions import Upper\n"
+            "def lookups(value, rows, field):\n"
+            "    rows.filter(name__iexact=value)\n"
+            "    rows.filter(**{f'{field}__iexact': value})\n"
+            "    return value.casefold(), Lower('name')\n"
+        )
+
+        self.assertEqual(_name_folds(source), NAME_FOLDS)
 
     def test_permission_constraint_parsing_has_one_owner(self):
         """Only the object permission module interprets NetBox constraint state."""
