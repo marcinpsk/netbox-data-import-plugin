@@ -3769,11 +3769,6 @@ def _with_device_resolution_permissions(profile, actor, questions):
     return results
 
 
-def _workspace_field_keys(workspace) -> set:
-    """Return every termination field key the reviewed preview actually asked about."""
-    return {item["field_key"] for trace in workspace.traces for item in trace.terminations}
-
-
 def _disable_policy_form(form) -> None:
     for field in form.fields.values():
         field.disabled = True
@@ -4169,7 +4164,9 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             paths=_workspace_location_paths(workspace),
             has_locations=has_locations,
         )
-        proposal_display = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
+        proposal_display = ProposalPresentation(
+            profile=profile, actor=request.user, reader=reader, asked=workspace.asked_terminations
+        )
         proposal_fields = proposal_display.fields(selected.terminations if selected else [])
         if selected is not None:
             selected = replace(
@@ -4225,7 +4222,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             summary["active_proposals"] = ResolutionProposal.objects.filter(
                 profile=profile,
                 task_type=SELECT_TERMINATION_TASK,
-                field_key__in=_workspace_field_keys(workspace),
+                field_key__in=list(workspace.asked_terminations),
                 status__in=ProposalStatus.ACTIVE,
             ).count()
         return render(
@@ -4351,6 +4348,7 @@ class InvalidCandidatePage(Exception):
     """A picker request names a page the candidate endpoints do not serve."""
 
 
+TERMINATION_UNRESOLVABLE = "That termination cannot be resolved here."
 CANDIDATE_LIMIT_INVALID = f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}."
 # PostgreSQL reads OFFSET and LIMIT as bigint, so the last row of a page must stay inside that range.
 CANDIDATE_OFFSET_MAX = 2**63 - 1 - ELIGIBLE_TERMINATION_LIMIT
@@ -4388,7 +4386,7 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         profile, _document, workspace, planning_context = loaded
         field_key = request.GET.get("field_key", "").strip()
         # A review read answers a question this preview asked, never one the caller invented.
-        if field_key not in _workspace_field_keys(workspace):
+        if field_key not in workspace.asked_terminations:
             return JsonResponse(
                 {"ok": False, "error": "This preview asked no question about that termination."}, status=400
             )
@@ -4396,12 +4394,15 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
             limit, offset = _candidate_page(request.GET)
         except InvalidCandidatePage as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+        asked = workspace.asked_terminations[field_key]
+        if asked is None:
+            return JsonResponse({"ok": False, "error": TERMINATION_UNRESOLVABLE}, status=400)
         try:
             found = self._eligible(
-                request, profile, planning_context, field_key, request.GET.get("search", ""), limit, offset
+                request, profile, planning_context, asked, request.GET.get("search", ""), limit, offset
             )
         except (PlanningTargetUnavailable, ValueError):
-            return JsonResponse({"ok": False, "error": "That termination cannot be resolved here."}, status=400)
+            return JsonResponse({"ok": False, "error": TERMINATION_UNRESOLVABLE}, status=400)
         return JsonResponse(
             {
                 "ok": True,
@@ -4424,10 +4425,10 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         )
 
     @staticmethod
-    def _eligible(request, profile, planning_context, field_key, search, limit, offset):
+    def _eligible(request, profile, planning_context, asked, search, limit, offset):
         """Return the eligible page, inside the caller's own read scope."""
         reader = _trace_reader(request, profile, planning_context)
-        return eligible_terminations(field_key, reader, profile=profile, search=search, limit=limit, offset=offset)
+        return eligible_terminations(asked, reader, profile=profile, search=search, limit=limit, offset=offset)
 
 
 class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
@@ -4842,7 +4843,7 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
         except (TypeError, ValueError):
             return _preview_action_error(request, next_url, "A termination selection names one object.", status=400)
         # A review command answers a question this preview asked, never one the caller invented.
-        if field_key not in _workspace_field_keys(workspace):
+        if field_key not in workspace.asked_terminations:
             return _preview_action_error(
                 request, next_url, "This preview asked no question about that termination.", status=400
             )
@@ -4850,11 +4851,14 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
             limit, offset = _candidate_page(request.POST)
         except InvalidCandidatePage as exc:
             return _preview_action_error(request, next_url, str(exc), status=400)
+        asked = workspace.asked_terminations[field_key]
+        if asked is None:
+            return _preview_action_error(request, next_url, TERMINATION_UNRESOLVABLE, status=400)
         try:
             reader = _trace_reader(request, profile, planning_context)
             # The recheck repeats the query that made the offer, so a searched or paged candidate still counts.
             found = eligible_terminations(
-                field_key,
+                asked,
                 reader,
                 profile=profile,
                 search=request.POST.get("search", ""),
@@ -4862,7 +4866,7 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
                 offset=offset,
             )
         except (PlanningTargetUnavailable, ValueError):
-            return _preview_action_error(request, next_url, "That termination cannot be resolved here.", status=400)
+            return _preview_action_error(request, next_url, TERMINATION_UNRESOLVABLE, status=400)
         # The picker is the only legal source of a choice, so the write rechecks the offer.
         chosen = next(
             (
@@ -5006,15 +5010,16 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             _discard_import_preview(request)
             return JsonResponse({"ok": False, "error": reason}, status=409)
         field_key = request.POST.get("field_key", "").strip()
-        if field_key not in _workspace_field_keys(workspace):
+        if field_key not in workspace.asked_terminations:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
         task = proposal_task(SELECT_TERMINATION_TASK)
         with locked_profile_policy(profile.pk):
             live = ImportEngine.plan(profile, document, request.user, planning_context)
+            live_workspace = ReviewWorkspace(live, request.user)
             field = next(
                 (
                     item
-                    for trace in ReviewWorkspace(live, request.user).traces
+                    for trace in live_workspace.traces
                     for item in trace.terminations
                     if item["field_key"] == field_key
                 ),
@@ -5022,13 +5027,16 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             )
             if field is None:
                 raise InvalidProposalTarget("This field is no longer in the preview.")
+            asked = live_workspace.asked_terminations[field_key]
+            if asked is None:
+                raise PreviewActionInvalid(TERMINATION_UNRESOLVABLE)
             if field["state"] != UNRESOLVED:
                 raise PreviewActionInvalid("This termination is already resolved.")
             # Refuse on the observed predecessor, not on the index: see active_proposal_exists.
             if active_proposal_exists(profile=profile, task_type=SELECT_TERMINATION_TASK, field_key=field_key):
                 raise ActiveProposalExists("This field already has an active Resolution Proposal.")
             inventory = task.inventory(
-                profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_eligible_set_limit()
+                profile=profile, asked=asked, netbox_reader=reader, limit=proposal_eligible_set_limit()
             )
             device = inventory.resolved_device
             if device is None:
@@ -5100,8 +5108,18 @@ class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
             reader = _trace_reader(request, profile, planning_context)
         except PlanningTargetUnavailable:
             reader = None
-        presentation = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
+        presentation = ProposalPresentation(
+            profile=profile, actor=request.user, reader=reader, asked=workspace.asked_terminations
+        )
         return JsonResponse(presentation.fields([field])[field_key])
+
+
+def _asked_by_proposal(workspace, proposal):
+    """Return the question this preview asked for the proposal's field, or refuse when it cannot name one."""
+    asked = workspace.asked_terminations.get(proposal.field_key)
+    if asked is None:
+        raise PreviewActionInvalid(TERMINATION_UNRESOLVABLE)
+    return asked
 
 
 class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, View):
@@ -5129,7 +5147,7 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             profile=profile,
             task_type=SELECT_TERMINATION_TASK,
         )
-        if proposal.field_key not in _workspace_field_keys(workspace):
+        if proposal.field_key not in workspace.asked_terminations:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
         if not self.apply(proposal, request, reader, workspace):
             raise PreviewActionInvalid("This proposal no longer permits that action. Re-read it before continuing.")
@@ -5155,7 +5173,7 @@ class TraceCancelProposalView(_TraceProposalActionView):
         if (
             proposal_task(proposal.task_type).resolved_device(
                 profile=proposal.profile,
-                field_key=proposal.field_key,
+                asked=_asked_by_proposal(workspace, proposal),
                 netbox_reader=reader,
             )
             is None
@@ -5173,6 +5191,7 @@ class TraceAcceptProposalView(_TraceProposalActionView):
 
         accepted = accept_proposal(
             proposal.pk,
+            asked=_asked_by_proposal(workspace, proposal),
             operator=request.user,
             netbox_reader=reader,
             reviewed_fingerprint=workspace.plan.profile_fingerprint,

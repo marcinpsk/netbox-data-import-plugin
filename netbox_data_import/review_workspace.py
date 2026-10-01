@@ -9,7 +9,7 @@ from functools import cached_property
 from types import MappingProxyType
 from typing import Any
 
-from .cable_target import UNRESOLVED
+from .cable_target import UNRESOLVED, AskedTermination
 from .import_engine import ImportEngine
 from .models import (
     CableClassMapping,
@@ -834,6 +834,18 @@ class TraceWorkspaceUnit:
         return (sync,)
 
 
+def _asked_termination(record: dict, devices: dict) -> AskedTermination | None:
+    """Return the question one termination record states, or None when the record lacks its source values."""
+    from .field_keys import parse_termination_field_key
+    from .trace_device_resolution import DeviceEvidence
+
+    try:
+        device = DeviceEvidence.from_dict(devices[parse_termination_field_key(record["field_key"])["device"]])
+        return AskedTermination(field_key=record["field_key"], device=device, port=record["source_port"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 class ReviewWorkspace:
     """Read-only presentation of the accepted Import Plan."""
 
@@ -895,6 +907,20 @@ class ReviewWorkspace:
         Cached because one page reads it twice, and each build reserializes every change.
         """
         return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self._presentation_units if _states_a_trace(unit))
+
+    @cached_property
+    def asked_terminations(self) -> MappingProxyType:
+        """Return each termination question this preview asked, by field key, with the source values it matched.
+
+        A key the source states two ways, or a record without its source values, maps to None, so no
+        lookup guesses which source spelling the question meant.
+        """
+        asked: dict[str, set] = {}
+        for trace in self.traces:
+            devices = {item.get("key"): item for item in trace.devices}
+            for item in trace.terminations:
+                asked.setdefault(item["field_key"], set()).add(_asked_termination(item, devices))
+        return MappingProxyType({key: next(iter(found)) if len(found) == 1 else None for key, found in asked.items()})
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:
         """Return the unit and every unit owning a change it depends on, transitively.

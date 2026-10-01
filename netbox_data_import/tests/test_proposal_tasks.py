@@ -10,7 +10,6 @@ from netbox_data_import.field_keys import (
     MAPPED_PEER_ROLE,
     SELECT_TERMINATION_TASK,
     TERMINATION_ROLE,
-    termination_field_key,
 )
 from netbox_data_import.models import ImportProfile, TerminationResolution
 from netbox_data_import.netbox_reader import NetBoxReader
@@ -26,7 +25,7 @@ from netbox_data_import.proposal_tasks import (
     snapshot_from,
 )
 from netbox_data_import.termination_proposal import SelectTerminationTask, UnsupportedProposalRole
-from netbox_data_import.tests.helpers import make_dcim_objects
+from netbox_data_import.tests.helpers import asked_termination, make_dcim_objects
 
 User = get_user_model()
 
@@ -186,9 +185,10 @@ class SelectTerminationTaskTest(TestCase):
         cls.interfaces = [
             Interface.objects.create(device=cls.device, name=f"Ethernet 1/{index}") for index in (1, 2, 3)
         ]
-        cls.field_key = termination_field_key(
+        cls.asked = asked_termination(
             device="TASK-SWITCH", cards="", port="Ethernet 1/1", kind="interface", role=TERMINATION_ROLE
         )
+        cls.field_key = cls.asked.field_key
         cls.task = SelectTerminationTask()
 
     def reader(self):
@@ -196,9 +196,7 @@ class SelectTerminationTaskTest(TestCase):
         return NetBoxReader.for_actor(self.actor).for_target(site=self.site)
 
     def test_the_snapshot_offers_every_eligible_termination_on_the_device(self):
-        snapshot = self.task.current(
-            profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
-        )
+        snapshot = self.task.current(profile=self.profile, asked=self.asked, netbox_reader=self.reader(), limit=64)
 
         self.assertEqual(snapshot.total, 3)
         self.assertEqual([entry.display_name for entry in snapshot.entries], [str(port) for port in self.interfaces])
@@ -209,9 +207,7 @@ class SelectTerminationTaskTest(TestCase):
         console = ConsolePort.objects.create(device=self.device, name="Console")
         power = PowerPort.objects.create(device=self.device, name="PSU 1")
 
-        snapshot = self.task.current(
-            profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
-        )
+        snapshot = self.task.current(profile=self.profile, asked=self.asked, netbox_reader=self.reader(), limit=64)
 
         self.assertEqual(snapshot.total, 5)
         self.assertEqual(
@@ -228,9 +224,7 @@ class SelectTerminationTaskTest(TestCase):
         console = ConsolePort.objects.create(device=self.device, name="Ethernet 1/1")
 
         def current():
-            return self.task.current(
-                profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
-            )
+            return self.task.current(profile=self.profile, asked=self.asked, netbox_reader=self.reader(), limit=64)
 
         first = current()
 
@@ -247,16 +241,14 @@ class SelectTerminationTaskTest(TestCase):
         PowerPort.objects.create(device=self.device, name="PSU 1")
 
         with self.assertRaises(UnusableCandidateSet) as caught:
-            self.task.current(profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=3)
+            self.task.current(profile=self.profile, asked=self.asked, netbox_reader=self.reader(), limit=3)
 
         self.assertEqual(caught.exception.reason, TOO_MANY_CANDIDATES)
 
     def test_accepting_a_power_port_candidate_writes_the_power_port(self):
         """The written decision names the candidate's own model, never one derived from the claimed kind."""
         power = PowerPort.objects.create(device=self.device, name="PSU 1")
-        snapshot = self.task.current(
-            profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
-        )
+        snapshot = self.task.current(profile=self.profile, asked=self.asked, netbox_reader=self.reader(), limit=64)
         entry = next(entry for entry in snapshot.entries if entry.object_type == "dcim.powerport")
 
         receipt = self.task.write_resolution(
@@ -268,45 +260,43 @@ class SelectTerminationTaskTest(TestCase):
 
     def test_a_device_with_more_ports_than_the_bound_is_refused(self):
         with self.assertRaises(UnusableCandidateSet) as caught:
-            self.task.current(profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=2)
+            self.task.current(profile=self.profile, asked=self.asked, netbox_reader=self.reader(), limit=2)
 
         self.assertEqual(caught.exception.reason, TOO_MANY_CANDIDATES)
 
     def test_the_resolved_device_is_the_one_the_key_names(self):
         resolved = self.task.resolved_device(
             profile=self.profile,
-            field_key=self.field_key,
+            asked=self.asked,
             netbox_reader=self.reader(),
         )
 
         self.assertEqual(resolved, self.device)
 
     def test_a_key_naming_no_visible_device_resolves_to_nothing(self):
-        absent = termination_field_key(
+        absent = asked_termination(
             device="NO-SUCH-DEVICE", cards="", port="Ethernet 1/1", kind="interface", role=TERMINATION_ROLE
         )
 
         self.assertIsNone(
             self.task.resolved_device(
                 profile=self.profile,
-                field_key=absent,
+                asked=absent,
                 netbox_reader=self.reader(),
             )
         )
 
     def test_the_mapped_peer_role_is_not_proposed_for(self):
         """Section 7.1 requests proposals for the termination role in this delivery."""
-        peer_key = termination_field_key(
+        peer = asked_termination(
             device="TASK-SWITCH", cards="", port="Ethernet 1/1", kind="interface", role=MAPPED_PEER_ROLE
         )
 
         with self.assertRaises(UnsupportedProposalRole):
-            self.task.current(profile=self.profile, field_key=peer_key, netbox_reader=self.reader(), limit=64)
+            self.task.current(profile=self.profile, asked=peer, netbox_reader=self.reader(), limit=64)
 
     def test_writing_a_resolution_returns_only_its_id(self):
-        snapshot = self.task.current(
-            profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
-        )
+        snapshot = self.task.current(profile=self.profile, asked=self.asked, netbox_reader=self.reader(), limit=64)
 
         receipt = self.task.write_resolution(
             actor=self.actor, profile=self.profile, field_key=self.field_key, entry=snapshot.entries[1]
@@ -318,9 +308,7 @@ class SelectTerminationTaskTest(TestCase):
 
     def test_the_last_explicit_action_wins_for_one_key(self):
         """Acceptance upserts, so a second decision replaces the row instead of duplicating it."""
-        snapshot = self.task.current(
-            profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
-        )
+        snapshot = self.task.current(profile=self.profile, asked=self.asked, netbox_reader=self.reader(), limit=64)
         first = self.task.write_resolution(
             actor=self.actor, profile=self.profile, field_key=self.field_key, entry=snapshot.entries[0]
         )

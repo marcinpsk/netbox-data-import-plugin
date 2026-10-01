@@ -21,21 +21,12 @@ from .resolution_proposals import decide_proposal
 from .review_workspace import refuse_moved_policy
 
 
-def proposal_staleness(proposal, *, netbox_reader=None, inventory=None):
+def proposal_staleness(proposal, *, inventory):
     """Compare current inventory with frozen evidence without changing the proposal."""
-    if inventory is None:
-        if netbox_reader is None:
-            raise ValueError("Proposal staleness requires current inventory or a scoped NetBox reader.")
-        inventory = proposal_task(proposal.task_type).inventory(
-            profile=proposal.profile,
-            field_key=proposal.field_key,
-            netbox_reader=netbox_reader,
-            limit=proposal_eligible_set_limit(),
-        )
     return proposal_inventory_staleness(proposal, inventory)
 
 
-def accept_proposal(proposal_id, *, operator, netbox_reader, reviewed_fingerprint) -> bool:
+def accept_proposal(proposal_id, *, asked, operator, netbox_reader, reviewed_fingerprint) -> bool:
     """Write one fresh candidate decision under the profile, proposal, and resolution locks.
 
     Acceptance is a workspace command that writes profile policy, so it also refuses a decision made
@@ -66,6 +57,7 @@ def accept_proposal(proposal_id, *, operator, netbox_reader, reviewed_fingerprin
             return False
         receipt = task.write_resolution_if_fresh(
             proposal=proposal,
+            asked=asked,
             entry=entry,
             actor=operator,
             netbox_reader=netbox_reader,

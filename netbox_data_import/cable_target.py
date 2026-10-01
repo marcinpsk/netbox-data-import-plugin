@@ -58,12 +58,12 @@ from .plan import Diagnostic, Disposition, PlannedChange, Severity, Synchronizat
 from .target_runtime import DeletedObject, PreconditionFailed
 from .trace_device_resolution import (
     STALE as DEVICE_STALE,
+    DeviceEvidence,
     collect_trace_device_evidence,
     resolve_trace_devices,
-    resolved_trace_device,
     source_device_key,
 )
-from .values import source_text
+from .values import identity_text, source_text
 
 CABLE_STATUS = "connected"
 ELIGIBLE_TERMINATION_LIMIT = 20
@@ -87,6 +87,24 @@ _CONFLICT_CODES = frozenset(
 
 # A PortMapping joins a front port to a rear port; no other Cable End Kind passes a path through.
 _PASS_THROUGH_PEERS = {FRONT_PORT_MODEL: REAR_PORT_MODEL, REAR_PORT_MODEL: FRONT_PORT_MODEL}
+
+
+@dataclass(frozen=True)
+class AskedTermination:
+    """One termination question as the plan asked it: its field key and the source values the planner matched.
+
+    A field key holds casefolded text, and the database identity of casefolded text can name another row.
+    """
+
+    field_key: str
+    device: DeviceEvidence
+    port: str
+
+    def __post_init__(self):
+        """Refuse source values that do not fold to the field key they claim to state."""
+        parsed = parse_termination_field_key(self.field_key)
+        if self.device.key != parsed["device"] or identity_text(self.port) != parsed["port"]:
+            raise ValueError("The source values do not state this termination field key.")
 
 
 @dataclass(frozen=True)
@@ -361,19 +379,17 @@ def _source_record(trace, segment_index: int) -> dict:
     }
 
 
-def resolved_device_for(field_key: str, netbox_reader, *, profile, _lock_rows=False):
-    """Return the one visible Device a termination field key names, or None when it names no single one.
+def resolved_device_for(asked: AskedTermination, netbox_reader, *, profile, _lock_rows=False):
+    """Return the one visible Device a termination question names, or None when it names no single one.
 
-    A proposal freezes this reference and revalidates it, so the retrieval and the freshness check
-    have to agree on what "the resolved Device" means.
+    It resolves the plan's own Device evidence, so it reads the Device the planner read. A proposal
+    freezes this reference and revalidates it, so the retrieval and the freshness check have to agree
+    on what "the resolved Device" means.
     """
-    device_name = parse_termination_field_key(field_key)["device"]
-    return resolved_trace_device(
-        profile=profile,
-        reader=netbox_reader,
-        source_label=device_name,
-        lock_rows=_lock_rows,
-    )
+    key = asked.device.key
+    return resolve_trace_devices(
+        profile=profile, reader=netbox_reader, evidence={key: asked.device}, lock_rows=_lock_rows
+    )[key].device
 
 
 def _named_terminations(netbox_reader, label: str, device_id: int, identities) -> dict[str, list]:
@@ -409,7 +425,7 @@ def _exact_name_match(kind: str, identity: str, named_for) -> Any | None:
     return None
 
 
-def _mapped_peer_sources(parsed: dict, device, netbox_reader, profile) -> tuple:
+def _mapped_peer_sources(parsed: dict, port: str, device, netbox_reader, profile) -> tuple:
     """Return the opposite ports one resolved pass-through port maps to, as (label, rows) sources."""
     from .models import TerminationResolution, index_digest
 
@@ -434,7 +450,7 @@ def _mapped_peer_sources(parsed: dict, device, netbox_reader, profile) -> tuple:
         .first()
     )
     if stored is None:
-        identity = search_identity(parsed["port"])
+        identity = database_identities((port,))[port]
         base = _exact_name_match(
             parsed["kind"],
             identity,
@@ -459,7 +475,7 @@ _RESOLVED_DEVICE_UNSET = object()
 
 
 def eligible_terminations(
-    field_key: str,
+    asked: AskedTermination,
     netbox_reader,
     *,
     profile,
@@ -469,25 +485,25 @@ def eligible_terminations(
     _resolved_device=_RESOLVED_DEVICE_UNSET,
     _lock_rows: bool = False,
 ) -> EligibleTerminations:
-    """Return one page of candidates for a canonical termination field key.
+    """Return one page of candidates for one termination question the plan asked.
 
     The termination role offers every model the claimed kind admits on the resolved Device, as one
     set with one count, one bound, and one order (section 6.1). The mapped-peer role starts from the
     profile's saved base resolution or the exact-name match, then offers its opposite ports. The
     reader keeps both inside the actor's view scope. The picker and a proposal request share this
-    query. Each model counts and pages in the database, so no read holds more than *limit* rows of
-    one model.
+    query. The models count and page in the database as one set, so no read holds more than *limit*
+    rows.
     """
-    parsed = parse_termination_field_key(field_key)
+    parsed = parse_termination_field_key(asked.field_key)
     device = (
-        resolved_device_for(field_key, netbox_reader, profile=profile, _lock_rows=_lock_rows)
+        resolved_device_for(asked, netbox_reader, profile=profile, _lock_rows=_lock_rows)
         if _resolved_device is _RESOLVED_DEVICE_UNSET
         else _resolved_device
     )
     if device is None:
         return EligibleTerminations(candidates=(), total=0)
     if parsed["role"] == MAPPED_PEER_ROLE:
-        sources = _mapped_peer_sources(parsed, device, netbox_reader, profile)
+        sources = _mapped_peer_sources(parsed, asked.port, device, netbox_reader, profile)
     else:
         sources = tuple(
             (label, netbox_reader.terminations(label).filter(device_id=device.pk))
@@ -747,6 +763,8 @@ class _CableBatch:
             "state": state,
             "selected": "" if termination is None else termination.display,
             "selected_type": "" if termination is None else termination.object_type,
+            # The picker reads NetBox from the source spelling, because the folded key can name another row.
+            "source_port": source_text(reference.port),
             "selectable": not reason,
             "reason": reason,
             # A segment NetBox cannot cable reopens both its ends, however they were resolved.
@@ -1875,6 +1893,7 @@ __all__ = (
     "MANUALLY_RESOLVED",
     "REUSE_SEGMENT",
     "UNRESOLVED",
+    "AskedTermination",
     "CableModule",
     "EligibleTerminations",
     "eligible_terminations",

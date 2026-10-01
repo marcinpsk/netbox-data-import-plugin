@@ -6,7 +6,7 @@ import copy
 import re
 from io import BytesIO
 
-from dcim.models import Cable, Device, FrontPort, Interface, PowerOutlet, PowerPort, RearPort, Site
+from dcim.models import Cable, Device, FrontPort, Interface, PortMapping, PowerOutlet, PowerPort, RearPort, Site
 from django.db import connection
 from django.test import Client, TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
@@ -20,7 +20,7 @@ from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
 from netbox_data_import import adapters as adapter_registry
 from netbox_data_import.adapters import TraceWorkbookAdapter
 from netbox_data_import.catalog import OutputKind
-from netbox_data_import.field_keys import termination_field_key
+from netbox_data_import.field_keys import MAPPED_PEER_ROLE, termination_field_key
 from netbox_data_import.models import CableClassMapping, CableSegmentOverride, ImportProfile, TerminationResolution
 from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
 from netbox_data_import.preview_row_actions import (
@@ -30,6 +30,7 @@ from netbox_data_import.preview_row_actions import (
 )
 from netbox_data_import.review_workspace import _SUMMARY_KEYS, ReviewWorkspace
 from netbox_data_import.tests.test_cable_module import (
+    DEVICE_A,
     DEVICE_B,
     SERVER_PSU,
     CableTopologyMixin,
@@ -38,10 +39,10 @@ from netbox_data_import.tests.test_cable_module import (
     power_path,
 )
 from netbox_data_import.tests.helpers import (
-    executed_sql,
     assert_absent_from,
     cables_on,
     competing_write_during,
+    executed_sql,
     trace_endpoint_line,
     trace_segment,
     trace_termination,
@@ -52,6 +53,7 @@ from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.views import (
     CANDIDATE_OFFSET_INVALID,
     CANDIDATE_OFFSET_MAX,
+    TERMINATION_UNRESOLVABLE,
     _review_workspace_url,
     _trace_workspace_url,
 )
@@ -1588,6 +1590,82 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
 
                 self.assertEqual(response.status_code, 400)
                 self.assertEqual(response.json()["error"], CANDIDATE_OFFSET_INVALID)
+
+    def panel_rear(self, panel, name, fronts):
+        """Add one rear port to *panel* whose front ports all map to it, and return those front ports."""
+        rear = RearPort.objects.create(device=panel, name=name, type="8p8c", positions=len(fronts))
+        ports = []
+        for position, front_name in enumerate(fronts, 1):
+            front = FrontPort.objects.create(device=panel, name=front_name, type="8p8c")
+            PortMapping.objects.create(
+                front_port=front, rear_port=rear, front_port_position=1, rear_port_position=position
+            )
+            ports.append(front)
+        return ports
+
+    def test_a_mapped_peer_question_offers_the_peers_of_the_rear_port_the_plan_matched(self):
+        """A capital sharp s folds to "ss" in the field key, but the picker starts from the source spelling."""
+        Device.objects.filter(name="PANEL-1", site=self.site).delete()
+        panel = self.make_device("PANEL-1")
+        own = {
+            "STRAẞE": self.panel_rear(panel, "STRAẞE", ("F1", "F2")),
+            "Straße": self.panel_rear(panel, "Straße", ("F3", "F4")),
+        }
+        for spelling, fronts in own.items():
+            with self.subTest(spelling=spelling):
+                rear = trace_termination("PANEL-1", "", spelling, "Punch-Down")
+                self.open_workspace(
+                    (
+                        trace_endpoint_line(DEVICE_A),
+                        trace_endpoint_line(DEVICE_B),
+                        (
+                            trace_segment(DEVICE_A, "Patch", rear),
+                            trace_segment(rear, "Trunk", trace_termination("PANEL-2", "", "R1", "Punch-Down")),
+                            trace_segment(trace_termination("PANEL-2", "", "F1", "Position Front"), "Patch", DEVICE_B),
+                        ),
+                    )
+                )
+                field_key = termination_field_key(
+                    device="PANEL-1", cards="", port=spelling, kind="rear_port", role=MAPPED_PEER_ROLE
+                )
+
+                payload = self.candidates(field_key).json()
+
+                self.assertEqual(
+                    ([item["id"] for item in payload["candidates"]], payload["total"]),
+                    ([front.pk for front in fronts], 2),
+                )
+
+    def test_a_device_named_with_a_capital_sharp_s_offers_its_ports(self):
+        """The resolved Device comes from the source label the plan matched, not from the folded key."""
+        device = self.make_device("STRAẞE-SW")
+        port = Interface.objects.create(device=device, name="uplink", type="1000base-t")
+        self.open_workspace(
+            direct_path(from_end=trace_termination("STRAẞE-SW", "", "absent-port", "Port"), to_end=DEVICE_B)
+        )
+        field_key = termination_field_key(device="STRAẞE-SW", cards="", port="absent-port", kind="interface")
+
+        payload = self.candidates(field_key).json()
+
+        self.assertEqual(([item["id"] for item in payload["candidates"]], payload["total"]), ([port.pk], 1))
+
+    def test_a_cached_question_without_its_source_spelling_is_refused_rather_than_guessed(self):
+        """A plan cached before the record kept its source spelling names no port, so the read and the write refuse."""
+        field_key = self.open_blocked_workspace()
+        session = self.client.session
+        plan = session[PREVIEW_PLAN_SESSION_KEY]
+        for unit in plan["units"]:
+            for record in unit["display"].get("trace", {}).get("terminations", ()):
+                record.pop("source_port")
+        session[PREVIEW_PLAN_SESSION_KEY] = plan
+        session.save()
+
+        read = self.candidates(field_key)
+        write = self.resolve(field_key, self.eth0)
+
+        self.assertEqual((read.status_code, read.json()["error"]), (400, TERMINATION_UNRESOLVABLE))
+        self.assertContains(write, TERMINATION_UNRESOLVABLE, status_code=400)
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
 
     def test_a_candidate_deleted_after_ranking_drops_out_of_the_read_and_the_write(self):
         """A port deleted between the ranked page and its row load is not offered, and nothing fails."""
