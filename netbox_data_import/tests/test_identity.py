@@ -7,6 +7,7 @@ A Python or ICU upgrade that changes one uppercase mapping on one side only must
 
 import itertools
 import json
+import sys
 import unicodedata
 
 from django.db import connection
@@ -97,6 +98,26 @@ def identity_sql(column: str) -> tuple[str, tuple]:
     return query.get_compiler(connection=connection).compile(expression)
 
 
+def _unicode_versions() -> str:
+    """Name the Unicode data of both sides, so a drift failure says which side moved."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_collation_actual_version(oid) FROM pg_collation WHERE collname = %s", [IDENTITY_COLLATION]
+        )
+        (collator,) = cursor.fetchone()
+        # PostgreSQL 17 added icu_unicode_version(); an older server cannot state it.
+        cursor.execute("SELECT to_regproc('pg_catalog.icu_unicode_version') IS NOT NULL")
+        (stated,) = cursor.fetchone()
+        icu_unicode = "unknown on this PostgreSQL version"
+        if stated:
+            cursor.execute("SELECT icu_unicode_version()")
+            (icu_unicode,) = cursor.fetchone()
+    return (
+        f"Python {sys.version.split()[0]} states Unicode {unicodedata.unidata_version}; the database ICU states "
+        f"Unicode {icu_unicode} (collator version {collator}). Two different versions mean that one side has newer case data."
+    )
+
+
 def _batches(values):
     """Yield *values* in fixed-size chunks."""
     iterator = iter(values)
@@ -171,15 +192,10 @@ class IdentityAgreementTest(TestCase):
     def test_every_storable_code_point_agrees(self):
         found = self.disagreements(STORABLE)
 
-        self.assertEqual(
-            found[:40],
-            [],
-            f"{len(found)} disagreements, Python Unicode {unicodedata.unidata_version}. "
-            "Python and the database ICU library state different uppercase mappings.",
-        )
+        self.assertEqual(found[:40], [], f"{len(found)} disagreements. {_unicode_versions()}")
 
     def test_composites_and_whitespace_placements_agree(self):
-        self.assertEqual(self.disagreements(COMPOSITES), [])
+        self.assertEqual(self.disagreements(COMPOSITES), [], _unicode_versions())
 
     def test_the_identity_collation_is_icu_with_the_root_locale(self):
         """A language tailoring, such as Turkish dotted I, would change the uppercase mapping."""
