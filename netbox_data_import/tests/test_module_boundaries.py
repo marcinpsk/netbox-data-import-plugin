@@ -110,34 +110,70 @@ NAME_IDENTITY_MODELS = frozenset(
 )
 EXACT_NAME_KEYWORDS = frozenset({"name", "name__in", "name__exact"})
 QUERY_METHODS = frozenset({"filter", "exclude", "get", "get_or_create", "update_or_create"})
+SHORTCUTS = frozenset({"get_object_or_404", "get_list_or_404"})
+
+
+def _callee(call: ast.Call) -> str:
+    """Return the name a call reaches, bare or qualified."""
+    func = call.func
+    return func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
 
 
 def _query_root(node) -> str:
-    """Return the model name a queryset chain starts from, `type` for `type(obj)`, or an empty string."""
+    """Return the model a queryset chain or model reference names, `type` for `type(obj)`, or an empty string."""
     while isinstance(node, (ast.Attribute, ast.Call)):
         if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id == "type":
+            if _callee(node) == "type" and isinstance(node.func, ast.Name):
                 return "type"
             node = node.func
+        elif node.attr in NAME_IDENTITY_MODELS:
+            return node.attr
         else:
             node = node.value
     return node.id if isinstance(node, ast.Name) else ""
 
 
+def _q_predicates(node):
+    """Yield every `Q(...)` call of a filter argument, through `&`, `|`, `~` and nested `Q` arguments."""
+    if isinstance(node, ast.BinOp):
+        yield from (*_q_predicates(node.left), *_q_predicates(node.right))
+    elif isinstance(node, ast.UnaryOp):
+        yield from _q_predicates(node.operand)
+    elif isinstance(node, ast.Call) and _callee(node) == "Q":
+        yield node
+        for argument in node.args:
+            yield from _q_predicates(argument)
+
+
+def _names_exactly(call: ast.Call, arguments) -> bool:
+    """Return whether a call, or a `Q` among *arguments*, has an exact `name` keyword or literal `**{...}` key."""
+    for predicate in (call, *(q for argument in arguments for q in _q_predicates(argument))):
+        for keyword in predicate.keywords:
+            literal = keyword.value.keys if keyword.arg is None and isinstance(keyword.value, ast.Dict) else []
+            keys = [keyword.arg, *(key.value for key in literal if isinstance(key, ast.Constant))]
+            if EXACT_NAME_KEYWORDS.intersection(keys):
+                return True
+    return False
+
+
 def _exact_name_lookups(source: str) -> set[int]:
     """Return the line of each exact `name` lookup on a named NetBox model or a `type(obj)` queryset.
 
-    A queryset held in a variable or returned by a helper, such as `reader.devices()`, escapes this scan.
+    A queryset held in a variable or returned by a helper, such as `reader.devices()`, or a computed key escapes it.
     """
-    return {
-        node.lineno
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr in QUERY_METHODS
-        and any(keyword.arg in EXACT_NAME_KEYWORDS for keyword in node.keywords)
-        and _query_root(node.func.value) in {*NAME_IDENTITY_MODELS, "type"}
-    }
+    found = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr in QUERY_METHODS:
+            root, arguments = _query_root(node.func.value), node.args
+        elif _callee(node) in SHORTCUTS and node.args:
+            root, arguments = _query_root(node.args[0]), node.args[1:]
+        else:
+            continue
+        if root in {*NAME_IDENTITY_MODELS, "type"} and _names_exactly(node, arguments):
+            found.add(node.lineno)
+    return found
 
 
 JS_FOLD = re.compile(
@@ -392,6 +428,23 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         )
 
         self.assertEqual(_exact_name_lookups(source), {2, 3, 4})
+
+    def test_the_exact_name_guard_reads_q_objects_literal_keywords_qualified_models_and_shortcuts(self):
+        source = (
+            "def lookups(device, name, user, site, field):\n"
+            "    Device.objects.filter(Q(site=site) | Q(name=name))\n"
+            "    Device.objects.exclude(~Q(Q(name__in=[name]), site=site))\n"
+            "    Rack.objects.filter(**{'name': name})\n"
+            "    dcim.models.Device.objects.get(name=name)\n"
+            "    get_object_or_404(Device, name=name)\n"
+            "    shortcuts.get_object_or_404(Rack.objects.restrict(user, 'view'), Q(name=name))\n"
+            "    Device.objects.filter(Q(site=site), **{'site': site})\n"
+            "    Device.objects.filter(rack__in=ContactRole.objects.filter(Q(name=name)))\n"
+            "    get_object_or_404(ContactRole, name=name)\n"
+            "    get_object_or_404(Device.objects.restrict(user, 'view'), pk=name)\n"
+        )
+
+        self.assertEqual(_exact_name_lookups(source), {2, 3, 4, 5, 6, 7})
 
     def test_browser_code_folds_case_only_where_the_allowlist_says_why(self):
         """A browser carries its own Unicode version, so it compares raw values and leaves identity to the server."""
