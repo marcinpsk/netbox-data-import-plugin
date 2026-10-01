@@ -196,7 +196,7 @@ def _rekey_segment_overrides(CableSegmentOverride, alias):
 
 
 def rekey_name_identities(apps, schema_editor):
-    """Retire the requests in flight, then rekey every decision, request and provenance row."""
+    """Retire the requests in flight, then rekey every decision and provenance row."""
     alias = schema_editor.connection.alias
 
     def model(name):
@@ -208,14 +208,7 @@ def rekey_name_identities(apps, schema_editor):
     ResolutionProposal.objects.using(alias).filter(status__in=("queued", "running")).update(
         status="failed", failure_reason="superseded_request"
     )
-    proposals = []
-    for row in ResolutionProposal.objects.using(alias).order_by("pk"):
-        new = _field_key(row.field_key)
-        if new is None:
-            _skip("ResolutionProposal", row, "field_key")
-            continue
-        proposals.append((row, new))
-    _store_keys(ResolutionProposal, proposals, key_field="field_key", digest_field="field_key_digest", alias=alias)
+    # Every proposal is now terminal and keeps its casefold key, so it answers no current question.
 
     TerminationResolution = model("TerminationResolution")
     _rekey_policy(

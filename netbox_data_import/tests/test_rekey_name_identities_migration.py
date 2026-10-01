@@ -215,7 +215,7 @@ class RekeyNameIdentitiesMigrationTest(TransactionTestCase):
         self.assertIn("Dropped TraceDeviceResolution", output)
         self.assertIn("Dropped TraceLocationResolution", output)
 
-    def test_requests_in_flight_retire_and_every_request_rekeys(self):
+    def test_requests_in_flight_retire_and_every_request_keeps_its_casefold_key(self):
         queued = self.proposal(old_field_key("dev-a", "eth0"), "queued")
         running = self.proposal(old_field_key("dev-a", "eth1"), "running")
         cancelled = self.proposal(old_field_key("dev-a", "eth2"), "cancelled")
@@ -227,14 +227,120 @@ class RekeyNameIdentitiesMigrationTest(TransactionTestCase):
         self.assertEqual(
             sorted(Proposal.objects.values_list("pk", "status", "failure_reason", "field_key", "field_key_digest")),
             sorted(
-                (row.pk, status, reason, old_field_key("DEV-A", port), _digest(old_field_key("DEV-A", port)))
+                (row.pk, status, reason, old_field_key("dev-a", port), _digest(old_field_key("dev-a", port)))
                 for row, status, reason, port in (
-                    (queued, "failed", "superseded_request", "ETH0"),
-                    (running, "failed", "superseded_request", "ETH1"),
-                    (cancelled, "cancelled", "", "ETH2"),
+                    (queued, "failed", "superseded_request", "eth0"),
+                    (running, "failed", "superseded_request", "eth1"),
+                    (cancelled, "cancelled", "", "eth2"),
                 )
             ),
         )
+
+    def merged_question(self):
+        """Return a Device whose two casefold Device keys merge, its new field key, and its inventory."""
+        from dcim.models import Device, Interface
+        from django.contrib.auth import get_user_model
+
+        from netbox_data_import.field_keys import termination_field_key
+        from netbox_data_import.inference_backend import proposal_eligible_set_limit
+        from netbox_data_import.termination_proposal import SelectTerminationTask
+
+        device = Device.objects.create(
+            name="ALIAS-I",
+            site=self.devices[0].site,
+            device_type=self.devices[0].device_type,
+            role=self.devices[0].role,
+        )
+        Interface.objects.bulk_create(
+            Interface(device=device, name=f"p{number}", type="1000base-t") for number in range(5)
+        )
+        operator = get_user_model().objects.create_superuser("rekey-operator", "rekey@example.invalid", "x")
+        reader = NetBoxReader.for_actor(operator).for_target(site=device.site)
+        key = termination_field_key(device="alias-i", cards="", port="absent", kind="interface")
+
+        def inventory():
+            return SelectTerminationTask().inventory(
+                profile=ImportProfile.objects.get(pk=self.profile.pk),
+                field_key=key,
+                netbox_reader=reader,
+                limit=proposal_eligible_set_limit(),
+            )
+
+        return device, key, operator, reader, inventory
+
+    def answered(self, old_key, device, snapshot, *, outcome):
+        """Store one completed attempt under a casefold key, through the proposal lifecycle."""
+        from dcim.models import Device, Interface
+        from core.models import ObjectType
+
+        from netbox_data_import.field_keys import SELECT_TERMINATION_TASK
+        from netbox_data_import.resolution_proposals import claim_proposal, complete_proposal, request_proposal
+
+        proposal = request_proposal(
+            profile=ImportProfile.objects.get(pk=self.profile.pk),
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=old_key,
+            source_evidence={},
+            resolved_device_type=ObjectType.objects.get_for_model(Device),
+            resolved_device_id=device.pk,
+            prompt_version=2,
+            response_schema_version=2,
+            candidate_snapshot=snapshot,
+        )
+        claim_proposal(proposal.pk)
+        entry = snapshot.page[0]
+        selection = (
+            {
+                "selected_candidate_id": entry.candidate_id,
+                "selected_object_type": ObjectType.objects.get_for_model(Interface),
+                "selected_object_id": entry.object_id,
+            }
+            if outcome == "candidate"
+            else {}
+        )
+        complete_proposal(proposal.pk, outcome=outcome, explanation="answered", **selection)
+        return proposal
+
+    def test_an_exhausted_page_of_a_casefold_question_does_not_move_the_merged_question(self):
+        from netbox_data_import.field_keys import SELECT_TERMINATION_TASK
+        from netbox_data_import.resolution_proposals import next_page_offset
+
+        device, key, _operator, _reader, inventory = self.merged_question()
+        page = inventory().candidate_snapshot.with_page(offset=0, size=2)
+        self.answered(old_field_key(f"alias-{DOTLESS_I}", "absent"), device, page, outcome="no_match")
+        self.assertTrue(page.has_next_page)
+
+        MigrationExecutor(connection).migrate([(APP, REKEY)])
+
+        offset = next_page_offset(
+            profile=ImportProfile.objects.get(pk=self.profile.pk),
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=key,
+            inventory=inventory(),
+        )
+        self.assertEqual(offset, 0)
+
+    def test_a_completed_candidate_of_a_casefold_question_cannot_be_accepted(self):
+        from django.core.exceptions import ValidationError
+
+        from netbox_data_import.models import TerminationResolution
+        from netbox_data_import.proposal_decisions import accept_proposal
+
+        device, _key, operator, reader, inventory = self.merged_question()
+        page = inventory().candidate_snapshot.with_page(offset=0, size=2)
+        proposal = self.answered(old_field_key(f"alias-{DOTLESS_I}", "absent"), device, page, outcome="candidate")
+
+        MigrationExecutor(connection).migrate([(APP, REKEY)])
+
+        with self.assertRaises(ValidationError):
+            accept_proposal(
+                proposal.pk,
+                source={"device": "alias-i", "cards": "", "port": "absent"},
+                operator=operator,
+                netbox_reader=reader,
+                reviewed_fingerprint=ImportProfile.objects.get(pk=self.profile.pk).planning_fingerprint,
+            )
+        self.assertFalse(TerminationResolution.objects.exists())
 
     def test_provenance_reorders_its_endpoints_and_overrides_follow(self):
         from dcim.models import Cable, Interface

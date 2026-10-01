@@ -34,11 +34,11 @@ Before you upgrade:
    changes.
 
 Migration `0045_rekey_name_identities` rekeys every saved termination, Device and Location
-decision, every Resolution Proposal, every Cable provenance row and every Cable segment override.
-It never stops the upgrade:
+decision, every Cable provenance row and every Cable segment override. It never stops the upgrade:
 
 - A queued or running Resolution Proposal fails with the reason "Superseded by a newer request
-  contract". Ask again after the upgrade.
+  contract". Every Resolution Proposal keeps its old key as history, so no earlier attempt answers,
+  pages or can be accepted for a question after the upgrade. Ask again.
 - Two saved decisions whose keys become one key are merged when they chose the same NetBox object:
   the oldest row stays, and a proposal that wrote the other row points to it. When they chose
   different objects, both are deleted, and the question is open again.

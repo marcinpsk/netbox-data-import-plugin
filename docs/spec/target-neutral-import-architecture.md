@@ -635,9 +635,10 @@ upgrade notes state the gap for operators.
 A change of this definition is a schema change of every stored key. It needs a data migration that
 rekeys every live key, and a plan schema version that rebuilds each cached Import Plan. The
 decision models therefore keep the source spelling beside the key (section 9.1), so the next change
-can rekey from that text. Migration `0045_rekey_name_identities` moved every key from the earlier
-casefold identity to this one; see the installation upgrade notes for the names it cannot move
-exactly.
+can rekey from that text. Migration `0045_rekey_name_identities` moved every decision and
+provenance key from the earlier casefold identity to this one; see the installation upgrade notes for
+the names it cannot move exactly. A Resolution Proposal is an audit record of the question it was
+asked, so it keeps its casefold key and binds to no question after the change.
 
 ## 6. Patched Path Replacement planning and transaction behavior
 
