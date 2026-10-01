@@ -20,6 +20,7 @@ from netbox_data_import.preview_row_actions import PREVIEW_PLAN_SESSION_KEY, PRE
 from netbox_data_import.profile_yaml import serialize_profile
 from netbox_data_import.trace_device_resolution import CandidateFact, DeviceEvidence, eligible_trace_devices
 from netbox_data_import.tests.helpers import (
+    executed_sql,
     trace_endpoint_line,
     trace_segment,
     trace_termination,
@@ -27,6 +28,7 @@ from netbox_data_import.tests.helpers import (
     user_with_object_permission,
 )
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin
+from netbox_data_import.views import CANDIDATE_OFFSET_INVALID, CANDIDATE_OFFSET_MAX
 
 SOURCE_PATH = "Region >> Building (X) >> 1st Floor >> DH4 >> T"
 OTHER_PATH = "Region >> Building (X) >> 1st Floor >> DH5"
@@ -704,8 +706,10 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
             ({"preview_revision": "obsolete"}, 409, "No current import preview matches this request."),
             ({"search": "x" * 201}, 400, "Location search must be 200 characters or fewer."),
             ({"limit": "0"}, 400, "Candidate limit must be an integer from 1 to 20."),
-            ({"offset": "-1"}, 400, "Candidate offset must be an integer of 0 or more."),
-            ({"offset": "next"}, 400, "Candidate offset must be an integer of 0 or more."),
+            ({"offset": "-1"}, 400, CANDIDATE_OFFSET_INVALID),
+            ({"offset": "next"}, 400, CANDIDATE_OFFSET_INVALID),
+            ({"offset": str(CANDIDATE_OFFSET_MAX + 1)}, 400, CANDIDATE_OFFSET_INVALID),
+            ({"offset": str(2**63)}, 400, CANDIDATE_OFFSET_INVALID),
         )
         for params, status, error in cases:
             with self.subTest(params=params):
@@ -713,6 +717,19 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
 
                 self.assertEqual(response.status_code, status)
                 self.assertEqual(response.json(), {"ok": False, "error": error})
+
+    def test_the_largest_offset_reads_an_empty_location_page(self):
+        """The bound leaves room for one page, and a page past the count is empty."""
+        self.open_workspace()
+
+        with executed_sql() as statements:
+            response = self.location_candidates(offset=CANDIDATE_OFFSET_MAX)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual((payload["candidates"], payload["offset"]), ([], CANDIDATE_OFFSET_MAX))
+        self.assertGreater(payload["total"], 0)
+        self.assertEqual([sql for sql in statements if "OFFSET" in sql], [])
 
     def test_a_path_the_preview_never_carried_is_refused(self):
         self.open_workspace()

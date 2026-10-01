@@ -65,7 +65,8 @@ def eligible_trace_locations(reader, *, search: str = "", limit: int, offset: in
     from .database_identity import matching_search, search_identity
 
     locations = matching_search(site_locations(reader), search_identity(search)).order_by("name", "pk")
-    page = tuple(locations[offset : offset + limit])
+    total = locations.count()
+    page = tuple(locations[offset : offset + limit]) if offset < total else ()
     # Two Locations can share a name under different parents, so the visible parent tells them apart.
     parents = dict(
         site_locations(reader)
@@ -74,7 +75,7 @@ def eligible_trace_locations(reader, *, search: str = "", limit: int, offset: in
     )
     return LocationCandidatePage(
         candidates=tuple(LocationCandidate(location, parents.get(location.parent_id, "")) for location in page),
-        total=locations.count(),
+        total=total,
     )
 
 

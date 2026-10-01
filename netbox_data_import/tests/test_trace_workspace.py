@@ -38,6 +38,7 @@ from netbox_data_import.tests.test_cable_module import (
     power_path,
 )
 from netbox_data_import.tests.helpers import (
+    executed_sql,
     assert_absent_from,
     cables_on,
     competing_write_during,
@@ -48,7 +49,12 @@ from netbox_data_import.tests.helpers import (
     user_with_object_permission,
 )
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
-from netbox_data_import.views import _review_workspace_url, _trace_workspace_url
+from netbox_data_import.views import (
+    CANDIDATE_OFFSET_INVALID,
+    CANDIDATE_OFFSET_MAX,
+    _review_workspace_url,
+    _trace_workspace_url,
+)
 
 
 class _MixedOutputTestAdapter(TraceWorkbookAdapter):
@@ -1568,7 +1574,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         )
 
         self.assertEqual(refused.status_code, 400)
-        self.assertContains(malformed, "Candidate offset must be an integer of 0 or more.", status_code=400)
+        self.assertContains(malformed, CANDIDATE_OFFSET_INVALID, status_code=400)
         self.assertEqual(saved.status_code, 302, saved.content)
         self.assertEqual(TerminationResolution.objects.get(profile=self.profile).selected_object_id, spares[-1].pk)
 
@@ -1576,12 +1582,38 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         """A malformed or negative offset is an invalid request."""
         field_key = self.open_blocked_workspace()
 
-        for offset in ("next", "-1"):
+        for offset in ("next", "-1", str(CANDIDATE_OFFSET_MAX + 1), str(2**63)):
             with self.subTest(offset=offset):
                 response = self.candidates(field_key, offset=offset)
 
                 self.assertEqual(response.status_code, 400)
-                self.assertEqual(response.json()["error"], "Candidate offset must be an integer of 0 or more.")
+                self.assertEqual(response.json()["error"], CANDIDATE_OFFSET_INVALID)
+
+    def test_the_largest_offset_reads_an_empty_page_and_an_overflowing_write_is_refused(self):
+        """The bound leaves room for one page, and the write applies the same bound as the read."""
+        field_key = self.open_blocked_workspace()
+        port = Interface.objects.get(device=self.device_a, name="eth0")
+
+        with executed_sql() as statements:
+            last = self.candidates(field_key, offset=CANDIDATE_OFFSET_MAX)
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_termination"),
+            {
+                "field_key": field_key,
+                "object_type": port._meta.label_lower,
+                "object_id": port.pk,
+                "offset": 2**63,
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+            headers={"accept": "application/json"},
+        )
+
+        self.assertEqual(last.status_code, 200)
+        self.assertEqual((last.json()["candidates"], last.json()["offset"]), ([], CANDIDATE_OFFSET_MAX))
+        self.assertGreater(last.json()["total"], 0)
+        self.assertContains(refused, CANDIDATE_OFFSET_INVALID, status_code=400)
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+        self.assertEqual([sql for sql in statements if "OFFSET" in sql], [])
 
     def test_the_picker_rejects_invalid_limits(self):
         """A malformed or out-of-range limit is an invalid request."""

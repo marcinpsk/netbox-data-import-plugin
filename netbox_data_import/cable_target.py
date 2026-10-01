@@ -19,8 +19,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import partial
-import heapq
-from itertools import islice
 from typing import Any
 
 from .cable_disclosure import (
@@ -502,21 +500,24 @@ def eligible_terminations(
         for _label, rows in sorted(sources, key=lambda source: source[0]):
             tuple(rows.order_by("pk").select_for_update(of=("self",)).values_list("pk", flat=True))
     total = sum(rows.count() for _label, rows in sources)
-    keys = (_ranked_keys(rows, wanted, order, offset + limit) for order, (_label, rows) in enumerate(sources))
-    page = list(islice(heapq.merge(*keys), offset, offset + limit))
+    if offset >= total:
+        return EligibleTerminations(candidates=(), total=total)
+    ranked = [_ranked_keys(rows, wanted, order) for order, (_label, rows) in enumerate(sources)]
+    combined = ranked[0].union(*ranked[1:], all=True) if len(ranked) > 1 else ranked[0]
+    page = combined.order_by("-_ndi_exact", "_ndi_name", "_ndi_order", "_ndi_pk")[offset : offset + limit]
     wanted_ids: dict[int, list[int]] = {}
-    for key in page:
-        wanted_ids.setdefault(key[2], []).append(key[3])
+    for _exact, _name, order, pk in page:
+        wanted_ids.setdefault(order, []).append(pk)
     loaded = {order: sources[order][1].in_bulk(ids) for order, ids in wanted_ids.items()}
-    return EligibleTerminations(candidates=tuple(loaded[key[2]][key[3]] for key in page), total=total)
+    return EligibleTerminations(candidates=tuple(loaded[order][pk] for _exact, _name, order, pk in page), total=total)
 
 
-def _ranked_keys(rows, wanted: str, order: int, count: int) -> list[tuple[bool, bytes, int, int]]:
-    """Return the merge keys of one model's first *count* rows in the combined order, loading no row.
+def _ranked_keys(rows, wanted: str, order: int):
+    """Return one model's order keys for the combined order, which the database pages as one set.
 
-    The database orders names bytewise and the merge compares UTF-8 bytes, so both agree.
+    The bytewise collation orders names the same way across every admitted model.
     """
-    from django.db.models import Case, IntegerField, Value, When
+    from django.db.models import Case, F, IntegerField, Value, When
     from django.db.models.functions import Collate
 
     if wanted:
@@ -524,11 +525,16 @@ def _ranked_keys(rows, wanted: str, order: int, count: int) -> list[tuple[bool, 
         rows = with_database_identity(rows)
     else:
         exact = Value(0, output_field=IntegerField())
-    ranked = rows.annotate(_ndi_exact=exact).order_by("-_ndi_exact", Collate("name", "C"), "pk")
-    return [
-        (not exact_match, name.encode(), order, pk)
-        for pk, name, exact_match in ranked.values_list("pk", "name", "_ndi_exact")[:count]
-    ]
+    return (
+        rows.order_by()
+        .annotate(
+            _ndi_exact=exact,
+            _ndi_name=Collate("name", "C"),
+            _ndi_order=Value(order, output_field=IntegerField()),
+            _ndi_pk=F("pk"),
+        )
+        .values_list("_ndi_exact", "_ndi_name", "_ndi_order", "_ndi_pk")
+    )
 
 
 class _CableBatch:

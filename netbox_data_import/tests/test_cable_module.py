@@ -67,6 +67,7 @@ from netbox_data_import.plan import Disposition, PlannedChange, Severity, finger
 from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.tests.helpers import (
+    executed_sql,
     assert_absent_from,
     make_dcim_objects,
     competing_write_during,
@@ -2536,6 +2537,42 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         self.assertEqual(tuple(row for page in pages for row in page.candidates), whole.candidates)
         self.assertEqual({page.total for page in pages}, {whole.total})
         self.assertEqual(len(materialized), whole.total)
+
+    def test_a_page_past_the_last_candidate_is_empty_and_reads_no_row(self):
+        """An offset at or past the count answers an empty page from the count queries alone."""
+        field_key = self.add_console_and_power_ports()
+
+        for offset in (7, 10**15):
+            with self.subTest(offset=offset), executed_sql() as statements:
+                result = eligible_terminations(field_key, self.reader(), profile=self.profile, offset=offset)
+
+                self.assertEqual((result.candidates, result.total), ((), 7))
+                self.assertEqual([sql for sql in statements if "LIMIT" in sql], [])
+
+    def test_a_late_page_reads_no_more_rows_than_its_bound(self):
+        """A large offset inside the count does not read every earlier key of each model."""
+        from django.db import connection
+
+        for number in range(30):
+            Interface.objects.create(device=self.device_a, name=f"if-{number:02}", type="1000base-t")
+            PowerPort.objects.create(device=self.device_a, name=f"pp-{number:02}")
+        field_key = termination_field_key(device="DEV-A", cards="", port="absent", kind="interface")
+        returned = []
+
+        def count_rows(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            returned.append((context["cursor"].rowcount, sql))
+            return result
+
+        with connection.execute_wrapper(count_rows):
+            result = eligible_terminations(field_key, self.reader(), profile=self.profile, limit=3, offset=58)
+
+        self.assertEqual(
+            self.offered(result),
+            [("dcim.powerport", "pp-27"), ("dcim.powerport", "pp-28"), ("dcim.powerport", "pp-29")],
+        )
+        self.assertEqual(result.total, 61)
+        self.assertEqual([sql for rows, sql in returned if rows > 3], [])
 
     def test_each_admitted_model_stays_inside_the_actor_view_scope(self):
         """The one set holds only the rows of each model the actor may view."""

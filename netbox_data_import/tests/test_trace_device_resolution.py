@@ -43,7 +43,13 @@ from netbox_data_import.trace_device_resolution import (
     source_device_key,
 )
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
-from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes, user_with_object_permission
+from netbox_data_import.tests.helpers import (
+    executed_sql,
+    trace_termination,
+    trace_workbook_bytes,
+    user_with_object_permission,
+)
+from netbox_data_import.views import CANDIDATE_OFFSET_INVALID, CANDIDATE_OFFSET_MAX
 
 
 class DeviceEvidenceSerializationTest(TestCase):
@@ -661,9 +667,35 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         )
 
         self.assertEqual(refused.status_code, 400)
-        self.assertContains(malformed, "Candidate offset must be an integer of 0 or more.", status_code=400)
+        self.assertContains(malformed, CANDIDATE_OFFSET_INVALID, status_code=400)
         self.assertEqual(saved.status_code, 302, saved.content)
         self.assertEqual(TraceDeviceResolution.objects.get(profile=self.profile).selected_device_id, spares[-1].pk)
+
+    def test_the_device_picker_bounds_the_offset_of_a_read_and_a_write(self):
+        """An offset past the database page range is refused, and the largest one reads an empty page."""
+        response = self.start_alias_preview()
+        question = {"device_key": "source alias", "preview_revision": response.context["preview_revision"]}
+        url = reverse("plugins:netbox_data_import:trace_device_candidates")
+
+        with executed_sql() as statements:
+            last = self.client.get(url, {**question, "offset": CANDIDATE_OFFSET_MAX})
+        refused = [
+            self.client.get(url, {**question, "offset": CANDIDATE_OFFSET_MAX + 1}),
+            self.client.get(url, {**question, "offset": 2**63}),
+            self.client.post(
+                reverse("plugins:netbox_data_import:trace_resolve_device"),
+                {**question, "device_id": self.device_a.pk, "offset": 2**63},
+                headers={"accept": "application/json"},
+            ),
+        ]
+
+        self.assertEqual(last.status_code, 200)
+        self.assertEqual((last.json()["candidates"], last.json()["offset"]), ([], CANDIDATE_OFFSET_MAX))
+        self.assertGreater(last.json()["total"], 0)
+        self.assertEqual([sql for sql in statements if "OFFSET" in sql], [])
+        for response in refused:
+            self.assertContains(response, CANDIDATE_OFFSET_INVALID, status_code=400)
+        self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
 
     def test_an_unoffered_device_choice_is_rejected_as_request_input(self):
         response = self.start_alias_preview()

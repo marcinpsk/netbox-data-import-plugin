@@ -4352,7 +4352,9 @@ class InvalidCandidatePage(Exception):
 
 
 CANDIDATE_LIMIT_INVALID = f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}."
-CANDIDATE_OFFSET_INVALID = "Candidate offset must be an integer of 0 or more."
+# PostgreSQL reads OFFSET and LIMIT as bigint, so the last row of a page must stay inside that range.
+CANDIDATE_OFFSET_MAX = 2**63 - 1 - ELIGIBLE_TERMINATION_LIMIT
+CANDIDATE_OFFSET_INVALID = f"Candidate offset must be an integer from 0 to {CANDIDATE_OFFSET_MAX}."
 
 
 def _candidate_page(params) -> tuple[int, int]:
@@ -4368,7 +4370,7 @@ def _candidate_page(params) -> tuple[int, int]:
         offset = 0 if raw_offset in (None, "") else int(raw_offset)
     except (TypeError, ValueError) as exc:
         raise InvalidCandidatePage(CANDIDATE_OFFSET_INVALID) from exc
-    if offset < 0:
+    if not 0 <= offset <= CANDIDATE_OFFSET_MAX:
         raise InvalidCandidatePage(CANDIDATE_OFFSET_INVALID)
     return limit, offset
 

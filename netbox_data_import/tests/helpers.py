@@ -333,6 +333,22 @@ def run_on_separate_connection(target):
 
 
 @contextmanager
+def executed_sql():
+    """Yield a list that keeps each SQL statement this connection runs inside the block.
+
+    `CaptureQueriesContext` slices the connection log when it is read, and every later request clears that log.
+    """
+    statements = []
+
+    def record(execute, sql, params, many, context):
+        statements.append(sql)
+        return execute(sql, params, many, context)
+
+    with connections["default"].execute_wrapper(record):
+        yield statements
+
+
+@contextmanager
 def profile_deleted_at_the_policy_lock(profile_pk):
     """Delete one Import Profile on another connection as this thread takes its policy lock.
 
