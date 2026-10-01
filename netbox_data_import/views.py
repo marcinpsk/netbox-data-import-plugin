@@ -497,6 +497,11 @@ def _fuzzy_match_netbox_field(column_name: str) -> str | None:
 
 logger = logging.getLogger(__name__)
 
+# An Import Plan error can name session data, so a response states one fixed sentence instead.
+UNREADABLE_PREVIEW = "This preview cannot be read. Re-read the preview."
+UNREADABLE_PREVIEW_ENDED = "This preview cannot be read. Start a new import."
+UNPLANNABLE_IMPORT = "This import could not be planned. The server log names the reason."
+
 
 class ImportProfileListView(generic.ObjectListView):
     """List all import profiles with their mapping counts."""
@@ -1026,9 +1031,14 @@ class ImportSetupView(PermissionRequiredMixin, View):
         }
         try:
             plan = ImportEngine.plan(profile, document, request.user, planning_context)
-        except (adapters.SourceUnreadable, adapters.UnknownSourceAdapter, PlanningTargetUnavailable, PlanError) as exc:
+        except (adapters.SourceUnreadable, adapters.UnknownSourceAdapter, PlanningTargetUnavailable) as exc:
             document.delete()
             messages.error(request, f"Failed to parse file: {exc}")
+            return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
+        except PlanError:
+            logger.warning("ImportSetupView: planning produced an unreadable Import Plan.", exc_info=True)
+            document.delete()
+            messages.error(request, UNPLANNABLE_IMPORT)
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
         workspace = ReviewWorkspace(plan, request.user)
@@ -1238,9 +1248,10 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         if (use_materialized_result or retained_reason) and isinstance(stored_plan, dict):
             try:
                 plan = ImportPlan.from_dict(stored_plan)
-            except PlanError as exc:
+            except PlanError:
+                logger.warning("ImportPreviewView: the stored Import Plan is unreadable.", exc_info=True)
                 _discard_import_preview(request)
-                messages.error(request, str(exc))
+                messages.error(request, UNREADABLE_PREVIEW_ENDED)
                 return redirect(reverse("plugins:netbox_data_import:import_setup"))
         else:
             planning_context = {
@@ -1673,9 +1684,10 @@ class ImportRunView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         try:
             accepted = ImportPlan.from_dict(plan_data)
-        except PlanError as exc:
+        except PlanError:
+            logger.warning("ImportRunView: the stored Import Plan is unreadable.", exc_info=True)
             _discard_import_preview(request)
-            messages.error(request, str(exc))
+            messages.error(request, UNREADABLE_PREVIEW_ENDED)
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         if ReviewWorkspace(accepted, request.user).has_errors:
             messages.warning(request, "Resolve every preview error before importing.")
@@ -5739,6 +5751,33 @@ class SyncSingleRowView(_AjaxPermissionView):
             clear_events.send(sender=self)
             raise
 
+    def _execution_refusal(self, profile, document, plan_data, identity, user, row_number):
+        """Execute one unit, and return the response that refuses it, or None once it committed."""
+        try:
+            self._execute_unit(profile, document, plan_data, identity, user)
+        except PlanError:
+            logger.warning(
+                "SyncSingleRowView: the Import Plan for row_number=%s is unreadable.", row_number, exc_info=True
+            )
+            return JsonResponse({"ok": False, "error": UNREADABLE_PREVIEW}, status=409)
+        except (
+            PlanningTargetUnavailable,
+            PreconditionFailed,
+            SelectionError,
+            StalePlan,
+            StaleSourceDocument,
+        ) as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=409)
+        except (DatabaseError, ObjectPermissionDenied, ValidationError) as exc:
+            return _refused_row_write_response(exc, row_number)
+        except Exception:
+            logger.exception("SyncSingleRowView: unexpected error for row_number=%s", row_number)
+            return JsonResponse(
+                {"ok": False, "error": "An unexpected error occurred. See server logs."},
+                status=500,
+            )
+        return None
+
     def post(self, request):
         """Execute one selected Synchronization Unit and return JSON."""
         ctx_data = request.session.get("import_context")
@@ -5772,8 +5811,9 @@ class SyncSingleRowView(_AjaxPermissionView):
 
         try:
             accepted = ImportPlan.from_dict(plan_data)
-        except PlanError as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=409)
+        except PlanError:
+            logger.warning("SyncSingleRowView: the stored Import Plan is unreadable.", exc_info=True)
+            return JsonResponse({"ok": False, "error": UNREADABLE_PREVIEW}, status=409)
         workspace = ReviewWorkspace(accepted, request.user)
         preview_unit = next(
             (
@@ -5798,26 +5838,9 @@ class SyncSingleRowView(_AjaxPermissionView):
                 status=400,
             )
 
-        try:
-            self._execute_unit(profile, document, plan_data, preview_unit.identity, request.user)
-        except (
-            PlanError,
-            PlanningTargetUnavailable,
-            PreconditionFailed,
-            SelectionError,
-            StalePlan,
-            StaleSourceDocument,
-        ) as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=409)
-        except (DatabaseError, ObjectPermissionDenied, ValidationError) as exc:
-            return _refused_row_write_response(exc, row_number)
-        except Exception:
-            logger.exception("SyncSingleRowView: unexpected error for row_number=%s", row_number)
-            return JsonResponse(
-                {"ok": False, "error": "An unexpected error occurred. See server logs."},
-                status=500,
-            )
-
+        refusal = self._execution_refusal(profile, document, plan_data, preview_unit.identity, request.user, row_number)
+        if refusal is not None:
+            return refusal
         mark_preview_dirty(request.session)
         verb = "created" if preview_unit.action == "create" else "updated"
         written = f"{preview_unit.object_type.capitalize()} '{preview_unit.name}' was {verb} in NetBox."
