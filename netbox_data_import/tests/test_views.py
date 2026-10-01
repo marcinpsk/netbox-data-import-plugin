@@ -2122,6 +2122,62 @@ class CheckDeviceNameViewTest(BaseViewTestCase):
         self.assertFalse(data.get("exists"))
 
 
+class CheckDeviceNameViewObjectPermissionTest(TestCase):
+    """`dcim.view_device` can be granted for some sites only, so the check reports only the Devices it covers."""
+
+    def setUp(self):
+        """Give one user Device view access to two of three sites."""
+        from django.contrib.contenttypes.models import ContentType
+
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+        from users.models import ObjectPermission
+
+        self.sites = {
+            slug: Site.objects.create(name=slug, slug=slug) for slug in ("hidden-site", "seen-site-1", "seen-site-2")
+        }
+        manufacturer = Manufacturer.objects.create(name="Seen Mfg", slug="seen-mfg")
+        self.device_type = DeviceType.objects.create(manufacturer=manufacturer, model="Seen Model", slug="seen-model")
+        self.role = DeviceRole.objects.create(name="Seen Role", slug="seen-role")
+        self.user = User.objects.create_user("seen_device_user", "seen@example.com", "testpass")
+        profile_view = ObjectPermission.objects.create(name="View profiles", actions=["view"])
+        profile_view.object_types.add(ContentType.objects.get_for_model(ImportProfile))
+        device_view = ObjectPermission.objects.create(
+            name="View seen sites", actions=["view"], constraints={"site__slug__in": ["seen-site-1", "seen-site-2"]}
+        )
+        device_view.object_types.add(ContentType.objects.get_for_model(Device))
+        for permission in (profile_view, device_view):
+            permission.users.add(self.user)
+        clear_user_permission_caches(self.user)
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    def device(self, name, site):
+        from dcim.models import Device
+
+        return Device.objects.create(name=name, site=self.sites[site], device_type=self.device_type, role=self.role)
+
+    def check(self, name):
+        return self.client.get(reverse("plugins:netbox_data_import:check_device"), {"name": name}).json()
+
+    def test_a_name_only_a_hidden_device_holds_reports_nothing(self):
+        """Existence, pk and URL of a Device outside the view grant stay hidden."""
+        self.device("core-sw", "hidden-site")
+
+        self.assertEqual(self.check("CORE-SW"), {"exists": False, "url": None, "id": None})
+
+    def test_a_shared_name_reports_a_visible_device_and_counts_only_visible_devices(self):
+        """The hidden Device has the lowest pk, so an unrestricted sample would report it first."""
+        self.device("edge-sw", "hidden-site")
+        first = self.device("Edge-SW", "seen-site-1")
+        self.device("EDGE-SW", "seen-site-2")
+
+        answer = self.check("edge-sw")
+
+        self.assertEqual((answer["exists"], answer["id"], answer["count"]), (True, first.pk, 2))
+        self.assertTrue(answer["url"].endswith(first.get_absolute_url()))
+
+
 class SearchNetBoxObjectsViewTest(BaseViewTestCase):
     """Tests for SearchNetBoxObjectsView AJAX endpoint."""
 

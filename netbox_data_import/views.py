@@ -3692,9 +3692,9 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
 
 
 class CheckDeviceNameView(PermissionRequiredMixin, View):
-    """AJAX endpoint: check if a device with the given name exists in NetBox.
+    """AJAX endpoint: check if a Device the user can view has the name identity of the given name.
 
-    Returns JSON: {"exists": bool, "url": str|null, "id": int|null}.
+    Returns JSON: {"exists": bool, "url": str|null, "id": int|null}, and "count" when several Devices match.
     """
 
     permission_required = "netbox_data_import.view_importprofile"
@@ -3713,7 +3713,7 @@ class CheckDeviceNameView(PermissionRequiredMixin, View):
         if not key:
             return JsonResponse({"exists": False, "url": None, "id": None})
 
-        devices = Device.objects.filter(identity_in("name", [key])).order_by("pk")
+        devices = Device.objects.restrict(request.user, "view").filter(identity_in("name", [key])).order_by("pk")
         found = list(devices[:2])
         if not found:
             return JsonResponse({"exists": False, "url": None, "id": None})
