@@ -10,6 +10,7 @@ workbook, no column and no NetBox object type.
 from __future__ import annotations
 
 from contextlib import suppress
+import logging
 from typing import cast
 
 from django.core.exceptions import ValidationError
@@ -19,10 +20,11 @@ from . import adapter_config, adapters, branching, catalog, target_modules
 from .models import FailureReason, ImportExecution, SourceDocument, locked_profile_policy
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied, clear_user_permission_caches
-from .plan import Diagnostic, Disposition, ImportPlan, PlanInvalid, Severity, executable_units, merge_changes
+from .plan import Diagnostic, Disposition, ImportPlan, PlanError, PlanInvalid, Severity, executable_units, merge_changes
 from .source_resolution import derive_effective_rows
 from .target_runtime import DeletedObject, ExecutionContext, PreconditionFailed
 
+logger = logging.getLogger(__name__)
 
 _RESOLUTION_SECTION = "source_resolutions"
 
@@ -39,14 +41,25 @@ def _resolution_section():
     return section
 
 
+# An Import Plan error names plan identities built from source data, so the operator reads a fixed sentence.
+UNREADABLE_PLAN = "The accepted Import Plan cannot be read. Re-read the preview, then sync again."
+UNMERGEABLE_SELECTION = (
+    "The selected rows cannot run on their own: they need changes from rows that are not selected, "
+    "or their changes conflict. Select those rows too, or sync the whole import. The server log names the changes."
+)
+
+
 def operator_failure_message(exc) -> str:
     """Return one execution failure as the text the operator reads.
 
     A database message names the table, the column and the constraint that refused the write, so it
-    stays in the log. Every other exception here carries a message this plugin or NetBox wrote.
+    stays in the log, and so does an Import Plan error. Every other exception here carries a message
+    this plugin or NetBox wrote.
     """
     if isinstance(exc, DatabaseError):
         return "The import could not be written. Check the NetBox logs and try again."
+    if isinstance(exc, PlanError):
+        return UNREADABLE_PLAN
     return "; ".join(exc.messages) if isinstance(exc, ValidationError) else str(exc)
 
 
@@ -240,7 +253,8 @@ class ImportEngine:
         try:
             changes = merge_changes(units)
         except PlanInvalid as exc:
-            raise SelectionError(str(exc)) from exc
+            logger.warning("The selected units cannot merge into one execution order.", exc_info=True)
+            raise SelectionError(UNMERGEABLE_SELECTION) from exc
         total = len(units) + len(changes)
         if progress_callback is not None:
             progress_callback(0, total)
