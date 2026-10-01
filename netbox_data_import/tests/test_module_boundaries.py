@@ -99,10 +99,6 @@ JS_FOLD = re.compile(
 # Each browser case fold that is not a name comparison, by file and stripped line, with the reason it may fold.
 JS_FOLD_ALLOWED = {
     (
-        "static/netbox_data_import/js/split_name_modal.js",
-        "return String(value).replace(WHITESPACE_RUN, ' ').replace(/^ | $/g, '').toUpperCase();",
-    ): "the one browser name identity, which tests/js/identity_corpus.json checks against Python",
-    (
         "static/netbox_data_import/js/contact_candidate_modal.js",
         (
             "blank.setCustomValidity('Give this row a ' + (ROLE_LABELS[role] || role).toLowerCase() + ', or select no "
@@ -328,10 +324,10 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         self.assertEqual(_name_folds(source), NAME_FOLDS)
 
     def test_browser_code_folds_case_only_where_the_allowlist_says_why(self):
-        """A browser comparison that folds case its own way disagrees with the server's name identity."""
+        """A browser carries its own Unicode version, so it compares raw values and leaves identity to the server."""
         found = _js_folds(PACKAGE)
 
-        self.assertEqual(sorted(found - set(JS_FOLD_ALLOWED)), [], "compare names with ndiIdentityText")
+        self.assertEqual(sorted(found - set(JS_FOLD_ALLOWED)), [], "compare raw values; the server decides identity")
         self.assertEqual(sorted(set(JS_FOLD_ALLOWED) - found), [], "remove the allowlist entries that match nothing")
 
     def test_the_browser_fold_guard_reads_scripts_and_templates(self):

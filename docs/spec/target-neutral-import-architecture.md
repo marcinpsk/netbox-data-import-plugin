@@ -613,11 +613,12 @@ owns it, in Python and in PostgreSQL:
    locale `und-u-kn-true`. Every step before `UPPER` runs under the `C` collation, so the collation
    of the input column changes nothing.
 
-The split-name modal compares a split part with the value the row already carries in the browser,
-with one JavaScript copy of this definition. A corpus that Python writes from its own identity holds
-the expected keys, a Python test refuses a stale corpus, and vitest runs the JavaScript copy over it.
-A serial stays an exact comparison there too. A guard refuses any other browser case fold that is not
-listed with its display-only reason.
+A browser carries its own Unicode version and trims its own whitespace set, so no browser code
+decides an identity. The split-name modal compares a split part with the value the row carries
+exactly, as typed, and asks for an acknowledgement on any difference. The server then refuses a split
+that replaces a value of another identity, or a serial that differs at all, unless the acknowledgement
+names that field; a value of the same identity saves without it. A guard refuses any browser case fold
+that is not listed with its display-only reason.
 
 Mappings whose make, or make and model, share one identity are one mapping when they name one
 target. When they name different targets, a row with that make and model is blocked with

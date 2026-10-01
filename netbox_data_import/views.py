@@ -1372,17 +1372,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         sync_change_preview_by_row = _sync_change_preview_by_row(result.units, target_field_labels)
         rack_filter_options, no_rack_filter_value = _rack_filter_options(result.units)
         split_field_values_by_source_id = {
-            r.source_id: {
-                "device_name": r.name or "",
-                "asset_tag": r.extra_data.get("asset_tag", ""),
-                "serial": r.extra_data.get("source_serial", ""),
-                "make": r.extra_data.get("source_make", ""),
-                "model": r.extra_data.get("source_model", ""),
-                "rack_name": r.rack_name or "",
-                "source_id": r.source_id,
-            }
-            for r in result.units
-            if r.object_type == "device" and r.source_id
+            r.source_id: _split_field_values(r) for r in result.units if r.object_type == "device" and r.source_id
         }
         preview_rows = _preview_rows_with_conflict_comparisons(result, rows, profile)
 
@@ -3224,6 +3214,71 @@ class IgnorePositionView(PermissionRequiredMixin, View):
         return _name_resolution_response(request, next_url)
 
 
+# The split modal sends each part to one of these Target Fields, and a part can replace the row's value.
+SPLIT_TARGET_FIELDS = ("device_name", "asset_tag", "serial", "make", "model", "rack_name")
+# A serial is compared exactly; every other split target compares by name identity.
+EXACT_SPLIT_FIELDS = frozenset({"serial"})
+ACKNOWLEDGEMENT_INVALID = "Acknowledged fields must be a JSON list of field names."
+
+
+def _split_field_values(unit) -> dict[str, str]:
+    """Return the value one preview row carries for each split target, which a split part can replace."""
+    return {
+        "device_name": unit.name or "",
+        "asset_tag": unit.extra_data.get("asset_tag", ""),
+        "serial": unit.extra_data.get("source_serial", ""),
+        "make": unit.extra_data.get("source_make", ""),
+        "model": unit.extra_data.get("source_model", ""),
+        "rack_name": unit.rack_name or "",
+        "source_id": unit.source_id,
+    }
+
+
+def _carried_split_values(request, source_id) -> dict[str, str]:
+    """Return the split target values the active preview shows for one source row, or none without one row."""
+    plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY)
+    if not plan_data:
+        return {}
+    try:
+        workspace = ReviewWorkspace.from_dict(plan_data, request.user)
+    except PlanError as exc:
+        raise ValidationError("The active Import Plan is no longer readable.") from exc
+    rows = [unit for unit in workspace.units if unit.object_type == "device" and str(unit.source_id) == str(source_id)]
+    return _split_field_values(rows[0]) if len(rows) == 1 else {}
+
+
+def _unacknowledged_replacement(request, source_id, source_column, resolved_fields) -> str:
+    """Return why a split replaces a value the preview row carries without the operator's acknowledgement."""
+    import json
+
+    if source_column not in SPLIT_TARGET_FIELDS:
+        return ""
+    try:
+        acknowledged = json.loads(request.POST.get("acknowledged_fields") or "[]")
+    except json.JSONDecodeError:
+        return ACKNOWLEDGEMENT_INVALID
+    if not isinstance(acknowledged, list) or not all(isinstance(field, str) for field in acknowledged):
+        return ACKNOWLEDGEMENT_INVALID
+    carried = _carried_split_values(request, source_id)
+    for field, value in resolved_fields.items():
+        if field == source_column or field not in SPLIT_TARGET_FIELDS or field in acknowledged:
+            continue
+        existing, replacement = source_text(carried.get(field)), source_text(value)
+        if not existing:
+            continue
+        same = (
+            existing == replacement
+            if field in EXACT_SPLIT_FIELDS
+            else identity_text(existing) == identity_text(replacement)
+        )
+        if not same:
+            return (
+                f"The split replaces the {CATALOG.display(field)} '{existing}' with '{replacement}'. "
+                "Acknowledge the replacement to save it."
+            )
+    return ""
+
+
 class SaveResolutionView(_PermissionScopedWriteMixin, _AjaxPermissionView):
     """Save a manual field resolution for rerere replay."""
 
@@ -3263,6 +3318,12 @@ class SaveResolutionView(_PermissionScopedWriteMixin, _AjaxPermissionView):
             if stale_reason is not None:
                 return _preview_action_error(request, next_url, stale_reason, status=409)
 
+            try:
+                refusal = _unacknowledged_replacement(request, source_id, source_column, resolved_fields)
+            except ValidationError as exc:
+                return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
+            if refusal:
+                return _preview_action_error(request, next_url, refusal, status=400)
             contact_context = None
             candidates = {}
             if source_column == "candidate:contact":

@@ -29,6 +29,7 @@ function render({ existingResolutions = {}, original = ORIGINAL_VALUE, fieldValu
         <input type="hidden" id="res_source_column" name="source_column">
         <input type="hidden" id="res_original_value" name="original_value">
         <input type="hidden" id="res_resolved_fields" name="resolved_fields">
+        <input type="hidden" id="res_acknowledged_fields" name="acknowledged_fields">
         <div id="res_original_display"></div>
         <input type="text" id="res_delimiter" value=" - ">
         <div id="res_existing_notice" class="d-none"><code id="res_existing_display"></code></div>
@@ -140,7 +141,7 @@ describe("split modal parts", () => {
     const delimiter = document.getElementById("res_delimiter");
     delimiter.value = "-";
     delimiter.dispatchEvent(new Event("input", { bubbles: true }));
-    expect([partValue(0).value, partValue(1).value, partValue(2).value]).toEqual(["AT900", "host", "900"]);
+    expect([partValue(0).value, partValue(1).value, partValue(2).value]).toEqual(["AT900 ", " host", "900"]);
   });
 
   it("saves the field each part was sent to without navigating away", async () => {
@@ -342,24 +343,8 @@ describe("a part that overwrites a value the file already carries", () => {
   });
 });
 
-describe("the name identity of the split modal", () => {
-  /* Python writes this corpus from its own identity, and `test_identity` refuses a stale copy. */
-  const corpus = JSON.parse(
-    readFileSync(resolve(process.cwd(), "netbox_data_import/tests/js/identity_corpus.json"), "utf8"),
-  );
-
-  it("gives the Python key of every corpus value", () => {
-    render();
-
-    const differing = corpus.filter(([value, key]) => window.ndiIdentityText(value) !== key);
-
-    expect(corpus.length).toBeGreaterThan(400);
-    expect(differing).toEqual([]);
-  });
-});
-
 describe("a part compared with the value the file carries", () => {
-  /* The server compares names, asset tags, racks, makes and models by name identity, and serials exactly. */
+  /* The modal folds nothing and asks on any difference; the server decides by name identity, serials exactly. */
   function renderPart(field, fileValue, part) {
     const original = `${part} - host-900`;
     render({ original, fieldValues: { "cn-2": { device_name: original, [field]: fileValue } } });
@@ -377,11 +362,39 @@ describe("a part compared with the value the file carries", () => {
     expect(saveButton().disabled).toBe(true);
   });
 
-  it("reads two spellings of one name identity as the value the file carries", () => {
+  it("asks to acknowledge two spellings of one name identity, which the server then saves without it", () => {
     renderPart("asset_tag", "STRASSE", "stra\u00DFe");
+
+    expect(acknowledgementAsked()).toBe(true);
+  });
+
+  it("asks to acknowledge a value that differs only in a byte order mark the browser trims", () => {
+    renderPart("asset_tag", "\uFEFFAT900", "AT900");
+
+    expect(acknowledgementAsked()).toBe(true);
+  });
+
+  it("asks to acknowledge two letters whose browser uppercase agrees", () => {
+    renderPart("asset_tag", "\uA7D2", "\uA7D3");
+
+    expect(acknowledgementAsked()).toBe(true);
+  });
+
+  it("reads only the identical value as the value the file carries", () => {
+    renderPart("asset_tag", "AT900", "AT900");
 
     expect(acknowledgementAsked()).toBe(false);
     expect(document.getElementById("res_part_preview_0").textContent).toContain("Matches file value");
+  });
+
+  it("posts the acknowledged replacement for the server to check", () => {
+    renderPart("asset_tag", "STRA\u1E9EE", "Stra\u00DFe");
+    document.getElementById("res_force_0").checked = true;
+    document.getElementById("res_force_0").dispatchEvent(new Event("change"));
+
+    submitForm();
+
+    expect(JSON.parse(document.getElementById("res_acknowledged_fields").value)).toEqual(["asset_tag"]);
   });
 
   it("asks to acknowledge a serial that differs only in case", () => {
