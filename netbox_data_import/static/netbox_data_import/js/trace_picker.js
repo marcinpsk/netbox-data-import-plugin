@@ -252,7 +252,7 @@
       labelOf: function (trigger) { return trigger.dataset.traceLocationLabel; },
       keyParam: 'location_key',
       noun: 'visible Locations',
-      // One line per Location keeps a full page of candidates and the Save button in view together.
+      // One line per Location keeps each row compact, with the parent that tells two names apart.
       rowClass: 'd-flex justify-content-between align-items-baseline gap-3',
       render: function (item, candidate) {
         var title = document.createElement('span');

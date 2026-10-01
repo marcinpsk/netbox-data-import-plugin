@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Source Location paths: the profile mapping, the Device candidate evidence, and the workspace list."""
 
+import re
 from io import BytesIO
 
 from dcim.models import Cable, Device, FrontPort, Interface, Location, Rack, RearPort, Site
@@ -678,6 +679,21 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
             ],
         )
         self.assertEqual(searched["total"], 2)
+
+    def test_the_three_pickers_scroll_only_their_candidate_list(self):
+        """Search, count, pages and Save stay in view, and each picker places them the same way."""
+        page = self.open_workspace().content.decode()
+
+        for prefix in ("traceDevice", "traceLocation", "traceTermination"):
+            with self.subTest(picker=prefix):
+                dialog = re.search(rf'<div class="modal" id="{prefix}Picker".*?id="{prefix}Submit"', page, re.DOTALL)
+                self.assertIsNotNone(dialog)
+                markup = dialog.group()
+                self.assertIn('class="modal-dialog modal-lg modal-dialog-scrollable"', markup)
+                self.assertIn('class="d-flex flex-column overflow-hidden"', markup)
+                self.assertIn('<div class="modal-body d-flex flex-column overflow-hidden">', markup)
+                self.assertIn(f'class="list-group overflow-auto ndi-picker-list" id="{prefix}Candidates"', markup)
+                self.assertRegex(markup, rf'<div class="modal-footer">\s*<nav class="me-auto" id="{prefix}Pages"')
 
     def test_the_location_picker_reaches_the_twenty_first_location_of_one_name(self):
         """Twenty-one visible 'Room' Locations under different parents fill more than one page."""

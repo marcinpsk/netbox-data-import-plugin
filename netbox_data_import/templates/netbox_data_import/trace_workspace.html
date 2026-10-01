@@ -39,6 +39,9 @@
   .ndi-trace-reason { color: var(--tblr-secondary); font-size: .8rem; }
   .ndi-trace-severity-warning { background-color: var(--tblr-warning) !important; color: #000 !important; }
   .ndi-location-path { overflow-wrap: anywhere; }
+  /* Only the candidate list scrolls, so the search, the count, the pages and Save stay in view. */
+  .ndi-picker-list { min-height: 0; }
+  .ndi-picker-list .list-group-item { padding-top: .375rem; padding-bottom: .375rem; }
   .ndi-location-actions { white-space: nowrap; }
 </style>
 
@@ -607,9 +610,9 @@
 </div>
 
 <div class="modal" id="traceDevicePicker" tabindex="-1" aria-labelledby="traceDevicePickerTitle">
-  <div class="modal-dialog modal-lg" role="document">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable" role="document">
     <div class="modal-content">
-      <form id="traceDeviceForm" method="post"
+      <form id="traceDeviceForm" method="post" class="d-flex flex-column overflow-hidden"
             action="{% url 'plugins:netbox_data_import:trace_resolve_device' %}"
             data-candidates-url="{% url 'plugins:netbox_data_import:trace_device_candidates' %}"
             hx-post="{% url 'plugins:netbox_data_import:trace_resolve_device' %}"
@@ -625,13 +628,13 @@
           <h5 class="modal-title" id="traceDevicePickerTitle">Choose the NetBox Device for <span id="traceDeviceLabel"></span></h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
-        <div class="modal-body">
+        <div class="modal-body d-flex flex-column overflow-hidden">
           <input type="search" class="form-control mb-2" id="traceDeviceSearch"
                  aria-label="Search eligible Devices"
                  placeholder="Search eligible Devices" autocomplete="off">
           <div class="text-secondary small mb-2" id="traceDeviceCount" aria-live="polite" hidden></div>
           <div class="alert alert-danger" id="traceDeviceError" hidden></div>
-          <div class="list-group" id="traceDeviceCandidates"></div>
+          <div class="list-group overflow-auto ndi-picker-list" id="traceDeviceCandidates"></div>
         </div>
         <div class="modal-footer">
           <nav class="me-auto" id="traceDevicePages" aria-label="Pages of Devices" hidden>
@@ -648,7 +651,7 @@
 
 {% if location_mappings %}
 <div class="modal" id="traceLocationPicker" tabindex="-1" aria-labelledby="traceLocationPickerTitle">
-  <div class="modal-dialog modal-dialog-scrollable" role="document">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable" role="document">
     <div class="modal-content">
       <form id="traceLocationForm" method="post" class="d-flex flex-column overflow-hidden"
             action="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
@@ -664,13 +667,13 @@
           <h5 class="modal-title" id="traceLocationPickerTitle">Choose the NetBox Location for <span id="traceLocationLabel" class="ndi-location-path"></span></h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
-        <div class="modal-body">
+        <div class="modal-body d-flex flex-column overflow-hidden">
           <input type="search" class="form-control mb-2" id="traceLocationSearch"
                  aria-label="Search the visible Locations of this Site"
                  placeholder="Search the visible Locations of this Site" autocomplete="off">
           <div class="text-secondary small mb-2" id="traceLocationCount" aria-live="polite" hidden></div>
           <div class="alert alert-danger" id="traceLocationError" hidden></div>
-          <div class="list-group" id="traceLocationCandidates"></div>
+          <div class="list-group overflow-auto ndi-picker-list" id="traceLocationCandidates"></div>
         </div>
         <div class="modal-footer">
           <nav class="me-auto" id="traceLocationPages" aria-label="Pages of Locations" hidden>
@@ -687,9 +690,9 @@
 {% endif %}
 
 <div class="modal" id="traceTerminationPicker" tabindex="-1" aria-labelledby="traceTerminationPickerTitle">
-  <div class="modal-dialog modal-lg" role="document">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable" role="document">
     <div class="modal-content">
-      <form id="traceTerminationForm" method="post"
+      <form id="traceTerminationForm" method="post" class="d-flex flex-column overflow-hidden"
             action="{% url 'plugins:netbox_data_import:trace_resolve_termination' %}"
             data-candidates-url="{% url 'plugins:netbox_data_import:trace_termination_candidates' %}"
             hx-post="{% url 'plugins:netbox_data_import:trace_resolve_termination' %}"
@@ -706,13 +709,13 @@
           <h5 class="modal-title" id="traceTerminationPickerTitle">Choose the termination for <span id="traceTerminationLabel"></span></h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
-        <div class="modal-body">
+        <div class="modal-body d-flex flex-column overflow-hidden">
           <input type="search" class="form-control mb-2" id="traceTerminationSearch"
                  aria-label="Search the eligible terminations"
                  placeholder="Search the eligible terminations" autocomplete="off">
           <div class="text-secondary small mb-2" id="traceTerminationCount" aria-live="polite" hidden></div>
           <div class="alert alert-danger" id="traceTerminationError" hidden></div>
-          <div class="list-group" id="traceTerminationCandidates"></div>
+          <div class="list-group overflow-auto ndi-picker-list" id="traceTerminationCandidates"></div>
         </div>
         <div class="modal-footer">
           <nav class="me-auto" id="traceTerminationPages" aria-label="Pages of terminations" hidden>
