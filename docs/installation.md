@@ -18,6 +18,53 @@ python manage.py migrate
 
 ## Upgrade notes
 
+### Names compare under one uppercase identity
+
+The plugin now compares every name with one name identity: it reads each whitespace character as a
+space, collapses each run of spaces, trims the ends, and compares the full Unicode uppercase form.
+Python builds each saved key with it, and PostgreSQL compares each NetBox name with it. Before, the
+saved keys were casefolded, while the database compared uppercase names, and the two did not agree
+for every character.
+
+Before you upgrade:
+
+1. Merge or discard every open netbox-branching branch. Migration `0045_rekey_name_identities`
+   rewrites Cable provenance only in main, so a branch would bring back its old trace keys.
+2. Expect each open import preview to rebuild from its stored workbook. The plan schema version
+   changes.
+
+Migration `0045_rekey_name_identities` rekeys every saved termination, Device and Location
+decision, every Resolution Proposal, every Cable provenance row and every Cable segment override.
+It never stops the upgrade:
+
+- A queued or running Resolution Proposal fails with the reason "Superseded by a newer request
+  contract". Ask again after the upgrade.
+- Two saved decisions whose keys become one key are merged when they chose the same NetBox object:
+  the oldest row stays, and a proposal that wrote the other row points to it. When they chose
+  different objects, both are deleted, and the question is open again.
+- A Cable provenance row whose trace endpoints sort in the other order now, for example because a
+  name has `_` where the other has a letter, gets the other `direction`, and its `segment_index`
+  becomes empty: the upgrade does not know how many segments the trace has.
+
+Each merge, deletion and empty `segment_index` writes a warning to the
+`netbox_data_import.migrations.0045_rekey_name_identities` logger. Keep the `migrate` output.
+
+The upgrade can only uppercase the casefolded key it finds. That is exact unless the source name
+contains one of these characters, which casefold to another letter:
+
+| Character | Code point | Saved key after the upgrade answers |
+| --- | --- | --- |
+| Capital sharp s `ẞ` | U+1E9E | `SS`, so a name spelled `STRASSE` or `Straße` |
+| Kelvin sign | U+212A | the letter `K` |
+| Angstrom sign | U+212B | the letter `Å` (U+00C5) |
+| Ohm sign | U+2126 | the letter `Ω` (U+03A9) |
+| Theta symbol `ϴ` | U+03F4 | the letter `Θ` |
+| Capital I with dot above `İ` | U+0130 | `I` followed by a combining dot above |
+
+A saved decision for such a name now answers the spelling in the last column, and the name itself
+asks its question again. Choose it again. A name with a dotless `ı` (U+0131) now has the key of the
+same name with `i`, so its decision can merge with that name's decision, or both can be deleted.
+
 ### Transform patterns use RE2
 
 The plugin now evaluates Column Transform Rule patterns with RE2. RE2 prevents a configured pattern

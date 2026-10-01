@@ -457,9 +457,9 @@ SourceTrace
               per-sheet export timestamp, original From/To text and direction
 ```
 
-A Termination Reference is identified by its device, cards, and port labels. Normalization reuses the
-plugin's existing source-identity convention: trim, collapse whitespace, casefold. Original spellings
-stay in the evidence for display. The source Device column names the panel.
+A Termination Reference is identified by its device, cards, and port labels, each compared under the
+name identity (section 5.9). Original spellings stay in the evidence for display. The source Device
+column names the panel.
 
 The cards label is part of Termination Reference identity, part of review display, and context for the
 operator and the Inference Backend. Deterministic matching never uses it: port resolution uses only
@@ -474,8 +474,10 @@ identify anything or select a Device.
 Per ADR 0002:
 
 - **Trace identity**: the unordered pair of endpoint Termination References. Its canonical form is the
-  JSON serialization of the two normalized termination triples, sorted lexicographically:
-  `[["device","cards","port"],["device","cards","port"]]`. JSON is unambiguous by construction, so a
+  JSON serialization of the two endpoint identity keys, sorted lexicographically by code point:
+  `[["device","cards","port","kind"],["device","cards","port","kind"]]`. Device, cards, and port are
+  name identities (section 5.9). The fourth member is the claimed kind (section 6.1), or the name
+  identity of a PortClass outside the vocabulary. JSON is unambiguous by construction, so a
   label that contains a separator character cannot collide with another identity. This canonical JSON
   form is the stored key and the Synchronization Unit identity. It is stable across direction flips,
   re-exports, and patching changes.
@@ -596,6 +598,40 @@ blank-row layout, empty-string cells, and sheet dimensions.
 | Fiber trace workbook | 20 blocks per sheet collapse to 10 Source Traces, zero duplicate conflicts, 8 valid with 4 to 9 segments, 4 ending at a rear port, every `Trace List` corroboration passing, 1 `trace.non_linear_path`, 1 `trace.pass_through_at_interface`, and one accepted legal same-rear-port continuation |
 | Both | Zero shared terminations between distinct traces |
 
+### 5.9 Name identity
+
+Every human name this specification compares uses one name identity: a Termination Reference label,
+a source Device label and Location path, a Device, Rack, Location, port, and Contact name, an asset
+tag, and the make and model of a Device Type or Manufacturer mapping. `netbox_data_import/identity.py`
+owns it, in Python and in PostgreSQL:
+
+1. Map each character of this whitespace set to an ASCII space: U+0009 to U+000D, U+001C to U+0020,
+   U+0085, U+00A0, U+1680, U+2000 to U+200A, U+2028, U+2029, U+202F, U+205F, and U+3000.
+2. Collapse each run of spaces to one space, and remove a leading or trailing space.
+3. Apply the full Unicode uppercase mapping, with no language tailoring. Python uses `str.upper()`.
+   PostgreSQL uses `UPPER` under NetBox's `natural_sort` collation, an ICU collation with the root
+   locale `und-u-kn-true`. Every step before `UPPER` runs under the `C` collation, so the collation
+   of the input column changes nothing.
+
+No step applies NFC or NFKC, so `e` with a combining acute accent and `é` are two identities. Keys
+compare bytewise. A source value is text when it reaches the identity: a Source Adapter reads a
+spreadsheet null word such as `none` or `N/A` as an empty cell before it builds a key, so a real name
+`none` keeps its identity. Source IDs, serials, enum values, slugs, field-key members other than
+names, and candidate identifiers keep their own comparison rules.
+
+A key that Python builds and a name the database compares meet only when both sides state the same
+Unicode case data. Python and the ICU library carry their own Unicode versions, so `test_identity`
+runs every code point PostgreSQL can store, each uppercase expansion in context, and each whitespace
+character in each position through both sides, on columns of three collations and on parameters. An
+upgrade that changes one side fails it.
+
+A change of this definition is a schema change of every stored key. It needs a data migration that
+rekeys every live key, and a plan schema version that rebuilds each cached Import Plan. The
+decision models therefore keep the source spelling beside the key (section 9.1), so the next change
+can rekey from that text. Migration `0045_rekey_name_identities` moved every key from the earlier
+casefold identity to this one; see the installation upgrade notes for the names it cannot move
+exactly.
+
 ## 6. Patched Path Replacement planning and transaction behavior
 
 The Cable Target Module verifies pass-throughs against the PortMapping model, which NetBox 4.5
@@ -607,10 +643,10 @@ request context when a job fails.
 ### 6.1 Port resolution
 
 Each Termination Reference resolves inside its resolved Device. Device resolution runs before port
-resolution begins. A saved `TraceDeviceResolution` maps the normalized source Device label to one
-NetBox Device for the Import Profile. The mapping applies to every port under that label and to later
-source documents that use the same normalized label. A saved choice takes precedence over exact-name
-matching.
+resolution begins. A saved `TraceDeviceResolution` maps the name identity of a source Device label
+(section 5.9) to one NetBox Device for the Import Profile. The mapping applies to every port under
+that label and to later source documents whose label has the same identity, whatever its case and
+whitespace. A saved choice takes precedence over exact-name matching.
 
 Without a saved choice, one exact Device-name match inside the actor's view scope and selected Site
 resolves automatically. Zero or several matches leave one Device question open in the Trace Review
@@ -620,8 +656,8 @@ also view its related Rack or Location.
 
 The source Location is an opaque path, for example `Region >> Building >> 1st Floor >> DH4 >> T`. The
 plugin never splits or interprets it, so it never compares it with a NetBox Location name. Its key is
-`identity_text` of the source value, used for evidence collection, lookup, the digest, and
-uniqueness; the source text is kept separately for display. An empty key is not a path. Separator
+the name identity of the source value (section 5.9), used for evidence collection, lookup, the
+digest, and uniqueness; the source text is kept separately for display and beside a saved mapping. An empty key is not a path. Separator
 spelling is part of the key, so `A>>B` and `A >> B` are two paths.
 
 The operator can map one source Location path to one NetBox Location in the selected Site. A
@@ -688,10 +724,11 @@ the proposal snapshot, and every selection write carry that pair unchanged, and 
 the model from the claimed kind.
 
 Deterministic matching takes the admitted models in match order and stops at the first model with any
-normalized exact port-name match. The database computes that normalized form for both the source port
-and each stored name, with the same expression and one fixed collation that the picker search uses,
-and it reads only the rows whose form matches. A source port and a candidate that the search ranks as
-an exact match are therefore the same match here. Exactly one match in that model resolves the Termination Reference.
+exact port-name match under the name identity (section 5.9). Python builds the identity of the source
+port, and the database computes the identity of each stored name with the expression the picker search
+uses, so it reads only the rows whose identity matches. A source port, a field key's port member, and
+a candidate that the search ranks as an exact match are therefore one match, and a lookup that starts
+from a field key needs no source spelling. Exactly one match in that model resolves the Termination Reference.
 Several matches in that model, or no match in any admitted model, leave the Target Field unresolved:
 the unit is blocked, and manual searchable selection resolves it. An Interface name match therefore
 always wins over a console or power port of the same name, and a device with no matching Interface
@@ -712,11 +749,11 @@ never uses it.
 
 Eligible-candidate retrieval treats the admitted models as one set. It has one combined count and one
 combined bound: the picker's page size and the proposal's complete-set ceiling each apply to the
-whole set, never per model. The order is stable and total: an exact normalized match of the search
-text first, then name, then match order of the model, then id. An exact-name search therefore always
-reaches its candidate, whatever the other models hold. A search admits each candidate whose
-normalized name contains the normalized search text, and the database computes both forms, so a
-name that differs only in whitespace or case is never filtered out. Names compare bytewise. Each
+whole set, never per model. The order is stable and total: a candidate whose name identity equals
+the identity of the search text first, then name, then match order of the model, then id. An
+exact-name search therefore always reaches its candidate, whatever the other models hold. A search
+admits each candidate whose name identity contains the identity of the search text, so a name that
+differs only in whitespace or case is never filtered out. Names compare bytewise. Each
 model is counted in the database. A page has an offset into the combined order: the database orders
 the keys of every model as one set and returns only the page, and only the rows of that page load.
 A page at or past the count is empty and reads no row. A row that leaves the set between the page
@@ -885,8 +922,8 @@ Diagnostic code strings are spec defaults; the conditions and dispositions are n
 A Resolution Proposal binds to (Import Profile, task type, target-module-defined field key). Binding
 is plan-independent, so a proposal survives preview close and replanning.
 
-The first task type is `select_termination`. Its field key is the normalized termination identity
-triple plus the claimed kind plus the role marker. Its canonical form is the JSON serialization of
+The first task type is `select_termination`. Its field key is the name identity (section 5.9) of the
+termination's device, cards, and port, plus the claimed kind plus the role marker. Its canonical form is the JSON serialization of
 those values, matching the trace identity rule in section 5.2:
 `{"cards":<cards>,"device":<device>,"kind":<kind>,"port":<port>,"role":"termination"}`, with members
 sorted by name (spec default for the member order). The stored key is this canonical JSON form. A
@@ -1289,7 +1326,7 @@ index, and projection column.
 | Model (spec default names) | Purpose | Key | Introduced by |
 | --- | --- | --- | --- |
 | `SourceDocument` | The stored uploaded workbook that `source_document` references | Content fingerprint indexed per Import Profile | T2 |
-| `TraceDeviceResolution` | A trace source Device label selected as one NetBox Device | (Import Profile, normalized source Device key) unique | T6 |
+| `TraceDeviceResolution` | A trace source Device label selected as one NetBox Device | (Import Profile, source Device key) unique | T6 |
 | `TraceLocationResolution` | A trace source Location path mapped to one NetBox Location | (Import Profile, source Location key) unique | Location evidence |
 | `TerminationResolution` | The trace-side Row Resolution written by manual selection or proposal acceptance | (Import Profile, task type, field key) unique | T4 |
 | `CableClassMapping` | Cable target policy for one CableClass value | (Import Profile, CableClass value) unique | T4 |
@@ -1312,18 +1349,20 @@ stale-document error (section 2.1) and requires a fresh upload. That error is th
 contract; the runtime adds no other concurrent-preview machinery.
 
 `TerminationResolution` is a Row Resolution in glossary terms. It stores the Import Profile, the task
-type, the canonical JSON field key (which carries the role marker, section 7.1), the selected object
-type, the selected object id, and the display name at selection time. The three value columns hold the
+type, the canonical JSON field key (which carries the role marker, section 7.1), the device, cards, and
+port spelling the decision was made for, the selected object type, the selected object id, and the
+display name at selection time. Each spelling must have the identity of its key member (section 5.9);
+a row saved before the spelling was kept holds empty spellings. The three value columns hold the
 selection for both the `termination` and `mapped_peer` roles. `SourceResolution` keeps its flat
 `(profile, source_id, source_column)` shape and stays flat-adapter-specific.
 
-`TraceDeviceResolution` stores the canonical source Device key, its fixed-width digest, the selected
-Device ID, and a display snapshot. The plain Device ID preserves a stale decision after Device
+`TraceDeviceResolution` stores the canonical source Device key, its fixed-width digest, the source
+label the decision was made for, the selected Device ID, and a display snapshot. The plain Device ID preserves a stale decision after Device
 deletion so the operator can replace it. The snapshot is never shown unless the Device is still in
 the actor's view scope. Installation-local Device IDs are not part of portable profile YAML.
 
-`TraceLocationResolution` stores the canonical source Location key, its fixed-width digest, the
-selected Location ID, and a display snapshot. Like `TraceDeviceResolution`, the plain ID keeps a
+`TraceLocationResolution` stores the canonical source Location key, its fixed-width digest, the source
+path the decision was made for, the selected Location ID, and a display snapshot. Like `TraceDeviceResolution`, the plain ID keeps a
 stale decision after Location deletion so the operator can replace it, the snapshot is shown only
 while the Location is in the actor's view scope, and the row is not part of portable profile YAML
 (the YAML omits the whole section). It is a registered policy section, so a mapping change changes
@@ -1338,7 +1377,9 @@ segment resolves to another pair.
 
 `CableImportSource` records the Import Profile, the Cable (a plain foreign key), the trace identity,
 the segment index, the original From/To text and direction, the workbook provenance (fingerprint,
-sheet, block ordinal, row range), and the source export timestamp. One Cable created for a shared
+sheet, block ordinal, row range), and the source export timestamp. The segment index is empty only on
+a row whose canonical endpoint order the identity rekey reversed (section 5.9), because that upgrade
+does not know the trace's segment count. One Cable created for a shared
 identical segment carries one row per contributing Source Trace (section 5.7).
 
 `ResolutionProposal` stores the immutable request content (including the resolved Device object type
@@ -1464,7 +1505,7 @@ The workspace lists, at batch level and independent of the selected trace, each 
 Location path of the batch with its state: unmapped, mapped (with the Location), or stale. With no
 paths it says "No source Location paths"; with paths but no visible Location in the Site it says so
 separately. One picker serves every path: it searches the visible Locations of the selected Site by
-normalized name and shows a bounded page with an "N of M" count, so the page renders no per-path
+name identity (section 5.9) and shows a bounded page with an "N of M" count, so the page renders no per-path
 list of Locations.
 
 A mapping row's state, target, snapshot, and every explanation derived from it need view permission
@@ -1963,7 +2004,7 @@ variables.
 - A trace-only profile opens this workspace directly. An open source Device label offers a Device
   picker before its termination picker.
 - Selecting a Device writes one profile-owned `TraceDeviceResolution` and replans. A later source
-  document reuses it for the same normalized label and for every port under that label.
+  document reuses it for every label with the same name identity and for every port under it.
 - Rack, Location, and U position only rank visible Device candidates. They never select one. Source
   Location evidence compares only through a `TraceLocationResolution` mapping, and the import-page
   Location ranks candidates after source evidence without filtering them.
