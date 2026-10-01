@@ -568,7 +568,8 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(unit.disposition, Disposition.BLOCKED)
         unresolved = next(item for item in unit.diagnostics if item.code == "cable.termination_unresolved")
-        self.assertEqual(unresolved.display["selected_display_name"], str(elsewhere))
+        self.assertEqual(unresolved.display, {"device": "DEV-A", "cards": "", "port": "eth0", "port_class": "Port"})
+        assert_absent_from(self, unit.to_dict(), str(elsewhere))
 
     def test_a_stored_termination_resolution_with_the_wrong_kind_is_blocked(self):
         """A FrontPort selection cannot satisfy a source reference whose PortClass claims a RearPort."""

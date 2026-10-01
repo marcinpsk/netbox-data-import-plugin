@@ -2610,6 +2610,59 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
         selected = {item["label"]: item["selected"] for item in cached.context["selected_trace"].terminations}
         self.assertEqual(selected["PDU-1 OUT1"], TERMINATION_HIDDEN)
 
+    def test_a_saved_selection_the_viewer_cannot_view_names_no_port_in_any_copy(self):
+        """A saved decision's stored port name reaches neither the plan, the page, nor the queued Job."""
+        from core.models import Job, ObjectType
+        from django_rq import get_queue
+        from users.models import ObjectPermission
+
+        from netbox_data_import.field_keys import SELECT_TERMINATION_TASK
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+
+        hidden_interface = Interface.objects.create(device=self.device_a, name="saved-hidden-if", type="1000base-t")
+        hidden_front = FrontPort.objects.create(device=self.panel_2, name="saved-hidden-front", type="8p8c")
+        for (device, port), selected in ((("DEV-A", "eth0"), hidden_interface), (("DEV-B", "eth1"), hidden_front)):
+            TerminationResolution.objects.create(
+                profile=self.profile,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key=termination_field_key(device=device, cards="", port=port, kind="interface"),
+                selected_object_type=ObjectType.objects.get_for_model(selected),
+                selected_object_id=selected.pk,
+                selected_display_name=str(selected),
+            )
+        for model, hidden in ((Interface, hidden_interface), (FrontPort, hidden_front)):
+            permission = ObjectPermission.objects.get(name=f"trace-port-viewer {model.__name__} view")
+            permission.constraints = {"id__in": list(model.objects.exclude(pk=hidden.pk).values_list("pk", flat=True))}
+            permission.save()
+        clear_user_permission_caches(self.viewer)
+        names = (str(hidden_interface), str(hidden_front))
+
+        page = self.open_workspace(patched_path(), power_path())
+        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        blocked = next(unit for unit in accepted.units if unit.disposition == Disposition.BLOCKED)
+        self.assertEqual(
+            {item.code for item in blocked.diagnostics}
+            & {"cable.termination_unresolved", "cable.termination_kind_mismatch"},
+            {"cable.termination_unresolved", "cable.termination_kind_mismatch"},
+        )
+        actionable = next(unit for unit in accepted.units if unit.disposition == Disposition.ACTIONABLE)
+        queued = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {
+                "identity": actionable.identity,
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+        )
+
+        self.assertEqual(queued.status_code, 302)
+        job = Job.objects.latest("pk")
+        worker_input = get_queue(job.queue_name).fetch_job(str(job.job_id)).kwargs["accepted_plan"]
+        self.assertEqual(len(worker_input["units"]), 2)
+        for name in names:
+            self.assertNotContains(page, name)
+            assert_absent_from(self, accepted.to_dict(), name)
+            assert_absent_from(self, worker_input, name)
+
     def test_a_cached_port_name_without_an_authorizable_source_redacts_on_render(self):
         """The workspace does not trust a cached port name whose source is missing or malformed."""
         self.open_workspace(power_path())

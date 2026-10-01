@@ -696,6 +696,9 @@ terminations on the resolved Device. The actor must then be able to view the uni
 model. A hidden match, or several matches, leaves the field unresolved with the same diagnostic as a
 missing name, and never falls through to a later model. The diagnostic carries no hidden identity,
 label, or count. Without this rule two actors would resolve one source port to two different objects.
+A saved selection that no longer answers its question, because it left the Device, is hidden, or names
+a model the claimed kind does not admit, reports its diagnostic without the saved display name: that
+name can belong to a port the actor cannot view, and no later render can recheck it.
 
 The optional Resolution Proposal flow (section 7) assists the same selection. The cards label is
 identity, display, and context for the operator and the Inference Backend. Deterministic matching

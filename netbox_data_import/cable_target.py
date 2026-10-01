@@ -747,21 +747,14 @@ class _CableBatch:
         if label not in ADMITTED_TERMINATION_MODELS[claimed_kind]:
             analysis.block(
                 "cable.termination_kind_mismatch",
-                {
-                    **_reference_display(reference),
-                    "selected_display_name": stored.selected_display_name,
-                    "claimed_kind": claimed_kind,
-                    "selected_object_type": label,
-                },
+                {**_reference_display(reference), "claimed_kind": claimed_kind, "selected_object_type": label},
             )
             return None
         # A saved selection that left the resolved Device no longer answers the question it was asked.
         selected = self.reader.terminations(label).filter(pk=stored.selected_object_id, device_id=device.pk).first()
         if selected is None:
-            analysis.block(
-                "cable.termination_unresolved",
-                {**_reference_display(reference), "selected_display_name": stored.selected_display_name},
-            )
+            # The saved name may belong to a port the actor cannot view, so the finding states source values alone.
+            analysis.block("cable.termination_unresolved", _reference_display(reference))
             return None
         return self._termination(selected)
 
