@@ -52,6 +52,11 @@ from netbox_data_import.review_workspace import save_termination_resolution_and_
 User = get_user_model()
 
 
+def _reviewed(profile) -> str:
+    """Return the fingerprint of the profile as stored now, which the caller has reviewed."""
+    return ImportProfile.objects.get(pk=profile.pk).planning_fingerprint
+
+
 def _flatten_choices(choices):
     """Return value and label pairs from flat or grouped NetBox choices."""
     flattened = []
@@ -594,6 +599,7 @@ class TerminationResolutionPersistenceTest(TestCase):
             selected_object_type=self.interface_type,
             selected_object_id=self.interface.pk,
             selected_display_name=str(self.interface),
+            reviewed_fingerprint=_reviewed(self.profile),
         )
 
     def test_the_saved_selection_is_followed_by_a_fresh_plan(self):
@@ -636,6 +642,7 @@ class TerminationResolutionPersistenceTest(TestCase):
                 selected_object_type=self.interface_type,
                 selected_object_id=self.interface.pk,
                 selected_display_name=str(self.interface),
+                reviewed_fingerprint=_reviewed(flat_profile),
             )
 
         self.assertFalse(TerminationResolution.objects.filter(profile=flat_profile).exists())
@@ -678,6 +685,8 @@ class TerminationResolutionLockOrderingTest(TransactionTestCase):
                 wait_until_a_lock_is_blocked(self)
                 ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="flat_workbook")
 
+        # The caller reviewed the flat profile, so only a profile read under the lock reaches the refusal.
+        reviewed_flat = ImportProfile(pk=self.profile.pk, source_adapter="flat_workbook", adapter_config={})
         with run_on_separate_connection(hold_the_lock_then_change_the_adapter):
             self.assertTrue(holder_ready.wait(timeout=10), "the holder never took the policy lock")
             with self.assertRaisesMessage(ValidationError, "do not apply"):
@@ -691,6 +700,7 @@ class TerminationResolutionLockOrderingTest(TransactionTestCase):
                     selected_object_type=self.interface_type,
                     selected_object_id=self.interface.pk,
                     selected_display_name=str(self.interface),
+                    reviewed_fingerprint=reviewed_flat.planning_fingerprint,
                 )
 
         self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
@@ -771,6 +781,7 @@ class ReplanUnderThePolicyLockTest(TransactionTestCase):
                     pass
             return execute(sql, params, many, context)
 
+        reviewed = _reviewed(self.profile)
         with connection.execute_wrapper(contend_while_the_plan_reads):
             save_termination_resolution_and_replan(
                 profile=self.profile,
@@ -782,6 +793,7 @@ class ReplanUnderThePolicyLockTest(TransactionTestCase):
                 selected_object_type=self.interface_type,
                 selected_object_id=self.interface.pk,
                 selected_display_name=str(self.interface),
+                reviewed_fingerprint=reviewed,
             )
 
         self.assertTrue(contended, "the plan never read the stored source")

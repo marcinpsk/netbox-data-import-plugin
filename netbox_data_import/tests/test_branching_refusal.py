@@ -455,7 +455,11 @@ class BackgroundRefusalTest(TransactionTestCase):
         entries = {
             "locked_resolution_policy": enter_resolution_lock,
             "accept_proposal": partial(
-                accept_proposal, 1, operator=self.user, netbox_reader=NetBoxReader.for_actor(self.user)
+                accept_proposal,
+                1,
+                operator=self.user,
+                netbox_reader=NetBoxReader.for_actor(self.user),
+                reviewed_fingerprint=plan.profile_fingerprint,
             ),
             "reject_proposal": partial(reject_proposal, 1, operator=self.user),
             "apply_profile_document": partial(apply_profile_document, serialize_profile(self.profile), actor=self.user),

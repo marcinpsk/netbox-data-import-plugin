@@ -18,6 +18,7 @@ from .models import (
 from .object_permissions import ObjectPermissionDenied
 from .proposal_tasks import CandidateSnapshot, proposal_inventory_staleness, proposal_task
 from .resolution_proposals import decide_proposal
+from .review_workspace import refuse_moved_policy
 
 
 def proposal_staleness(proposal, *, netbox_reader=None, inventory=None):
@@ -34,8 +35,12 @@ def proposal_staleness(proposal, *, netbox_reader=None, inventory=None):
     return proposal_inventory_staleness(proposal, inventory)
 
 
-def accept_proposal(proposal_id, *, operator, netbox_reader) -> bool:
-    """Write one fresh candidate decision under the profile, proposal, and resolution locks."""
+def accept_proposal(proposal_id, *, operator, netbox_reader, reviewed_fingerprint) -> bool:
+    """Write one fresh candidate decision under the profile, proposal, and resolution locks.
+
+    Acceptance is a workspace command that writes profile policy, so it also refuses a decision made
+    against a reviewed preview whose profile policy has since moved (section 10.2).
+    """
     branching.refuse_branch()
     if operator is None or netbox_reader.actor != operator:
         raise ValueError("Acceptance requires a reader scoped to the deciding operator.")
@@ -51,6 +56,7 @@ def accept_proposal(proposal_id, *, operator, netbox_reader) -> bool:
             # atomic-exit-safe: proposal-refused-before-write
             return False
         proposal.profile = ImportProfile.objects.get(pk=profile_id)
+        refuse_moved_policy(proposal.profile, reviewed_fingerprint)
         snapshot = CandidateSnapshot.from_json(proposal.candidate_snapshot)
         entry = next(
             (entry for entry in snapshot.entries if entry.candidate_id == proposal.selected_candidate_id), None

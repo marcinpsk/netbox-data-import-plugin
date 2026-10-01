@@ -49,6 +49,7 @@ def save_termination_resolution_and_replan(
     selected_object_type,
     selected_object_id,
     selected_display_name,
+    reviewed_fingerprint,
 ):
     """Persist one manual termination selection, then request a fresh Import Plan."""
     values = {
@@ -58,6 +59,7 @@ def save_termination_resolution_and_replan(
     }
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
         lookup = {
             "profile": locked_profile,
             "task_type": task_type,
@@ -101,7 +103,7 @@ def _refuse_blind_overwrite(actor, row) -> None:
     raise UnacceptablePolicyDecision([POLICY_WRITE_REFUSED])
 
 
-def _refuse_moved_policy(locked_profile, reviewed_fingerprint) -> None:
+def refuse_moved_policy(locked_profile, reviewed_fingerprint) -> None:
     """Refuse a decision made against a policy that has already moved under this preview.
 
     A preview revision is per session, so it cannot see another operator's profile edit.
@@ -134,7 +136,7 @@ def save_cable_class_mapping_and_replan(
         # The row is read under the lock, so the form validates what the write will replace.
         stored = CableClassMapping.objects.filter(**lookup).first()
         _refuse_blind_overwrite(actor, stored)
-        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
         instance = stored or CableClassMapping(**lookup)
         form = CableClassMappingForm({**data, "cable_class": cable_class}, instance=instance)
         if not form.is_valid():
@@ -177,7 +179,7 @@ def save_cable_segment_override_and_replan(
         stored = CableSegmentOverride.objects.filter(**lookup).first()
         deciding = stored or CableClassMapping.objects.filter(profile=locked_profile, cable_class=cable_class).first()
         _refuse_blind_overwrite(actor, deciding)
-        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
         instance = stored or CableSegmentOverride(**lookup)
         instance.source_trace_identity = trace_identity
         instance.segment_index = segment_index
@@ -213,7 +215,7 @@ def clear_cable_segment_override_and_replan(
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
         stored = CableSegmentOverride.objects.filter(profile=locked_profile, segment_key=segment_key).first()
         _refuse_blind_overwrite(actor, stored)
-        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
         if stored is not None:
             delete_permission_scoped_objects(actor, CableSegmentOverride.objects.filter(pk=stored.pk))
         # atomic-exit-safe: segment-override-cleared-and-replanned
@@ -238,7 +240,7 @@ def save_trace_device_resolution_and_replan(
 
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
-        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
         reader = NetBoxReader.for_actor(actor).for_planning_context(
             planning_context, output_kinds=locked_profile.output_kinds
         )
@@ -307,7 +309,7 @@ def save_trace_location_resolution_and_replan(
             profile=locked_profile, source_location_key_digest=lookup["source_location_key_digest"]
         ).first()
         _refuse_blind_overwrite(actor, stored)
-        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
         reader = NetBoxReader.for_actor(actor).for_planning_context(
             planning_context, output_kinds=locked_profile.output_kinds
         )
@@ -338,7 +340,7 @@ def clear_trace_location_resolution_and_replan(
             profile=locked_profile, source_location_key_digest=index_digest(source_location_key)
         ).first()
         _refuse_blind_overwrite(actor, stored)
-        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
         if stored is not None:
             delete_permission_scoped_objects(actor, TraceLocationResolution.objects.filter(pk=stored.pk))
         # atomic-exit-safe: location-mapping-cleared-and-replanned
@@ -1119,4 +1121,4 @@ class ReviewWorkspace:
         return replace(unit, **values)
 
 
-__all__ = ("AutoMatchSummary", "ReviewWorkspace", "WorkspaceUnit")
+__all__ = ("AutoMatchSummary", "ReviewWorkspace", "WorkspaceUnit", "refuse_moved_policy")

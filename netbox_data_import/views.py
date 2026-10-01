@@ -4777,8 +4777,11 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
                     selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
                     selected_object_id=chosen.pk,
                     selected_display_name=str(chosen),
+                    reviewed_fingerprint=workspace.plan.profile_fingerprint,
                 )
                 record_recalculated_preview(request.session, plan, user=request.user)
+        except ProfilePolicyMoved as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
         except PreviewLocked as exc:
@@ -4833,7 +4836,7 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
             return JsonResponse({"ok": False, "error": "The import profile is no longer available."}, status=404)
         except ResolutionProposal.DoesNotExist:
             return JsonResponse({"ok": False, "error": "That proposal is no longer available."}, status=404)
-        except (PreviewActionInvalid, ActiveProposalExists) as exc:
+        except (PreviewActionInvalid, ActiveProposalExists, ProfilePolicyMoved) as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=409)
         except UnusableCandidateSet as exc:
             return JsonResponse({"ok": False, "error": str(exc), "reason": exc.reason}, status=400)
@@ -5014,7 +5017,7 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
         )
         if proposal.field_key not in _workspace_field_keys(workspace):
             raise InvalidProposalTarget("This preview asked no question about that termination.")
-        if not self.apply(proposal, request, reader):
+        if not self.apply(proposal, request, reader, workspace):
             raise PreviewActionInvalid("This proposal no longer permits that action. Re-read it before continuing.")
         proposal.refresh_from_db()
         payload = {"ok": True, "proposal_id": proposal.pk, "status": proposal.status, "decision": proposal.decision}
@@ -5022,7 +5025,7 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             payload["preview_state"] = "recalculation_required"
         return JsonResponse(payload)
 
-    def apply(self, proposal, request, reader):
+    def apply(self, proposal, request, reader, workspace):
         """Apply the action implemented by the concrete endpoint."""
         raise NotImplementedError
 
@@ -5030,7 +5033,7 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
 class TraceCancelProposalView(_TraceProposalActionView):
     """Allow any operator with preview and resolved Device access to cancel active work."""
 
-    def apply(self, proposal, request, reader):
+    def apply(self, proposal, request, reader, workspace):
         """Cancel through the lifecycle's conditional transition."""
         from .proposal_tasks import proposal_task
         from .resolution_proposals import cancel_proposal
@@ -5050,11 +5053,16 @@ class TraceCancelProposalView(_TraceProposalActionView):
 class TraceAcceptProposalView(_TraceProposalActionView):
     """Accept through the existing transaction; the operator replans their own preview."""
 
-    def apply(self, proposal, request, reader):
+    def apply(self, proposal, request, reader, workspace):
         """Record the accepted resolution and require an explicit preview recalculation."""
         from .proposal_decisions import accept_proposal
 
-        accepted = accept_proposal(proposal.pk, operator=request.user, netbox_reader=reader)
+        accepted = accept_proposal(
+            proposal.pk,
+            operator=request.user,
+            netbox_reader=reader,
+            reviewed_fingerprint=workspace.plan.profile_fingerprint,
+        )
         if accepted:
             mark_preview_dirty(request.session)
         return accepted
@@ -5067,7 +5075,7 @@ class TraceRejectProposalView(_TraceProposalActionView):
     preview_profile_action = "view"
     requires_reader = False
 
-    def apply(self, proposal, request, reader):
+    def apply(self, proposal, request, reader, workspace):
         """Reject through the permission-checked decision service."""
         from .proposal_decisions import reject_proposal
 

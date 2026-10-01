@@ -102,9 +102,18 @@ class DecisionInventory:
         proposal.refresh_from_db()
         return proposal
 
+    def reviewed_fingerprint(self):
+        """Return the profile fingerprint as stored now, which an operator who just re-read has reviewed."""
+        return ImportProfile.objects.get(pk=self.profile.pk).planning_fingerprint
+
     def accept(self, proposal, operator=None):
         actor = operator or self.operator
-        return accept_proposal(proposal.pk, operator=actor, netbox_reader=self.reader(actor))
+        return accept_proposal(
+            proposal.pk,
+            operator=actor,
+            netbox_reader=self.reader(actor),
+            reviewed_fingerprint=self.reviewed_fingerprint(),
+        )
 
     def stale(self, proposal):
         return proposal_staleness(proposal, netbox_reader=self.reader())
@@ -366,7 +375,12 @@ class ProposalAcceptanceTest(DecisionInventory, TestCase):
         proposal = self.proposal()
         actor = User.objects.create_user("other-reader", password="testpass")
         with self.assertRaises(ValueError):
-            accept_proposal(proposal.pk, operator=actor, netbox_reader=self.reader())
+            accept_proposal(
+                proposal.pk,
+                operator=actor,
+                netbox_reader=self.reader(),
+                reviewed_fingerprint=self.reviewed_fingerprint(),
+            )
         self.assert_unwritten(proposal)
 
     def test_a_rejected_candidate_cannot_be_accepted(self):

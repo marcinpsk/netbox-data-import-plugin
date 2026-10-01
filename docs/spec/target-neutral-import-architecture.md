@@ -997,7 +997,10 @@ current resolved Device equals the frozen resolved Device reference, and the sel
 exists.
 
 Acceptance upserts the `TerminationResolution` row for the bound key and links it from the proposal.
-The last explicit operator action wins across proposals for that key. A `no_match` outcome is
+The last explicit operator action wins across proposals for that key. Acceptance is a workspace
+command that writes profile policy, so it also compares the reviewed plan's profile fingerprint under
+the profile lock (section 10.2). After one acceptance the operator re-reads before the next policy
+decision, because acceptance does not replan the preview. A `no_match` outcome is
 informational and cannot be accepted. A proposal never changes NetBox and never applies itself.
 
 Rejection sets the same one-shot decision fields, records the operator and time, and does not block

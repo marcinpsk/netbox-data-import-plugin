@@ -8,7 +8,7 @@ from io import BytesIO
 
 from dcim.models import Cable, Device, FrontPort, Interface, PowerOutlet, PowerPort, RearPort, Site
 from django.db import connection
-from django.test import TestCase, TransactionTestCase
+from django.test import Client, TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils.html import escape
@@ -1454,27 +1454,43 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
     def setUpTestData(cls):
         cls.build_topology()
 
-    def open_workspace(self, *blocks):
+    def open_workspace(self, *blocks, client=None):
         """Upload the given path blocks and leave the wizard on a materialized preview."""
-        self.client.force_login(self.actor)
+        client = client or self.client
+        client.force_login(self.actor)
         upload = BytesIO(trace_workbook_bytes(path_blocks=blocks))
         upload.name = "traces.xlsx"
-        response = self.client.post(
+        response = client.post(
             reverse("plugins:netbox_data_import:import_setup"),
             {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
             follow=True,
         )
         self.assertEqual(response.status_code, 200)
 
-    def open_blocked_workspace(self):
+    def open_blocked_workspace(self, client=None):
         """Leave the wizard on a preview whose one trace waits on a termination decision."""
         self.open_workspace(
             direct_path(
                 from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
                 to_end=trace_termination("DEV-B", "", "eth1", "Port"),
-            )
+            ),
+            client=client,
         )
         return termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface")
+
+    def resolve(self, field_key, port, client=None):
+        """Post one termination decision the way the picker posts it, asking for JSON."""
+        client = client or self.client
+        return client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_termination"),
+            {
+                "field_key": field_key,
+                "object_type": port._meta.label_lower,
+                "object_id": port.pk,
+                "preview_revision": client.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+            headers={"accept": "application/json"},
+        )
 
     def candidates(self, field_key, **params):
         """Ask the picker endpoint the way the picker itself asks: JSON, with the revision."""
@@ -1784,6 +1800,21 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         self.assertEqual(
             response.json(), {"ok": False, "error": "This preview asked no question about that termination."}
         )
+
+    def test_a_termination_decision_against_a_moved_policy_is_refused(self):
+        """Two sessions on one profile: the revision is per session, the fingerprint is not."""
+        field_key = self.open_blocked_workspace()
+        other = Client()
+        self.open_blocked_workspace(client=other)
+        self.assertEqual(self.resolve(field_key, self.eth0, client=other).status_code, 302)
+        later_choice = Interface.objects.create(device=self.device_a, name="eth9", type="1000base-t")
+
+        refused = self.resolve(field_key, later_choice)
+
+        self.assertEqual(refused.status_code, 409)
+        self.assertIn("policy changed since this preview was planned", refused.json()["error"])
+        stored = TerminationResolution.objects.get(profile=self.profile, field_key=field_key)
+        self.assertEqual(stored.selected_object_id, self.eth0.pk)
 
     def test_a_stale_form_post_is_refused_by_the_resolve_command(self):
         """A decision taken against a preview that has moved on is not the decision it looks like."""

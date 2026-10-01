@@ -11,7 +11,7 @@ from core.choices import JobStatusChoices
 from core.models import Job, ObjectType
 from dcim.models import Device, Interface, PowerPort, Site
 from django.db import connection
-from django.test import RequestFactory, SimpleTestCase, TestCase
+from django.test import Client, RequestFactory, SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
 from django.views import View
@@ -146,6 +146,14 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         actor = user_with_object_permission(f"operator-{uuid.uuid4().hex}", grants)
         self.login_with_preview(actor)
         return actor
+
+    def reread(self):
+        """Adopt the plan live NetBox states now, as the workspace re-read action does."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
+        )
+        self.assertEqual(response.status_code, 302)
 
     def login_with_preview(self, actor):
         preview = {key: value for key, value in self.client.session.items() if key.startswith("import_")}
@@ -904,6 +912,44 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         proposal.refresh_from_db()
         self.assertEqual((proposal.decision, proposal.written_resolution_id), ("accepted", row.pk))
 
+    def test_acceptance_against_a_moved_policy_is_refused(self):
+        """Two sessions on one profile: an acceptance cannot commit against a policy its preview never saw."""
+        proposal = self.completed()
+        other = Client()
+        other.force_login(self.actor)
+        upload = BytesIO(
+            trace_workbook_bytes(
+                path_blocks=[
+                    direct_path(
+                        from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
+                        to_end=trace_termination("DEV-B", "", "eth1", "Port"),
+                    )
+                ]
+            )
+        )
+        upload.name = "traces.xlsx"
+        other.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        saved = other.post(
+            reverse("plugins:netbox_data_import:trace_cable_policy"),
+            {
+                "cable_class": "Patch",
+                "cable_type": "cat6a",
+                "cable_profile": "single-1c1p",
+                "preview_revision": other.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+        )
+        self.assertEqual(saved.status_code, 302)
+
+        response = self.call("accept_proposal", proposal_id=proposal.pk)
+
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertIn("policy changed since this preview was planned", response.json()["error"])
+        self.assert_unwritten(proposal)
+
     def test_reject_by_another_operator_records_decision_only(self):
         proposal = self.completed(no_match=True)
         actor = self.operator(decide=True)
@@ -947,6 +993,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
                 (TerminationResolution, ["add"], {"profile_id": self.profile.pk}),
             ],
         )
+        # The operator reviews the policy row above, so the acceptance does not meet a moved policy.
+        self.reread()
         self.login_with_preview(actor)
 
         self.assertIn("permission", self.presentation()["actions"][2]["reason"])
@@ -979,6 +1027,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
                 (TerminationResolution, ["change"], {"missing_field": "value"}),
             ],
         )
+        # The operator reviews the policy row above, so the acceptance does not meet a moved policy.
+        self.reread()
         self.login_with_preview(actor)
 
         self.assertIn("permission", self.presentation()["actions"][2]["reason"])
@@ -1227,6 +1277,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
                 (TerminationResolution, ["add"], {"profile__termination_resolutions__pk": sibling.pk}),
             ],
         )
+        # The operator reviews the policy row above, so the acceptance does not meet a moved policy.
+        self.reread()
         self.login_with_preview(actor)
 
         self.assertEqual(self.presentation()["actions"][2]["reason"], "")
@@ -1264,6 +1316,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
                 ),
             ],
         )
+        # The operator reviews the policy row above, so the acceptance does not meet a moved policy.
+        self.reread()
         self.login_with_preview(actor)
 
         self.assertEqual(self.presentation()["actions"][2]["reason"], "")
