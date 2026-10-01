@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from core.choices import JobStatusChoices
 from core.models import Job, ObjectType
-from dcim.models import Device, Interface, Site
+from dcim.models import Device, Interface, PowerPort, Site
 from django.db import connection
 from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.urls import reverse
@@ -868,6 +868,41 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], before)
         self.assertEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], revision)
         self.assertTrue(self.client.session[PREVIEW_DIRTY_SESSION_KEY])
+
+    def test_accepting_a_power_port_that_shares_an_interface_id_saves_the_power_port(self):
+        """The accept view writes the candidate's own model, never another model with the same numeric id."""
+        shared_id = 900_002
+        Interface.objects.create(pk=shared_id, device=self.device_a, name="eth-shared", type="1000base-t")
+        PowerPort.objects.create(pk=shared_id, device=self.device_a, name="psu-shared")
+        proposal = self.request_proposal()
+        entry = next(
+            item
+            for item in proposal.candidate_snapshot["candidates"]
+            if (item["object_type"], item["object_id"]) == ("dcim.powerport", shared_id)
+        )
+        self.assertTrue(claim_proposal(proposal.pk))
+        self.assertTrue(
+            complete_proposal(
+                proposal.pk,
+                outcome=ProposalOutcome.CANDIDATE,
+                explanation="The source port is the server power inlet.",
+                selected_candidate_id=entry["candidate_id"],
+                selected_object_type=ObjectType.objects.get_for_model(PowerPort),
+                selected_object_id=shared_id,
+            )
+        )
+
+        response = self.call("accept_proposal", proposal_id=proposal.pk)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        row = TerminationResolution.objects.get(profile=self.profile, field_key=self.field_key)
+        self.assertEqual(
+            (row.selected_object_type.app_label, row.selected_object_type.model, row.selected_object_id),
+            ("dcim", "powerport", shared_id),
+        )
+        self.assertEqual(row.selected_display_name, "psu-shared")
+        proposal.refresh_from_db()
+        self.assertEqual((proposal.decision, proposal.written_resolution_id), ("accepted", row.pk))
 
     def test_reject_by_another_operator_records_decision_only(self):
         proposal = self.completed(no_match=True)
