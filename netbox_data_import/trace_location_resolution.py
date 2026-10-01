@@ -44,6 +44,40 @@ def site_locations(reader):
     return locations.filter(site=reader.site) if reader.site is not None else locations
 
 
+@dataclass(frozen=True)
+class LocationCandidate:
+    """One visible Location the picker offers, with its parent's name when the actor may view it."""
+
+    location: Any
+    parent: str
+
+
+@dataclass(frozen=True)
+class LocationCandidatePage:
+    """One bounded page of Location candidates and its uncapped total."""
+
+    candidates: tuple[LocationCandidate, ...]
+    total: int
+
+
+def eligible_trace_locations(reader, *, search: str = "", limit: int) -> LocationCandidatePage:
+    """Return one bounded page of the selected Site's visible Locations, searched by normalized name."""
+    from .database_identity import matching_search, search_identity
+
+    locations = matching_search(site_locations(reader), search_identity(search)).order_by("name", "pk")
+    page = tuple(locations[:limit])
+    # Two Locations can share a name under different parents, so the visible parent tells them apart.
+    parents = dict(
+        site_locations(reader)
+        .filter(pk__in={location.parent_id for location in page if location.parent_id})
+        .values_list("pk", "name")
+    )
+    return LocationCandidatePage(
+        candidates=tuple(LocationCandidate(location, parents.get(location.parent_id, "")) for location in page),
+        total=locations.count(),
+    )
+
+
 def trace_location_mappings(*, profile, reader, keys: Iterable[str]) -> dict[str, LocationMapping]:
     """Return the mapping state of every source Location key, read in bulk inside the actor's scope."""
     from .models import TraceLocationResolution, index_digest
@@ -171,8 +205,11 @@ __all__ = (
     "MAPPED",
     "STALE",
     "UNMAPPED",
+    "LocationCandidate",
+    "LocationCandidatePage",
     "LocationMapping",
     "LocationMappingRow",
+    "eligible_trace_locations",
     "present_location_mappings",
     "site_locations",
     "source_location_key",

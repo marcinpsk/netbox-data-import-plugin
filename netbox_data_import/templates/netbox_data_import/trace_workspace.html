@@ -39,9 +39,7 @@
   .ndi-trace-reason { color: var(--tblr-secondary); font-size: .8rem; }
   .ndi-trace-severity-warning { background-color: var(--tblr-warning) !important; color: #000 !important; }
   .ndi-location-path { overflow-wrap: anywhere; }
-  .ndi-location-actions { min-width: 24rem; }
-  .ndi-location-actions form { flex-wrap: nowrap; align-items: center; }
-  .ndi-location-actions .ts-wrapper { flex: 0 1 16rem; min-width: 0; }
+  .ndi-location-actions { white-space: nowrap; }
 </style>
 
 <div hx-history="false">
@@ -143,7 +141,7 @@
     {% if not location_mappings %}
       <div class="text-secondary">No source Location paths</div>
     {% else %}
-      {% if not location_choices %}
+      {% if not has_locations %}
         <div class="text-secondary mb-2">No Location in this Site is visible to you.</div>
       {% endif %}
       <div class="table-responsive">
@@ -159,33 +157,29 @@
                 </td>
                 <td>{{ mapping.location }}</td>
                 <td class="ndi-location-actions">
-                  <form method="post" class="d-flex gap-2"
-                        action="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
-                        hx-post="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
-                        hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
-                    {% csrf_token %}
-                    <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
-                    <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
-                    <input type="hidden" name="location_key" value="{{ mapping.key }}">
-                    <label class="visually-hidden" for="locationMapping{{ forloop.counter }}">
-                      NetBox Location for {{ mapping.path }}</label>
-                    <select name="location_id" id="locationMapping{{ forloop.counter }}"
-                            class="form-select form-select-sm" {% if mapping.save_reason %}disabled{% endif %}>
-                      <option value="">Choose a Location</option>
-                      {% for location in location_choices %}
-                        <option value="{{ location.pk }}"{% if location.pk == mapping.location_id %} selected{% endif %}>{{ location.name }}</option>
-                      {% endfor %}
-                    </select>
-                    <button type="submit" class="btn btn-sm btn-primary" data-location-mapping-save
-                            {% if mapping.save_reason %}disabled{% endif %}>Save</button>
+                  <div class="d-flex justify-content-end gap-2">
+                    {# One picker serves every row, so a long list of paths adds no per-row control to enhance. #}
+                    <button type="button" class="btn btn-sm btn-outline-secondary"
+                            data-trace-location-picker="{{ mapping.key }}"
+                            data-trace-location-label="{{ mapping.path }}"
+                            {% if mapping.save_reason %}disabled aria-describedby="locationReason{{ forloop.counter }}"{% endif %}>{% if mapping.location %}Change Location{% else %}Choose Location{% endif %}</button>
                     {% if mapping.clearable %}
-                      <button type="submit" name="clear" value="1" class="btn btn-sm btn-outline-secondary"
-                              data-location-mapping-clear {% if mapping.clear_reason %}disabled{% endif %}>Clear</button>
+                      <form method="post" class="d-inline"
+                            action="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
+                            hx-post="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
+                            hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
+                        {% csrf_token %}
+                        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+                        <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
+                        <input type="hidden" name="location_key" value="{{ mapping.key }}">
+                        <button type="submit" name="clear" value="1" class="btn btn-sm btn-outline-secondary"
+                                data-location-mapping-clear {% if mapping.clear_reason %}disabled{% endif %}>Clear</button>
+                      </form>
                     {% endif %}
-                  </form>
-                  {% if mapping.save_reason %}<div class="ndi-trace-reason mt-1">{{ mapping.save_reason }}</div>{% endif %}
+                  </div>
+                  {% if mapping.save_reason %}<div class="ndi-trace-reason mt-1 text-end" id="locationReason{{ forloop.counter }}">{{ mapping.save_reason }}</div>{% endif %}
                   {% if mapping.clear_reason and mapping.clear_reason != mapping.save_reason %}
-                    <div class="ndi-trace-reason mt-1">{{ mapping.clear_reason }}</div>
+                    <div class="ndi-trace-reason mt-1 text-end">{{ mapping.clear_reason }}</div>
                   {% endif %}
                 </td>
               </tr>
@@ -647,6 +641,42 @@
   </div>
 </div>
 
+{% if location_mappings %}
+<div class="modal" id="traceLocationPicker" tabindex="-1" aria-labelledby="traceLocationPickerTitle">
+  <div class="modal-dialog modal-dialog-scrollable" role="document">
+    <div class="modal-content">
+      <form id="traceLocationForm" method="post" class="d-flex flex-column overflow-hidden"
+            action="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
+            data-candidates-url="{% url 'plugins:netbox_data_import:trace_location_candidates' %}"
+            hx-post="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
+            hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
+        {% csrf_token %}
+        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+        <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
+        <input type="hidden" name="location_key" id="traceLocationKey">
+        <input type="hidden" name="location_id" id="traceLocationId">
+        <div class="modal-header">
+          <h5 class="modal-title" id="traceLocationPickerTitle">Choose the NetBox Location for <span id="traceLocationLabel" class="ndi-location-path"></span></h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <input type="search" class="form-control mb-2" id="traceLocationSearch"
+                 aria-label="Search the visible Locations of this Site"
+                 placeholder="Search the visible Locations of this Site" autocomplete="off">
+          <div class="text-secondary small mb-2" id="traceLocationCount" aria-live="polite" hidden></div>
+          <div class="alert alert-danger" id="traceLocationError" hidden></div>
+          <div class="list-group" id="traceLocationCandidates"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-link" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="traceLocationSubmit" disabled>Save mapping</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <div class="modal" id="traceTerminationPicker" tabindex="-1" aria-labelledby="traceTerminationPickerTitle">
   <div class="modal-dialog modal-lg" role="document">
     <div class="modal-content">
@@ -687,6 +717,7 @@
 <script src="{% static 'netbox_data_import/js/trace_proposals.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_picker_search.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_device_picker.js' %}?v={{ plugin_version }}"></script>
+<script src="{% static 'netbox_data_import/js/trace_location_picker.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_termination_picker.js' %}?v={{ plugin_version }}"></script>
 </div>
 {% endblock %}

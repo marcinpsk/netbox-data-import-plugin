@@ -142,7 +142,12 @@ from .review_workspace import (
     save_trace_location_resolution_and_replan,
 )
 from .trace_device_resolution import DeviceEvidence, eligible_trace_devices, source_device_key
-from .trace_location_resolution import present_location_mappings, site_locations, source_location_key
+from .trace_location_resolution import (
+    eligible_trace_locations,
+    present_location_mappings,
+    site_locations,
+    source_location_key,
+)
 
 
 def _safe_next_url(request, fallback: str) -> str:
@@ -4127,13 +4132,14 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             reader = _trace_reader(request, profile, planning_context)
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
-        location_choices = list(site_locations(reader).order_by("name", "pk"))
+        # The picker reads Locations a page at a time, so the page only asks whether any is visible.
+        has_locations = site_locations(reader).exists()
         location_mappings = present_location_mappings(
             profile=profile,
             viewer=request.user,
             reader=reader,
             paths=_workspace_location_paths(workspace),
-            has_locations=bool(location_choices),
+            has_locations=has_locations,
         )
         proposal_display = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
         proposal_fields = proposal_display.fields(selected.terminations if selected else [])
@@ -4211,7 +4217,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "segment_policy_forms": segment_policy_forms,
                 "summary": summary,
                 "location_mappings": location_mappings,
-                "location_choices": location_choices,
+                "has_locations": has_locations,
                 "import_location_unavailable": reader.location_unavailable,
                 "drift": drift,
                 "retained_sync_reason": retained_reason,
@@ -4521,6 +4527,55 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
 
 
 LOCATION_CHOICE_REFUSED = "Choose a visible Location in the selected Site."
+
+
+class TraceLocationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Serve one bounded page of the selected Site's visible Locations for one source Location path."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+    requires_preview_revision = True
+
+    def get(self, request):
+        """Return the searched page and the uncapped total the picker counts."""
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            return JsonResponse({"ok": False, "error": "No current import preview matches this request."}, status=409)
+        profile, _document, workspace, planning_context = loaded
+        # A review read answers a question this preview asked, never one the caller invented.
+        if source_location_key(request.GET.get("location_key", "")) not in _workspace_location_paths(workspace):
+            return JsonResponse(
+                {"ok": False, "error": "This preview carries no such source Location path."}, status=400
+            )
+        search = request.GET.get("search", "")
+        if len(search) > 200:
+            return JsonResponse({"ok": False, "error": "Location search must be 200 characters or fewer."}, status=400)
+        try:
+            limit = _candidate_page_limit(request.GET.get("limit"))
+        except (TypeError, ValueError):
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "error": f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
+                },
+                status=400,
+            )
+        try:
+            found = eligible_trace_locations(
+                _trace_reader(request, profile, planning_context), search=search, limit=limit
+            )
+        except PlanningTargetUnavailable:
+            return JsonResponse({"ok": False, "error": "The import target is no longer available."}, status=400)
+        return JsonResponse(
+            {
+                "ok": True,
+                "candidates": [
+                    {"id": candidate.location.pk, "name": candidate.location.name, "parent": candidate.parent}
+                    for candidate in found.candidates
+                ],
+                "shown": len(found.candidates),
+                "total": found.total,
+            }
+        )
 
 
 class TraceLocationMappingView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):

@@ -1445,7 +1445,9 @@ every port a cached plan names: a hidden or deleted port shows neither its name 
 The workspace lists, at batch level and independent of the selected trace, each distinct source
 Location path of the batch with its state: unmapped, mapped (with the Location), or stale. With no
 paths it says "No source Location paths"; with paths but no visible Location in the Site it says so
-separately. A picker offers the visible Locations of the selected Site.
+separately. One picker serves every path: it searches the visible Locations of the selected Site by
+normalized name and shows a bounded page with an "N of M" count, so the page renders no per-path
+list of Locations.
 
 A mapping row's state, target, snapshot, and every explanation derived from it need view permission
 on that row. Add, change, and delete are checked separately with object constraints, on the server,

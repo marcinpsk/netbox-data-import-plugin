@@ -495,6 +495,13 @@ class LocationWorkspaceMixin(LocationTreeMixin):
         self.assertEqual(response.status_code, 200, response.content)
         return {item["id"]: item for item in response.json()["candidates"]}
 
+    def location_candidates(self, client=None, **params):
+        """Ask the shared Location picker endpoint the way the picker asks."""
+        client = client or self.client
+        params.setdefault("location_key", " ".join(SOURCE_PATH.split()).casefold())
+        params.setdefault("preview_revision", client.session[PREVIEW_REVISION_SESSION_KEY])
+        return client.get(reverse("plugins:netbox_data_import:trace_location_candidates"), params)
+
     @staticmethod
     def mapping_row(response, key=None):
         """Return the workspace row for one source Location path."""
@@ -610,6 +617,80 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         for device in (self.in_row, self.in_other_hall):
             facts = candidates[device.pk]["matched_facts"] + candidates[device.pk]["conflicting_facts"]
             self.assertEqual([fact for fact in facts if fact["fact"] == "location"], [], device.name)
+
+    def test_one_location_picker_serves_every_source_path(self):
+        """Each row opens the one shared picker; no row renders its own list of Locations."""
+        import re
+
+        from django.utils.html import escape
+
+        second = located_path(OTHER_PATH, source_label="SRV Other", to_port="eth3")
+        response = self.open_workspace(located_path(SOURCE_PATH), second)
+
+        html = response.content.decode()
+        card = re.search(r"<div[^>]*data-trace-location-mappings.*?<div class=\"row g-3\">", html, re.DOTALL)
+        self.assertIsNotNone(card)
+        self.assertNotIn("<select", card.group())
+        self.assertEqual(html.count('id="traceLocationPicker"'), 1)
+        for row in response.context["location_mappings"]:
+            self.assertIn(f'data-trace-location-picker="{escape(row.key)}"', html)
+
+    def test_the_workspace_reads_no_location_list_to_render(self):
+        """The page asks only whether a Location is visible; the picker pages the rest on demand."""
+        from django.db.models.signals import post_init
+
+        for number in range(30):
+            Location.objects.create(site=self.site, name=f"Bulk {number:02}", slug=f"bulk-{number:02}")
+        self.open_workspace()
+        materialized = []
+
+        def count(sender, instance, **kwargs):
+            materialized.append(instance)
+
+        post_init.connect(count, sender=Location)
+        try:
+            response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        finally:
+            post_init.disconnect(count, sender=Location)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(len(materialized), 5, [str(location) for location in materialized])
+
+    def test_the_location_picker_pages_and_searches_the_visible_locations_of_the_site(self):
+        other_site = Site.objects.create(name="Other Picker Site", slug="other-picker-site")
+        Location.objects.create(site=other_site, name="DH9 Elsewhere", slug="dh9-elsewhere")
+        self.open_workspace()
+
+        first_page = self.location_candidates(limit=2).json()
+        searched = self.location_candidates(search="  dh ").json()
+
+        self.assertEqual(
+            (first_page["shown"], first_page["total"]), (2, Location.objects.filter(site=self.site).count())
+        )
+        self.assertEqual([item["name"] for item in first_page["candidates"]], ["1st Floor", "Building X"])
+        self.assertEqual(
+            searched["candidates"],
+            [
+                {"id": self.hall.pk, "name": "DH4", "parent": "1st Floor"},
+                {"id": self.other_hall.pk, "name": "DH5", "parent": "1st Floor"},
+            ],
+        )
+        self.assertEqual(searched["total"], 2)
+
+    def test_the_location_picker_refuses_what_the_preview_did_not_ask(self):
+        self.open_workspace()
+        cases = (
+            ({"location_key": "invented path"}, 400, "This preview carries no such source Location path."),
+            ({"preview_revision": "obsolete"}, 409, "No current import preview matches this request."),
+            ({"search": "x" * 201}, 400, "Location search must be 200 characters or fewer."),
+            ({"limit": "0"}, 400, "Candidate limit must be an integer from 1 to 20."),
+        )
+        for params, status, error in cases:
+            with self.subTest(params=params):
+                response = self.location_candidates(**params)
+
+                self.assertEqual(response.status_code, status)
+                self.assertEqual(response.json(), {"ok": False, "error": error})
 
     def test_a_path_the_preview_never_carried_is_refused(self):
         self.open_workspace()
@@ -925,6 +1006,29 @@ class LocationMappingPermissionTest(LocationWorkspaceMixin, TestCase):
 
         self.assertEqual(cleared.status_code, 302, cleared.content)
         self.assertFalse(TraceLocationResolution.objects.exists())
+
+    def test_the_location_picker_offers_only_visible_locations_and_names_only_a_visible_parent(self):
+        actor = user_with_object_permission(
+            "location-picker-scoped",
+            [
+                *[grant for grant in _workspace_grants() if grant[0] is not Location],
+                (Location, ("view",), {"name__in": ["DH4", "DH5", "T"]}),
+            ],
+        )
+        self.client.force_login(actor)
+        self.open_workspace()
+
+        offered = self.location_candidates().json()
+
+        self.assertEqual(
+            offered["candidates"],
+            [
+                {"id": self.hall.pk, "name": "DH4", "parent": ""},
+                {"id": self.other_hall.pk, "name": "DH5", "parent": ""},
+                {"id": self.row.pk, "name": "T", "parent": "DH4"},
+            ],
+        )
+        self.assertEqual(offered["total"], 3)
 
     def test_a_hidden_row_discloses_nothing_and_is_never_overwritten_blind(self):
         existing = self.map_path(SOURCE_PATH, self.hall, display="Hidden Row Snapshot")
