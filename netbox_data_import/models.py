@@ -1947,7 +1947,12 @@ class CableImportSource(DigestIndexedMixin):
         help_text="Fixed-width digest of trace_identity, which is what the index and constraint carry",
     )
     segment_index = models.PositiveIntegerField(
-        help_text="Position of this segment in the Source Trace, in canonical order",
+        null=True,
+        blank=True,
+        help_text=(
+            "Position of this segment in the Source Trace, in canonical order; empty when an identity "
+            "upgrade reversed that order and the trace length was unknown"
+        ),
     )
     from_text = models.TextField(blank=True, default="")
     to_text = models.TextField(blank=True, default="")

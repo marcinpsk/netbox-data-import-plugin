@@ -297,13 +297,10 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
         tagged_item = TaggedItem.objects.get(tag=tag, object_id=cable.pk)
         previous = (APP, "0037_cablesegmentoverride")
         leaf = (APP, "0038_cable_tag_integrity")
-        final = (APP, "0039_remove_job_plan_copies")
         self.addCleanup(migrate_plugin_to_leaf)
 
-        # Reverse the later schema migrations for real, so the fake below skips only 0039's data step.
-        MigrationExecutor(connection).migrate([final])
-        MigrationExecutor(connection).migrate([leaf], fake=True)
-        MigrationExecutor(connection).migrate([previous])
+        # The walk fakes only the data steps with no reverse, 0039 among them, and reverses 0038 for real.
+        unapply_plugin_migrations_to(previous[1])
 
         self.assertTrue(TaggedItem.objects.filter(pk=tagged_item.pk).exists())
         with connection.cursor() as cursor:
@@ -340,7 +337,6 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
 
         previous = (APP, "0037_cablesegmentoverride")
         leaf = (APP, "0038_cable_tag_integrity")
-        final = (APP, "0039_remove_job_plan_copies")
         orphan_pk = None
 
         def restore_leaf():
@@ -351,10 +347,8 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
         self.addCleanup(restore_leaf)
         tag = Tag.objects.create(name="Orphan upgrade", slug="orphan-upgrade")
         cable_type = ObjectType.objects.get_for_model(Cable)
-        # Reverse the later schema migrations for real, so the fake below skips only 0039's data step.
-        MigrationExecutor(connection).migrate([final])
-        MigrationExecutor(connection).migrate([leaf], fake=True)
-        MigrationExecutor(connection).migrate([previous])
+        # The walk fakes only the data steps with no reverse, 0039 among them, and reverses 0038 for real.
+        unapply_plugin_migrations_to(previous[1])
         orphan_pk = TaggedItem.objects.create(tag=tag, content_type=cable_type, object_id=2_147_483_647).pk
 
         with self.assertRaises(IntegrityError) as raised:

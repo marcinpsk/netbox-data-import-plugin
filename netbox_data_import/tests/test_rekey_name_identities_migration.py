@@ -1,0 +1,302 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
+"""The upgrade rekeys every stored casefold identity to the uppercase identity, and never stops on a collision."""
+
+import hashlib
+import json
+from importlib import import_module
+
+from django.db import connection
+from django.db.migrations import RunPython
+from django.db.migrations.executor import MigrationExecutor
+from django.test import SimpleTestCase, TransactionTestCase
+
+from netbox_data_import.field_keys import parse_termination_field_key
+from netbox_data_import.identity import identity_text
+from netbox_data_import.models import ImportProfile
+from netbox_data_import.netbox_reader import NetBoxReader
+from netbox_data_import.tests.helpers import make_dcim_objects, migrate_plugin_to_leaf, unapply_plugin_migrations_to
+from netbox_data_import.trace_device_resolution import (
+    MANUALLY_RESOLVED,
+    DeviceEvidence,
+    resolve_trace_devices,
+    source_device_key,
+)
+
+APP = "netbox_data_import"
+BEFORE = "0044_cableimportsource_segment_index_unknown"
+REKEY = "0045_rekey_name_identities"
+LOGGER = f"{APP}.migrations.{REKEY}"
+DOTLESS_I = "\u0131"
+
+
+def _digest(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def old_field_key(device, port, cards="", kind="interface", role="termination"):
+    """Return a termination field key the way the casefold release stored it."""
+    data = {"cards": cards, "device": device, "kind": kind, "port": port, "role": role}
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def old_trace(*endpoints):
+    """Return a trace identity the way the casefold release stored it: endpoints sorted by casefold key."""
+    return json.dumps(sorted(list(endpoint) for endpoint in endpoints), ensure_ascii=False, separators=(",", ":"))
+
+
+class RekeyStructureTest(SimpleTestCase):
+    """The data migration has no reverse and follows the schema migration it needs."""
+
+    def test_the_rekey_refuses_to_reverse(self):
+        migration = import_module(f"{APP}.migrations.{REKEY}").Migration
+        (operation,) = migration.operations
+
+        self.assertIsInstance(operation, RunPython)
+        self.assertIsNone(operation.reverse_code)
+        self.assertEqual(migration.dependencies, [(APP, BEFORE)])
+
+
+class RekeyNameIdentitiesMigrationTest(TransactionTestCase):
+    """Real rows of every affected model, written under the casefold identity, then migrated."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(migrate_plugin_to_leaf)
+        unapply_plugin_migrations_to(BEFORE)
+        self.apps = MigrationExecutor(connection).loader.project_state([(APP, BEFORE)]).apps
+        from dcim.models import Device
+
+        # DCIM is at its leaf, so the current model writes its rows and fills NetBox's own defaults.
+        site, _manufacturer, device_type, role = make_dcim_objects("Rekey")
+        self.devices = [
+            Device.objects.create(name=f"rekey-{number}", site=site, device_type=device_type, role=role)
+            for number in range(2)
+        ]
+        self.profile = self.model("ImportProfile").objects.create(
+            name="Rekey Profile", source_adapter="trace_workbook", adapter_config={}
+        )
+        ObjectType = self.apps.get_model("core", "ObjectType")
+        self.interface_type = ObjectType.objects.get(app_label="dcim", model="interface")
+        self.device_type = ObjectType.objects.get(app_label="dcim", model="device")
+
+    def model(self, name):
+        return self.apps.get_model(APP, name)
+
+    def termination(self, key, object_id):
+        return self.model("TerminationResolution").objects.create(
+            profile=self.profile,
+            task_type="select_termination",
+            field_key=key,
+            field_key_digest=_digest(key),
+            selected_object_type=self.interface_type,
+            selected_object_id=object_id,
+            selected_display_name=f"port {object_id}",
+        )
+
+    def proposal(self, key, status, **fields):
+        return self.model("ResolutionProposal").objects.create(
+            profile=self.profile,
+            task_type="select_termination",
+            field_key=key,
+            field_key_digest=_digest(key),
+            status=status,
+            source_evidence={},
+            resolved_device_type=self.device_type,
+            resolved_device_id=self.devices[0].pk,
+            prompt_version=2,
+            response_schema_version=2,
+            candidate_snapshot={},
+            **fields,
+        )
+
+    def migrate(self):
+        with self.assertLogs(LOGGER, level="WARNING") as logs:
+            MigrationExecutor(connection).migrate([(APP, REKEY)])
+        return "\n".join(logs.output)
+
+    def test_termination_decisions_rekey_merge_one_target_and_drop_two(self):
+        Model = self.model("TerminationResolution")
+        plain = self.termination(old_field_key("dev-a", "eth0"), 11)
+        sharp = self.termination(old_field_key("strasse", "eth0"), 12)
+        kept = self.termination(old_field_key(f"sw-{DOTLESS_I}", "eth1"), 21)
+        merged = self.termination(old_field_key("sw-i", "eth1"), 21)
+        first_drop = self.termination(old_field_key(f"rack-{DOTLESS_I}", "eth2"), 31)
+        second_drop = self.termination(old_field_key("rack-i", "eth2"), 32)
+        decided = {"outcome": "candidate", "selected_candidate_id": "x", "selected_object_type": self.interface_type}
+        decided |= {"selected_object_id": 21, "decision": "accepted", "decided_at": "2026-01-01T00:00:00Z"}
+        to_merged = self.proposal(old_field_key("sw-i", "eth1"), "completed", written_resolution=merged, **decided)
+        to_dropped = self.proposal(
+            old_field_key("rack-i", "eth2"), "completed", written_resolution=second_drop, **decided
+        )
+
+        output = self.migrate()
+
+        rows = {row.pk: row for row in Model.objects.all()}
+        self.assertEqual(set(rows), {plain.pk, sharp.pk, kept.pk})
+        expected = {
+            plain.pk: old_field_key("DEV-A", "ETH0"),
+            sharp.pk: old_field_key("STRASSE", "ETH0"),
+            kept.pk: old_field_key("SW-I", "ETH1"),
+        }
+        self.assertEqual({pk: row.field_key for pk, row in rows.items()}, expected)
+        self.assertEqual(
+            {pk: row.field_key_digest for pk, row in rows.items()}, {pk: _digest(key) for pk, key in expected.items()}
+        )
+        for row in rows.values():
+            parsed = parse_termination_field_key(row.field_key)
+            self.assertEqual(parsed["device"], identity_text(parsed["device"]))
+        Proposal = self.model("ResolutionProposal")
+        self.assertEqual(Proposal.objects.get(pk=to_merged.pk).written_resolution_id, kept.pk)
+        self.assertIsNone(Proposal.objects.get(pk=to_dropped.pk).written_resolution_id)
+        self.assertIn(f"Merged TerminationResolution rows [{merged.pk}] into row {kept.pk}", output)
+        self.assertIn(f"Dropped TerminationResolution rows [{first_drop.pk}, {second_drop.pk}]", output)
+
+    def test_device_and_location_decisions_rekey_merge_and_drop(self):
+        Device = self.model("TraceDeviceResolution")
+        Location = self.model("TraceLocationResolution")
+        rows = {}
+        for name, key, device in (
+            ("alias", "srv alias", 0),
+            ("kept", f"core-{DOTLESS_I}", 0),
+            ("merged", "core-i", 0),
+            ("dropped-a", f"edge-{DOTLESS_I}", 0),
+            ("dropped-b", "edge-i", 1),
+        ):
+            rows[name] = Device.objects.create(
+                profile=self.profile,
+                source_device_key=key,
+                source_device_key_digest=_digest(key),
+                selected_device_id=self.devices[device].pk,
+                selected_display_name="device",
+            )
+        hall = Location.objects.create(
+            profile=self.profile,
+            source_location_key="campus >> dh4",
+            source_location_key_digest=_digest("campus >> dh4"),
+            selected_location_id=7,
+            selected_display_name="DH4",
+        )
+        for key, location in ((f"row {DOTLESS_I}", 8), ("row i", 9)):
+            Location.objects.create(
+                profile=self.profile,
+                source_location_key=key,
+                source_location_key_digest=_digest(key),
+                selected_location_id=location,
+                selected_display_name="row",
+            )
+
+        output = self.migrate()
+
+        self.assertEqual(
+            dict(Device.objects.values_list("pk", "source_device_key")),
+            {rows["alias"].pk: "SRV ALIAS", rows["kept"].pk: "CORE-I"},
+        )
+        self.assertEqual(
+            dict(Device.objects.values_list("source_device_key", "source_device_key_digest")),
+            {"SRV ALIAS": _digest("SRV ALIAS"), "CORE-I": _digest("CORE-I")},
+        )
+        self.assertEqual(
+            list(Location.objects.values_list("pk", "source_location_key", "source_location_key_digest")),
+            [(hall.pk, "CAMPUS >> DH4", _digest("CAMPUS >> DH4"))],
+        )
+        # The rekeyed choice answers the label it was made for, under the identity the planner now uses.
+        evidence = DeviceEvidence(
+            key=source_device_key("Srv  Alias"), labels=("Srv  Alias",), locations=(), racks=(), u_positions=()
+        )
+        reader = NetBoxReader.unrestricted().for_target(site=self.devices[0].site)
+        resolved = resolve_trace_devices(
+            profile=ImportProfile.objects.get(pk=self.profile.pk), reader=reader, evidence={evidence.key: evidence}
+        )
+        self.assertEqual(
+            (resolved[evidence.key].state, resolved[evidence.key].device), (MANUALLY_RESOLVED, self.devices[0])
+        )
+        self.assertIn("Merged TraceDeviceResolution", output)
+        self.assertIn("Dropped TraceDeviceResolution", output)
+        self.assertIn("Dropped TraceLocationResolution", output)
+
+    def test_requests_in_flight_retire_and_every_request_rekeys(self):
+        queued = self.proposal(old_field_key("dev-a", "eth0"), "queued")
+        running = self.proposal(old_field_key("dev-a", "eth1"), "running")
+        cancelled = self.proposal(old_field_key("dev-a", "eth2"), "cancelled")
+
+        with self.assertNoLogs(LOGGER, level="WARNING"):
+            MigrationExecutor(connection).migrate([(APP, REKEY)])
+
+        Proposal = self.model("ResolutionProposal")
+        self.assertEqual(
+            sorted(Proposal.objects.values_list("pk", "status", "failure_reason", "field_key", "field_key_digest")),
+            sorted(
+                (row.pk, status, reason, old_field_key("DEV-A", port), _digest(old_field_key("DEV-A", port)))
+                for row, status, reason, port in (
+                    (queued, "failed", "superseded_request", "ETH0"),
+                    (running, "failed", "superseded_request", "ETH1"),
+                    (cancelled, "cancelled", "", "ETH2"),
+                )
+            ),
+        )
+
+    def test_provenance_reorders_its_endpoints_and_overrides_follow(self):
+        from dcim.models import Cable, Interface
+
+        first = Interface.objects.create(device_id=self.devices[0].pk, name="eth0", type="1000base-t")
+        second = Interface.objects.create(device_id=self.devices[1].pk, name="eth0", type="1000base-t")
+        cable = Cable(a_terminations=[first], b_terminations=[second])
+        cable.save()
+        Source = self.model("CableImportSource")
+        # '_' sorts before 'b' and after 'B', so uppercase reverses the canonical endpoint order.
+        underscore = old_trace(("a_x", "", "p1", "interface"), ("ab", "", "p2", "interface"))
+        steady = old_trace(("dev-a", "", "eth0", "interface"), ("dev-b", "", "eth1", "interface"))
+        merged_pair = (
+            old_trace((f"dev-{DOTLESS_I}", "", "eth0", "interface"), ("dev-0", "", "eth1", "interface")),
+            old_trace(("dev-i", "", "eth0", "interface"), ("dev-0", "", "eth1", "interface")),
+        )
+        rows = {}
+        for name, identity, index, direction in (
+            ("reversed", underscore, 2, "canonical"),
+            ("steady", steady, 1, "reversed"),
+            ("kept", merged_pair[0], 0, "canonical"),
+            ("merged", merged_pair[1], 0, "canonical"),
+        ):
+            rows[name] = Source.objects.create(
+                cable_id=cable.pk,
+                profile=self.profile,
+                trace_identity=identity,
+                trace_key=_digest(identity),
+                segment_index=index,
+                direction=direction,
+            )
+        override = self.model("CableSegmentOverride").objects.create(
+            profile=self.profile,
+            segment_key="dcim.interface:1|dcim.interface:2",
+            source_trace_identity=underscore,
+            segment_index=2,
+        )
+
+        output = self.migrate()
+
+        reordered = json.dumps([["AB", "", "P2", "interface"], ["A_X", "", "P1", "interface"]], separators=(",", ":"))
+        expected = {
+            rows["reversed"].pk: (reordered, None, "reversed"),
+            rows["steady"].pk: (
+                old_trace(("DEV-A", "", "ETH0", "interface"), ("DEV-B", "", "ETH1", "interface")),
+                1,
+                "reversed",
+            ),
+            rows["kept"].pk: (
+                old_trace(("DEV-I", "", "ETH0", "interface"), ("DEV-0", "", "ETH1", "interface")),
+                0,
+                "canonical",
+            ),
+        }
+        self.assertEqual(
+            {row.pk: (row.trace_identity, row.segment_index, row.direction) for row in Source.objects.all()}, expected
+        )
+        self.assertEqual(
+            {row.pk: row.trace_key for row in Source.objects.all()},
+            {pk: _digest(identity) for pk, (identity, _index, _direction) in expected.items()},
+        )
+        override = self.model("CableSegmentOverride").objects.get(pk=override.pk)
+        self.assertEqual((override.source_trace_identity, override.segment_index), (reordered, 2))
+        self.assertIn(f"CableImportSource {rows['reversed'].pk}: the canonical endpoint order", output)
+        self.assertIn(f"Merged CableImportSource rows [{rows['merged'].pk}]", output)
