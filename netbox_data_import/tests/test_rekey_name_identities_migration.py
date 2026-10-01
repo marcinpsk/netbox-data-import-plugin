@@ -215,6 +215,46 @@ class RekeyNameIdentitiesMigrationTest(TransactionTestCase):
         self.assertIn("Dropped TraceDeviceResolution", output)
         self.assertIn("Dropped TraceLocationResolution", output)
 
+    def test_a_large_table_is_read_staged_and_written_in_bounded_pages(self):
+        """No read or write of the decision table holds more than one page, and every temporary digest goes first."""
+        from django.test.utils import CaptureQueriesContext
+
+        page = 500
+        Device = self.model("TraceDeviceResolution")
+        keys = [f"core-{DOTLESS_I}", *(f"dev-{number:04}" for number in range(2 * page)), "core-i"]
+        Device.objects.bulk_create(
+            Device(
+                profile=self.profile,
+                source_device_key=key,
+                source_device_key_digest=_digest(key),
+                selected_device_id=self.devices[0].pk,
+                selected_display_name="device",
+            )
+            for key in keys
+        )
+        first, last = Device.objects.order_by("pk").values_list("pk", flat=True)[:: len(keys) - 1]
+        table = connection.ops.quote_name(Device._meta.db_table)
+
+        with CaptureQueriesContext(connection) as captured, self.assertLogs(LOGGER, level="WARNING") as logs:
+            MigrationExecutor(connection).migrate([(APP, REKEY)])
+
+        reads = [
+            query["sql"] for query in captured if query["sql"].startswith("SELECT") and f"FROM {table}" in query["sql"]
+        ]
+        writes = [query["sql"] for query in captured if query["sql"].startswith(f"UPDATE {table}")]
+        stages = [query["sql"] for query in captured if query["sql"].startswith("INSERT INTO ndi_rekey_stage")]
+        self.assertEqual(len(reads), 3)
+        self.assertTrue(all(sql.endswith(f"LIMIT {page}") for sql in reads), reads)
+        self.assertEqual(len(stages), 3)
+        self.assertEqual(
+            [("rekey-" in sql) for sql in writes], [True] * 3 + [False] * 3, "every temporary digest goes first"
+        )
+        self.assertEqual(Device.objects.count(), len(keys) - 1)
+        self.assertEqual(Device.objects.get(pk=first).source_device_key, "CORE-I")
+        self.assertFalse(Device.objects.filter(pk=last).exists())
+        self.assertEqual(Device.objects.get(source_device_key="DEV-0999").source_device_key_digest, _digest("DEV-0999"))
+        self.assertIn(f"Merged TraceDeviceResolution rows [{last}] into row {first}", "\n".join(logs.output))
+
     def test_requests_in_flight_retire_and_every_request_keeps_its_casefold_key(self):
         queued = self.proposal(old_field_key("dev-a", "eth0"), "queued")
         running = self.proposal(old_field_key("dev-a", "eth1"), "running")
@@ -404,5 +444,5 @@ class RekeyNameIdentitiesMigrationTest(TransactionTestCase):
         )
         override = self.model("CableSegmentOverride").objects.get(pk=override.pk)
         self.assertEqual((override.source_trace_identity, override.segment_index), (reordered, 2))
-        self.assertIn(f"CableImportSource {rows['reversed'].pk}: the canonical endpoint order", output)
+        self.assertIn(f"CableImportSource rows [{rows['reversed'].pk}]: the canonical endpoint order", output)
         self.assertIn(f"Merged CableImportSource rows [{rows['merged'].pk}]", output)

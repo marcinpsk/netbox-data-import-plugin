@@ -6,12 +6,13 @@ A stored key holds casefolded text whose whitespace is already one ASCII space p
 key of that text is its uppercase. That is exact for every name without the capital sharp s
 (U+1E9E), the Kelvin, Angstrom or Ohm sign, the theta symbol (U+03F4) or the dotted capital I
 (U+0130), which casefold to other letters, and the dotless i (U+0131), which now shares the key of i.
+
+Each table is read in pages of BATCH_SIZE rows and staged in a temporary table, which groups the
+collisions in the database, so the migration never holds a whole table in memory.
 """
 
-import hashlib
 import json
 import logging
-from collections import defaultdict
 
 from django.db import migrations
 
@@ -20,13 +21,14 @@ fake_on_branch = True
 
 logger = logging.getLogger(__name__)
 
+BATCH_SIZE = 500
+STAGE = "ndi_rekey_stage"
+GROUPS = "ndi_rekey_groups"
 # A trace identity endpoint ends with a claimed kind, which is a protocol value and keeps its case.
 CLAIMED_KINDS = frozenset({"interface", "front_port", "rear_port"})
 NAME_PARTS = ("cards", "device", "port")
-
-
-def _digest(text):
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+# PostgreSQL computes the digest from the staged key, as `index_digest` does in Python.
+DIGEST_SQL = "encode(sha256(convert_to(stage.new_key, 'UTF8')), 'hex')"
 
 
 def _field_key(old):
@@ -70,182 +72,257 @@ def _trace_identity(old):
     return json.dumps(ordered, ensure_ascii=False, separators=(",", ":")), ordered != rekeyed
 
 
-def _skip(model, row, field):
-    logger.warning("Kept %s %s unchanged: its %s is not a canonical identity.", model, row.pk, field)
+def _pages(model, alias, fields):
+    """Yield every row of *model* as (pk, *fields) tuples, BATCH_SIZE rows per read, in pk order."""
+    rows = model.objects.using(alias).order_by("pk")
+    last = None
+    while True:
+        page = list((rows if last is None else rows.filter(pk__gt=last)).values_list("pk", *fields)[:BATCH_SIZE])
+        if page:
+            yield page
+        if len(page) < BATCH_SIZE:
+            return
+        last = page[-1][0]
 
 
-def _rekey_policy(model, rows, *, rekey, key_field, digest_field, scope, target, alias, written=None):
-    """Rekey one policy model: merge colliding rows with one target, drop colliding rows with several."""
-    keyed = {}
-    for row in rows:
-        new = rekey(getattr(row, key_field))
-        if new is None:
-            _skip(model.__name__, row, key_field)
-            continue
-        keyed[row.pk] = (row, new)
-    groups = defaultdict(list)
-    for row, new in keyed.values():
-        groups[(*(getattr(row, field) for field in scope), new)].append(row)
-    removed = set()
-    for (*scope_values, new), members in groups.items():
-        if len(members) < 2:
-            continue
-        members.sort(key=lambda row: row.pk)
-        others = [row.pk for row in members[1:]]
-        if len({tuple(getattr(row, field) for field in target) for row in members}) == 1:
-            kept = members[0].pk
-            if written is not None:
-                written.objects.using(alias).filter(written_resolution_id__in=others).update(written_resolution_id=kept)
-            logger.warning(
-                "Merged %s rows %s into row %s: one key %r in scope %r now names them, and they chose one target.",
-                model.__name__,
-                others,
-                kept,
-                new,
-                scope_values,
-            )
-            removed.update(others)
-        else:
-            dropped = [row.pk for row in members]
-            if written is not None:
-                written.objects.using(alias).filter(written_resolution_id__in=dropped).update(
-                    written_resolution_id=None
-                )
-            logger.warning(
-                "Dropped %s rows %s: one key %r in scope %r now names them, and they chose different targets. "
-                "Make the decision again.",
-                model.__name__,
-                dropped,
-                new,
-                scope_values,
-            )
-            removed.update(dropped)
-    model.objects.using(alias).filter(pk__in=removed).delete()
-    survivors = [(row, new) for pk, (row, new) in keyed.items() if pk not in removed]
-    _store_keys(model, survivors, key_field=key_field, digest_field=digest_field, alias=alias)
+def _staged_pages(cursor):
+    """Yield the staged row ids, BATCH_SIZE per page, in id order."""
+    last = 0
+    while True:
+        cursor.execute(f"SELECT id FROM {STAGE} WHERE id > %s ORDER BY id LIMIT %s", [last, BATCH_SIZE])  # noqa: S608 - fixed table name
+        ids = [row[0] for row in cursor.fetchall()]
+        if ids:
+            yield ids
+        if len(ids) < BATCH_SIZE:
+            return
+        last = ids[-1]
 
 
-def _store_keys(model, rows, *, key_field, digest_field, alias, extra=()):
-    """Write each new key and digest in two passes, so no row meets a unique digest another row still holds."""
-    for row, _new in rows:
-        setattr(row, digest_field, f"rekey-{row.pk}")
-    model.objects.using(alias).bulk_update([row for row, _new in rows], [digest_field], batch_size=500)
-    for row, new in rows:
-        setattr(row, key_field, new)
-        setattr(row, digest_field, _digest(new))
-    model.objects.using(alias).bulk_update(
-        [row for row, _new in rows], [key_field, digest_field, *extra], batch_size=500
+def _stage(cursor, rows):
+    """Write one page of (id, scope, new key, target, reversed) rows to the staging table."""
+    cursor.execute(
+        f"INSERT INTO {STAGE} (id, scope, new_key, target, reversed) "  # noqa: S608 - fixed table name
+        "SELECT * FROM unnest(%s::bigint[], %s::text[], %s::text[], %s::text[], %s::boolean[])",
+        [list(column) for column in zip(*rows, strict=True)],
     )
 
 
-def _rekey_cable_sources(CableImportSource, alias):
+def _new_stage(cursor):
+    cursor.execute(f"DROP TABLE IF EXISTS {STAGE}")
+    cursor.execute(
+        f"CREATE TEMPORARY TABLE {STAGE} "
+        '(id bigint PRIMARY KEY, scope text COLLATE "C" NOT NULL, new_key text COLLATE "C" NOT NULL, '
+        'target text COLLATE "C" NOT NULL, reversed boolean NOT NULL)'
+    )
+
+
+def _resolve_collisions(cursor, model, *, quote, merge_all=False, written=None):
+    """Merge each group of staged rows that now share a key and a target; drop a group with several targets.
+
+    A merge keeps the lowest id, and a proposal that wrote a removed row points to it. A drop deletes every
+    row of the group and clears the link of each proposal that wrote one.
+    """
+    cursor.execute(f"DROP TABLE IF EXISTS {GROUPS}")
+    cursor.execute(
+        f"CREATE TEMPORARY TABLE {GROUPS} AS "  # noqa: S608 - fixed table names
+        "SELECT row_number() OVER (ORDER BY min(id)) AS n, scope, new_key, array_agg(id ORDER BY id) AS ids, "
+        f"count(DISTINCT target) AS targets FROM {STAGE} "
+        "GROUP BY scope, new_key HAVING count(*) > 1"
+    )
+    table = quote(model._meta.db_table)
+    last = 0
+    while True:
+        cursor.execute(
+            f"SELECT n, scope, new_key, ids, targets FROM {GROUPS} WHERE n > %s ORDER BY n LIMIT %s",  # noqa: S608
+            [last, BATCH_SIZE],
+        )
+        groups = cursor.fetchall()
+        removed = []
+        for _n, scope, new_key, ids, targets in groups:
+            if merge_all or targets == 1:
+                kept, others = ids[0], ids[1:]
+                if written is not None:
+                    _relink(cursor, written, others, kept, quote=quote)
+                logger.warning(
+                    "Merged %s rows %s into row %s: one key %r in scope %s now names them, and they chose one target.",
+                    model.__name__,
+                    others,
+                    kept,
+                    new_key,
+                    scope,
+                )
+                removed += others
+            else:
+                if written is not None:
+                    _relink(cursor, written, ids, None, quote=quote)
+                logger.warning(
+                    "Dropped %s rows %s: one key %r in scope %s now names them, and they chose different targets. "
+                    "Make the decision again.",
+                    model.__name__,
+                    ids,
+                    new_key,
+                    scope,
+                )
+                removed += ids
+        if removed:
+            cursor.execute(f"DELETE FROM {table} WHERE id = ANY(%s)", [removed])  # noqa: S608 - quoted name
+            cursor.execute(f"DELETE FROM {STAGE} WHERE id = ANY(%s)", [removed])  # noqa: S608 - fixed name
+        if len(groups) < BATCH_SIZE:
+            return
+        last = groups[-1][0]
+
+
+def _relink(cursor, ResolutionProposal, ids, kept, *, quote):
+    """Point each proposal that wrote one of *ids* at *kept*, or at no row when *kept* is None."""
+    cursor.execute(
+        f"UPDATE {quote(ResolutionProposal._meta.db_table)} SET written_resolution_id = %s "  # noqa: S608
+        "WHERE written_resolution_id = ANY(%s)",
+        [kept, ids],
+    )
+
+
+def _store(cursor, model, *, key_field, digest_field, quote, extra_sql=""):
+    """Write the staged keys in two bounded passes, so no row meets a unique digest another row still holds."""
+    table = quote(model._meta.db_table)
+    key = quote(model._meta.get_field(key_field).column)
+    digest = quote(model._meta.get_field(digest_field).column)
+    for ids in _staged_pages(cursor):
+        cursor.execute(f"UPDATE {table} SET {digest} = 'rekey-' || id WHERE id = ANY(%s)", [ids])  # noqa: S608
+    for ids in _staged_pages(cursor):
+        cursor.execute(
+            f"UPDATE {table} AS stored SET {key} = stage.new_key, {digest} = {DIGEST_SQL}{extra_sql} "  # noqa: S608
+            f"FROM {STAGE} AS stage WHERE stored.id = stage.id AND stage.id = ANY(%s)",
+            [ids],
+        )
+
+
+def _skip(model, pk, field):
+    logger.warning("Kept %s %s unchanged: its %s is not a canonical identity.", model, pk, field)
+
+
+def _rekey_policy(cursor, model, *, rekey, key_field, digest_field, scope, target, alias, quote, written=None):
+    """Rekey one decision model, page by page, and settle the keys that now collide."""
+    _new_stage(cursor)
+    for page in _pages(model, alias, (key_field, *scope, *target)):
+        rows = []
+        for pk, old, *values in page:
+            new = rekey(old)
+            if new is None:
+                _skip(model.__name__, pk, key_field)
+                new = old
+            scope_values, target_values = values[: len(scope)], values[len(scope) :]
+            rows.append((pk, json.dumps(scope_values), new, json.dumps(target_values), False))
+        _stage(cursor, rows)
+    _resolve_collisions(cursor, model, quote=quote, written=written)
+    _store(cursor, model, key_field=key_field, digest_field=digest_field, quote=quote)
+
+
+def _rekey_cable_sources(cursor, CableImportSource, alias, quote):
     """Rekey provenance, and state an unknown segment position when the canonical endpoint order reversed."""
-    keyed = []
-    for row in CableImportSource.objects.using(alias).order_by("pk"):
-        found = _trace_identity(row.trace_identity)
-        if found is None:
-            _skip("CableImportSource", row, "trace_identity")
-            continue
-        new, reversed_order = found
-        if reversed_order:
-            row.segment_index = None
-            row.direction = {"canonical": "reversed", "reversed": "canonical"}.get(row.direction, row.direction)
+    _new_stage(cursor)
+    for page in _pages(CableImportSource, alias, ("trace_identity", "cable_id", "profile_id")):
+        rows = []
+        for pk, old, cable_id, profile_id in page:
+            found = _trace_identity(old)
+            if found is None:
+                _skip("CableImportSource", pk, "trace_identity")
+                found = (old, False)
+            rows.append((pk, json.dumps([cable_id, profile_id]), found[0], "", found[1]))
+        reversed_ids = [row[0] for row in rows if row[4]]
+        if reversed_ids:
             logger.warning(
-                "CableImportSource %s: the canonical endpoint order of its trace reversed, so its segment "
+                "CableImportSource rows %s: the canonical endpoint order of their trace reversed, so their segment "
                 "position is now unknown.",
-                row.pk,
+                reversed_ids,
             )
-        keyed.append((row, new))
-    groups = defaultdict(list)
-    for row, new in keyed:
-        groups[(row.cable_id, row.profile_id, new)].append(row)
-    removed = set()
-    for (cable_id, profile_id, new), members in groups.items():
-        others = sorted(row.pk for row in members)[1:]
-        if others:
-            logger.warning(
-                "Merged CableImportSource rows %s of Cable %s and profile %s: one trace identity %r now names them.",
-                others,
-                cable_id,
-                profile_id,
-                new,
-            )
-            removed.update(others)
-    CableImportSource.objects.using(alias).filter(pk__in=removed).delete()
-    _store_keys(
+        _stage(cursor, rows)
+    _resolve_collisions(cursor, CableImportSource, quote=quote, merge_all=True)
+    # A reversed order counts the segments from the other end, and the trace length is not stored.
+    _store(
+        cursor,
         CableImportSource,
-        [(row, new) for row, new in keyed if row.pk not in removed],
         key_field="trace_identity",
         digest_field="trace_key",
-        alias=alias,
-        extra=("segment_index", "direction"),
+        quote=quote,
+        extra_sql=(
+            ", segment_index = CASE WHEN stage.reversed THEN NULL ELSE stored.segment_index END"
+            ", direction = CASE WHEN NOT stage.reversed THEN stored.direction WHEN stored.direction = 'canonical' "
+            "THEN 'reversed' WHEN stored.direction = 'reversed' THEN 'canonical' ELSE stored.direction END"
+        ),
     )
 
 
-def _rekey_segment_overrides(CableSegmentOverride, alias):
+def _rekey_segment_overrides(cursor, CableSegmentOverride, alias, quote):
     """Rekey the trace an override was decided from. Its pair key names NetBox objects and keeps its value."""
-    changed = []
-    for row in CableSegmentOverride.objects.using(alias).order_by("pk"):
-        found = _trace_identity(row.source_trace_identity)
-        if found is None:
-            _skip("CableSegmentOverride", row, "source_trace_identity")
-            continue
-        row.source_trace_identity = found[0]
-        changed.append(row)
-    CableSegmentOverride.objects.using(alias).bulk_update(changed, ["source_trace_identity"], batch_size=500)
+    table = quote(CableSegmentOverride._meta.db_table)
+    for page in _pages(CableSegmentOverride, alias, ("source_trace_identity",)):
+        rows = []
+        for pk, old in page:
+            found = _trace_identity(old)
+            if found is None:
+                _skip("CableSegmentOverride", pk, "source_trace_identity")
+                continue
+            rows.append((pk, found[0]))
+        if rows:
+            cursor.execute(
+                f"UPDATE {table} AS stored SET source_trace_identity = new.identity "  # noqa: S608 - quoted name
+                "FROM unnest(%s::bigint[], %s::text[]) AS new(id, identity) WHERE stored.id = new.id",
+                [list(column) for column in zip(*rows, strict=True)],
+            )
 
 
 def rekey_name_identities(apps, schema_editor):
     """Retire the requests in flight, then rekey every decision and provenance row."""
     alias = schema_editor.connection.alias
+    quote = schema_editor.connection.ops.quote_name
 
     def model(name):
         return apps.get_model("netbox_data_import", name)
 
     ResolutionProposal = model("ResolutionProposal")
-
     # An answer would bind to a key and evidence built under the casefold identity.
     ResolutionProposal.objects.using(alias).filter(status__in=("queued", "running")).update(
         status="failed", failure_reason="superseded_request"
     )
     # Every proposal is now terminal and keeps its casefold key, so it answers no current question.
-
-    TerminationResolution = model("TerminationResolution")
-    _rekey_policy(
-        TerminationResolution,
-        TerminationResolution.objects.using(alias).order_by("pk"),
-        rekey=_field_key,
-        key_field="field_key",
-        digest_field="field_key_digest",
-        scope=("profile_id", "task_type"),
-        target=("selected_object_type_id", "selected_object_id"),
-        alias=alias,
-        written=ResolutionProposal,
-    )
-    TraceDeviceResolution = model("TraceDeviceResolution")
-    _rekey_policy(
-        TraceDeviceResolution,
-        TraceDeviceResolution.objects.using(alias).order_by("pk"),
-        rekey=str.upper,
-        key_field="source_device_key",
-        digest_field="source_device_key_digest",
-        scope=("profile_id",),
-        target=("selected_device_id",),
-        alias=alias,
-    )
-    TraceLocationResolution = model("TraceLocationResolution")
-    _rekey_policy(
-        TraceLocationResolution,
-        TraceLocationResolution.objects.using(alias).order_by("pk"),
-        rekey=str.upper,
-        key_field="source_location_key",
-        digest_field="source_location_key_digest",
-        scope=("profile_id",),
-        target=("selected_location_id",),
-        alias=alias,
-    )
-    _rekey_cable_sources(model("CableImportSource"), alias)
-    _rekey_segment_overrides(model("CableSegmentOverride"), alias)
+    with schema_editor.connection.cursor() as cursor:
+        _rekey_policy(
+            cursor,
+            model("TerminationResolution"),
+            rekey=_field_key,
+            key_field="field_key",
+            digest_field="field_key_digest",
+            scope=("profile_id", "task_type"),
+            target=("selected_object_type_id", "selected_object_id"),
+            alias=alias,
+            quote=quote,
+            written=ResolutionProposal,
+        )
+        _rekey_policy(
+            cursor,
+            model("TraceDeviceResolution"),
+            rekey=str.upper,
+            key_field="source_device_key",
+            digest_field="source_device_key_digest",
+            scope=("profile_id",),
+            target=("selected_device_id",),
+            alias=alias,
+            quote=quote,
+        )
+        _rekey_policy(
+            cursor,
+            model("TraceLocationResolution"),
+            rekey=str.upper,
+            key_field="source_location_key",
+            digest_field="source_location_key_digest",
+            scope=("profile_id",),
+            target=("selected_location_id",),
+            alias=alias,
+            quote=quote,
+        )
+        _rekey_cable_sources(cursor, model("CableImportSource"), alias, quote)
+        _rekey_segment_overrides(cursor, model("CableSegmentOverride"), alias, quote)
+        cursor.execute(f"DROP TABLE IF EXISTS {STAGE}, {GROUPS}")
 
 
 class Migration(migrations.Migration):
