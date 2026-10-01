@@ -9,8 +9,9 @@ schema, so no view shows their text, and `import_engine.operator_failure_message
 Job. A builtin or third-party exception shows its text only where an audit below says why.
 
 A plugin type stops being curated when some handler wraps a caught `PlanError`'s text into it,
-because its text then repeats the plan error. That search follows local assignments and calls into a
-helper function of the same module; a method or another module's helper is not followed.
+because its text then repeats the plan error. That search follows local assignments, an exception
+bound to a name and raised later, and calls into a helper function of the same module; a method,
+another module's helper, and a factory that returns the exception are not followed.
 
 The scan is syntactic. A caught exception passed whole to a helper is not followed: the helpers
 listed in `SANITIZERS` word it, and any other bare argument counts as a text use.
@@ -188,49 +189,88 @@ def caught_classes(handler: ast.ExceptHandler, namespace) -> list[type | str]:
     return classes
 
 
+def _assignments(body):
+    """Yield (value, assigned names) for every assignment form in one statement list."""
+    for node in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if isinstance(node, ast.Assign):
+            value, targets = node.value, node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and node.value is not None:
+            value, targets = node.value, [node.target]
+        else:
+            continue
+        yield value, {child.id for target in targets for child in ast.walk(target) if isinstance(child, ast.Name)}
+
+
 def _tainted_names(body, names: set[str]) -> set[str]:
     """Return *names* and every name a statement list assigns from one of them, followed to a fixpoint."""
     tainted = set(names)
+    assignments = list(_assignments(body))
     changed = True
     while changed:
         changed = False
-        for node in ast.walk(ast.Module(body=body, type_ignores=[])):
-            if isinstance(node, ast.Assign):
-                value, targets = node.value, node.targets
-            elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and node.value is not None:
-                value, targets = node.value, [node.target]
-            else:
-                continue
-            if not _names_in(value) & tainted:
-                continue
-            assigned = {child.id for target in targets for child in ast.walk(target) if isinstance(child, ast.Name)}
-            if not assigned <= tainted:
+        for value, assigned in assignments:
+            if _names_in(value) & tainted and not assigned <= tainted:
                 tainted |= assigned
                 changed = True
     return tainted
 
 
+def _carries(call: ast.Call, tainted: set[str]) -> bool:
+    """Return whether one call receives a tainted value."""
+    return any(_names_in(argument) & tainted for argument in (*call.args, *(item.value for item in call.keywords)))
+
+
+def _built_with(body, tainted: set[str]) -> dict[str, str]:
+    """Return each name bound to a call that receives a tainted value, mapped to the called name, aliases followed."""
+    built: dict[str, str] = {}
+    assignments = list(_assignments(body))
+    size = -1
+    while size != len(built):
+        size = len(built)
+        for value, assigned in assignments:
+            if isinstance(value, ast.Call) and _carries(value, tainted):
+                built.update(dict.fromkeys(assigned, _call_name(value) or ""))
+            elif isinstance(value, ast.Name) and value.id in built:
+                built.update(dict.fromkeys(assigned, built[value.id]))
+    return built
+
+
 def _tainted_parameters(helper: ast.FunctionDef, call: ast.Call, tainted: set[str]) -> set[str]:
-    """Return the helper parameters one call binds to a tainted value."""
-    positional = [*helper.args.posonlyargs, *helper.args.args]
-    bound = {
-        parameter.arg
-        for parameter, argument in zip(positional, call.args, strict=False)
-        if _names_in(argument) & tainted
-    }
-    bound |= {keyword.arg for keyword in call.keywords if keyword.arg and _names_in(keyword.value) & tainted}
+    """Return the helper parameters one call binds to a tainted value, `*args` and `**kwargs` included."""
+    signature = helper.args
+    positional = [parameter.arg for parameter in (*signature.posonlyargs, *signature.args)]
+    named = {*positional, *(parameter.arg for parameter in signature.kwonlyargs)}
+    variadic = {signature.vararg.arg} if signature.vararg else set()
+    keywords = {signature.kwarg.arg} if signature.kwarg else set()
+    bound: set[str] = set()
+    for index, argument in enumerate(call.args):
+        if not _names_in(argument) & tainted:
+            continue
+        # An unpacked argument can fill this parameter and every later one.
+        unpacked = isinstance(argument, ast.Starred)
+        bound |= set(positional[index:] if unpacked else positional[index : index + 1])
+        if unpacked or index >= len(positional):
+            bound |= variadic
+    for keyword in call.keywords:
+        if not _names_in(keyword.value) & tainted:
+            continue
+        if keyword.arg is None:
+            bound |= named | keywords
+        else:
+            bound |= {keyword.arg} if keyword.arg in named else keywords
     return bound
 
 
 def _raised_with(body, names: set[str], functions: dict, seen: frozenset = frozenset()) -> set[str]:
     """Return the class names a statement list raises with the text of *names*, through same-module helpers."""
     tainted = _tainted_names(body, names)
+    built = _built_with(body, tainted)
     raised: set[str] = set()
     for node in ast.walk(ast.Module(body=body, type_ignores=[])):
-        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
-            arguments = [*node.exc.args, *(keyword.value for keyword in node.exc.keywords)]
-            if any(_names_in(argument) & tainted for argument in arguments):
-                raised.add(_call_name(node.exc) or "")
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call) and _carries(node.exc, tainted):
+            raised.add(_call_name(node.exc) or "")
+        elif isinstance(node, ast.Raise) and isinstance(node.exc, ast.Name) and node.exc.id in built:
+            raised.add(built[node.exc.id])
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
             helper = functions[node.func.id]
             parameters = _tainted_parameters(helper, node, tainted)
@@ -353,6 +393,34 @@ class ExceptionTextScannerTest(SimpleTestCase):
                 "def _wrap(prefix, *, error):\n    text = repr(error)\n    raise SelectionError(prefix + text)\n"
                 "def merge():\n    try:\n        order()\n    except PlanInvalid as caught:\n"
                 "        _wrap('x', error=caught)\n"
+            ),
+            (
+                "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n"
+                "        wrapped = SelectionError(str(exc))\n        raise wrapped from exc\n"
+            ),
+            (
+                "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n"
+                "        wrapped: Exception = SelectionError(str(exc))\n        again = wrapped\n        raise again\n"
+            ),
+            (
+                "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n"
+                "        if flag:\n            wrapped = SelectionError(str(exc))\n        again = wrapped\n        raise again\n"
+            ),
+            (
+                "def _wrap(*parts):\n    raise SelectionError(' '.join(str(part) for part in parts))\n"
+                "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n        _wrap('x', exc)\n"
+            ),
+            (
+                "def _wrap(prefix, error):\n    raise SelectionError(str(error))\n"
+                "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n        _wrap(*('x', exc))\n"
+            ),
+            (
+                "def _wrap(error):\n    raise SelectionError(str(error))\n"
+                "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n        _wrap(**{'error': exc})\n"
+            ),
+            (
+                "def _wrap(**parts):\n    raise SelectionError(str(parts))\n"
+                "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n        _wrap(error=exc)\n"
             ),
         )
         for engine in engines:

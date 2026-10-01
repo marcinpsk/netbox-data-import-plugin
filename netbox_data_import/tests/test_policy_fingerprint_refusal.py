@@ -8,6 +8,7 @@ skipped the comparison, so a second session silently replaced the first session'
 
 The refusal must be a statement of the lock block itself, before any statement that writes, so no
 branch can skip it. The scan reads only WRITER_MODULES and does not follow a lock taken inside a helper.
+It follows aliases of the lock and of an opened lock through assignments to plain names only.
 """
 
 import ast
@@ -49,21 +50,31 @@ def _name(node) -> str | None:
     return getattr(node, "id", None) or getattr(node, "attr", None)
 
 
+def _assignments(tree):
+    """Yield (target names, value) for every plain and annotated assignment."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            yield [target.id for target in node.targets if isinstance(target, ast.Name)], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None and isinstance(node.target, ast.Name):
+            yield [node.target.id], node.value
+
+
 def _lock_names(tree) -> tuple[set[str], set[str]]:
-    """Return the names that call the lock, an alias included, and the names that hold an opened lock."""
+    """Return the names that call the lock and the names that hold an opened lock, aliases followed to a fixpoint."""
     callers = {LOCK}
+    held: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             callers.update(alias.asname for alias in node.names if alias.name == LOCK and alias.asname)
-        elif isinstance(node, ast.Assign) and _name(node.value) == LOCK:
-            callers.update(target.id for target in node.targets if isinstance(target, ast.Name))
-    held = {
-        target.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and _name(node.value.func) in callers
-        for target in node.targets
-        if isinstance(target, ast.Name)
-    }
+    assignments = list(_assignments(tree))
+    size = -1
+    while size != len(callers) + len(held):
+        size = len(callers) + len(held)
+        for targets, value in assignments:
+            if isinstance(value, (ast.Name, ast.Attribute)) and _name(value) in callers:
+                callers.update(targets)
+            elif (isinstance(value, ast.Call) and _name(value.func) in callers) or _name(value) in held:
+                held.update(targets)
     return callers, held
 
 
@@ -199,6 +210,17 @@ class PolicyFingerprintRefusalScannerTest(SimpleTestCase):
             ),
             "hold = policy_lock.locked_profile_policy\ndef save():\n    with hold(pk):\n        row.save()\n",
             "def save():\n    held = locked_profile_policy(pk)\n    with held:\n        row.save()\n",
+            (
+                "from .policy_lock import locked_profile_policy as hold\nlock = hold\n"
+                "def save():\n    with lock(pk):\n        row.save()\n"
+            ),
+            "hold: Callable = locked_profile_policy\ndef save():\n    with hold(pk):\n        row.save()\n",
+            "def save():\n    held: Lock = locked_profile_policy(pk)\n    with held:\n        row.save()\n",
+            "def save():\n    held = locked_profile_policy(pk)\n    again = held\n    with again:\n        row.save()\n",
+            (
+                "def save():\n    if flag:\n        held = locked_profile_policy(pk)\n"
+                "    again = held\n    with again:\n        row.save()\n"
+            ),
         )
         for source in sources:
             with self.subTest(source=source):
