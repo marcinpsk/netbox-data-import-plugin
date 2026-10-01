@@ -246,6 +246,10 @@ class CableTopologyMixin:
         self.document = document
         return ImportEngine.plan(self.profile, document, actor or self.actor, self.planning_context)
 
+    def reader(self, actor=None):
+        """Return a reader scoped to *actor*, the superuser by default, bound to the import target."""
+        return NetBoxReader.for_actor(actor or self.actor).for_target(site=self.site)
+
     def unit(self, *blocks, actor=None):
         """Plan one path block and return the single unit it produces."""
         plan = self.plan(*blocks, actor=actor)
@@ -1273,6 +1277,63 @@ class CableEndKindTest(CableTopologyMixin, TestCase):
                     unresolved.display, {"device": "DEV-A", "cards": "", "port": "XE02", "port_class": "Port"}
                 )
                 assert_absent_from(self, unit.to_dict(), f"dcim.interface:{hidden.pk}")
+
+    def test_the_exact_name_rule_compares_names_as_the_picker_search_does(self):
+        """Python folds both 'ẞ' and 'ß' to 'ss' and PostgreSQL does not, so only the database decides a match."""
+        from netbox_data_import.database_identity import database_identities
+
+        sharp = Interface.objects.create(device=self.device_a, name="Straße", type="1000base-t")
+        capital = Interface.objects.create(device=self.device_a, name="STRAẞE", type="1000base-t")
+        self.assertNotEqual(*database_identities(("Straße", "STRAẞE")).values())
+        field_key = termination_field_key(device="DEV-A", cards="", port="Straße", kind="interface")
+
+        for port, expected in (("STRASSE", sharp), ("straẞe", capital)):
+            with self.subTest(port=port):
+                unit = self.unit(direct_path(from_end=trace_termination("DEV-A", "", port, "Port")))
+                ranked = eligible_terminations(field_key, self.reader(), profile=self.profile, search=port, limit=1)
+
+                self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+                self.assertIn(("dcim.interface", expected.pk), self.termination_pairs(unit.changes[0]))
+                self.assertEqual(ranked.candidates, (expected,))
+
+    def test_a_device_name_outside_ascii_resolves_to_its_namesake(self):
+        """A stored name and a source value are compared under one collation, so 'Straße' finds 'Straße'."""
+        device = self.make_device("Straße-1")
+        port = FrontPort.objects.create(device=device, name="Weiß", type="8p8c")
+        source = trace_termination("Straße-1", "", "eth9", "Port")
+        Interface.objects.create(device=device, name="eth9", type="1000base-t")
+        field_key = termination_field_key(device="Straße-1", cards="", port="Weiß", kind="front_port")
+
+        unit = self.unit(direct_path(from_end=source))
+        found = eligible_terminations(field_key, self.reader(), profile=self.profile, search="Weiß")
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+        self.assertEqual(found.candidates, (port,))
+
+    def test_the_exact_name_rule_materializes_only_the_rows_it_compares(self):
+        """A dense Device is filtered by name identity in the database, never loaded whole."""
+        from django.db.models.signals import post_init
+
+        Interface.objects.bulk_create(
+            Interface(device=self.device_a, name=f"if-{number:04}", type="1000base-t") for number in range(400)
+        )
+        PowerPort.objects.bulk_create(PowerPort(device=self.device_a, name=f"pp-{number:04}") for number in range(400))
+        admitted = (Interface, ConsolePort, ConsoleServerPort, PowerPort, PowerOutlet)
+        materialized = []
+
+        def count(sender, instance, **kwargs):
+            materialized.append(sender)
+
+        for model in admitted:
+            post_init.connect(count, sender=model)
+        try:
+            unit = self.unit(direct_path())
+        finally:
+            for model in admitted:
+                post_init.disconnect(count, sender=model)
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+        self.assertLessEqual(len(materialized), 6, materialized)
 
     def test_a_match_in_a_model_the_actor_cannot_view_at_all_stays_open(self):
         """An actor with no power-port grant cannot resolve to a power port, and learns nothing of it."""
@@ -2332,10 +2393,6 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         self.assertEqual([candidate.name for candidate in result.candidates], ["Eligible 1", "Eligible 2"])
         self.assertEqual(result.total, 3)
 
-    def reader(self, actor=None):
-        """Return a reader scoped to *actor*, the superuser by default, bound to the import target."""
-        return NetBoxReader.for_actor(actor or self.actor).for_target(site=self.site)
-
     def add_console_and_power_ports(self):
         """Give DEV-A one port of every model the interface claim admits, two of them named alike."""
         Interface.objects.create(device=self.device_a, name="p02", type="1000base-t")
@@ -2589,6 +2646,31 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
 
         self.assertEqual((stored.candidates, stored.total), ((), 0))
         self.assertEqual((ambiguous.candidates, ambiguous.total), ((), 0))
+
+    def test_a_mapped_peer_base_lookup_materializes_only_the_rows_it_compares(self):
+        """The automatic base of a dense panel is found by name identity in the database, never loaded whole."""
+        from django.db.models.signals import post_init
+
+        panel, fronts, _rear = self.rebuild_panel("PANEL-1", fronts=2)
+        RearPort.objects.bulk_create(
+            RearPort(device=panel, name=f"R-{number:04}", type="8p8c", positions=1) for number in range(2000)
+        )
+        peer_key = termination_field_key(device="PANEL-1", cards="", port="R1", kind="rear_port", role=MAPPED_PEER_ROLE)
+        materialized = []
+
+        def count(sender, instance, **kwargs):
+            materialized.append(sender)
+
+        for model in (FrontPort, RearPort):
+            post_init.connect(count, sender=model)
+        try:
+            result = eligible_terminations(peer_key, self.reader(), profile=self.profile, limit=1)
+        finally:
+            for model in (FrontPort, RearPort):
+                post_init.disconnect(count, sender=model)
+
+        self.assertEqual((result.candidates, result.total), ((fronts[0],), 2))
+        self.assertLessEqual(len(materialized), 3, materialized)
 
     def test_mapped_peer_candidates_stay_inside_the_actor_view_scope(self):
         """A mapped-peer question offers only the opposite ports the actor may view."""

@@ -3,7 +3,8 @@
 """The one PostgreSQL identity expression for target names, and the search rule built on it.
 
 Python `casefold` and SQL `UPPER` disagree on some characters, so both sides of a comparison are
-computed in the database.
+computed in the database. `UPPER` follows the collation of its input, and a NetBox name column and a
+query parameter have different collations, so the expression names one collation for both sides.
 """
 
 from __future__ import annotations
@@ -15,11 +16,16 @@ from django.db.models import CharField, F, Func
 from django.db.models.lookups import Contains
 
 CANONICAL_NAME = "_ndi_canonical_name"
+# NetBox creates this ICU collation for its name columns, so most stored identities keep their value.
+IDENTITY_COLLATION = "natural_sort"
 
 
 def _database_identity_sql(expression: str) -> tuple[str, tuple[str, str, str]]:
     """Return the one SQL expression used for every target identity comparison."""
-    return f"UPPER(TRIM(REGEXP_REPLACE({expression}, %s, %s, %s)))", (r"\s+", " ", "g")
+    return (
+        f'UPPER(TRIM(REGEXP_REPLACE({expression}, %s, %s, %s)) COLLATE "{IDENTITY_COLLATION}")',
+        (r"\s+", " ", "g"),
+    )
 
 
 class DatabaseIdentity(Func):

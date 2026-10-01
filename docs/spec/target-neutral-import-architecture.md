@@ -682,7 +682,10 @@ the proposal snapshot, and every selection write carry that pair unchanged, and 
 the model from the claimed kind.
 
 Deterministic matching takes the admitted models in match order and stops at the first model with any
-normalized exact port-name match. Exactly one match in that model resolves the Termination Reference.
+normalized exact port-name match. The database computes that normalized form for both the source port
+and each stored name, with the same expression and one fixed collation that the picker search uses,
+and it reads only the rows whose form matches. A source port and a candidate that the search ranks as
+an exact match are therefore the same match here. Exactly one match in that model resolves the Termination Reference.
 Several matches in that model, or no match in any admitted model, leave the Target Field unresolved:
 the unit is blocked, and manual searchable selection resolves it. An Interface name match therefore
 always wins over a console or power port of the same name, and a device with no matching Interface

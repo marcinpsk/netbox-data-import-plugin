@@ -34,7 +34,13 @@ from .cable_disclosure import (
     validate_diagnostic_disclosures,
 )
 from .catalog import OutputKind, TargetModuleKey
-from .database_identity import CANONICAL_NAME, matching_search, search_identity, with_database_identity
+from .database_identity import (
+    CANONICAL_NAME,
+    database_identities,
+    matching_search,
+    search_identity,
+    with_database_identity,
+)
 from .field_keys import (
     ADMITTED_TERMINATION_MODELS,
     CABLE_END_KINDS,
@@ -58,7 +64,7 @@ from .trace_device_resolution import (
     resolved_trace_device,
     source_device_key,
 )
-from .values import identity_text, source_text
+from .values import source_text
 
 CABLE_STATUS = "connected"
 ELIGIBLE_TERMINATION_LIMIT = 20
@@ -371,8 +377,8 @@ def resolved_device_for(field_key: str, netbox_reader, *, profile, _lock_rows=Fa
     )
 
 
-def _named_terminations(netbox_reader, label: str, device_id: int) -> dict[str, list]:
-    """Return every row of one model on one Device by comparison name, each marked as visible or not.
+def _named_terminations(netbox_reader, label: str, device_id: int, identities) -> dict[str, list]:
+    """Return one Device's rows of one model whose name identity is wanted, each marked as visible or not.
 
     The read is unscoped, so the actor's view scope cannot change which model the exact-name rule
     stops at. Only the visibility mark comes from the actor's scope.
@@ -380,24 +386,25 @@ def _named_terminations(netbox_reader, label: str, device_id: int) -> dict[str, 
     from django.db.models import Exists, OuterRef
 
     rows = (
-        _model_for_label(label)
-        .objects.filter(device_id=device_id)
+        with_database_identity(_model_for_label(label).objects.filter(device_id=device_id))
+        .filter(**{f"{CANONICAL_NAME}__in": sorted(identities)})
         .annotate(actor_may_view=Exists(netbox_reader.terminations(label).filter(pk=OuterRef("pk"))))
+        .order_by("pk")
     )
     named: dict[str, list] = {}
     for row in rows:
-        named.setdefault(identity_text(row.name), []).append(row)
+        named.setdefault(getattr(row, CANONICAL_NAME), []).append(row)
     return named
 
 
-def _exact_name_match(kind: str, port: str, named_for) -> Any | None:
-    """Return the one row the section 6.1 exact-name rule resolves *port* to, or None.
+def _exact_name_match(kind: str, identity: str, named_for) -> Any | None:
+    """Return the one row the section 6.1 exact-name rule resolves a port *identity* to, or None.
 
     The rule stops at the first admitted model with any match. Several matches or a hidden one leave
     the field open there, and never fall through to a later model.
     """
     for label in ADMITTED_TERMINATION_MODELS[kind]:
-        matches = named_for(label).get(port, [])
+        matches = named_for(label).get(identity, [])
         if matches:
             return matches[0] if len(matches) == 1 and matches[0].actor_may_view else None
     return None
@@ -428,8 +435,11 @@ def _mapped_peer_sources(parsed: dict, device, netbox_reader, profile) -> tuple:
         .first()
     )
     if stored is None:
+        identity = search_identity(parsed["port"])
         base = _exact_name_match(
-            parsed["kind"], parsed["port"], partial(_named_terminations, netbox_reader, device_id=device.pk)
+            parsed["kind"],
+            identity,
+            partial(_named_terminations, netbox_reader, device_id=device.pk, identities=(identity,)),
         )
     elif _stored_label(stored) == base_label:
         base = netbox_reader.terminations(base_label).filter(pk=stored.selected_object_id, device_id=device.pk).first()
@@ -525,6 +535,8 @@ class _CableBatch:
         self._objects: dict[tuple[str, int], Any] = {}
         self._visible: dict[tuple[str, int], bool] = {}
         self._named: dict[tuple[int, str], dict[str, list]] = {}
+        self._port_identities: dict[str, str] = {}
+        self._asked_identities: dict[int, set[str]] = {}
         self._resolved: dict[str, dict[tuple, _Termination]] = {}
         self._mappings_by_front: dict[int, list] = {}
         self._mappings_by_rear: dict[int, list] = {}
@@ -549,6 +561,7 @@ class _CableBatch:
             for resolution in self._device_resolutions.values()
             if resolution.device is not None
         }
+        self._collect_asked_ports()
         self._resolve_terminations()
         self._load_mappings()
         self._build_segments()
@@ -617,10 +630,26 @@ class _CableBatch:
         ).select_related("selected_object_type")
         return {row.field_key: row for row in rows}
 
+    def _collect_asked_ports(self) -> None:
+        """Compute in one query the name identity of every port the exact-name rule is asked about."""
+        asked = []
+        for analysis in self.analyses:
+            if analysis.stopped:
+                continue
+            for reference in self._references(analysis.trace):
+                device = self._device_resolutions[source_device_key(reference.device)].device
+                if device is not None and _field_key(reference) not in self._stored:
+                    asked.append((device.pk, source_text(reference.port)))
+        self._port_identities = database_identities(port for _device_id, port in asked)
+        for device_id, port in asked:
+            self._asked_identities.setdefault(device_id, set()).add(self._port_identities[port])
+
     def _named_for(self, device_id: int, label: str) -> dict[str, list]:
-        """Return one Device's rows of one model by comparison name, read once per batch."""
+        """Return one Device's asked rows of one model by name identity, read once per batch."""
         if (device_id, label) not in self._named:
-            self._named[(device_id, label)] = _named_terminations(self.reader, label, device_id)
+            self._named[(device_id, label)] = _named_terminations(
+                self.reader, label, device_id, self._asked_identities[device_id]
+            )
         return self._named[(device_id, label)]
 
     def _resolve_terminations(self) -> None:
@@ -666,7 +695,7 @@ class _CableBatch:
             return termination
         match = _exact_name_match(
             claimed_termination_kind(reference.port_class),
-            identity_text(reference.port),
+            self._port_identities[source_text(reference.port)],
             partial(self._named_for, device.pk),
         )
         if match is None:
