@@ -5,6 +5,9 @@
 Specification section 10.2: a preview revision is per session, so only the profile fingerprint
 under the lock shows that another operator moved the policy. Two writers once took the lock and
 skipped the comparison, so a second session silently replaced the first session's decision.
+
+The refusal must be a statement of the lock block itself, before any statement that writes, so no
+branch can skip it. The scan reads only WRITER_MODULES and does not follow a lock taken inside a helper.
 """
 
 import ast
@@ -16,6 +19,24 @@ PACKAGE = pathlib.Path(__file__).resolve().parents[1]
 WRITER_MODULES = ("review_workspace.py", "proposal_decisions.py")
 LOCK = "locked_profile_policy"
 REFUSAL = "refuse_moved_policy"
+# Calls that write a row; a statement before the refusal must make none of them.
+WRITE_CALLS = frozenset(
+    {
+        "bulk_create",
+        "bulk_update",
+        "create",
+        "decide_proposal",
+        "delete",
+        "delete_permission_scoped_objects",
+        "get_or_create",
+        "save",
+        "save_permission_scoped_object",
+        "update",
+        "update_or_create",
+        "write_resolution",
+        "write_resolution_if_fresh",
+    }
+)
 
 # Writer function -> why it takes the lock without comparing the reviewed fingerprint.
 EXEMPT_WRITERS = {
@@ -28,44 +49,79 @@ def _name(node) -> str | None:
     return getattr(node, "id", None) or getattr(node, "attr", None)
 
 
-def _takes_lock(node) -> bool:
-    """Return whether one `with` statement opens the profile policy lock."""
+def _lock_names(tree) -> tuple[set[str], set[str]]:
+    """Return the names that call the lock, an alias included, and the names that hold an opened lock."""
+    callers = {LOCK}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            callers.update(alias.asname for alias in node.names if alias.name == LOCK and alias.asname)
+        elif isinstance(node, ast.Assign) and _name(node.value) == LOCK:
+            callers.update(target.id for target in node.targets if isinstance(target, ast.Name))
+    held = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and _name(node.value.func) in callers
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    return callers, held
+
+
+def _takes_lock(node, callers: set[str], held: set[str]) -> bool:
+    """Return whether one `with` statement opens the profile policy lock, under any of its names."""
     return isinstance(node, ast.With) and any(
-        isinstance(item.context_expr, ast.Call) and _name(item.context_expr.func) == LOCK for item in node.items
+        (isinstance(item.context_expr, ast.Call) and _name(item.context_expr.func) in callers)
+        or (isinstance(item.context_expr, ast.Name) and item.context_expr.id in held)
+        for item in node.items
     )
 
 
-def _calls_refusal(body) -> bool:
-    """Return whether a statement list calls the refusal, outside any nested function or class."""
-    pending = list(body)
+def _writes(statement) -> bool:
+    """Return whether a statement makes a write call, outside any nested function or class."""
+    pending = [statement]
     while pending:
         node = pending.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
             continue
-        if isinstance(node, ast.Call) and _name(node.func) == REFUSAL:
+        if isinstance(node, ast.Call) and _name(node.func) in WRITE_CALLS:
             return True
         pending.extend(ast.iter_child_nodes(node))
     return False
 
 
+def _refuses_before_writing(body) -> bool:
+    """Return whether the block itself calls the refusal before any statement that writes."""
+    for statement in body:
+        call = statement.value if isinstance(statement, ast.Expr) else None
+        if isinstance(call, ast.Call) and _name(call.func) == REFUSAL:
+            return True
+        if _writes(statement):
+            return False
+    return False
+
+
 def lock_holders(source: str) -> dict[str, list[ast.With]]:
     """Return each module-level function's profile-lock blocks."""
+    tree = ast.parse(source)
+    callers, held = _lock_names(tree)
     holders: dict[str, list[ast.With]] = {}
-    for function in ast.parse(source).body:
+    for function in tree.body:
         if isinstance(function, ast.FunctionDef):
-            blocks = [node for node in ast.walk(function) if isinstance(node, ast.With) and _takes_lock(node)]
+            blocks = [
+                node for node in ast.walk(function) if isinstance(node, ast.With) and _takes_lock(node, callers, held)
+            ]
             if blocks:
                 holders[function.name] = blocks
     return holders
 
 
 def unguarded_writers(source: str, exempt=None) -> list[str]:
-    """Return each lock-taking function with a lock block that never compares the reviewed fingerprint."""
+    """Return each lock-taking function with a lock block that can write before it refuses."""
     exempt = EXEMPT_WRITERS if exempt is None else exempt
     return [
         name
         for name, blocks in lock_holders(source).items()
-        if name not in exempt and not all(_calls_refusal(block.body) for block in blocks)
+        if name not in exempt and not all(_refuses_before_writing(block.body) for block in blocks)
     ]
 
 
@@ -109,11 +165,44 @@ class PolicyFingerprintRefusalScannerTest(SimpleTestCase):
         source = (
             "def save():\n"
             "    with transaction.atomic(), locked_profile_policy(pk):\n"
+            "        stored = Row.objects.filter(pk=pk).first()\n"
+            "        if stored is None:\n"
+            "            return False\n"
+            "        refuse_moved_policy(profile, reviewed)\n"
+            "        row.save()\n"
+        )
+        self.assertEqual(unguarded_writers(source, exempt={}), [])
+
+    def test_a_conditional_refusal_does_not_count(self):
+        source = (
+            "def save():\n"
+            "    with locked_profile_policy(pk):\n"
             "        if stored:\n"
             "            refuse_moved_policy(profile, reviewed)\n"
             "        row.save()\n"
         )
-        self.assertEqual(unguarded_writers(source, exempt={}), [])
+        self.assertEqual(unguarded_writers(source, exempt={}), ["save"])
+
+    def test_a_refusal_after_a_write_does_not_count(self):
+        source = (
+            "def save():\n"
+            "    with locked_profile_policy(pk):\n"
+            "        save_permission_scoped_object(actor, Row, lookup, values)\n"
+            "        refuse_moved_policy(profile, reviewed)\n"
+        )
+        self.assertEqual(unguarded_writers(source, exempt={}), ["save"])
+
+    def test_an_aliased_lock_is_still_the_lock(self):
+        sources = (
+            (
+                "from .policy_lock import locked_profile_policy as hold\ndef save():\n    with hold(pk):\n        row.save()\n"
+            ),
+            "hold = policy_lock.locked_profile_policy\ndef save():\n    with hold(pk):\n        row.save()\n",
+            "def save():\n    held = locked_profile_policy(pk)\n    with held:\n        row.save()\n",
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self.assertEqual(unguarded_writers(source, exempt={}), ["save"])
 
 
 class WorkspaceWriterRefusalTest(SimpleTestCase):

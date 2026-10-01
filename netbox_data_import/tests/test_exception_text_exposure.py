@@ -9,7 +9,8 @@ schema, so no view shows their text, and `import_engine.operator_failure_message
 Job. A builtin or third-party exception shows its text only where an audit below says why.
 
 A plugin type stops being curated when some handler wraps a caught `PlanError`'s text into it,
-because its text then repeats the plan error.
+because its text then repeats the plan error. That search follows local assignments and calls into a
+helper function of the same module; a method or another module's helper is not followed.
 
 The scan is syntactic. A caught exception passed whole to a helper is not followed: the helpers
 listed in `SANITIZERS` word it, and any other bare argument counts as a text use.
@@ -187,6 +188,57 @@ def caught_classes(handler: ast.ExceptHandler, namespace) -> list[type | str]:
     return classes
 
 
+def _tainted_names(body, names: set[str]) -> set[str]:
+    """Return *names* and every name a statement list assigns from one of them, followed to a fixpoint."""
+    tainted = set(names)
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(ast.Module(body=body, type_ignores=[])):
+            if isinstance(node, ast.Assign):
+                value, targets = node.value, node.targets
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and node.value is not None:
+                value, targets = node.value, [node.target]
+            else:
+                continue
+            if not _names_in(value) & tainted:
+                continue
+            assigned = {child.id for target in targets for child in ast.walk(target) if isinstance(child, ast.Name)}
+            if not assigned <= tainted:
+                tainted |= assigned
+                changed = True
+    return tainted
+
+
+def _tainted_parameters(helper: ast.FunctionDef, call: ast.Call, tainted: set[str]) -> set[str]:
+    """Return the helper parameters one call binds to a tainted value."""
+    positional = [*helper.args.posonlyargs, *helper.args.args]
+    bound = {
+        parameter.arg
+        for parameter, argument in zip(positional, call.args, strict=False)
+        if _names_in(argument) & tainted
+    }
+    bound |= {keyword.arg for keyword in call.keywords if keyword.arg and _names_in(keyword.value) & tainted}
+    return bound
+
+
+def _raised_with(body, names: set[str], functions: dict, seen: frozenset = frozenset()) -> set[str]:
+    """Return the class names a statement list raises with the text of *names*, through same-module helpers."""
+    tainted = _tainted_names(body, names)
+    raised: set[str] = set()
+    for node in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+            arguments = [*node.exc.args, *(keyword.value for keyword in node.exc.keywords)]
+            if any(_names_in(argument) & tainted for argument in arguments):
+                raised.add(_call_name(node.exc) or "")
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
+            helper = functions[node.func.id]
+            parameters = _tainted_parameters(helper, node, tainted)
+            if parameters and helper.name not in seen:
+                raised |= _raised_with(helper.body, parameters, functions, seen | {helper.name})
+    return raised
+
+
 def plan_error_carriers(sources: dict[str, tuple[ast.Module, Mapping]]) -> set[type]:
     """Return the classes some handler raises with the text of a caught `PlanError`, followed to a fixpoint."""
     carriers: set[type] = {PlanError}
@@ -194,17 +246,13 @@ def plan_error_carriers(sources: dict[str, tuple[ast.Module, Mapping]]) -> set[t
     while changed:
         changed = False
         for tree, namespace in sources.values():
+            functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
             for _qualified, handler in _qualified_handlers(tree):
                 caught = caught_classes(handler, namespace)
                 if not any(isinstance(cls, type) and issubclass(cls, tuple(carriers)) for cls in caught):
                     continue
-                for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
-                    if not (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)):
-                        continue
-                    arguments = [*node.exc.args, *(keyword.value for keyword in node.exc.keywords)]
-                    if not any(handler.name in _names_in(argument) for argument in arguments):
-                        continue
-                    raised = namespace.get(_call_name(node.exc) or "")
+                for name in _raised_with(handler.body, {handler.name}, functions):
+                    raised = namespace.get(name)
                     if isinstance(raised, type) and raised not in carriers:
                         carriers.add(raised)
                         changed = True
@@ -287,6 +335,29 @@ class ExceptionTextScannerTest(SimpleTestCase):
         view = "def post():\n    try:\n        run()\n    except (SelectionError, StalePlan) as exc:\n        return Json(f'{exc}')\n"
         self.assertEqual(self.scan(view), [])
         self.assertEqual(self.scan(view, engine), [("post", "SelectionError")])
+
+    def test_a_plan_error_text_carried_through_a_variable_or_a_helper_is_reported(self):
+        view = (
+            "def post():\n    try:\n        run()\n    except SelectionError as exc:\n        return Json(str(exc))\n"
+        )
+        engines = (
+            (
+                "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n"
+                "        detail = str(exc)\n        message = f'{detail}.'\n        raise SelectionError(message) from exc\n"
+            ),
+            (
+                "def _wrap(error):\n    raise SelectionError(str(error))\n"
+                "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n        _wrap(exc)\n"
+            ),
+            (
+                "def _wrap(prefix, *, error):\n    text = repr(error)\n    raise SelectionError(prefix + text)\n"
+                "def merge():\n    try:\n        order()\n    except PlanInvalid as caught:\n"
+                "        _wrap('x', error=caught)\n"
+            ),
+        )
+        for engine in engines:
+            with self.subTest(engine=engine):
+                self.assertEqual(self.scan(view, engine), [("post", "SelectionError")])
 
     def test_a_curated_type_raised_with_a_fixed_sentence_stays_curated(self):
         engine = "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n        raise SelectionError(FIXED) from exc\n"
