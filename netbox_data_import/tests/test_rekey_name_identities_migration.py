@@ -4,6 +4,7 @@
 
 import hashlib
 import json
+import secrets
 from importlib import import_module
 
 from django.db import connection
@@ -318,6 +319,41 @@ class RekeyNameIdentitiesMigrationTest(TransactionTestCase):
         self.assertLessEqual(max(arrays), page)
         self.assertEqual([sql for sql, _params in statements if "array_agg" in sql], [])
         self.assertEqual(list(Device.objects.values_list("pk", "source_device_key")), [(first, "DEV-" + "I" * 11)])
+
+    def test_a_long_incompressible_key_rekeys_without_a_collision(self):
+        """The key is unbounded source text, and a btree entry cannot exceed about 2704 bytes."""
+        # A repeated character compresses away, so the port text has to be incompressible.
+        port = secrets.token_hex(2000)
+        row = self.termination(old_field_key("dev-a", port), 11)
+
+        with self.assertNoLogs(LOGGER, level="WARNING"):
+            MigrationExecutor(connection).migrate([(APP, REKEY)])
+
+        expected = old_field_key("DEV-A", port.upper())
+        stored = self.model("TerminationResolution").objects.get(pk=row.pk)
+        self.assertEqual((stored.field_key, stored.field_key_digest), (expected, _digest(expected)))
+
+    def test_long_incompressible_keys_that_collide_merge_or_drop_and_a_long_peer_stays(self):
+        """Long keys group by their exact text: one shared key merges or drops, and a key that differs stays."""
+        shared = secrets.token_hex(2000)
+        kept = self.termination(old_field_key("dev-a", f"{shared}-{DOTLESS_I}"), 21)
+        merged = self.termination(old_field_key("dev-a", f"{shared}-i"), 21)
+        first_drop = self.termination(old_field_key("dev-b", f"{shared}-{DOTLESS_I}"), 31)
+        second_drop = self.termination(old_field_key("dev-b", f"{shared}-i"), 32)
+        peer = self.termination(old_field_key("dev-a", f"{shared}-x"), 21)
+
+        output = self.migrate()
+
+        Model = self.model("TerminationResolution")
+        self.assertEqual(
+            dict(Model.objects.values_list("pk", "field_key")),
+            {
+                kept.pk: old_field_key("DEV-A", f"{shared.upper()}-I"),
+                peer.pk: old_field_key("DEV-A", f"{shared.upper()}-X"),
+            },
+        )
+        self.assertIn(f"Merged TerminationResolution rows [{merged.pk}] into row {kept.pk}", output)
+        self.assertIn(f"Dropped TerminationResolution rows [{first_drop.pk}, {second_drop.pk}]", output)
 
     def test_requests_in_flight_retire_and_every_request_keeps_its_casefold_key(self):
         queued = self.proposal(old_field_key("dev-a", "eth0"), "queued")

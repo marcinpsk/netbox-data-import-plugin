@@ -29,7 +29,7 @@ GROUPS = "pg_temp.netbox_data_import_0045_groups"
 CLAIMED_KINDS = frozenset({"interface", "front_port", "rear_port"})
 NAME_PARTS = ("cards", "device", "port")
 # PostgreSQL computes the digest from the staged key, as `index_digest` does in Python.
-DIGEST_SQL = "encode(sha256(convert_to(stage.new_key, 'UTF8')), 'hex')"
+DIGEST_SQL = "encode(sha256(convert_to(page.new_key, 'UTF8')), 'hex')"
 
 
 def _field_key(old):
@@ -100,10 +100,12 @@ def _staged_pages(cursor):
 
 
 def _stage(cursor, rows):
-    """Write one page of (id, scope, new key, target, reversed) rows to the staging table."""
+    """Write one page of (id, scope, new key, target, reversed) rows, with the digest of each key, to the stage."""
     cursor.execute(
-        f"INSERT INTO {STAGE} (id, scope, new_key, target, reversed) "  # noqa: S608 - fixed table name
-        "SELECT * FROM unnest(%s::bigint[], %s::text[], %s::text[], %s::text[], %s::boolean[])",
+        f"INSERT INTO {STAGE} (id, scope, new_key, digest, target, reversed) "  # noqa: S608 - fixed table name
+        f"SELECT page.id, page.scope, page.new_key, {DIGEST_SQL}, page.target, page.reversed "
+        "FROM unnest(%s::bigint[], %s::text[], %s::text[], %s::text[], %s::boolean[]) "
+        "AS page(id, scope, new_key, target, reversed)",
         [list(column) for column in zip(*rows, strict=True)],
     )
 
@@ -113,7 +115,7 @@ def _new_stage(cursor):
     cursor.execute(
         f"CREATE TEMPORARY TABLE {STAGE} "
         '(id bigint PRIMARY KEY, scope text COLLATE "C" NOT NULL, new_key text COLLATE "C" NOT NULL, '
-        'target text COLLATE "C" NOT NULL, reversed boolean NOT NULL)'
+        'digest text COLLATE "C" NOT NULL, target text COLLATE "C" NOT NULL, reversed boolean NOT NULL)'
     )
 
 
@@ -124,23 +126,24 @@ def _resolve_collisions(cursor, model, *, quote, merge_all=False, written=None):
     row of the group and clears the link of each proposal that wrote one. PostgreSQL keeps each group's
     members, and the migration reads them one page at a time.
     """
-    cursor.execute(f"CREATE INDEX ON {STAGE} (scope, new_key, id)")
+    # A btree entry cannot exceed about 2704 bytes, so the index holds the fixed-width digest of the key.
+    cursor.execute(f"CREATE INDEX ON {STAGE} (scope, digest, id)")
     cursor.execute(f"DROP TABLE IF EXISTS {GROUPS}")
     cursor.execute(
         f"CREATE TEMPORARY TABLE {GROUPS} AS "  # noqa: S608 - fixed table names
-        "SELECT row_number() OVER (ORDER BY min(id)) AS n, scope, new_key, min(id) AS kept, "
-        f"count(DISTINCT target) AS targets FROM {STAGE} GROUP BY scope, new_key HAVING count(*) > 1"
+        "SELECT row_number() OVER (ORDER BY min(id)) AS n, scope, new_key, digest, min(id) AS kept, "
+        f"count(DISTINCT target) AS targets FROM {STAGE} GROUP BY scope, new_key, digest HAVING count(*) > 1"
     )
     last = 0
     while True:
         cursor.execute(
-            f"SELECT n, scope, new_key, kept, targets FROM {GROUPS} WHERE n > %s ORDER BY n LIMIT %s",  # noqa: S608
+            f"SELECT n, scope, new_key, digest, kept, targets FROM {GROUPS} WHERE n > %s ORDER BY n LIMIT %s",  # noqa: S608
             [last, BATCH_SIZE],
         )
         groups = cursor.fetchall()
-        for _n, scope, new_key, kept, targets in groups:
+        for _n, scope, new_key, digest, kept, targets in groups:
             merge = merge_all or targets == 1
-            for ids in _members(cursor, scope, new_key, after=kept if merge else 0):
+            for ids in _members(cursor, scope, new_key, digest, after=kept if merge else 0):
                 _remove(cursor, model, ids, kept if merge else None, quote=quote, written=written)
                 if merge:
                     logger.warning(
@@ -166,12 +169,13 @@ def _resolve_collisions(cursor, model, *, quote, merge_all=False, written=None):
         last = groups[-1][0]
 
 
-def _members(cursor, scope, new_key, *, after):
+def _members(cursor, scope, new_key, digest, *, after):
     """Yield the staged ids of one collision group above *after*, BATCH_SIZE per page."""
     while True:
         cursor.execute(
-            f"SELECT id FROM {STAGE} WHERE scope = %s AND new_key = %s AND id > %s ORDER BY id LIMIT %s",  # noqa: S608
-            [scope, new_key, after, BATCH_SIZE],
+            f"SELECT id FROM {STAGE} WHERE scope = %s AND digest = %s AND new_key = %s AND id > %s "  # noqa: S608
+            "ORDER BY id LIMIT %s",
+            [scope, digest, new_key, after, BATCH_SIZE],
         )
         ids = [row[0] for row in cursor.fetchall()]
         if ids:
@@ -207,7 +211,7 @@ def _store(cursor, model, *, key_field, digest_field, quote, extra_sql=""):
         cursor.execute(f"UPDATE {table} SET {digest} = 'rekey-' || id WHERE id = ANY(%s)", [ids])  # noqa: S608
     for ids in _staged_pages(cursor):
         cursor.execute(
-            f"UPDATE {table} AS stored SET {key} = stage.new_key, {digest} = {DIGEST_SQL}{extra_sql} "  # noqa: S608
+            f"UPDATE {table} AS stored SET {key} = stage.new_key, {digest} = stage.digest{extra_sql} "  # noqa: S608
             f"FROM {STAGE} AS stage WHERE stored.id = stage.id AND stage.id = ANY(%s)",
             [ids],
         )
