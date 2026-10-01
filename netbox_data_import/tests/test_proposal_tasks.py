@@ -189,6 +189,7 @@ class SelectTerminationTaskTest(TestCase):
         cls.field_key = termination_field_key(
             device="TASK-SWITCH", cards="", port="Ethernet 1/1", kind="interface", role=TERMINATION_ROLE
         )
+        cls.source = {"device": "TASK-SWITCH", "cards": "", "port": "Ethernet 1/1"}
         cls.task = SelectTerminationTask()
 
     def reader(self):
@@ -260,7 +261,7 @@ class SelectTerminationTaskTest(TestCase):
         entry = next(entry for entry in snapshot.entries if entry.object_type == "dcim.powerport")
 
         receipt = self.task.write_resolution(
-            actor=self.actor, profile=self.profile, field_key=self.field_key, entry=entry
+            actor=self.actor, profile=self.profile, field_key=self.field_key, source=self.source, entry=entry
         )
 
         written = TerminationResolution.objects.get(pk=receipt.written_resolution_id)
@@ -309,7 +310,11 @@ class SelectTerminationTaskTest(TestCase):
         )
 
         receipt = self.task.write_resolution(
-            actor=self.actor, profile=self.profile, field_key=self.field_key, entry=snapshot.entries[1]
+            actor=self.actor,
+            profile=self.profile,
+            field_key=self.field_key,
+            source=self.source,
+            entry=snapshot.entries[1],
         )
 
         written = TerminationResolution.objects.get(pk=receipt.written_resolution_id)
@@ -322,11 +327,19 @@ class SelectTerminationTaskTest(TestCase):
             profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
         )
         first = self.task.write_resolution(
-            actor=self.actor, profile=self.profile, field_key=self.field_key, entry=snapshot.entries[0]
+            actor=self.actor,
+            profile=self.profile,
+            field_key=self.field_key,
+            source=self.source,
+            entry=snapshot.entries[0],
         )
 
         second = self.task.write_resolution(
-            actor=self.actor, profile=self.profile, field_key=self.field_key, entry=snapshot.entries[2]
+            actor=self.actor,
+            profile=self.profile,
+            field_key=self.field_key,
+            source=self.source,
+            entry=snapshot.entries[2],
         )
 
         self.assertEqual(first.written_resolution_id, second.written_resolution_id)

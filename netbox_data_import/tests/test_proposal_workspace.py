@@ -868,6 +868,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(response.json()["preview_state"], "recalculation_required")
         row = TerminationResolution.objects.get(profile=self.profile)
         self.assertEqual(row.selected_object_id, self.eth0.pk)
+        self.assertEqual((row.source_device, row.source_cards, row.source_port), ("DEV-A", "", "absent-port"))
         self.assertEqual(proposal.written_resolution_id, row.pk)
         self.assertEqual(proposal.decision, "accepted")
         self.assertEqual(proposal.decided_by_id, actor.pk)

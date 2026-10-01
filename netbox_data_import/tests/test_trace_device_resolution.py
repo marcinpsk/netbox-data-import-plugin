@@ -130,6 +130,7 @@ class TraceDeviceResolutionModelTest(CableTopologyMixin, TestCase):
         resolution = TraceDeviceResolution(
             profile=self.profile,
             source_device_key="SOURCE DEVICE",
+            source_device_label="Source  Device",
             selected_device_id=self.device_a.pk,
             selected_display_name=str(self.device_a),
         )
@@ -139,6 +140,21 @@ class TraceDeviceResolutionModelTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(resolution.source_device_key, "SOURCE DEVICE")
         self.assertEqual(len(resolution.source_device_key_digest), 64)
+
+    def test_the_kept_source_label_has_to_state_the_key(self):
+        """A label of another key would move the decision to that key at the next rekey."""
+        for label in ("", "Other Device"):
+            with self.subTest(label=label):
+                resolution = TraceDeviceResolution(
+                    profile=self.profile,
+                    source_device_key="SOURCE DEVICE",
+                    source_device_label=label,
+                    selected_device_id=self.device_a.pk,
+                    selected_display_name=str(self.device_a),
+                )
+
+                with self.assertRaisesMessage(ValidationError, "source label of this Device key"):
+                    resolution.full_clean()
 
     def test_a_noncanonical_source_device_key_is_rejected(self):
         resolution = TraceDeviceResolution(
@@ -559,6 +575,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         later = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         selected = next(device for device in later.context["selected_trace"].devices if device["key"] == "SOURCE ALIAS")
         self.assertEqual(selected["state"], "manually resolved")
+        self.assertEqual(TraceDeviceResolution.objects.get(profile=self.profile).source_device_label, "Source Alias")
         assert_saved_choice_is_rendered(later)
 
         reread = self.client.post(

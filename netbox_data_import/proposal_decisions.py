@@ -26,8 +26,8 @@ def proposal_staleness(proposal, *, inventory):
     return proposal_inventory_staleness(proposal, inventory)
 
 
-def accept_proposal(proposal_id, *, operator, netbox_reader, reviewed_fingerprint) -> bool:
-    """Write one fresh candidate decision under the profile, proposal, and resolution locks.
+def accept_proposal(proposal_id, *, source, operator, netbox_reader, reviewed_fingerprint) -> bool:
+    """Write one fresh candidate decision, with the source spelling the preview states, under the locks.
 
     Acceptance is a workspace command that writes profile policy, so it also refuses a decision made
     against a reviewed preview whose profile policy has since moved (section 10.2).
@@ -58,6 +58,7 @@ def accept_proposal(proposal_id, *, operator, netbox_reader, reviewed_fingerprin
         receipt = task.write_resolution_if_fresh(
             proposal=proposal,
             entry=entry,
+            source=source,
             actor=operator,
             netbox_reader=netbox_reader,
             limit=proposal_eligible_set_limit(),

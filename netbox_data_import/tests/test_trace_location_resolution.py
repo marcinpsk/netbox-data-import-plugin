@@ -72,6 +72,7 @@ class LocationTreeMixin(CableTopologyMixin):
         return TraceLocationResolution.objects.create(
             profile=self.profile,
             source_location_key=" ".join(path.split()).upper(),
+            source_location_path=path,
             selected_location_id=location.pk,
             selected_display_name=display,
         )
@@ -130,6 +131,7 @@ class TraceLocationResolutionModelTest(LocationTreeMixin, TestCase):
         resolution = TraceLocationResolution(
             profile=self.profile,
             source_location_key="REGION >> BUILDING (X) >> 1ST FLOOR >> DH4 >> T",
+            source_location_path=SOURCE_PATH,
             selected_location_id=self.hall.pk,
             selected_display_name=str(self.hall),
         )
@@ -138,6 +140,21 @@ class TraceLocationResolutionModelTest(LocationTreeMixin, TestCase):
         resolution.save()
 
         self.assertEqual(len(resolution.source_location_key_digest), 64)
+
+    def test_the_kept_source_path_has_to_state_the_key(self):
+        """A path of another key would move the mapping to that key at the next rekey."""
+        for path in ("", "Region >> Building (X)"):
+            with self.subTest(path=path):
+                resolution = TraceLocationResolution(
+                    profile=self.profile,
+                    source_location_key="REGION >> BUILDING (X) >> 1ST FLOOR >> DH4 >> T",
+                    source_location_path=path,
+                    selected_location_id=self.hall.pk,
+                    selected_display_name=str(self.hall),
+                )
+
+                with self.assertRaisesMessage(ValidationError, "source path of this Location key"):
+                    resolution.full_clean()
 
     def test_a_noncanonical_or_empty_source_location_key_is_rejected(self):
         for key in (SOURCE_PATH, "  ", ""):
@@ -584,6 +601,7 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         self.assertEqual(saved.status_code, 302, saved.content)
         stored = TraceLocationResolution.objects.get(profile=self.profile)
         self.assertEqual((stored.selected_location_id, stored.selected_display_name), (self.hall.pk, "DH4"))
+        self.assertEqual(stored.source_location_path, SOURCE_PATH)
         self.assertNotEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], before)
         page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         row = self.mapping_row(page)

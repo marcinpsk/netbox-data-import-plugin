@@ -61,6 +61,7 @@ class DecisionInventory:
         self.field_key = termination_field_key(
             device=self.device.name, cards="", port="Eth1", kind="interface", role=TERMINATION_ROLE
         )
+        self.source = {"device": self.device.name, "cards": "", "port": "Eth1"}
         self.task = proposal_task(SELECT_TERMINATION_TASK)
 
     def reader(self, operator=None):
@@ -110,6 +111,7 @@ class DecisionInventory:
         actor = operator or self.operator
         return accept_proposal(
             proposal.pk,
+            source=self.source,
             operator=actor,
             netbox_reader=self.reader(actor),
             reviewed_fingerprint=self.reviewed_fingerprint(),
@@ -383,6 +385,7 @@ class ProposalAcceptanceTest(DecisionInventory, TestCase):
         with self.assertRaises(ValueError):
             accept_proposal(
                 proposal.pk,
+                source=self.source,
                 operator=actor,
                 netbox_reader=self.reader(),
                 reviewed_fingerprint=self.reviewed_fingerprint(),

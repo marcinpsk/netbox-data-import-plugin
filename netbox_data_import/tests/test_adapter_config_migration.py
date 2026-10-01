@@ -10,7 +10,7 @@ from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.executor import MigrationExecutor
 from django.test import SimpleTestCase, TransactionTestCase
 
-from netbox_data_import.tests.helpers import restore_plugin_migrations
+from netbox_data_import.tests.helpers import migrate_plugin_to_leaf, unapply_plugin_migrations_to
 
 APP = "netbox_data_import"
 BEFORE = "0020_migrate_import_source_custom_field"
@@ -47,12 +47,8 @@ def _migrate(target, *, fake=False):
 
 
 def _rewind_to_before_the_cutover():
-    """Reverse schema operations and fake only the irreversible data operation."""
-    _migrate("0029_alter_cableimportsource_from_text_and_more", fake=True)
-    _migrate(DROP_MOVED_COLUMNS)
-    _migrate(MOVE_CONFIG_DATA)
-    _migrate(ADD_CONFIG_FIELDS, fake=True)
-    return _migrate(BEFORE)
+    """Reverse schema operations and fake only the irreversible data operations."""
+    unapply_plugin_migrations_to(BEFORE)
 
 
 class ProfileAdapterConfigMigrationStructureTest(SimpleTestCase):
@@ -94,7 +90,7 @@ class ProfileAdapterConfigMigrationStructureTest(SimpleTestCase):
 
 def _restore_every_leaf():
     """Restore every leaf because a migration test can leave later worker tests incomplete."""
-    restore_plugin_migrations()
+    migrate_plugin_to_leaf()
 
 
 class ProfileAdapterConfigMigrationTest(TransactionTestCase):

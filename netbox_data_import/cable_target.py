@@ -738,6 +738,8 @@ class _CableBatch:
             "state": state,
             "selected": "" if termination is None else termination.display,
             "selected_type": "" if termination is None else termination.object_type,
+            # A saved decision keeps this spelling beside its key, so a later identity change can rekey it.
+            "source": {"device": reference.device, "cards": reference.cards, "port": reference.port},
             "selectable": not reason,
             "reason": reason,
             # A segment NetBox cannot cable reopens both its ends, however they were resolved.

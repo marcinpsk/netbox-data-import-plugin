@@ -1870,6 +1870,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         self.assertEqual(response.status_code, 302)
         stored = TerminationResolution.objects.get(profile=self.profile, field_key=field_key)
         self.assertEqual(stored.selected_object_id, self.eth0.pk)
+        self.assertEqual((stored.source_device, stored.source_cards, stored.source_port), ("DEV-A", "", "absent-port"))
         workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         trace = workspace.context["traces"][0]
         self.assertEqual(trace.disposition, "actionable")

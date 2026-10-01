@@ -49,13 +49,17 @@ def save_termination_resolution_and_replan(
     planning_context,
     task_type,
     field_key,
+    source,
     selected_object_type,
     selected_object_id,
     selected_display_name,
     reviewed_fingerprint,
 ):
-    """Persist one manual termination selection, then request a fresh Import Plan."""
+    """Persist one manual termination selection with its source spelling, then request a fresh Import Plan."""
     values = {
+        "source_device": source["device"],
+        "source_cards": source["cards"],
+        "source_port": source["port"],
         "selected_object_type": selected_object_type,
         "selected_object_id": selected_object_id,
         "selected_display_name": selected_display_name,
@@ -267,6 +271,7 @@ def save_trace_device_resolution_and_replan(
             "source_device_key_digest": index_digest(evidence.key),
         }
         values = {
+            "source_device_label": evidence.labels[0] if evidence.labels else "",
             "selected_device_id": chosen.pk,
             "selected_display_name": str(chosen),
         }
@@ -293,20 +298,21 @@ def save_trace_location_resolution_and_replan(
     source_document,
     actor,
     planning_context,
-    source_location_key,
+    source_location_path,
     selected_location_id,
     reviewed_fingerprint,
 ):
     """Map one source Location path to a visible Location of the selected Site, then replan."""
     from .netbox_reader import NetBoxReader
-    from .trace_location_resolution import site_locations
+    from .trace_location_resolution import site_locations, source_location_key
 
+    key = source_location_key(source_location_path)
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
         lookup = {
             "profile": locked_profile,
-            "source_location_key": source_location_key,
-            "source_location_key_digest": index_digest(source_location_key),
+            "source_location_key": key,
+            "source_location_key_digest": index_digest(key),
         }
         stored = TraceLocationResolution.objects.filter(
             profile=locked_profile, source_location_key_digest=lookup["source_location_key_digest"]
@@ -320,7 +326,11 @@ def save_trace_location_resolution_and_replan(
         location = site_locations(reader).filter(pk=selected_location_id).select_for_update(of=("self",)).first()
         if location is None:
             raise IneligibleLocationSelection(f"Location {selected_location_id} is not a visible Location of the Site.")
-        values = {"selected_location_id": location.pk, "selected_display_name": str(location)}
+        values = {
+            "source_location_path": source_location_path,
+            "selected_location_id": location.pk,
+            "selected_display_name": str(location),
+        }
         TraceLocationResolution(**lookup, **values).full_clean(validate_unique=False, validate_constraints=False)
         save_permission_scoped_object(actor, TraceLocationResolution, lookup, values)
         # atomic-exit-safe: location-mapping-saved-and-replanned
@@ -924,6 +934,15 @@ class ReviewWorkspace:
         Cached because one page reads it twice, and each build reserializes every change.
         """
         return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self._presentation_units if _states_a_trace(unit))
+
+    @cached_property
+    def termination_sources(self) -> MappingProxyType:
+        """Return the source spelling of each termination field key this preview asked about, the first it states."""
+        sources: dict[str, dict] = {}
+        for trace in self.traces:
+            for item in trace.terminations:
+                sources.setdefault(item["field_key"], item["source"])
+        return MappingProxyType(sources)
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:
         """Return the unit and every unit owning a change it depends on, transitively.

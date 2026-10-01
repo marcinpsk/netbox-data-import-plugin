@@ -47,6 +47,8 @@ class DigestIndexedModelTest(TestCase):
                     profile=self.profile,
                     task_type=SELECT_TERMINATION_TASK,
                     field_key=key,
+                    source_device="Digest Device",
+                    source_port="eth0",
                     selected_object_type=ObjectType.objects.get_for_model(self.first),
                     selected_object_id=self.first.pk,
                     selected_display_name="Original selection",
@@ -72,6 +74,7 @@ class DigestIndexedModelTest(TestCase):
                 TraceDeviceResolution(
                     profile=self.profile,
                     source_device_key="DIGEST DEVICE",
+                    source_device_label="Digest Device",
                     selected_device_id=self.device.pk,
                     selected_display_name="Original Device",
                 ),

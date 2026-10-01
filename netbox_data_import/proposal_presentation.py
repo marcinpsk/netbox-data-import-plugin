@@ -343,7 +343,7 @@ class ProposalPresentation:
         accept_reason = accept_reason or stale_reason
         if not self.preview_allowed:
             accept_reason = "You do not have permission to save a termination resolution."
-        elif selected_entry is not None:
+        elif selected_entry is not None and "source" in field:
             assessment_key = (
                 proposal.field_key,
                 selected_entry.object_type,
@@ -357,6 +357,7 @@ class ProposalPresentation:
                     profile=self.profile,
                     field_key=proposal.field_key,
                     entry=selected_entry,
+                    source=field["source"],
                     actor=self.actor,
                 )
             assessment = self._write_assessments[assessment_key]

@@ -457,6 +457,7 @@ class BackgroundRefusalTest(TransactionTestCase):
             "accept_proposal": partial(
                 accept_proposal,
                 1,
+                source={"device": "DEV-A", "cards": "", "port": "eth0"},
                 operator=self.user,
                 netbox_reader=NetBoxReader.for_actor(self.user),
                 reviewed_fingerprint=plan.profile_fingerprint,

@@ -3755,6 +3755,7 @@ def _with_device_resolution_permissions(profile, actor, questions):
                 "source_device_key_digest": index_digest(key),
             },
             {
+                "source_device_label": question["labels"][0] if question["labels"] else "",
                 "selected_device_id": 1,
                 "selected_display_name": "Pending Device selection",
             },
@@ -3770,11 +3771,6 @@ def _with_device_resolution_permissions(profile, actor, questions):
             }
         )
     return results
-
-
-def _workspace_field_keys(workspace) -> set:
-    """Return every termination field key the reviewed preview actually asked about."""
-    return {item["field_key"] for trace in workspace.traces for item in trace.terminations}
 
 
 def _disable_policy_form(form) -> None:
@@ -4228,7 +4224,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             summary["active_proposals"] = ResolutionProposal.objects.filter(
                 profile=profile,
                 task_type=SELECT_TERMINATION_TASK,
-                field_key__in=_workspace_field_keys(workspace),
+                field_key__in=list(workspace.termination_sources),
                 status__in=ProposalStatus.ACTIVE,
             ).count()
         return render(
@@ -4397,7 +4393,7 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         profile, _document, workspace, planning_context = loaded
         field_key = request.GET.get("field_key", "").strip()
         # A review read answers a question this preview asked, never one the caller invented.
-        if field_key not in _workspace_field_keys(workspace):
+        if field_key not in workspace.termination_sources:
             return JsonResponse(
                 {"ok": False, "error": "This preview asked no question about that termination."}, status=400
             )
@@ -4680,7 +4676,7 @@ class TraceLocationMappingView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin
                         source_document=document,
                         actor=request.user,
                         planning_context=planning_context,
-                        source_location_key=key,
+                        source_location_path=paths[key],
                         selected_location_id=location_id,
                         reviewed_fingerprint=workspace.plan.profile_fingerprint,
                     )
@@ -4851,7 +4847,7 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
         except (TypeError, ValueError):
             return _preview_action_error(request, next_url, "A termination selection names one object.", status=400)
         # A review command answers a question this preview asked, never one the caller invented.
-        if field_key not in _workspace_field_keys(workspace):
+        if field_key not in workspace.termination_sources:
             return _preview_action_error(
                 request, next_url, "This preview asked no question about that termination.", status=400
             )
@@ -4897,6 +4893,7 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
                     planning_context=planning_context,
                     task_type=SELECT_TERMINATION_TASK,
                     field_key=field_key,
+                    source=workspace.termination_sources[field_key],
                     selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
                     selected_object_id=chosen.pk,
                     selected_display_name=str(chosen),
@@ -5015,7 +5012,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             _discard_import_preview(request)
             return JsonResponse({"ok": False, "error": reason}, status=409)
         field_key = request.POST.get("field_key", "").strip()
-        if field_key not in _workspace_field_keys(workspace):
+        if field_key not in workspace.termination_sources:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
         task = proposal_task(SELECT_TERMINATION_TASK)
         with locked_profile_policy(profile.pk):
@@ -5138,7 +5135,7 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             profile=profile,
             task_type=SELECT_TERMINATION_TASK,
         )
-        if proposal.field_key not in _workspace_field_keys(workspace):
+        if proposal.field_key not in workspace.termination_sources:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
         if not self.apply(proposal, request, reader, workspace):
             raise PreviewActionInvalid("This proposal no longer permits that action. Re-read it before continuing.")
@@ -5182,6 +5179,7 @@ class TraceAcceptProposalView(_TraceProposalActionView):
 
         accepted = accept_proposal(
             proposal.pk,
+            source=workspace.termination_sources[proposal.field_key],
             operator=request.user,
             netbox_reader=reader,
             reviewed_fingerprint=workspace.plan.profile_fingerprint,

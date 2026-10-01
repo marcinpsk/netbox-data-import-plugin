@@ -167,7 +167,11 @@ def present_location_mappings(*, profile, viewer, reader, paths: Mapping[str, st
                 viewer,
                 TraceLocationResolution,
                 {"profile": profile, "source_location_key": key, "source_location_key_digest": index_digest(key)},
-                {"selected_location_id": 1, "selected_display_name": "Pending Location mapping"},
+                {
+                    "source_location_path": path,
+                    "selected_location_id": 1,
+                    "selected_display_name": "Pending Location mapping",
+                },
                 unknown_fields={"selected_location_id", "selected_display_name"},
             )
             save_reason = (
