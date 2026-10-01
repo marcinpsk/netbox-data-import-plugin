@@ -3702,32 +3702,22 @@ class CheckDeviceNameView(PermissionRequiredMixin, View):
 
             return HttpResponseForbidden()
 
-        name = request.GET.get("name", "").strip()
-        if not name:
+        key = identity_text(request.GET.get("name", ""))
+        if not key:
             return JsonResponse({"exists": False, "url": None, "id": None})
 
-        try:
-            device = Device.objects.get(name=name)
-            return JsonResponse(
-                {
-                    "exists": True,
-                    "url": request.build_absolute_uri(device.get_absolute_url()),
-                    "id": device.pk,
-                }
-            )
-        except Device.DoesNotExist:
+        devices = Device.objects.filter(identity_in("name", [key])).order_by("pk")
+        found = list(devices[:2])
+        if not found:
             return JsonResponse({"exists": False, "url": None, "id": None})
-        except Device.MultipleObjectsReturned:
-            devices = Device.objects.filter(name=name)
-            first = devices.first()
-            return JsonResponse(
-                {
-                    "exists": True,
-                    "url": request.build_absolute_uri(first.get_absolute_url()),
-                    "id": first.pk,
-                    "count": devices.count(),
-                }
-            )
+        answer = {
+            "exists": True,
+            "url": request.build_absolute_uri(found[0].get_absolute_url()),
+            "id": found[0].pk,
+        }
+        if len(found) > 1:
+            answer["count"] = devices.count()
+        return JsonResponse(answer)
 
 
 # ---------------------------------------------------------------------------

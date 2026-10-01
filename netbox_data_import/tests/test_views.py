@@ -2094,6 +2094,23 @@ class CheckDeviceNameViewTest(BaseViewTestCase):
         data = json.loads(resp.content)
         self.assertTrue(data.get("exists"))
 
+    def test_a_device_is_found_by_its_name_identity(self):
+        """`strA\u1e9ee  sw` names the Device `STRA\u1e9eE<NBSP>SW`; `Stra\u00dfe SW` is `STRASSE SW`, another name."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        site = Site.objects.create(name="IdentitySite", slug="identity-site")
+        mfg = Manufacturer.objects.create(name="IdentityMfg", slug="identity-mfg")
+        device_type = DeviceType.objects.create(manufacturer=mfg, model="IdentityModel", slug="identity-model")
+        role = DeviceRole.objects.create(name="IdentityRole", slug="identity-role")
+        device = Device.objects.create(name="STRA\u1e9eE\u00a0SW", device_type=device_type, role=role, site=site)
+        url = reverse("plugins:netbox_data_import:check_device")
+
+        found = self.client.get(url, {"name": "  strA\u1e9ee  sw "}).json()
+        other = self.client.get(url, {"name": "Stra\u00dfe SW"}).json()
+
+        self.assertEqual((found["exists"], found["id"]), (True, device.pk))
+        self.assertFalse(other["exists"])
+
     def test_check_nonexistent_device(self):
         """Returns exists=False for an unknown device name."""
         url = reverse("plugins:netbox_data_import:check_device")
