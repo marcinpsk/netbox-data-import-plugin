@@ -2654,7 +2654,12 @@ class SyncDeviceFieldView(_AjaxPermissionView):
 
     def _apply_device_name(self, device, value):
         new_name = self._writer_safe_text(device, "device name", "name", value)
-        if type(device).objects.filter(site=device.site, name=new_name).exclude(pk=device.pk).exists():
+        if (
+            type(device)
+            .objects.filter(identity_in("name", [identity_text(new_name)]), site=device.site)
+            .exclude(pk=device.pk)
+            .exists()
+        ):
             raise PreviewActionInvalid(f"A device named '{new_name}' already exists in site '{device.site}'")
         device.name = new_name
         device.save(update_fields=["name"])
@@ -2776,7 +2781,9 @@ def _lookup_rack_for_device(request, device, value):
         return None, "Rack name is empty"
     if device.site_id is None:
         return None, "Device has no site; cannot resolve rack"
-    qs = Rack.objects.restrict(request.user, "view").filter(site=device.site, name=name)
+    qs = Rack.objects.restrict(request.user, "view").filter(
+        identity_in("name", [identity_text(name)]), site=device.site
+    )
     if device.location_id is not None:
         qs = qs.filter(location=device.location)
         loc_str = f" / location '{device.location}'"

@@ -4816,6 +4816,23 @@ class SyncDeviceFieldViewTests(TestCase):
         self.assertFalse(data["ok"])
         self.assertIn("already exists", data["error"])
 
+    def test_sync_device_name_collision_by_name_identity(self):
+        """A name of the same identity is taken too, although no exact spelling matches."""
+        from dcim.models import Device
+
+        Device.objects.create(
+            name="taken\u00a0name",
+            site=self.device.site,
+            device_type=self.device.device_type,
+            role=self.device.role,
+        )
+        response = self.client.post(
+            self.url, {"device_id": self.device.pk, "field": "device_name", "value": "TAKEN  NAME"}
+        )
+
+        self.assertFalse(response.json()["ok"], response.json())
+        self.assertIn("already exists", response.json()["error"])
+
 
 class SyncAirflowAndIPTests(TestCase):
     """Airflow and the IP fields are written by the import, so the preview can sync them too."""
@@ -5227,6 +5244,14 @@ class SyncRackAndPlacementTests(TestCase):
         )
         data = resp.json()
         self.assertTrue(data["ok"], data)
+        self.device_no_loc.refresh_from_db()
+        self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
+
+    def test_rack_name_sync_finds_the_rack_by_name_identity(self):
+        """The planner matches racks by name identity, so the placement sync does too."""
+        resp = self.client.post(self.placement_url, {"device_id": self.device_no_loc.pk, "rack_name": " r1 "})
+
+        self.assertTrue(resp.json()["ok"], resp.json())
         self.device_no_loc.refresh_from_db()
         self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
 
