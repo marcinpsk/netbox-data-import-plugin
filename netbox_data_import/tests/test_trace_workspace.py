@@ -22,7 +22,7 @@ from netbox_data_import.adapters import TraceWorkbookAdapter
 from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import MAPPED_PEER_ROLE, termination_field_key
 from netbox_data_import.models import CableClassMapping, CableSegmentOverride, ImportProfile, TerminationResolution
-from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
+from netbox_data_import.plan import Disposition, ImportPlan, PlanInvalid, PlannedChange, SynchronizationUnit
 from netbox_data_import.preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
@@ -2885,6 +2885,41 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
             assert_absent_from(self, accepted.to_dict(), name)
             assert_absent_from(self, worker_input, name)
 
+    def test_a_cached_plan_with_a_removed_display_field_is_refused_before_reuse_or_enqueue(self):
+        """A plan cached before the saved port name left the diagnostics still carries it, so it is never reused."""
+        from core.models import Job
+
+        self.open_workspace(
+            direct_path(from_end=trace_termination("DEV-A", "", "absent-port", "Port")),
+            power_path(),
+        )
+        session = self.client.session
+        stale = session[PREVIEW_PLAN_SESSION_KEY]
+        pre_change = 0
+        for unit in stale["units"]:
+            for diagnostic in unit["diagnostics"]:
+                if diagnostic["code"] == "cable.termination_unresolved":
+                    diagnostic["display"]["selected_display_name"] = "saved-hidden-port"
+                    pre_change += 1
+        session[PREVIEW_PLAN_SESSION_KEY] = stale
+        session.save()
+        actionable = next(unit["identity"] for unit in stale["units"] if unit["disposition"] == Disposition.ACTIONABLE)
+        jobs = Job.objects.count()
+
+        queued = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {"identity": actionable, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
+            follow=True,
+        )
+
+        self.assertGreater(pre_change, 0)
+        self.assertEqual(Job.objects.count(), jobs)
+        with self.assertRaises(PlanInvalid):
+            ImportPlan.from_dict(stale)
+        self.assertContains(queued, "No import preview in progress.")
+        self.assertNotContains(queued, "saved-hidden-port")
+        self.assertNotContains(self.reload(), "saved-hidden-port", status_code=302)
+
     def test_a_cached_port_name_without_an_authorizable_source_redacts_on_render(self):
         """The workspace does not trust a cached port name whose source is missing or malformed."""
         self.open_workspace(power_path())
@@ -2955,8 +2990,9 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
 
     def test_termination_sources_stay_out_of_the_accepted_fingerprint(self):
         """Live presentation removes port and Device names without moving any accepted decision input."""
+        from dataclasses import replace
+
         plan = self.plan(direct_path(from_end=SERVER_PSU, to_end=DEVICE_B), actor=self.viewer)
-        stripped = plan.to_dict()
 
         def remove_sources(value):
             if isinstance(value, dict):
@@ -2967,10 +3003,25 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
             elif isinstance(value, list):
                 for child in value:
                     remove_sources(child)
+            return value
 
-        remove_sources(stripped)
+        # The objects are rebuilt directly, because deserialization refuses a display without its sources.
+        stripped = replace(
+            plan,
+            units=tuple(
+                replace(
+                    unit,
+                    display=remove_sources(unit.to_dict()["display"]),
+                    diagnostics=tuple(
+                        replace(item, display=remove_sources(item.to_dict()["display"])) for item in unit.diagnostics
+                    ),
+                )
+                for unit in plan.units
+            ),
+        )
 
-        self.assertEqual(ImportPlan.from_dict(stripped).fingerprint, plan.fingerprint)
+        self.assertNotEqual(stripped.to_dict(), plan.to_dict())
+        self.assertEqual(stripped.fingerprint, plan.fingerprint)
 
 
 class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase):
@@ -3406,15 +3457,12 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
         session[PREVIEW_PLAN_SESSION_KEY] = data
         session.save()
 
-        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), follow=True)
 
-        finding = next(
-            item
-            for item in response.context["selected_trace"].findings
-            if item["code"] == "cable.media_family_mismatch"
-        )
-        self.assertIn("a Cable you cannot view", finding["message"])
-        self.assertNotIn(cable_type_label("mmf-om4"), finding["message"])
+        with self.assertRaises(PlanInvalid):
+            ImportPlan.from_dict(data)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, cable_type_label("mmf-om4"))
 
     def test_policy_view_changes_only_presentation_not_the_plan_decision(self):
         """The unrestricted policy decision and fingerprint do not depend on policy view access."""

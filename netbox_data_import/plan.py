@@ -225,14 +225,22 @@ class Diagnostic:
 
     @classmethod
     def from_dict(cls, data: dict) -> Diagnostic:
-        """Rebuild a diagnostic from its serialized form."""
-        return cls(
+        """Rebuild a diagnostic, refusing a display field the current display vocabulary does not register.
+
+        A cached plan can predate a display change, and an unknown field can hold a value no render
+        rechecks, so the plan has to be planned again instead of reused.
+        """
+        from .cable_disclosure import validate_diagnostic_disclosures
+
+        diagnostic = cls(
             code=data["code"],
             severity=data["severity"],
             identities=tuple(data.get("identities", ())),
             display=data.get("display", {}),
             evidence=data.get("evidence", {}),
         )
+        validate_diagnostic_disclosures(diagnostic.code, _thaw_json(diagnostic.display))
+        return diagnostic
 
 
 @dataclass(frozen=True)

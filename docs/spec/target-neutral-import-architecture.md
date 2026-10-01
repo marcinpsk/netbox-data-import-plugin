@@ -425,7 +425,9 @@ source rows or Target Module ORM operations.
 ### 4.8 Schema versioning and storage
 
 A serialized Import Plan carries an explicit schema version. The first version is `1` (spec default).
-An incompatible active preview or queued job fails before writes and requires replanning. Historical
+An incompatible active preview or queued job fails before writes and requires replanning. A plan whose
+diagnostic display holds a field the current display vocabulary does not register is incompatible
+too, because that field can hold a value no render rechecks. Historical
 Import Executions remain audit records. The runtime never migrates an old executable plan and never
 keeps a compatibility executor.
 
