@@ -16,7 +16,7 @@ from netbox_data_import.models import (
     TraceLocationResolution,
 )
 from netbox_data_import.netbox_reader import NetBoxReader
-from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY
+from netbox_data_import.preview_row_actions import PREVIEW_PLAN_SESSION_KEY, PREVIEW_REVISION_SESSION_KEY
 from netbox_data_import.profile_yaml import serialize_profile
 from netbox_data_import.trace_device_resolution import CandidateFact, DeviceEvidence, eligible_trace_devices
 from netbox_data_import.tests.helpers import (
@@ -106,6 +106,16 @@ class LocationTreeMixin(CableTopologyMixin):
     def candidate_for(page, device):
         """Return the one candidate that offers *device*."""
         return next(candidate for candidate in page.candidates if candidate.device.pk == device.pk)
+
+    @staticmethod
+    def order(page):
+        """Return the offered Devices in rank order."""
+        return [candidate.device.pk for candidate in page.candidates]
+
+    def unmapped_order(self, actor, path=SOURCE_PATH):
+        """Return the rank order *actor* sees once no mapping exists, as if the evidence never existed."""
+        TraceLocationResolution.objects.filter(profile=self.profile).delete()
+        return self.order(self.candidates(self.evidence(path), actor))
 
 
 class TraceLocationResolutionModelTest(LocationTreeMixin, TestCase):
@@ -273,6 +283,9 @@ class SourceLocationEvidenceTest(LocationTreeMixin, TestCase):
         candidate = self.candidate_for(page, device)
         self.assertEqual(self.facts(candidate, "location"), ([], []))
         self.assertNotIn("Secret Room", str(candidate))
+        # The order must be the order of a Device with no placement at all.
+        Device.objects.filter(pk=device.pk).update(location=None, rack=None)
+        self.assertEqual(self.order(page), self.order(self.candidates(self.evidence(SOURCE_PATH), actor)))
 
     def test_a_hidden_intermediate_location_does_not_break_containment(self):
         path = "Campus >> Level 1 >> Row T"
@@ -332,6 +345,8 @@ class SourceLocationEvidenceTest(LocationTreeMixin, TestCase):
         self.assertLess(ranked.index(rack_only), ranked.index(in_both))
 
     def test_a_stale_mapping_acts_unmapped(self):
+        # Sorts after every placed Device by name, so one Location conflict would reorder the page.
+        self.placed_device("Zz Unplaced")
         gone = Location.objects.create(site=self.site, name="Gone Room", slug="gone-room")
         moved = Location.objects.create(site=self.site, name="Moved Room", slug="moved-room")
         hidden = Location.objects.create(site=self.site, parent=self.hall, name="Hidden Room", slug="hidden-room")
@@ -359,6 +374,7 @@ class SourceLocationEvidenceTest(LocationTreeMixin, TestCase):
 
                 for device in (self.in_hall, self.in_other_hall):
                     self.assertEqual(self.facts(self.candidate_for(page, device), "location"), ([], []))
+                self.assertEqual(self.order(page), self.unmapped_order(actor))
 
     def test_a_mapping_row_the_actor_cannot_view_gives_no_evidence(self):
         self.map_path(SOURCE_PATH, self.hall)
@@ -375,6 +391,7 @@ class SourceLocationEvidenceTest(LocationTreeMixin, TestCase):
 
         self.assertEqual(self.facts(self.candidate_for(page, self.in_other_hall), "location"), ([], []))
         self.assertEqual(self.facts(self.candidate_for(page, self.in_hall), "location"), ([], []))
+        self.assertEqual(self.order(page), self.unmapped_order(actor))
 
     def test_the_import_location_ranks_after_name_and_source_evidence_and_never_filters(self):
         rack = Rack.objects.create(site=self.site, name="Source Rack", u_height=42)
@@ -574,13 +591,25 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
     def test_clearing_a_mapping_removes_it_and_replans(self):
         self.open_workspace()
         self.post_mapping(location_id=self.hall.pk)
+        mapped_fingerprint = self.client.session[PREVIEW_PLAN_SESSION_KEY]["profile_fingerprint"]
+        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
 
         cleared = self.post_mapping(clear="1")
 
         self.assertEqual(cleared.status_code, 302, cleared.content)
         self.assertFalse(TraceLocationResolution.objects.filter(profile=self.profile).exists())
+        self.assertNotEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], before)
+        # The stored plan was planned without the mapping, so the workspace reads it as current.
+        replanned = self.client.session[PREVIEW_PLAN_SESSION_KEY]["profile_fingerprint"]
+        self.assertNotEqual(replanned, mapped_fingerprint)
+        self.assertEqual(replanned, ImportProfile.objects.get(pk=self.profile.pk).planning_fingerprint)
         page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertFalse(page.context["drift"])
         self.assertEqual(self.mapping_row(page).state, "unmapped")
+        candidates = self.device_candidates()
+        for device in (self.in_row, self.in_other_hall):
+            facts = candidates[device.pk]["matched_facts"] + candidates[device.pk]["conflicting_facts"]
+            self.assertEqual([fact for fact in facts if fact["fact"] == "location"], [], device.name)
 
     def test_a_path_the_preview_never_carried_is_refused(self):
         self.open_workspace()
