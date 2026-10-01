@@ -702,8 +702,11 @@ Eligible-candidate retrieval treats the admitted models as one set. It has one c
 combined bound: the picker's page size and the proposal's complete-set ceiling each apply to the
 whole set, never per model. The order is stable and total: an exact normalized match of the search
 text first, then name, then match order of the model, then id. An exact-name search therefore always
-reaches its candidate, whatever the other models hold. A locking read locks the concrete models in
-one fixed global order.
+reaches its candidate, whatever the other models hold. A search admits each candidate whose
+normalized name contains the normalized search text, and the database computes both forms, so a
+name that differs only in whitespace or case is never filtered out. Names compare bytewise. Each
+model is counted and cut to the bound in the database, then the pages merge into the combined
+order. A locking read locks the concrete models in one fixed global order.
 
 Two resolved ends of one segment must be a pair NetBox can cable. The Cable Target Module reads that
 rule from NetBox's own compatible-termination table and never keeps a copy. It checks each segment

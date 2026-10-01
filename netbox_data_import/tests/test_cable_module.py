@@ -2370,6 +2370,59 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         self.assertEqual(len(result.candidates), ELIGIBLE_TERMINATION_LIMIT)
         self.assertEqual(result.total, ELIGIBLE_TERMINATION_LIMIT + 6)
 
+    def test_a_search_admits_and_ranks_first_a_name_that_differs_only_in_whitespace_or_case(self):
+        """`PSU  1` is the normalized exact match for `psu 1`, so the search keeps it and puts it first."""
+        Interface.objects.create(device=self.device_a, name="PSU 1a", type="1000base-t")
+        target = PowerPort.objects.create(device=self.device_a, name="PSU  1")
+        field_key = termination_field_key(device="DEV-A", cards="", port="absent", kind="interface")
+
+        result = eligible_terminations(field_key, self.reader(), profile=self.profile, search="psu 1")
+
+        self.assertEqual(self.offered(result), [("dcim.powerport", "PSU  1"), ("dcim.interface", "PSU 1a")])
+        self.assertEqual(result.candidates[0].pk, target.pk)
+        self.assertEqual(result.total, 2)
+
+    def test_names_order_bytewise_in_the_database_and_in_the_merge(self):
+        """Each model's page is cut in the order the merge compares, so a capital letter sorts first."""
+        Interface.objects.create(device=self.device_a, name="a1", type="1000base-t")
+        Interface.objects.create(device=self.device_a, name="B1", type="1000base-t")
+        PowerPort.objects.create(device=self.device_a, name="Z9")
+        field_key = termination_field_key(device="DEV-A", cards="", port="absent", kind="interface")
+
+        result = eligible_terminations(field_key, self.reader(), profile=self.profile, limit=2)
+
+        self.assertEqual(self.offered(result), [("dcim.interface", "B1"), ("dcim.powerport", "Z9")])
+        self.assertEqual(result.total, 4)
+
+    def test_a_page_materializes_at_most_its_bound_from_each_admitted_model(self):
+        """A dense Device is counted and cut in the database, never loaded whole and sliced."""
+        from django.db.models.signals import post_init
+
+        for number in range(30):
+            Interface.objects.create(device=self.device_a, name=f"if-{number:02}", type="1000base-t")
+            PowerPort.objects.create(device=self.device_a, name=f"pp-{number:02}")
+        field_key = termination_field_key(device="DEV-A", cards="", port="absent", kind="interface")
+        admitted = (Interface, ConsolePort, ConsoleServerPort, PowerPort, PowerOutlet)
+        materialized = []
+
+        def count(sender, instance, **kwargs):
+            materialized.append(sender)
+
+        for model in admitted:
+            post_init.connect(count, sender=model)
+        try:
+            result = eligible_terminations(field_key, self.reader(), profile=self.profile, limit=3)
+        finally:
+            for model in admitted:
+                post_init.disconnect(count, sender=model)
+
+        self.assertEqual(
+            self.offered(result),
+            [("dcim.interface", "eth0"), ("dcim.interface", "if-00"), ("dcim.interface", "if-01")],
+        )
+        self.assertEqual(result.total, 61)
+        self.assertLessEqual(len(materialized), 3 * 2, materialized)
+
     def test_each_admitted_model_stays_inside_the_actor_view_scope(self):
         """The one set holds only the rows of each model the actor may view."""
         field_key = self.add_console_and_power_ports()

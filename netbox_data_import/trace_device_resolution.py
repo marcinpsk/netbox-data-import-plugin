@@ -11,9 +11,15 @@ from functools import reduce
 from operator import or_
 from typing import Any
 
-from django.db import connection
-from django.db.models import BigIntegerField, Case, CharField, F, Func, IntegerField, Q, Value, When
+from django.db.models import BigIntegerField, Case, F, IntegerField, Q, Value, When
 
+from .database_identity import (
+    CANONICAL_NAME,
+    database_identities,
+    matching_search,
+    search_identity,
+    with_database_identity,
+)
 from .trace_location_resolution import MAPPED, site_locations, source_location_key, trace_location_mappings
 from .values import identity_text, normalize_for_compare, source_position, source_text
 
@@ -218,44 +224,6 @@ def _target_devices(reader):
     return devices
 
 
-def _database_identity_sql(expression: str) -> tuple[str, tuple[str, str, str]]:
-    """Return the one SQL expression used for every target identity comparison."""
-    return f"UPPER(TRIM(REGEXP_REPLACE({expression}, %s, %s, %s)))", (r"\s+", " ", "g")
-
-
-class _DatabaseIdentity(Func):
-    """Apply the shared target identity expression to one ORM value."""
-
-    arity = 1
-
-    def __init__(self, expression):
-        super().__init__(expression, output_field=CharField())
-
-    def as_sql(self, compiler, connection, **extra_context):
-        expression_sql, expression_params = compiler.compile(self.source_expressions[0])
-        sql, identity_params = _database_identity_sql(expression_sql)
-        return sql, (*expression_params, *identity_params)
-
-
-def _with_database_identity(queryset):
-    """Add the shared target identity to rows that have a name field."""
-    return queryset.annotate(_ndi_canonical_name=_DatabaseIdentity(F("name")))
-
-
-def _database_identity_values(values: Iterable[Any]) -> dict[str, str]:
-    """Return PostgreSQL's whitespace-insensitive case key for each source value."""
-    unique_values = sorted({source_text(value) for value in values} - {""})
-    if not unique_values:
-        return {}
-    identity_sql, identity_params = _database_identity_sql("source_value")
-    with connection.cursor() as cursor:
-        cursor.execute(
-            f"SELECT source_value, {identity_sql} FROM unnest(%s::text[]) AS source_value",  # noqa: S608 - The SQL fragment is fixed; values use query parameters.
-            [*identity_params, unique_values],
-        )
-        return dict(cursor.fetchall())
-
-
 def resolve_trace_devices(
     *,
     profile,
@@ -284,17 +252,17 @@ def resolve_trace_devices(
         key: tuple(source_text(label) for label in facts.labels if source_text(label)) or (key,)
         for key, facts in evidence.items()
     }
-    database_values = _database_identity_values(label for labels in source_labels.values() for label in labels)
+    database_values = database_identities(label for labels in source_labels.values() for label in labels)
     source_keys_by_database_name: dict[str, set[str]] = {}
     for key, labels in source_labels.items():
         for label in labels:
             source_keys_by_database_name.setdefault(database_values[label], set()).add(key)
 
-    target_devices = _with_database_identity(_target_devices(reader))
+    target_devices = with_database_identity(_target_devices(reader))
     device_ids = {row.selected_device_id for row in stored.values()}
     lookup = Q(pk__in=device_ids)
     if source_keys_by_database_name:
-        lookup |= Q(_ndi_canonical_name__in=source_keys_by_database_name)
+        lookup |= Q(**{f"{CANONICAL_NAME}__in": source_keys_by_database_name})
     devices = target_devices.filter(lookup)
     if lock_rows:
         devices = devices.order_by("pk").select_for_update(of=("self",))
@@ -302,7 +270,7 @@ def resolve_trace_devices(
     by_name: dict[str, list[Any]] = {}
     for device in devices:
         by_id[device.pk] = device
-        for key in source_keys_by_database_name.get(device._ndi_canonical_name, ()):
+        for key in source_keys_by_database_name.get(getattr(device, CANONICAL_NAME), ()):
             by_name.setdefault(key, []).append(device)
 
     outcomes = {}
@@ -397,7 +365,7 @@ def _with_evidence(devices, reader, evidence, *, exact_names, matching_racks, ma
     positions = [Decimal(str(value)) for value in positions if value is not None]
     visible_racks = _site_racks(reader).values("pk")
     path_names = tuple(f"_ndi_location_path_{index}" for index in range(len(mapped_paths)))
-    devices = _with_database_identity(devices).annotate(_ndi_placement_location=_placement_location(reader))
+    devices = with_database_identity(devices).annotate(_ndi_placement_location=_placement_location(reader))
     devices = devices.annotate(
         **{name: _flag(_in_subtree(location)) for name, (_path, location) in zip(path_names, mapped_paths, strict=True)}
     )
@@ -410,7 +378,7 @@ def _with_evidence(devices, reader, evidence, *, exact_names, matching_racks, ma
             Q(_ndi_placement_location__isnull=False) & reduce(or_, (Q(**{name: 0}) for name in path_names))
         )
     devices = devices.annotate(
-        _ndi_exact_name=_flag(Q(_ndi_canonical_name__in=exact_names)),
+        _ndi_exact_name=_flag(Q(**{f"{CANONICAL_NAME}__in": exact_names})),
         _ndi_rack_match=_flag(Q(rack_id__in=matching_racks)) if matching_racks else zero,
         _ndi_rack_conflict=(
             _flag(Q(rack_id__in=visible_racks) & ~Q(rack_id__in=matching_racks))
@@ -482,16 +450,14 @@ def eligible_trace_devices(
     lock_rows: bool = False,
 ) -> DeviceCandidatePage:
     """Return a deterministic bounded page of visible Device candidates."""
-    devices = _target_devices(reader)
-    if search:
-        devices = devices.filter(name__icontains=search)
+    devices = matching_search(_target_devices(reader), search_identity(search))
     exact_values = tuple(source_text(value) for value in evidence.labels if source_text(value)) or (evidence.key,)
     rack_values = tuple(source_text(value) for value in evidence.racks if source_text(value))
-    database_values = _database_identity_values((*exact_values, *rack_values))
+    database_values = database_identities((*exact_values, *rack_values))
     wanted_racks = {database_values[value] for value in rack_values}
     matching_racks = set(
-        _with_database_identity(_site_racks(reader))
-        .filter(_ndi_canonical_name__in=wanted_racks)
+        with_database_identity(_site_racks(reader))
+        .filter(**{f"{CANONICAL_NAME}__in": wanted_racks})
         .values_list("pk", flat=True)
     )
     mapped_paths = _mapped_paths(profile, reader, evidence)

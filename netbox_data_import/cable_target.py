@@ -19,9 +19,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import partial
+import heapq
+from itertools import islice
+from operator import itemgetter
 from typing import Any
 
 from .catalog import OutputKind, TargetModuleKey
+from .database_identity import CANONICAL_NAME, matching_search, search_identity, with_database_identity
 from .field_keys import (
     ADMITTED_TERMINATION_MODELS,
     CABLE_END_KINDS,
@@ -458,7 +462,8 @@ def eligible_terminations(
     set with one count, one bound, and one order (section 6.1). The mapped-peer role starts from the
     profile's saved base resolution or the exact-name match, then offers its opposite ports. The
     reader keeps both inside the actor's view scope. The picker and a proposal request share this
-    query.
+    query. Each model counts and pages in the database, so no read holds more than *limit* rows of
+    one model.
     """
     parsed = parse_termination_field_key(field_key)
     device = (
@@ -475,18 +480,33 @@ def eligible_terminations(
             (label, netbox_reader.terminations(label).filter(device_id=device.pk))
             for label in ADMITTED_TERMINATION_MODELS[parsed["kind"]]
         )
-    if search:
-        sources = tuple((label, rows.filter(name__icontains=search)) for label, rows in sources)
+    wanted = search_identity(search)
+    sources = tuple((label, matching_search(rows, wanted)) for label, rows in sources)
     if _lock_rows:
         # One global order, object type then id, as the segment locks take it.
         for _label, rows in sorted(sources, key=lambda source: source[0]):
             tuple(rows.order_by("pk").select_for_update(of=("self",)).values_list("pk", flat=True))
-    wanted = identity_text(search)
-    ranked = sorted(
-        ((order, row) for order, (_label, rows) in enumerate(sources) for row in rows),
-        key=lambda item: (not wanted or identity_text(item[1].name) != wanted, item[1].name, item[0], item[1].pk),
-    )
-    return EligibleTerminations(candidates=tuple(row for _order, row in ranked[:limit]), total=len(ranked))
+    total = sum(rows.count() for _label, rows in sources)
+    pages = (_ranked_page(rows, wanted, order, limit) for order, (_label, rows) in enumerate(sources))
+    merged = heapq.merge(*pages, key=itemgetter(0))
+    return EligibleTerminations(candidates=tuple(row for _key, row in islice(merged, limit)), total=total)
+
+
+def _ranked_page(rows, wanted: str, order: int, limit: int) -> list[tuple[tuple, Any]]:
+    """Return one model's first *limit* rows in the combined order, each with its merge key.
+
+    The database orders names bytewise and the merge compares UTF-8 bytes, so both agree.
+    """
+    from django.db.models import Case, IntegerField, Value, When
+    from django.db.models.functions import Collate
+
+    if wanted:
+        exact = Case(When(**{CANONICAL_NAME: wanted}, then=Value(1)), default=Value(0), output_field=IntegerField())
+        rows = with_database_identity(rows)
+    else:
+        exact = Value(0, output_field=IntegerField())
+    ranked = rows.annotate(_ndi_exact=exact).order_by("-_ndi_exact", Collate("name", "C"), "pk")[:limit]
+    return [((not row._ndi_exact, row.name.encode(), order, row.pk), row) for row in ranked]
 
 
 class _CableBatch:

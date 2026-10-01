@@ -332,6 +332,14 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
             page.candidates[0].matched[0], CandidateFact("name", source="Source Alias", netbox="Source  Alias")
         )
 
+    def test_a_search_admits_a_device_whose_name_differs_only_in_whitespace_or_case(self):
+        spaced = self.make_device("Search  Target")
+
+        page = self.eligible(self.reader(), search="search target")
+
+        self.assertEqual([candidate.device for candidate in page.candidates], [spaced])
+        self.assertEqual(page.total, 1)
+
     def test_canonical_rack_names_contribute_to_candidate_ranking(self):
         self.rack.name = "Trace  Rack"
         self.rack.save(update_fields=("name",))
