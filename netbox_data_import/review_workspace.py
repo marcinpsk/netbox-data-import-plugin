@@ -278,6 +278,9 @@ _DIAGNOSTIC_MESSAGES = {
     ),
     "cable.attribute_drift": "The existing Cable carries attributes this import would not have written.",
     "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Set the Cable policy for it.",
+    "cable.incompatible_terminations": (
+        "NetBox cannot cable these two terminations together. Choose another termination for the end that is wrong."
+    ),
     "cable.media_family_mismatch": (
         "Verified pass-throughs join segments that state different media families. "
         "Force the segment that states the wrong medium, or correct the Cable in NetBox."
@@ -307,7 +310,7 @@ _DIAGNOSTIC_MESSAGES = {
     "cable.segment_reused": "An existing Cable already proves this segment, so the import keeps it.",
     "cable.segment_self_connection": "Both ends of this segment name one termination. Correct the source path.",
     "cable.termination_kind_mismatch": (
-        "The saved selection is a different kind of port than the stated PortClass. Choose the termination again."
+        "The stated PortClass does not admit the kind of port the saved selection names. Choose the termination again."
     ),
     "cable.termination_occupied": (
         "Another Cable already occupies this termination. "
@@ -316,7 +319,9 @@ _DIAGNOSTIC_MESSAGES = {
     "cable.termination_unresolved": (
         "No single port on the resolved Device matches this name. Choose the termination for it."
     ),
-    "cable.unsupported_termination_kind": "A Cable can end on an Interface, a Front Port, or a Rear Port only.",
+    "cable.unsupported_termination_kind": (
+        "The saved selection is not a kind of port this import can cable. Choose the termination again."
+    ),
     "device.add_permission": "Permission denied: dcim.add_device",
     "device.already_bound": "Another source row is already linked to this device.",
     "device.ambiguous_asset_tag": "Multiple devices have this asset tag.",
@@ -677,6 +682,15 @@ class TraceAction:
     reason: str = ""
 
 
+def _termination_model_name(label: str) -> str:
+    """Return the NetBox name of the model one resolved termination selected, or nothing while open."""
+    if not label:
+        return ""
+    from django.apps import apps
+
+    return str(apps.get_model(label)._meta.verbose_name)
+
+
 @dataclass(frozen=True)
 class TraceWorkspaceUnit:
     """One Source Trace as the review workspace shows it."""
@@ -723,7 +737,10 @@ class TraceWorkspaceUnit:
             resolution_started=bool(workspace.get("resolution_started")),
             topology_known=bool(workspace.get("topology_known")),
             devices=[dict(item) for item in workspace.get("devices") or ()],
-            terminations=[dict(item) for item in workspace.get("terminations") or ()],
+            terminations=[
+                {**item, "selected_model": _termination_model_name(item["selected_type"])}
+                for item in workspace.get("terminations") or ()
+            ],
             findings=findings,
             actions=cls._actions(unit, findings, str(display.get("detail") or "")),
         )

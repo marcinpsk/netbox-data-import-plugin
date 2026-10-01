@@ -24,6 +24,11 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
             frozenset(),
         ),
         "cable.cableclass_unmapped": (frozenset({"segment_index", "cable_class"}), frozenset(), frozenset()),
+        "cable.incompatible_terminations": (
+            frozenset({"segment_index", "left_model", "right_model", "left_field_key", "right_field_key"}),
+            frozenset(),
+            frozenset(),
+        ),
         "cable.media_family_mismatch": (
             frozenset(),
             frozenset({"segments"}),
@@ -78,7 +83,7 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
             frozenset(),
         ),
         "cable.termination_kind_mismatch": (
-            _REFERENCE_FIELDS | {"selected_display_name", "claimed_kind", "selected_kind"},
+            _REFERENCE_FIELDS | {"selected_display_name", "claimed_kind", "selected_object_type"},
             frozenset(),
             frozenset(),
         ),
@@ -88,7 +93,7 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
             frozenset(),
         ),
         "cable.termination_unresolved": (
-            _REFERENCE_FIELDS | {"matches", "selected_display_name"},
+            _REFERENCE_FIELDS | {"selected_display_name"},
             frozenset(),
             frozenset(),
         ),

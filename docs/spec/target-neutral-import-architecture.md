@@ -45,6 +45,7 @@ The runtime uses these terms:
 | Pass-Through Claim | The implied continuation through one device between two segments. |
 | Endpoint Summary | The From and To statement of the two endpoint Termination References. |
 | CableClass | The source label for one cable's kind. |
+| Cable End Kind | A NetBox termination model the Cable Target Module may resolve a Termination Reference to (section 6.1). |
 | Cable Type, Cable Profile | The fixed NetBox Cable choices a CableClass maps to. |
 | Logical Cable | The direct Cable between the two endpoint terminations. |
 | Patched Path Replacement | The reviewed change that replaces a Logical Cable with segments. |
@@ -534,7 +535,7 @@ existing Cables, PortMapping rows) and cannot be detected during source interpre
 | Same termination claimed by different traces for different segments | `trace.cross_trace_conflict` | `invalid` on every involved trace | Source Adapter |
 | A PortClass value outside the adapter's fixed vocabulary | `trace.unknown_port_class` | `invalid` | Source Adapter |
 | Raw export metadata longer than the provenance column that stores it | `trace.metadata_too_long` | `invalid` | Source Adapter |
-| The resolved object is not an Interface, FrontPort, or RearPort | `cable.unsupported_termination_kind` | `invalid` | Cable Target Module |
+| The resolved object is not a Cable End Kind (section 6.1) | `cable.unsupported_termination_kind` | `invalid` | Cable Target Module |
 | Ambiguous or missing Device, panels included | `trace.device_unresolved` | `blocked` | Cable Target Module |
 | Saved Device is deleted, hidden, or outside the selected Site | `trace.device_resolution_stale` | `blocked` | Cable Target Module |
 | Endpoint evidence only and no matching direct Cable | `trace.endpoint_evidence_only` | `blocked` | Cable Target Module |
@@ -615,24 +616,64 @@ A saved Device that is deleted, hidden, or outside the selected Site becomes sta
 fall back to another exact-name match and does not show the saved display snapshot. A placement
 change inside the selected Site does not invalidate the choice.
 
-The adapter's fixed PortClass vocabulary claims the termination kind:
+The adapter's fixed PortClass vocabulary claims the termination kind. Each claimed kind admits a
+fixed, ordered list of NetBox termination models:
 
-| PortClass | Claimed NetBox termination |
-| --- | --- |
-| NIC, Switch Port, Port | Interface |
-| Position Front, Fiber Pair Front | FrontPort |
-| Punch-Down, Fiber Pair Back | RearPort |
+| PortClass | Claimed kind | Admitted NetBox terminations, in match order |
+| --- | --- | --- |
+| NIC, Switch Port, Port | `interface` | Interface, then ConsolePort, ConsoleServerPort, PowerPort, PowerOutlet |
+| Position Front, Fiber Pair Front | `front_port` | FrontPort |
+| Punch-Down, Fiber Pair Back | `rear_port` | RearPort |
+
+The source vocabulary has no console or power class: a source system records a server's console or
+power inlet, and a console server or PDU port, as NIC, Switch Port, or Port. The `interface` claim
+therefore admits the console and power component models. The admitted models of all three claims
+together are the Cable End Kinds.
 
 A PortClass value outside this vocabulary is a source-structure error the Source Adapter reports as
-`trace.unknown_port_class`, so it never reaches planning. A resolved object whose real type is not an
-Interface, FrontPort, or RearPort is a target-state error the Cable Target Module reports as
+`trace.unknown_port_class`, so it never reaches planning. A resolved object whose real type is not a
+Cable End Kind is a target-state error the Cable Target Module reports as
 `cable.unsupported_termination_kind`.
 
-Candidates are all terminations of the claimed kind on the resolved Device. Deterministic matching
-requires a unique normalized exact port-name match. Anything else leaves the Target Field unresolved:
-the unit is blocked, and manual searchable selection resolves it. The optional Resolution Proposal
-flow (section 7) assists the same selection. The cards label is identity, display, and context for the
-operator and the Inference Backend. Deterministic matching never uses it.
+Candidates are all terminations of the admitted models on the resolved Device. A candidate's identity
+is its concrete model and its id together, because two models can share one numeric id. The picker,
+the proposal snapshot, and every selection write carry that pair unchanged, and none of them derives
+the model from the claimed kind.
+
+Deterministic matching takes the admitted models in match order and stops at the first model with any
+normalized exact port-name match. Exactly one match in that model resolves the Termination Reference.
+Several matches in that model, or no match in any admitted model, leave the Target Field unresolved:
+the unit is blocked, and manual searchable selection resolves it. An Interface name match therefore
+always wins over a console or power port of the same name, and a device with no matching Interface
+still resolves to its one matching console or power port.
+
+Precedence does not depend on the actor's view scope. The stopping model is chosen from all
+terminations on the resolved Device. The actor must then be able to view the unique match in that
+model. A hidden match, or several matches, leaves the field unresolved with the same diagnostic as a
+missing name, and never falls through to a later model. The diagnostic carries no hidden identity,
+label, or count. Without this rule two actors would resolve one source port to two different objects.
+
+The optional Resolution Proposal flow (section 7) assists the same selection. The cards label is
+identity, display, and context for the operator and the Inference Backend. Deterministic matching
+never uses it.
+
+Eligible-candidate retrieval treats the admitted models as one set. It has one combined count and one
+combined bound: the picker's page size and the proposal's complete-set ceiling each apply to the
+whole set, never per model. The order is stable and total: an exact normalized match of the search
+text first, then name, then match order of the model, then id. An exact-name search therefore always
+reaches its candidate, whatever the other models hold. A locking read locks the concrete models in
+one fixed global order.
+
+Two resolved ends of one segment must be a pair NetBox can cable. The Cable Target Module reads that
+rule from NetBox's own compatible-termination table and never keeps a copy. It checks each segment
+after mapped-peer substitution. A pair outside the table, such as a PowerPort and an Interface, blocks
+the unit with `cable.incompatible_terminations`. The diagnostic names the segment index, both ends'
+models, and the field keys of both ends, inside the same disclosure rules as every Cable diagnostic.
+Both ends stay open to manual selection even when the exact-name rule resolved them, so the operator
+can correct a wrong automatic match before any write. The check is per segment only: it does not
+prove that a passive path carries one signal end to end (a ConsolePort through a panel to an
+Interface passes it). Port and media compatibility stay out of scope, as the Cable policy design
+records (`docs/design/trace-cable-policy.md`, accepted limitation 1).
 
 A termination resolved by the exact-name rule shows the `automatically resolved` badge state. A
 termination resolved by an operator or by an accepted proposal shows `manually resolved` or
@@ -755,14 +796,15 @@ inside the transaction as the accepted plan's operator.
 | Condition | Diagnostic code | Disposition |
 | --- | --- | --- |
 | No unique exact name match for a Termination Reference | `cable.termination_unresolved` | `blocked` |
-| The resolved object is not an Interface, FrontPort, or RearPort | `cable.unsupported_termination_kind` | `invalid` |
+| The resolved object is not a Cable End Kind (section 6.1) | `cable.unsupported_termination_kind` | `invalid` |
 | PortMapping contradicts a Pass-Through Claim | `cable.pass_through_not_mapped` | `invalid` |
 | Several mapped peers for a same-port continuation | `cable.ambiguous_mapped_peer` | `blocked` |
 | A foreign Cable occupies a desired termination | `cable.termination_occupied` | `blocked` |
 | A multi-termination Cable touches a desired port | `cable.multi_termination_conflict` | `blocked` |
 | Source Traces plan different Cables on one free termination | `cable.planned_termination_conflict` | `blocked` |
 | A segment whose two ends resolve to one termination | `cable.segment_self_connection` | `blocked` |
-| A stored termination selection whose kind contradicts the stated PortClass | `cable.termination_kind_mismatch` | `blocked` |
+| A stored termination selection whose model the stated PortClass does not admit | `cable.termination_kind_mismatch` | `blocked` |
+| A segment whose two resolved ends NetBox cannot cable together | `cable.incompatible_terminations` | `blocked` |
 | A CableClass dimension is unresolved | `cable.cableclass_unmapped` | `blocked` |
 | A stored Cable Type or Cable Profile value is no longer offered by the running instance | `cable.policy_stale` | `blocked` |
 | A stored Cable Profile is offered but is incompatible with one termination per side | `cable.profile_incompatible` | `blocked` |
@@ -790,7 +832,8 @@ triple plus the claimed kind plus the role marker. Its canonical form is the JSO
 those values, matching the trace identity rule in section 5.2:
 `{"cards":<cards>,"device":<device>,"kind":<kind>,"port":<port>,"role":"termination"}`, with members
 sorted by name (spec default for the member order). The stored key is this canonical JSON form. A
-pipe-separated string is a display form only and is never a key.
+pipe-separated string is a display form only and is never a key. The `kind` member is the claimed
+kind, not the selected model: an `interface` key can resolve to any model that claim admits.
 
 | Role marker | Meaning | Written by |
 | --- | --- | --- |
@@ -1338,8 +1381,9 @@ resolved`, `proposed`, `accepted`, `stale`, `failed`. The `automatically resolve
 from `manually resolved`, so the operator can see which terminations the exact-name rule matched
 without help.
 
-The searchable picker is scoped to eligible candidates of the claimed kind on the resolved Device and
-shows a visible "N of M eligible" count.
+The searchable picker is scoped to eligible candidates of the admitted models on the resolved Device,
+shows each candidate's model, and shows a visible "N of M eligible" count. A resolved termination
+shows its selected object's own model, not the claimed kind.
 
 Proposal card contract:
 
@@ -1484,8 +1528,8 @@ path survives it.
    real response. Cover upload, preview, review commands, selective synchronization, final
    synchronization, and the results page. Assert real database outcomes, not intermediate structures.
 2. **Integration second.** Exercise the Import Engine and Target Modules against the real NetBox ORM,
-   real forms, and real serializers. Use real Cable, Interface, FrontPort, RearPort, and PortMapping
-   objects.
+   real forms, and real serializers. Use real Cable, Interface, ConsolePort, ConsoleServerPort,
+   PowerPort, PowerOutlet, FrontPort, RearPort, and PortMapping objects.
 3. **Narrow unit last.** Reserve unit tests for pure functions such as normalization, canonical
    orientation, and fingerprinting.
 
@@ -1788,7 +1832,7 @@ Until T10 lands, a trace profile is configurable through the UI only.
 - A unique mapped peer substitutes automatically and the substitution appears in the plan; several
   mapped peers block the unit and offer exactly the mapped peers for manual selection.
 - A stored `TerminationResolution` row for either role is reused on a replan.
-- A resolved object that is not an Interface, FrontPort, or RearPort makes the unit `invalid` with
+- A resolved object that is not a Cable End Kind makes the unit `invalid` with
   `cable.unsupported_termination_kind`.
 - A contradicted Pass-Through Claim makes the unit `invalid` and names both ports and the actual
   mappings.
@@ -1796,8 +1840,8 @@ Until T10 lands, a trace profile is configurable through the UI only.
   edited.
 - An unresolved CableClass dimension, a stale mapping, and an incompatible Cable Profile each block
   the unit with their own diagnostic.
-- Eligible-candidate retrieval returns only terminations of the claimed kind on the resolved Device,
-  scoped to the actor's view permission.
+- Eligible-candidate retrieval returns only terminations of the models the claimed kind admits on the
+  resolved Device, scoped to the actor's view permission.
 - A precondition mismatch inside the transaction rolls back the complete selected transaction.
 - Every created Cable gets one provenance row per contributing Source Trace; two traces sharing one
   identical segment create one Cable and two rows. The deleted Logical Cable appears only in the

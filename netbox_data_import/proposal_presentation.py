@@ -41,14 +41,18 @@ RECENT_PROPOSAL_HISTORY_LIMIT = 10
 
 
 def group_terminations(fields):
-    """Keep exact matches without proposal history in the compact settled group."""
+    """Keep exact matches without proposal history in the compact settled group.
+
+    An end of a segment NetBox cannot cable stays in attention, so its picker can correct the match.
+    """
     attention, settled = [], []
     for field in fields:
-        display = field["proposal"]
-        group = (
-            settled if display["field_state"] == AUTOMATICALLY_RESOLVED and not field["proposal_history"] else attention
+        settles = (
+            field["proposal"]["field_state"] == AUTOMATICALLY_RESOLVED
+            and not field["proposal_history"]
+            and not field["incompatible"]
         )
-        group.append(field)
+        (settled if settles else attention).append(field)
     return attention, settled
 
 

@@ -84,8 +84,8 @@ see that a duplicate existed.
 ## Blockers found in round 1, and their r2 revisions
 
 **Blocker 1 — the ceiling of 20 would make the feature unusable.** Verified in source: for the
-`termination` role, `eligible_terminations` returns every visible termination of the claimed kind on
-the resolved Device; the port-name narrowing at `cable_target.py:371` applies only to the
+`termination` role, `eligible_terminations` returns every visible termination of the models the
+claimed kind admits (spec 6.1) on the resolved Device; the port-name narrowing at `cable_target.py:371` applies only to the
 `mapped_peer` role. A 48-port switch therefore yields `total=48`, and an `r1` request would refuse
 every interface question on ordinary equipment. The 20 is the **picker's page size**, not an
 eligibility bound.

@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from .field_keys import CABLE_END_KINDS
+
 
 class PlanningTargetUnavailable(Exception):
     """The planning context names a target this reader cannot resolve."""
@@ -111,23 +113,13 @@ class NetBoxReader:
 
         return self._scoped(Location, action)
 
-    def interfaces(self, action: str = "view"):
-        """Return the Interfaces the actor may take *action* on."""
-        from dcim.models import Interface
+    def terminations(self, model_label: str, action: str = "view"):
+        """Return the rows of one Cable End Kind, named ``app_label.model``, the actor may take *action* on."""
+        from django.apps import apps
 
-        return self._scoped(Interface, action)
-
-    def front_ports(self, action: str = "view"):
-        """Return the Front Ports the actor may take *action* on."""
-        from dcim.models import FrontPort
-
-        return self._scoped(FrontPort, action)
-
-    def rear_ports(self, action: str = "view"):
-        """Return the Rear Ports the actor may take *action* on."""
-        from dcim.models import RearPort
-
-        return self._scoped(RearPort, action)
+        if model_label not in CABLE_END_KINDS:
+            raise ValueError(f"'{model_label}' is not a Cable End Kind.")
+        return self._scoped(apps.get_model(model_label), action)
 
     def port_mappings(self):
         """Return the PortMapping rows of the Devices this actor may view.

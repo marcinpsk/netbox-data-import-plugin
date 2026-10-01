@@ -4312,8 +4312,15 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         return JsonResponse(
             {
                 "ok": True,
+                # A candidate is its model and its id together, because two models can share one id.
                 "candidates": [
-                    {"id": candidate.pk, "name": candidate.name, "display": str(candidate)}
+                    {
+                        "id": candidate.pk,
+                        "object_type": _object_type_label(candidate),
+                        "model": str(candidate._meta.verbose_name),
+                        "name": candidate.name,
+                        "display": str(candidate),
+                    }
                     for candidate in found.candidates
                 ],
                 "shown": len(found.candidates),

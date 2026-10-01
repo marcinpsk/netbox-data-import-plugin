@@ -36,13 +36,16 @@ beforeEach(() => {
     ok: true,
     json: async () => ({
       ok: true,
-      candidates: [{ id: 1, display: "port-a" }, { id: 2, display: "port-b" }],
+      candidates: [
+        { id: 1, object_type: "dcim.interface", model: "interface", display: "port-a" },
+        { id: 2, object_type: "dcim.interface", model: "interface", display: "port-b" },
+      ],
       shown: 2,
       total: 2,
     }),
   })));
   document.body.innerHTML = `
-    <button id="openPicker" data-trace-picker="termination" data-trace-kind="interface">Choose</button>
+    <button id="openPicker" data-trace-picker="termination">Choose</button>
     <div id="traceTerminationPicker" class="modal" tabindex="-1">
       <div class="modal-dialog"><div class="modal-content">
         <form id="traceTerminationForm" data-candidates-url="/candidates/">
@@ -154,6 +157,59 @@ describe("trace termination picker", () => {
     await openPicker();
     expect(node("traceTerminationCount").textContent).toBe("2 of 2 eligible");
     expect(node("traceTerminationCount").hidden).toBe(false);
+  });
+
+  it("submits the object type of the clicked candidate when two candidates share one id", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        candidates: [
+          { id: 7, object_type: "dcim.interface", model: "interface", display: "eth7" },
+          { id: 7, object_type: "dcim.powerport", model: "power port", display: "PSU1" },
+        ],
+        shown: 2,
+        total: 2,
+      }),
+    })));
+    const candidates = await openPicker();
+
+    candidates[1].click();
+
+    expect(node("traceTerminationObjectId").value).toBe("7");
+    expect(node("traceTerminationObjectType").value).toBe("dcim.powerport");
+    expect(node("traceTerminationSubmit").disabled).toBe(false);
+    candidates[0].click();
+    expect(node("traceTerminationObjectType").value).toBe("dcim.interface");
+  });
+
+  it("names the model of every candidate it offers", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        candidates: [{ id: 3, object_type: "dcim.consoleport", model: "console port", display: "con0" }],
+        shown: 1,
+        total: 1,
+      }),
+    })));
+
+    const candidates = await openPicker();
+
+    expect(candidates.map(item => item.textContent)).toEqual(["con0 console port"]);
+  });
+
+  it("refuses to submit a candidate the server sent without an object type", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, candidates: [{ id: 4, display: "untyped" }], shown: 1, total: 1 }),
+    })));
+    const candidates = await openPicker();
+
+    candidates[0].click();
+
+    expect(node("traceTerminationObjectType").value).toBe("");
+    expect(node("traceTerminationSubmit").disabled).toBe(true);
   });
 
   it("cancels Enter submission after editing the search with a previous candidate selected", async () => {

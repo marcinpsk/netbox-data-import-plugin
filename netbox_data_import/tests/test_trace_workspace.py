@@ -6,7 +6,7 @@ import copy
 import re
 from io import BytesIO
 
-from dcim.models import Cable, Device, FrontPort, Interface, RearPort, Site
+from dcim.models import Cable, Device, FrontPort, Interface, PowerOutlet, PowerPort, RearPort, Site
 from django.db import connection
 from django.test import TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
@@ -1546,6 +1546,86 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
 
         self.assertEqual([item["name"] for item in payload["candidates"]], ["mgmt0"])
         self.assertEqual(payload["total"], 1)
+
+    def test_the_picker_names_the_object_type_and_model_of_every_candidate(self):
+        """An interface claim offers console and power ports too, so each candidate states its model."""
+        field_key = self.open_blocked_workspace()
+        PowerPort.objects.create(device=self.device_a, name="psu0")
+
+        payload = self.candidates(field_key).json()
+
+        self.assertEqual(
+            [(item["object_type"], item["model"], item["name"]) for item in payload["candidates"]],
+            [("dcim.interface", "interface", "eth0"), ("dcim.powerport", "power port", "psu0")],
+        )
+        self.assertEqual((payload["shown"], payload["total"]), (2, 2))
+
+    def test_a_power_port_that_shares_an_interface_id_is_saved_as_the_power_port(self):
+        """A candidate is its model and its id together, so one numeric id never selects the other row."""
+        field_key = self.open_blocked_workspace()
+        shared_id = 900_001
+        Interface.objects.create(pk=shared_id, device=self.device_a, name="eth-shared", type="1000base-t")
+        PowerPort.objects.create(pk=shared_id, device=self.device_a, name="psu-shared")
+        offered = self.candidates(field_key).json()["candidates"]
+        self.assertEqual(
+            sorted((item["object_type"], item["id"]) for item in offered if item["id"] == shared_id),
+            [("dcim.interface", shared_id), ("dcim.powerport", shared_id)],
+        )
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_termination"),
+            {
+                "field_key": field_key,
+                "object_type": "dcim.powerport",
+                "object_id": shared_id,
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        stored = TerminationResolution.objects.get(profile=self.profile, field_key=field_key)
+        self.assertEqual(
+            (stored.selected_object_type.app_label, stored.selected_object_type.model, stored.selected_object_id),
+            ("dcim", "powerport", shared_id),
+        )
+        self.assertEqual(stored.selected_display_name, "psu-shared")
+
+    def test_both_ends_of_an_incompatible_segment_stay_open_to_the_picker(self):
+        """An automatic match NetBox cannot cable is offered for correction, not settled out of sight."""
+        PowerOutlet.objects.create(device=self.make_device("PDU-1"), name="OUT1")
+        self.open_workspace(direct_path(to_end=trace_termination("PDU-1", "", "OUT1", "Port")))
+        expected = [
+            termination_field_key(device="DEV-A", cards="", port="eth0", kind="interface"),
+            termination_field_key(device="PDU-1", cards="", port="OUT1", kind="interface"),
+        ]
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertEqual([item["field_key"] for item in response.context["attention_terminations"]], expected)
+        self.assertEqual(response.context["settled_terminations"], [])
+        html = response.content.decode()
+        for field_key in expected:
+            button = re.search(rf'<button\b[^>]*data-trace-picker="{re.escape(escape(field_key))}"[^>]*>', html)
+            self.assertIsNotNone(button, field_key)
+            self.assertNotIn("disabled", button.group())
+
+    def test_a_settled_termination_names_the_model_it_resolved_to(self):
+        """The Kind cell states the selected object's own model, not the kind the PortClass claims."""
+        PowerPort.objects.create(device=self.device_a, name="PSU1")
+        PowerOutlet.objects.create(device=self.make_device("PDU-1"), name="OUT1")
+        self.open_workspace(
+            direct_path(
+                from_end=trace_termination("DEV-A", "", "PSU1", "Port"),
+                to_end=trace_termination("PDU-1", "", "OUT1", "Port"),
+            )
+        )
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        settled = re.search(r"<details\b[^>]*data-trace-settled.*?</details>", response.content.decode(), re.DOTALL)
+        self.assertIsNotNone(settled)
+        self.assertRegex(settled.group(), r"<td>DEV-A PSU1</td>\s*<td>power port</td>")
+        self.assertRegex(settled.group(), r"<td>PDU-1 OUT1</td>\s*<td>power outlet</td>")
 
     def test_choosing_a_candidate_saves_the_decision_and_replans(self):
         """The decision is a TerminationResolution row, and the plan is asked for again."""

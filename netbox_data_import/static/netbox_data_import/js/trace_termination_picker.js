@@ -10,9 +10,6 @@
   if (window.ndiTraceTerminationPicker) return;
   window.ndiTraceTerminationPicker = true;
 
-  var kindLabels = {interface: 'dcim.interface', front_port: 'dcim.frontport', rear_port: 'dcim.rearport'};
-  var activeKind = '';
-
   // A swap replaces every node this picker reads, so each one is read at the time it is used.
   function node(id) {
     return document.getElementById(id);
@@ -44,6 +41,13 @@
       item.className = 'list-group-item list-group-item-action';
       item.setAttribute('aria-pressed', 'false');
       item.textContent = candidate.display || candidate.name;
+      // One claim admits several models, so each candidate names its own.
+      if (candidate.model) {
+        var model = document.createElement('span');
+        model.className = 'badge text-bg-secondary ms-2';
+        model.textContent = candidate.model;
+        item.append(' ', model);
+      }
       item.dataset.candidateId = candidate.id;
       // The offer belongs to the query that produced it, not to whatever the box says on click.
       item.dataset.offeredSearch = offered;
@@ -56,7 +60,8 @@
         item.setAttribute('aria-pressed', 'true');
         var objectType = node('traceTerminationObjectType');
         node('traceTerminationObjectId').value = candidate.id;
-        objectType.value = kindLabels[activeKind] || '';
+        // Two models can share one id, so the model travels with the id and is never derived.
+        objectType.value = candidate.object_type || '';
         // The write rechecks the offer, so it needs the search that produced it.
         node('traceTerminationOfferedSearch').value = item.dataset.offeredSearch;
         node('traceTerminationSubmit').disabled = !objectType.value;
@@ -101,7 +106,6 @@
     var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;
     if (!ModalClass) return;
     node('traceTerminationFieldKey').value = trigger.dataset.tracePicker;
-    activeKind = trigger.dataset.traceKind || '';
     node('traceTerminationLabel').textContent = trigger.dataset.traceLabel || '';
     node('traceTerminationSearch').value = '';
     show(node('traceTerminationError'), false);

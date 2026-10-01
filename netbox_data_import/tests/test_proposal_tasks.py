@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The closed proposal task registry, the Candidate Snapshot, and the termination task."""
 
-from dcim.models import Device, Interface
+from dcim.models import ConsolePort, Device, Interface, PowerPort
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
 
@@ -204,6 +204,68 @@ class SelectTerminationTaskTest(TestCase):
         self.assertEqual(snapshot.total, 3)
         self.assertEqual([entry.display_name for entry in snapshot.entries], [str(port) for port in self.interfaces])
         self.assertEqual({entry.object_type for entry in snapshot.entries}, {"dcim.interface"})
+
+    def test_the_snapshot_offers_console_and_power_ports_under_their_own_object_types(self):
+        """The interface claim admits console and power ports, and each entry carries its real model."""
+        console = ConsolePort.objects.create(device=self.device, name="Console")
+        power = PowerPort.objects.create(device=self.device, name="PSU 1")
+
+        snapshot = self.task.current(
+            profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
+        )
+
+        self.assertEqual(snapshot.total, 5)
+        self.assertEqual(
+            [(entry.object_type, entry.object_id) for entry in snapshot.entries],
+            [
+                ("dcim.consoleport", console.pk),
+                *(("dcim.interface", port.pk) for port in self.interfaces),
+                ("dcim.powerport", power.pk),
+            ],
+        )
+
+    def test_a_mixed_set_snapshots_alike_twice_and_goes_stale_when_a_console_port_is_renamed(self):
+        """Freshness compares the whole set, so its order across models has to be stable and total."""
+        console = ConsolePort.objects.create(device=self.device, name="Ethernet 1/1")
+
+        def current():
+            return self.task.current(
+                profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
+            )
+
+        first = current()
+
+        self.assertTrue(first.matches(current()))
+        self.assertEqual(
+            [(entry.object_type, entry.object_id) for entry in first.entries[:2]],
+            [("dcim.interface", self.interfaces[0].pk), ("dcim.consoleport", console.pk)],
+        )
+        ConsolePort.objects.filter(pk=console.pk).update(name="Console")
+        self.assertFalse(first.matches(current()))
+
+    def test_the_complete_set_bound_counts_every_admitted_model(self):
+        """The ceiling bounds the whole set, so a power port pushes three interfaces over a bound of three."""
+        PowerPort.objects.create(device=self.device, name="PSU 1")
+
+        with self.assertRaises(UnusableCandidateSet) as caught:
+            self.task.current(profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=3)
+
+        self.assertEqual(caught.exception.reason, TOO_MANY_CANDIDATES)
+
+    def test_accepting_a_power_port_candidate_writes_the_power_port(self):
+        """The written decision names the candidate's own model, never one derived from the claimed kind."""
+        power = PowerPort.objects.create(device=self.device, name="PSU 1")
+        snapshot = self.task.current(
+            profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
+        )
+        entry = next(entry for entry in snapshot.entries if entry.object_type == "dcim.powerport")
+
+        receipt = self.task.write_resolution(
+            actor=self.actor, profile=self.profile, field_key=self.field_key, entry=entry
+        )
+
+        written = TerminationResolution.objects.get(pk=receipt.written_resolution_id)
+        self.assertEqual((written.selected_object_type.model, written.selected_object_id), ("powerport", power.pk))
 
     def test_a_device_with_more_ports_than_the_bound_is_refused(self):
         with self.assertRaises(UnusableCandidateSet) as caught:

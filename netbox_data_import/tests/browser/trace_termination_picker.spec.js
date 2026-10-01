@@ -17,7 +17,7 @@ const controllerSource = readFileSync(
 const fixture = `
   <base href="http://preview.test/">
   <button type="button" data-trace-picker="device:DEV-A|cards:|port:absent|kind:interface|role:termination"
-          data-trace-kind="interface" data-trace-label="DEV-A absent-port">Choose termination</button>
+          data-trace-label="DEV-A absent-port">Choose termination</button>
   <div class="modal" id="traceTerminationPicker">
     <form id="traceTerminationForm" method="post"
           action="/plugins/data-import/trace-workspace/resolve-termination/"
@@ -70,8 +70,8 @@ test("the picker states how many of the eligible terminations it shows", async (
   await serveCandidates(page, {
     ok: true,
     candidates: [
-      { id: 1, name: "eth0", display: "eth0" },
-      { id: 2, name: "eth1", display: "eth1" },
+      { id: 1, object_type: "dcim.interface", name: "eth0", display: "eth0" },
+      { id: 2, object_type: "dcim.interface", name: "eth1", display: "eth1" },
     ],
     shown: 2,
     total: 7,
@@ -90,7 +90,7 @@ test("the picker states how many of the eligible terminations it shows", async (
 test("saving is refused until a candidate is chosen", async ({ page }) => {
   await serveCandidates(page, {
     ok: true,
-    candidates: [{ id: 42, name: "eth0", display: "eth0" }],
+    candidates: [{ id: 42, object_type: "dcim.interface", name: "eth0", display: "eth0" }],
     shown: 1,
     total: 1,
   });
@@ -106,6 +106,29 @@ test("saving is refused until a candidate is chosen", async ({ page }) => {
   await expect(page.locator("#traceTerminationSubmit")).toBeEnabled();
   await expect(page.locator("#traceTerminationObjectId")).toHaveValue("42");
   await expect(page.locator("#traceTerminationObjectType")).toHaveValue("dcim.interface");
+});
+
+test("a candidate that shares its id with another model saves its own object type", async ({ page }) => {
+  await serveCandidates(page, {
+    ok: true,
+    candidates: [
+      { id: 7, object_type: "dcim.interface", model: "interface", name: "eth7", display: "eth7" },
+      { id: 7, object_type: "dcim.powerport", model: "power port", name: "PSU1", display: "PSU1" },
+    ],
+    shown: 2,
+    total: 2,
+  });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
+  await page.addScriptTag({ content: controllerSource });
+
+  await page.locator("[data-trace-picker]").click();
+  await expect(page.locator("#traceTerminationCandidates button")).toHaveText(["eth7 interface", "PSU1 power port"]);
+  await page.locator("#traceTerminationCandidates button").nth(1).click();
+
+  await expect(page.locator("#traceTerminationObjectId")).toHaveValue("7");
+  await expect(page.locator("#traceTerminationObjectType")).toHaveValue("dcim.powerport");
+  await expect(page.locator("#traceTerminationSubmit")).toBeEnabled();
 });
 
 test("the picker sends the preview revision, which the server checks before it answers", async ({ page }) => {
@@ -132,8 +155,8 @@ test("the search that produced the offer travels with the saved decision", async
     // Each query answers differently, so waiting on the text proves which render is on screen.
     const search = new URL(route.request().url()).searchParams.get("search") || "";
     const candidate = search === "mgmt"
-      ? { id: 9, name: "mgmt0", display: "mgmt0" }
-      : { id: 1, name: "eth0", display: "eth0" };
+      ? { id: 9, object_type: "dcim.interface", name: "mgmt0", display: "mgmt0" }
+      : { id: 1, object_type: "dcim.interface", name: "eth0", display: "eth0" };
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({ ok: true, candidates: [candidate], shown: 1, total: 1 }),
@@ -175,8 +198,8 @@ test("a slower earlier search does not overwrite the answer to a later one", asy
     const url = new URL(route.request().url());
     const search = url.searchParams.get("search") || "";
     const body = search === "mgmt"
-      ? { ok: true, candidates: [{ id: 9, name: "mgmt0", display: "mgmt0" }], shown: 1, total: 1 }
-      : { ok: true, candidates: [{ id: 1, name: "eth0", display: "eth0" }], shown: 1, total: 5 };
+      ? { ok: true, candidates: [{ id: 9, object_type: "dcim.interface", name: "mgmt0", display: "mgmt0" }], shown: 1, total: 1 }
+      : { ok: true, candidates: [{ id: 1, object_type: "dcim.interface", name: "eth0", display: "eth0" }], shown: 1, total: 5 };
     if (search !== "mgmt") {
       await new Promise((done) => setTimeout(done, 400));
     }
@@ -201,7 +224,7 @@ test("the search that travels with a decision is the one that produced the offer
         contentType: "application/json",
         body: JSON.stringify({
           ok: true,
-          candidates: [{ id: 77, name: "zz-target", display: "zz-target" }],
+          candidates: [{ id: 77, object_type: "dcim.interface", name: "zz-target", display: "zz-target" }],
           shown: 1,
           total: 1,
         }),
@@ -244,7 +267,7 @@ test("a refused lookup drops the candidate the previous search offered", async (
     }
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify({ ok: true, candidates: [{ id: 5, name: "eth0", display: "eth0" }], shown: 1, total: 1 }),
+      body: JSON.stringify({ ok: true, candidates: [{ id: 5, object_type: "dcim.interface", name: "eth0", display: "eth0" }], shown: 1, total: 1 }),
     });
   });
   await page.setContent(fixture);
@@ -274,7 +297,7 @@ test("a lookup that never answers drops the offer on screen", async ({ page }) =
     }
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify({ ok: true, candidates: [{ id: 5, name: "eth0", display: "eth0" }], shown: 1, total: 4 }),
+      body: JSON.stringify({ ok: true, candidates: [{ id: 5, object_type: "dcim.interface", name: "eth0", display: "eth0" }], shown: 1, total: 4 }),
     });
   });
   await page.setContent(fixture);
@@ -300,7 +323,7 @@ test("a boosted navigation that evaluates the script again opens the picker once
     requests += 1;
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify({ ok: true, candidates: [{ id: 1, name: "eth0", display: "eth0" }], shown: 1, total: 1 }),
+      body: JSON.stringify({ ok: true, candidates: [{ id: 1, object_type: "dcim.interface", name: "eth0", display: "eth0" }], shown: 1, total: 1 }),
     });
   });
   await page.setContent(fixture);
@@ -341,7 +364,7 @@ test("a lookup that settles after a swap does not answer into the page that repl
     await held;
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify({ ok: true, candidates: [{ id: 1, name: "stale", display: "stale" }], shown: 1, total: 1 }),
+      body: JSON.stringify({ ok: true, candidates: [{ id: 1, object_type: "dcim.interface", name: "stale", display: "stale" }], shown: 1, total: 1 }),
     });
   });
   await page.setContent(fixture);

@@ -409,7 +409,7 @@
                   <span class="text-secondary">NetBox Device: {{ termination.resolved_device }}</span>
                 {% endif %}
                 {% if termination.selected %}
-                  <span class="text-secondary">{{ termination.selected }}</span>
+                  <span class="text-secondary">{{ termination.selected }} ({{ termination.selected_model }})</span>
                 {% endif %}
               </div>
               {% with field_number=forloop.counter %}
@@ -425,7 +425,6 @@
                   <div class="ndi-trace-action">
                     <button type="button" class="btn btn-sm btn-outline-secondary"
                             data-trace-picker="{{ termination.field_key }}"
-                            data-trace-kind="{{ termination.kind }}"
                             data-trace-label="{{ termination.label }}"
                             {% if not termination.selectable %}disabled{% endif %}>Choose termination</button>
                     {% if not termination.selectable %}
@@ -457,7 +456,7 @@
                   {% for termination in settled_terminations %}
                     <tr>
                       <td>{{ termination.label }}</td>
-                      <td>{{ termination.kind }}</td>
+                      <td>{{ termination.selected_model }}</td>
                       <td>{{ termination.selected }}</td>
                       <td><span class="badge ndi-trace-state-{{ termination.proposal.state_style }}">{{ termination.proposal.field_state }}</span></td>
                     </tr>

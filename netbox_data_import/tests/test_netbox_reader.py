@@ -82,6 +82,26 @@ class NetBoxReaderScopeTest(TestCase):
         self.assertEqual(NetBoxReader.for_optional_actor(None).devices().count(), 2)
         self.assertIs(NetBoxReader.for_optional_actor(self.actor).actor, self.actor)
 
+    def test_terminations_are_scoped_per_cable_end_kind(self):
+        """One accessor serves every Cable End Kind, inside the actor's view scope."""
+        from dcim.models import Device, PowerPort
+
+        for device in Device.objects.all():
+            PowerPort.objects.create(device=device, name="PSU1")
+        actor = user_with_object_permission(
+            "reader-power", [(PowerPort, ["view"], {"device__site__name": "Reader Visible"})]
+        )
+
+        ports = NetBoxReader.for_actor(actor).terminations("dcim.powerport")
+
+        self.assertEqual(set(ports.values_list("device__name", flat=True)), {"reader-visible-device"})
+        self.assertEqual(NetBoxReader.for_actor(actor).terminations("dcim.interface").count(), 0)
+
+    def test_terminations_refuse_a_model_no_claimed_kind_admits(self):
+        """A model outside the Cable End Kinds is a caller error, not an empty answer."""
+        with self.assertRaisesRegex(ValueError, "not a Cable End Kind"):
+            NetBoxReader.for_actor(self.actor).terminations("dcim.powerfeed")
+
     def test_for_actor_refuses_a_missing_actor(self):
         """`for_actor(None)` would be an unscoped read that reads like a scoped one."""
         with self.assertRaises(ValueError):
