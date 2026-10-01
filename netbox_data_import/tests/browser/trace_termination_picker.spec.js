@@ -5,12 +5,8 @@ import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const searchSource = readFileSync(
-  resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_picker_search.js"),
-  "utf8",
-);
-const controllerSource = readFileSync(
-  resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_termination_picker.js"),
+const pickerSource = readFileSync(
+  resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_picker.js"),
   "utf8",
 );
 
@@ -24,7 +20,8 @@ const fixture = `
           data-candidates-url="/plugins/data-import/trace-workspace/candidates/">
       <input type="hidden" name="preview_revision" value="rev-1">
       <input type="hidden" name="search" id="traceTerminationOfferedSearch">
-      <input type="hidden" name="field_key" id="traceTerminationFieldKey">
+      <input type="hidden" name="offset" id="traceTerminationOfferedOffset">
+      <input type="hidden" name="field_key" id="traceTerminationKey">
       <input type="hidden" name="object_type" id="traceTerminationObjectType">
       <input type="hidden" name="object_id" id="traceTerminationObjectId">
       <h5><span id="traceTerminationLabel"></span></h5>
@@ -32,6 +29,10 @@ const fixture = `
       <div id="traceTerminationCount" hidden></div>
       <div id="traceTerminationError" hidden></div>
       <div class="list-group" id="traceTerminationCandidates"></div>
+      <nav id="traceTerminationPages" hidden>
+        <button type="button" id="traceTerminationPrevious">Previous</button>
+        <button type="button" id="traceTerminationNext">Next</button>
+      </nav>
       <button type="submit" id="traceTerminationSubmit" disabled>Save decision</button>
     </form>
   </div>
@@ -77,8 +78,7 @@ test("the picker states how many of the eligible terminations it shows", async (
     total: 7,
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-picker]").click();
 
@@ -95,8 +95,7 @@ test("saving is refused until a candidate is chosen", async ({ page }) => {
     total: 1,
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-picker]").click();
   await expect(page.locator("#traceTerminationSubmit")).toBeDisabled();
@@ -119,8 +118,7 @@ test("a candidate that shares its id with another model saves its own object typ
     total: 2,
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-picker]").click();
   await expect(page.locator("#traceTerminationCandidates button")).toHaveText(["eth7 interface", "PSU1 power port"]);
@@ -141,8 +139,7 @@ test("the picker sends the preview revision, which the server checks before it a
     });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-picker]").click();
 
@@ -163,8 +160,7 @@ test("the search that produced the offer travels with the saved decision", async
     });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-picker]").click();
   await page.locator("#traceTerminationSearch").fill("mgmt");
@@ -183,8 +179,7 @@ test("a refused candidate query reports its reason and offers nothing", async ({
     });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-picker]").click();
 
@@ -206,8 +201,7 @@ test("a slower earlier search does not overwrite the answer to a later one", asy
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-picker]").click();
   await page.locator("#traceTerminationSearch").fill("mgmt");
@@ -239,8 +233,7 @@ test("the search that travels with a decision is the one that produced the offer
     });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-picker]").click();
   await page.locator("#traceTerminationSearch").fill("zz");
@@ -271,8 +264,7 @@ test("a refused lookup drops the candidate the previous search offered", async (
     });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-picker]").click();
   await page.locator("#traceTerminationCandidates button").first().click();
@@ -301,8 +293,7 @@ test("a lookup that never answers drops the offer on screen", async ({ page }) =
     });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-picker]").click();
   await page.locator("#traceTerminationCandidates button").first().click();
@@ -327,12 +318,10 @@ test("a boosted navigation that evaluates the script again opens the picker once
     });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
   // An htmx boost swaps the page and evaluates the script the new page carries a second time.
   await page.evaluate((markup) => { document.body.innerHTML = markup; }, fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-picker]").click();
 
@@ -347,8 +336,7 @@ test("a boosted navigation that evaluates the script again opens the picker once
 test("opening the picker twice reuses the one Modal the page already has", async ({ page }) => {
   await serveCandidates(page, { ok: true, candidates: [], shown: 0, total: 0 });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-picker]").click();
   await expect(page.locator("#traceTerminationCount")).toHaveText("0 of 0 eligible");
@@ -368,8 +356,7 @@ test("a lookup that settles after a swap does not answer into the page that repl
     });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
   await page.locator("[data-trace-picker]").click();
 
   // The boost swaps the page while that lookup is still in flight, then the answer arrives.
@@ -385,8 +372,7 @@ test("a search on a page whose picker the swap removed does not throw", async ({
   const failures = [];
   page.on("pageerror", (error) => failures.push(error.message));
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   // A boost can land on a page with no picker at all, while the debounce is still pending.
   await page.evaluate(() => {
@@ -402,8 +388,7 @@ test("a search on a page whose picker the swap removed does not throw", async ({
 test("saving closes the dialog before the swap takes it away", async ({ page }) => {
   await serveCandidates(page, { ok: true, candidates: [], shown: 0, total: 0 });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
   await page.locator("[data-trace-picker]").click();
 
   // htmx swaps the content the dialog lives in, so a dialog left open strands its backdrop.

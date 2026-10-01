@@ -1445,7 +1445,10 @@ from `manually resolved`, so the operator can see which terminations the exact-n
 without help.
 
 The searchable picker is scoped to eligible candidates of the admitted models on the resolved Device,
-shows each candidate's model, and shows a visible "N of M eligible" count. A resolved termination
+shows each candidate's model, and shows a visible "N of M eligible" count. The Device, termination,
+and Location pickers share one dialog: each pages through its whole candidate set with Previous and
+Next, and a later page states its range, such as "21–40 of 57 eligible". A write rechecks the offer
+on the page, search, and offset that made it. A resolved termination
 shows its selected object's own model, not the claimed kind. Each render rechecks view permission on
 every port and every resolved Device a cached plan names: a hidden or deleted port shows neither its
 name nor its model, and a hidden or deleted Device shows no name.

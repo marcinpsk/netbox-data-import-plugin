@@ -5,12 +5,8 @@ import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const searchSource = readFileSync(
-  resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_picker_search.js"),
-  "utf8",
-);
-const controllerSource = readFileSync(
-  resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_location_picker.js"),
+const pickerSource = readFileSync(
+  resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_picker.js"),
   "utf8",
 );
 
@@ -34,6 +30,10 @@ const fixture = `
       <div id="traceLocationCount" hidden></div>
       <div id="traceLocationError" hidden></div>
       <div class="list-group" id="traceLocationCandidates"></div>
+      <nav id="traceLocationPages" hidden>
+        <button type="button" id="traceLocationPrevious">Previous</button>
+        <button type="button" id="traceLocationNext">Next</button>
+      </nav>
       <button type="submit" id="traceLocationSubmit" disabled>Save mapping</button>
     </form>
   </div>
@@ -65,8 +65,7 @@ async function servedPage(page, payload, asked = []) {
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(payload) });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 }
 
 const offer = {
@@ -118,8 +117,7 @@ test("a search reaches the server and replaces the offer", async ({ page }) => {
     });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: searchSource });
-  await page.addScriptTag({ content: controllerSource });
+  await page.addScriptTag({ content: pickerSource });
 
   await page.locator("[data-trace-location-picker]").first().click();
   await expect(page.locator("#traceLocationCandidates button")).toHaveCount(2);
@@ -139,4 +137,34 @@ test("saving closes the dialog before the swap takes it away", async ({ page }) 
   });
 
   expect(await page.evaluate(() => window.ndiModalHides)).toBe(1);
+});
+
+test("the twenty-first Location of one name is reached through the next page", async ({ page }) => {
+  const rooms = Array.from({ length: 21 }, (_, index) => ({
+    id: 100 + index,
+    name: "Room",
+    parent: `Hall ${String(index + 1).padStart(2, "0")}`,
+  }));
+  await page.route("**/trace-workspace/location-candidates/**", async (route) => {
+    const offset = Number(new URL(route.request().url()).searchParams.get("offset"));
+    const candidates = rooms.slice(offset, offset + 20);
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, candidates, shown: candidates.length, total: 21, offset, limit: 20 }),
+    });
+  });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: pickerSource });
+
+  await page.locator("[data-trace-location-picker]").first().click();
+  await expect(page.locator("#traceLocationCandidates button")).toHaveCount(20);
+  await expect(page.locator("#traceLocationNext")).toBeEnabled();
+  await page.locator("#traceLocationNext").click();
+  await expect(page.locator("#traceLocationCandidates button")).toHaveText(["RoomIn Hall 21"]);
+  await expect(page.locator("#traceLocationCount")).toHaveText("21–21 of 21 visible Locations");
+  await page.locator("#traceLocationCandidates button").click();
+
+  await expect(page.locator("#traceLocationId")).toHaveValue("120");
+  await expect(page.locator("#traceLocationSubmit")).toBeEnabled();
+  await expect(page.locator("#traceLocationNext")).toBeDisabled();
 });

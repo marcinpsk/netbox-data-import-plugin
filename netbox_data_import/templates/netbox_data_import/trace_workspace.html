@@ -618,6 +618,7 @@
         <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
         <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
         <input type="hidden" name="search" id="traceDeviceOfferedSearch">
+        <input type="hidden" name="offset" id="traceDeviceOfferedOffset">
         <input type="hidden" name="device_key" id="traceDeviceKey">
         <input type="hidden" name="device_id" id="traceDeviceId">
         <div class="modal-header">
@@ -633,6 +634,10 @@
           <div class="list-group" id="traceDeviceCandidates"></div>
         </div>
         <div class="modal-footer">
+          <nav class="me-auto" id="traceDevicePages" aria-label="Pages of Devices" hidden>
+            <button type="button" class="btn btn-sm btn-outline-secondary me-1" id="traceDevicePrevious">Previous</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="traceDeviceNext">Next</button>
+          </nav>
           <button type="button" class="btn btn-link" data-bs-dismiss="modal">Cancel</button>
           <button type="submit" class="btn btn-primary" id="traceDeviceSubmit" disabled>Save decision</button>
         </div>
@@ -668,6 +673,10 @@
           <div class="list-group" id="traceLocationCandidates"></div>
         </div>
         <div class="modal-footer">
+          <nav class="me-auto" id="traceLocationPages" aria-label="Pages of Locations" hidden>
+            <button type="button" class="btn btn-sm btn-outline-secondary me-1" id="traceLocationPrevious">Previous</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="traceLocationNext">Next</button>
+          </nav>
           <button type="button" class="btn btn-link" data-bs-dismiss="modal">Cancel</button>
           <button type="submit" class="btn btn-primary" id="traceLocationSubmit" disabled>Save mapping</button>
         </div>
@@ -689,7 +698,8 @@
         <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
         <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
         <input type="hidden" name="search" id="traceTerminationOfferedSearch">
-        <input type="hidden" name="field_key" id="traceTerminationFieldKey">
+        <input type="hidden" name="offset" id="traceTerminationOfferedOffset">
+        <input type="hidden" name="field_key" id="traceTerminationKey">
         <input type="hidden" name="object_type" id="traceTerminationObjectType">
         <input type="hidden" name="object_id" id="traceTerminationObjectId">
         <div class="modal-header">
@@ -705,6 +715,10 @@
           <div class="list-group" id="traceTerminationCandidates"></div>
         </div>
         <div class="modal-footer">
+          <nav class="me-auto" id="traceTerminationPages" aria-label="Pages of terminations" hidden>
+            <button type="button" class="btn btn-sm btn-outline-secondary me-1" id="traceTerminationPrevious">Previous</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="traceTerminationNext">Next</button>
+          </nav>
           <button type="button" class="btn btn-link" data-bs-dismiss="modal">Cancel</button>
           <button type="submit" class="btn btn-primary" id="traceTerminationSubmit" disabled>Save decision</button>
         </div>
@@ -715,9 +729,6 @@
 
 {{ proposal_fields|json_script:"traceProposalFields" }}
 <script src="{% static 'netbox_data_import/js/trace_proposals.js' %}?v={{ plugin_version }}"></script>
-<script src="{% static 'netbox_data_import/js/trace_picker_search.js' %}?v={{ plugin_version }}"></script>
-<script src="{% static 'netbox_data_import/js/trace_device_picker.js' %}?v={{ plugin_version }}"></script>
-<script src="{% static 'netbox_data_import/js/trace_location_picker.js' %}?v={{ plugin_version }}"></script>
-<script src="{% static 'netbox_data_import/js/trace_termination_picker.js' %}?v={{ plugin_version }}"></script>
+<script src="{% static 'netbox_data_import/js/trace_picker.js' %}?v={{ plugin_version }}"></script>
 </div>
 {% endblock %}

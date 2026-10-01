@@ -9,7 +9,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const SCRIPT_DIRECTORY = resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js");
-const OWNER = "trace_picker_search.js";
+const OWNER = "trace_picker.js";
 
 const scripts = readdirSync(SCRIPT_DIRECTORY)
   .filter(name => name.endsWith(".js"))
