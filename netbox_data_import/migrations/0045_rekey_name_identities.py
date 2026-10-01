@@ -121,56 +121,72 @@ def _resolve_collisions(cursor, model, *, quote, merge_all=False, written=None):
     """Merge each group of staged rows that now share a key and a target; drop a group with several targets.
 
     A merge keeps the lowest id, and a proposal that wrote a removed row points to it. A drop deletes every
-    row of the group and clears the link of each proposal that wrote one.
+    row of the group and clears the link of each proposal that wrote one. PostgreSQL keeps each group's
+    members, and the migration reads them one page at a time.
     """
+    cursor.execute(f"CREATE INDEX ON {STAGE} (scope, new_key, id)")
     cursor.execute(f"DROP TABLE IF EXISTS {GROUPS}")
     cursor.execute(
         f"CREATE TEMPORARY TABLE {GROUPS} AS "  # noqa: S608 - fixed table names
-        "SELECT row_number() OVER (ORDER BY min(id)) AS n, scope, new_key, array_agg(id ORDER BY id) AS ids, "
-        f"count(DISTINCT target) AS targets FROM {STAGE} "
-        "GROUP BY scope, new_key HAVING count(*) > 1"
+        "SELECT row_number() OVER (ORDER BY min(id)) AS n, scope, new_key, min(id) AS kept, "
+        f"count(DISTINCT target) AS targets FROM {STAGE} GROUP BY scope, new_key HAVING count(*) > 1"
     )
-    table = quote(model._meta.db_table)
     last = 0
     while True:
         cursor.execute(
-            f"SELECT n, scope, new_key, ids, targets FROM {GROUPS} WHERE n > %s ORDER BY n LIMIT %s",  # noqa: S608
+            f"SELECT n, scope, new_key, kept, targets FROM {GROUPS} WHERE n > %s ORDER BY n LIMIT %s",  # noqa: S608
             [last, BATCH_SIZE],
         )
         groups = cursor.fetchall()
-        removed = []
-        for _n, scope, new_key, ids, targets in groups:
-            if merge_all or targets == 1:
-                kept, others = ids[0], ids[1:]
-                if written is not None:
-                    _relink(cursor, written, others, kept, quote=quote)
-                logger.warning(
-                    "Merged %s rows %s into row %s: one key %r in scope %s now names them, and they chose one target.",
-                    model.__name__,
-                    others,
-                    kept,
-                    new_key,
-                    scope,
-                )
-                removed += others
-            else:
-                if written is not None:
-                    _relink(cursor, written, ids, None, quote=quote)
-                logger.warning(
-                    "Dropped %s rows %s: one key %r in scope %s now names them, and they chose different targets. "
-                    "Make the decision again.",
-                    model.__name__,
-                    ids,
-                    new_key,
-                    scope,
-                )
-                removed += ids
-        if removed:
-            cursor.execute(f"DELETE FROM {table} WHERE id = ANY(%s)", [removed])  # noqa: S608 - quoted name
-            cursor.execute(f"DELETE FROM {STAGE} WHERE id = ANY(%s)", [removed])  # noqa: S608 - fixed name
+        for _n, scope, new_key, kept, targets in groups:
+            merge = merge_all or targets == 1
+            for ids in _members(cursor, scope, new_key, after=kept if merge else 0):
+                _remove(cursor, model, ids, kept if merge else None, quote=quote, written=written)
+                if merge:
+                    logger.warning(
+                        "Merged %s rows %s into row %s: one key %r in scope %s now names them, and they chose one "
+                        "target.",
+                        model.__name__,
+                        ids,
+                        kept,
+                        new_key,
+                        scope,
+                    )
+                else:
+                    logger.warning(
+                        "Dropped %s rows %s: one key %r in scope %s now names them, and they chose different "
+                        "targets. Make the decision again.",
+                        model.__name__,
+                        ids,
+                        new_key,
+                        scope,
+                    )
         if len(groups) < BATCH_SIZE:
             return
         last = groups[-1][0]
+
+
+def _members(cursor, scope, new_key, *, after):
+    """Yield the staged ids of one collision group above *after*, BATCH_SIZE per page."""
+    while True:
+        cursor.execute(
+            f"SELECT id FROM {STAGE} WHERE scope = %s AND new_key = %s AND id > %s ORDER BY id LIMIT %s",  # noqa: S608
+            [scope, new_key, after, BATCH_SIZE],
+        )
+        ids = [row[0] for row in cursor.fetchall()]
+        if ids:
+            yield ids
+        if len(ids) < BATCH_SIZE:
+            return
+        after = ids[-1]
+
+
+def _remove(cursor, model, ids, kept, *, quote, written):
+    """Delete one page of collision members, after pointing their proposals at *kept* or at no row."""
+    if written is not None:
+        _relink(cursor, written, ids, kept, quote=quote)
+    cursor.execute(f"DELETE FROM {quote(model._meta.db_table)} WHERE id = ANY(%s)", [ids])  # noqa: S608
+    cursor.execute(f"DELETE FROM {STAGE} WHERE id = ANY(%s)", [ids])  # noqa: S608 - fixed name
 
 
 def _relink(cursor, ResolutionProposal, ids, kept, *, quote):

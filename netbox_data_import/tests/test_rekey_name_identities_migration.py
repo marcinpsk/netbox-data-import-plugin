@@ -286,6 +286,39 @@ class RekeyNameIdentitiesMigrationTest(TransactionTestCase):
         self.assertEqual(Device.objects.get(source_device_key="DEV-0999").source_device_key_digest, _digest("DEV-0999"))
         self.assertIn(f"Merged TraceDeviceResolution rows [{last}] into row {first}", "\n".join(logs.output))
 
+    def test_a_collision_group_larger_than_a_page_is_settled_in_bounded_pages(self):
+        """1200 casefold keys of one uppercase key merge, and no statement carries or returns the whole group."""
+        import itertools
+
+        page = 500
+        Device = self.model("TraceDeviceResolution")
+        spellings = itertools.islice(itertools.product("i" + DOTLESS_I, repeat=11), 1200)
+        keys = ["dev-" + "".join(letters) for letters in spellings]
+        Device.objects.bulk_create(
+            Device(
+                profile=self.profile,
+                source_device_key=key,
+                source_device_key_digest=_digest(key),
+                selected_device_id=self.devices[0].pk,
+                selected_display_name="device",
+            )
+            for key in keys
+        )
+        first = Device.objects.order_by("pk").values_list("pk", flat=True).first()
+        statements = []
+
+        def record(execute, sql, params, many, context):
+            statements.append((sql, params or ()))
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(record), self.assertLogs(LOGGER, level="WARNING"):
+            MigrationExecutor(connection).migrate([(APP, REKEY)])
+
+        arrays = [len(value) for _sql, params in statements for value in params if isinstance(value, list)]
+        self.assertLessEqual(max(arrays), page)
+        self.assertEqual([sql for sql, _params in statements if "array_agg" in sql], [])
+        self.assertEqual(list(Device.objects.values_list("pk", "source_device_key")), [(first, "DEV-" + "I" * 11)])
+
     def test_requests_in_flight_retire_and_every_request_keeps_its_casefold_key(self):
         queued = self.proposal(old_field_key("dev-a", "eth0"), "queued")
         running = self.proposal(old_field_key("dev-a", "eth1"), "running")
