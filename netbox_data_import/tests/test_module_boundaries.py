@@ -227,6 +227,14 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
             with self.subTest(module=name):
                 self.assertEqual(_imported_roots(PACKAGE / name) & FORBIDDEN_TARGET_MODULE_IMPORTS, set())
 
+    def test_the_import_plan_imports_no_plugin_or_netbox_module(self):
+        """ADR 0001: the plan is target-neutral, so a Target Module registers with it instead."""
+        first_party = {path.stem for path in PACKAGE.glob("*.py")} | {
+            path.name for path in PACKAGE.iterdir() if path.is_dir()
+        }
+
+        self.assertEqual(_imported_roots(PACKAGE / "plan.py") & (first_party | FORBIDDEN_INTERPRETER_IMPORTS), set())
+
     def test_permission_constraint_parsing_has_one_owner(self):
         """Only the object permission module interprets NetBox constraint state."""
         self.assertEqual(_constraint_offenders(PACKAGE), {})

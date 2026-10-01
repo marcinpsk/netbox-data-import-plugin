@@ -30,7 +30,6 @@ from .cable_disclosure import (
     disclosure_source,
     segment_end_sources,
     termination_sources,
-    validate_diagnostic_disclosures,
 )
 from .catalog import OutputKind, TargetModuleKey
 from .database_identity import (
@@ -54,7 +53,15 @@ from .field_keys import (
     termination_field_key,
 )
 from .object_permissions import enforce_saved_object_permission
-from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit, fingerprint_of
+from .plan import (
+    Diagnostic,
+    Disposition,
+    PlannedChange,
+    Severity,
+    SynchronizationUnit,
+    fingerprint_of,
+    validate_diagnostic_display,
+)
 from .target_runtime import DeletedObject, PreconditionFailed
 from .trace_device_resolution import (
     STALE as DEVICE_STALE,
@@ -298,21 +305,21 @@ class _TraceAnalysis:
 
     def error(self, code: str, display: dict, identities=()) -> None:
         """Record one blocking or invalidating finding."""
-        validate_diagnostic_disclosures(code, display)
+        validate_diagnostic_display(code, display)
         self.diagnostics.append(
             Diagnostic(code=code, severity=Severity.ERROR, identities=tuple(identities), display=display)
         )
 
     def note(self, code: str, display: dict, identities=()) -> None:
         """Record one review note whose identities keep the unit honest about live state."""
-        validate_diagnostic_disclosures(code, display)
+        validate_diagnostic_display(code, display)
         self.diagnostics.append(
             Diagnostic(code=code, severity=Severity.INFO, identities=tuple(identities), display=display)
         )
 
     def warn(self, code: str, display: dict, identities=(), evidence=None) -> None:
         """Record a finding the operator has to see, which changes no disposition."""
-        validate_diagnostic_disclosures(code, display)
+        validate_diagnostic_display(code, display)
         self.diagnostics.append(
             Diagnostic(
                 code=code,

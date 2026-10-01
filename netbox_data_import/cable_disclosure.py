@@ -6,7 +6,9 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import NamedTuple
 
+from .catalog import TargetModuleKey
 from .field_keys import CABLE_END_KINDS
+from .plan import ImportPlan, register_diagnostic_display
 
 CABLE_ROW = "dcim.cable"
 CABLE_CLASS_MAPPING_ROW = "netbox_data_import.cableclassmapping"
@@ -163,8 +165,6 @@ def policy_row_is_disclosed(display: dict, row) -> bool:
 
 def validate_diagnostic_disclosures(code: str, display: dict) -> None:
     """Reject diagnostic display fields that bypass the shared disclosure vocabulary."""
-    if not code.startswith("cable."):
-        return
     fields = _DIAGNOSTIC_DISCLOSURE_FIELDS.get(code)
     if fields is None:
         raise ValueError(f"Diagnostic '{code}' has no registered display schema.")
@@ -474,8 +474,6 @@ def present_units(units, viewer) -> tuple:
 
 def redact_deleted_cables(plan_data: dict) -> dict:
     """Return an execution copy whose deleted Cable rows authorize no stored display text."""
-    from .plan import ImportPlan
-
     plan = ImportPlan.from_dict(plan_data)
     visible = _row_ids(plan.units)
     deleted_ids = {
@@ -487,6 +485,11 @@ def redact_deleted_cables(plan_data: dict) -> dict:
     visible[CABLE_ROW].difference_update(deleted_ids)
     units = tuple(_unit(unit, visible) for unit in plan.units)
     return replace(plan, units=units).to_dict()
+
+
+def register() -> None:
+    """Register the Cable display vocabulary, so a cached plan with an unknown Cable display field is refused."""
+    register_diagnostic_display(TargetModuleKey.CABLE, validate_diagnostic_disclosures)
 
 
 __all__ = (
@@ -512,6 +515,7 @@ __all__ = (
     "policy_row_is_disclosed",
     "present_units",
     "redact_deleted_cables",
+    "register",
     "segment_end_sources",
     "termination_sources",
     "validate_diagnostic_disclosures",

@@ -132,6 +132,10 @@ Import Engine. A Target Module never imports a Source Adapter implementation; it
 source items by output kind. A backend adapter never imports NetBox models, Candidate Snapshot
 models, Resolution Proposal models, or job models.
 
+The plan model imports no other module of the plugin. A Target Module that owns a diagnostic display
+vocabulary registers its validator with the plan model at application start, under its diagnostic
+code namespace.
+
 ### 2.3 Responsibilities
 
 **Source Adapter.** Deterministic source interpretation only. It returns typed source items and
@@ -426,10 +430,10 @@ source rows or Target Module ORM operations.
 
 A serialized Import Plan carries an explicit schema version. The first version is `1` (spec default).
 An incompatible active preview or queued job fails before writes and requires replanning. A plan whose
-diagnostic display holds a field the current display vocabulary does not register is incompatible
-too, because that field can hold a value no render rechecks. Historical
-Import Executions remain audit records. The runtime never migrates an old executable plan and never
-keeps a compatibility executor.
+diagnostic display holds a field its namespace's registered display vocabulary does not permit is
+incompatible too, because that field can hold a value no render rechecks. A namespace with no
+registered vocabulary is not checked. Historical Import Executions remain audit records. The runtime
+never migrates an old executable plan and never keeps a compatibility executor.
 
 The Import Plan contract is storage-neutral. This delivery stores the active preview plan in the
 session and passes the accepted serialized plan to the background job (spec default, permitted by ADR

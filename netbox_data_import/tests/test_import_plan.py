@@ -319,6 +319,47 @@ class PlanSerializationTest(SimpleTestCase):
         with self.assertRaises(PlanSchemaMismatch):
             ImportPlan.from_dict(stale)
 
+    def test_a_registered_namespace_refuses_a_display_field_its_module_does_not_register(self):
+        """Application start registers the Cable vocabulary, so the plan refuses what it does not name."""
+        displays = (
+            ("cable.segment_reused", {"segment_index": 0, "typo": "Cable A"}),
+            ("cable.unregistered", {}),
+        )
+        for code, display in displays:
+            with self.subTest(code=code):
+                payload = _plan(
+                    units=(_unit(diagnostics=(Diagnostic(code=code, severity=Severity.INFO, display=display),)),)
+                ).to_dict()
+                with self.assertRaises(PlanInvalid):
+                    ImportPlan.from_dict(payload)
+
+    def test_an_unregistered_namespace_keeps_its_display(self):
+        """A Source Adapter names its own namespace, and only a registered display carries row text."""
+        diagnostic = Diagnostic(code="workbook.unused_column", severity=Severity.INFO, display={"name": "Notes"})
+        original = _plan(units=(_unit(diagnostics=(diagnostic,)),))
+
+        self.assertEqual(ImportPlan.from_dict(original.to_dict()), original)
+
+    def test_the_display_check_reads_a_frozen_plan_display(self):
+        """A frozen display holds tuples, and the registered validator reads plain JSON."""
+        from netbox_data_import.plan import validate_diagnostic_display
+
+        segment = {"segment_index": 0, "retained": False, "visible": False, "origin": "cable"}
+        diagnostic = Diagnostic(
+            code="cable.media_family_mismatch", severity=Severity.WARNING, display={"segments": [segment]}
+        )
+
+        validate_diagnostic_display(diagnostic.code, diagnostic.display)
+
+    def test_a_namespace_takes_one_display_validator(self):
+        """A second validator for one namespace would silently replace the first module's vocabulary."""
+        from netbox_data_import.cable_disclosure import validate_diagnostic_disclosures
+        from netbox_data_import.plan import register_diagnostic_display
+
+        register_diagnostic_display("cable", validate_diagnostic_disclosures)
+        with self.assertRaisesMessage(ValueError, "Diagnostic namespace 'cable' already has a display validator."):
+            register_diagnostic_display("cable", lambda code, display: None)
+
     def test_a_schema_version_must_be_an_integer(self):
         """JSON booleans and floats are not valid Import Plan schema versions."""
         for version in (True, 1.0):
