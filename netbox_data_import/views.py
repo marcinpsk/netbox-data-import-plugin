@@ -4321,8 +4321,13 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         loaded = self.reviewed_preview(request)
         if loaded is None:
             return JsonResponse({"ok": False, "error": "No import preview in progress."}, status=409)
-        profile, _document, _workspace, planning_context = loaded
+        profile, _document, workspace, planning_context = loaded
         field_key = request.GET.get("field_key", "").strip()
+        # A review read answers a question this preview asked, never one the caller invented.
+        if field_key not in _workspace_field_keys(workspace):
+            return JsonResponse(
+                {"ok": False, "error": "This preview asked no question about that termination."}, status=400
+            )
         try:
             limit = _candidate_page_limit(request.GET.get("limit"))
         except (TypeError, ValueError):

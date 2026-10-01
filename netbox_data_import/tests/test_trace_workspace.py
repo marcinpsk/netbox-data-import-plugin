@@ -1772,6 +1772,19 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(TerminationResolution.objects.filter(field_key=elsewhere).exists())
 
+    def test_the_picker_refuses_a_field_key_the_workspace_never_asked_about(self):
+        """The candidate read answers only a question this preview asked, as the resolve command does."""
+        self.open_blocked_workspace()
+        # PANEL-1 exists in NetBox, but this workbook never names it.
+        elsewhere = termination_field_key(device="PANEL-1", cards="", port="F1", kind="front_port")
+
+        response = self.candidates(elsewhere)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json(), {"ok": False, "error": "This preview asked no question about that termination."}
+        )
+
     def test_a_stale_form_post_is_refused_by_the_resolve_command(self):
         """A decision taken against a preview that has moved on is not the decision it looks like."""
         field_key = self.open_blocked_workspace()
