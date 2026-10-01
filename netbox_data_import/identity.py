@@ -11,6 +11,7 @@ A Source Adapter imports this module, so Django loads only inside the database h
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
 # U+0009-000D, U+001C-0020, U+0085, U+00A0, U+1680, U+2000-200A, U+2028, U+2029, U+202F, U+205F, U+3000.
@@ -35,13 +36,15 @@ WHITESPACE = "".join(
 # NetBox creates this collation with the ICU root locale, `und-u-kn-true`, for its own name columns.
 IDENTITY_COLLATION = "natural_sort"
 CANONICAL_NAME = "_ndi_canonical_name"
+# A bracket expression of literal characters, which Python and PostgreSQL read the same way under any collation.
+WHITESPACE_RUN = f"[{WHITESPACE}]+"
 
-_TO_SPACE = str.maketrans(WHITESPACE, " " * len(WHITESPACE))
+_WHITESPACE_RUN = re.compile(WHITESPACE_RUN)
 
 
 def identity_text(value: str) -> str:
     """Return the comparison key of one name."""
-    return " ".join(part for part in value.translate(_TO_SPACE).split(" ") if part).upper()
+    return _WHITESPACE_RUN.sub(" ", value).strip(" ").upper()
 
 
 def identity_expression(expression):
@@ -51,9 +54,10 @@ def identity_expression(expression):
 
     # The bytewise collation keeps the input column's own collation out of every step before UPPER.
     text = Collate(Cast(expression, TextField()), "C")
-    spaced = Func(text, Value(WHITESPACE), Value(" " * len(WHITESPACE)), function="TRANSLATE", output_field=TextField())
-    collapsed = Func(spaced, Value(" +"), Value(" "), Value("g"), function="REGEXP_REPLACE", output_field=TextField())
-    trimmed = Func(collapsed, Value(" "), function="BTRIM", output_field=TextField())
+    spaced = Func(
+        text, Value(WHITESPACE_RUN), Value(" "), Value("g"), function="REGEXP_REPLACE", output_field=TextField()
+    )
+    trimmed = Func(spaced, Value(" "), function="BTRIM", output_field=TextField())
     return Upper(Collate(trimmed, IDENTITY_COLLATION))
 
 
@@ -87,6 +91,7 @@ __all__ = (
     "CANONICAL_NAME",
     "IDENTITY_COLLATION",
     "WHITESPACE",
+    "WHITESPACE_RUN",
     "identity_expression",
     "identity_in",
     "identity_text",
