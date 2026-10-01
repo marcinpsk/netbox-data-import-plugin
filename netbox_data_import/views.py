@@ -4344,10 +4344,6 @@ class TraceSyncView(_PermissionScopedWriteMixin, _TraceWorkspaceMixin, Permissio
             return redirect(next_url)
 
 
-class InvalidCandidatePage(Exception):
-    """A picker request names a page the candidate endpoints do not serve."""
-
-
 TERMINATION_UNRESOLVABLE = "That termination cannot be resolved here."
 CANDIDATE_LIMIT_INVALID = f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}."
 # PostgreSQL reads OFFSET and LIMIT as bigint, so the last row of a page must stay inside that range.
@@ -4355,22 +4351,31 @@ CANDIDATE_OFFSET_MAX = 2**63 - 1 - ELIGIBLE_TERMINATION_LIMIT
 CANDIDATE_OFFSET_INVALID = f"Candidate offset must be an integer from 0 to {CANDIDATE_OFFSET_MAX}."
 
 
-def _candidate_page(params) -> tuple[int, int]:
+@dataclass(frozen=True)
+class CandidatePage:
+    """One picker page, or the fixed sentence that refuses it."""
+
+    limit: int = 0
+    offset: int = 0
+    error: str = ""
+
+
+def _candidate_page(params) -> CandidatePage:
     """Return the page limit and offset of one picker read, or of the write that rechecks its offer."""
     raw_limit, raw_offset = params.get("limit"), params.get("offset")
     try:
         limit = ELIGIBLE_TERMINATION_LIMIT if raw_limit is None else int(raw_limit)
-    except (TypeError, ValueError) as exc:
-        raise InvalidCandidatePage(CANDIDATE_LIMIT_INVALID) from exc
+    except (TypeError, ValueError):
+        return CandidatePage(error=CANDIDATE_LIMIT_INVALID)
     if not 1 <= limit <= ELIGIBLE_TERMINATION_LIMIT:
-        raise InvalidCandidatePage(CANDIDATE_LIMIT_INVALID)
+        return CandidatePage(error=CANDIDATE_LIMIT_INVALID)
     try:
         offset = 0 if raw_offset in (None, "") else int(raw_offset)
-    except (TypeError, ValueError) as exc:
-        raise InvalidCandidatePage(CANDIDATE_OFFSET_INVALID) from exc
+    except (TypeError, ValueError):
+        return CandidatePage(error=CANDIDATE_OFFSET_INVALID)
     if not 0 <= offset <= CANDIDATE_OFFSET_MAX:
-        raise InvalidCandidatePage(CANDIDATE_OFFSET_INVALID)
-    return limit, offset
+        return CandidatePage(error=CANDIDATE_OFFSET_INVALID)
+    return CandidatePage(limit=limit, offset=offset)
 
 
 class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
@@ -4390,10 +4395,10 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
             return JsonResponse(
                 {"ok": False, "error": "This preview asked no question about that termination."}, status=400
             )
-        try:
-            limit, offset = _candidate_page(request.GET)
-        except InvalidCandidatePage as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+        page = _candidate_page(request.GET)
+        if page.error:
+            return JsonResponse({"ok": False, "error": page.error}, status=400)
+        limit, offset = page.limit, page.offset
         asked = workspace.asked_terminations[field_key]
         if asked is None:
             return JsonResponse({"ok": False, "error": TERMINATION_UNRESOLVABLE}, status=400)
@@ -4450,10 +4455,10 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
         search = request.GET.get("search", "")
         if len(search) > 200:
             return JsonResponse({"ok": False, "error": "Device search must be 200 characters or fewer."}, status=400)
-        try:
-            limit, offset = _candidate_page(request.GET)
-        except InvalidCandidatePage as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+        page = _candidate_page(request.GET)
+        if page.error:
+            return JsonResponse({"ok": False, "error": page.error}, status=400)
+        limit, offset = page.limit, page.offset
         try:
             evidence = DeviceEvidence.from_dict(question)
         except (TypeError, ValueError):
@@ -4536,11 +4541,11 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
                 "That Device is not one of the eligible candidates.",
                 status=400,
             )
-        try:
-            # The write rechecks the page that made the offer.
-            limit, offset = _candidate_page(request.POST)
-        except InvalidCandidatePage as exc:
-            return _preview_action_error(request, next_url, str(exc), status=400)
+        # The write rechecks the page that made the offer.
+        page = _candidate_page(request.POST)
+        if page.error:
+            return _preview_action_error(request, next_url, page.error, status=400)
+        limit, offset = page.limit, page.offset
         try:
             with transaction.atomic():
                 plan, chosen = save_trace_device_resolution_and_replan(
@@ -4596,10 +4601,10 @@ class TraceLocationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin,
         search = request.GET.get("search", "")
         if len(search) > 200:
             return JsonResponse({"ok": False, "error": "Location search must be 200 characters or fewer."}, status=400)
-        try:
-            limit, offset = _candidate_page(request.GET)
-        except InvalidCandidatePage as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+        page = _candidate_page(request.GET)
+        if page.error:
+            return JsonResponse({"ok": False, "error": page.error}, status=400)
+        limit, offset = page.limit, page.offset
         try:
             found = eligible_trace_locations(
                 _trace_reader(request, profile, planning_context), search=search, limit=limit, offset=offset
@@ -4847,10 +4852,10 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
             return _preview_action_error(
                 request, next_url, "This preview asked no question about that termination.", status=400
             )
-        try:
-            limit, offset = _candidate_page(request.POST)
-        except InvalidCandidatePage as exc:
-            return _preview_action_error(request, next_url, str(exc), status=400)
+        page = _candidate_page(request.POST)
+        if page.error:
+            return _preview_action_error(request, next_url, page.error, status=400)
+        limit, offset = page.limit, page.offset
         asked = workspace.asked_terminations[field_key]
         if asked is None:
             return _preview_action_error(request, next_url, TERMINATION_UNRESOLVABLE, status=400)
