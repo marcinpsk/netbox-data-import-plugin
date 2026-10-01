@@ -22,8 +22,9 @@ fake_on_branch = True
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 500
-STAGE = "ndi_rekey_stage"
-GROUPS = "ndi_rekey_groups"
+# The pg_temp schema keeps every create, drop and write away from a permanent table of the same name.
+STAGE = "pg_temp.netbox_data_import_0045_stage"
+GROUPS = "pg_temp.netbox_data_import_0045_groups"
 # A trace identity endpoint ends with a claimed kind, which is a protocol value and keeps its case.
 CLAIMED_KINDS = frozenset({"interface", "front_port", "rear_port"})
 NAME_PARTS = ("cards", "device", "port")

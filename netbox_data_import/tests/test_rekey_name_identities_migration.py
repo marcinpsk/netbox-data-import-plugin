@@ -215,6 +215,36 @@ class RekeyNameIdentitiesMigrationTest(TransactionTestCase):
         self.assertIn("Dropped TraceDeviceResolution", output)
         self.assertIn("Dropped TraceLocationResolution", output)
 
+    def test_a_permanent_table_named_like_a_staging_table_keeps_its_rows(self):
+        """The staging tables are temporary, so the migration must neither drop nor write a permanent namesake."""
+        migration = import_module(f"{APP}.migrations.{REKEY}")
+        names = [table.rpartition(".")[2] for table in (migration.STAGE, migration.GROUPS)]
+        with connection.cursor() as cursor:
+            for name in names:
+                cursor.execute(f"CREATE TABLE public.{name} (note text)")
+                cursor.execute(f"INSERT INTO public.{name} VALUES ('kept')")  # noqa: S608 - fixed names
+                self.addCleanup(self.drop_permanent, name)
+        self.model("TraceDeviceResolution").objects.create(
+            profile=self.profile,
+            source_device_key="alias",
+            source_device_key_digest=_digest("alias"),
+            selected_device_id=self.devices[0].pk,
+            selected_display_name="device",
+        )
+
+        MigrationExecutor(connection).migrate([(APP, REKEY)])
+
+        with connection.cursor() as cursor:
+            for name in names:
+                cursor.execute(f"SELECT note FROM public.{name}")  # noqa: S608 - fixed names
+                self.assertEqual(cursor.fetchall(), [("kept",)], name)
+        self.assertEqual(self.model("TraceDeviceResolution").objects.get().source_device_key, "ALIAS")
+
+    @staticmethod
+    def drop_permanent(name):
+        with connection.cursor() as cursor:
+            cursor.execute(f"DROP TABLE IF EXISTS public.{name}")
+
     def test_a_large_table_is_read_staged_and_written_in_bounded_pages(self):
         """No read or write of the decision table holds more than one page, and every temporary digest goes first."""
         from django.test.utils import CaptureQueriesContext
@@ -242,7 +272,8 @@ class RekeyNameIdentitiesMigrationTest(TransactionTestCase):
             query["sql"] for query in captured if query["sql"].startswith("SELECT") and f"FROM {table}" in query["sql"]
         ]
         writes = [query["sql"] for query in captured if query["sql"].startswith(f"UPDATE {table}")]
-        stages = [query["sql"] for query in captured if query["sql"].startswith("INSERT INTO ndi_rekey_stage")]
+        stage = import_module(f"{APP}.migrations.{REKEY}").STAGE
+        stages = [query["sql"] for query in captured if query["sql"].startswith(f"INSERT INTO {stage}")]
         self.assertEqual(len(reads), 3)
         self.assertTrue(all(sql.endswith(f"LIMIT {page}") for sql in reads), reads)
         self.assertEqual(len(stages), 3)
