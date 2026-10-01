@@ -1320,13 +1320,17 @@ class CableEndKindTest(CableTopologyMixin, TestCase):
         self.assertEqual(unit.changes, ())
         incompatible = next(item for item in unit.diagnostics if item.code == "cable.incompatible_terminations")
         self.assertEqual(
-            incompatible.display,
+            incompatible.to_dict()["display"],
             {
                 "segment_index": 0,
                 "left_model": "dcim.interface",
                 "right_model": "dcim.poweroutlet",
                 "left_field_key": termination_field_key(device="DEV-A", cards="", port="eth0", kind="interface"),
                 "right_field_key": termination_field_key(device="PDU-1", cards="", port="OUT1", kind="interface"),
+                "termination_sources": [
+                    {"kind": "dcim.interface", "pk": self.eth0.pk},
+                    {"kind": "dcim.poweroutlet", "pk": self.outlet.pk},
+                ],
             },
         )
         self.assertEqual(
@@ -1829,6 +1833,29 @@ class CableDisclosureSchemaTest(SimpleTestCase):
                     DISCLOSURE_SOURCE: {"kind": CABLE_SEGMENT_OVERRIDE_ROW, "pk": 1},
                 },
                 "Diagnostic 'cable.segment_override_lost' has a source for a hidden policy.",
+            ),
+            (
+                "termination field without sources",
+                "cable.planned_termination_conflict",
+                {"segment_index": 0, "competing_trace": "B", "termination": "eth0"},
+                "Diagnostic 'cable.planned_termination_conflict' names terminations without their sources.",
+            ),
+            (
+                "termination source of another row kind",
+                "cable.planned_termination_conflict",
+                {
+                    "segment_index": 0,
+                    "competing_trace": "B",
+                    "termination": "eth0",
+                    "termination_sources": [{"kind": CABLE_ROW, "pk": 1}],
+                },
+                "Diagnostic 'cable.planned_termination_conflict' names terminations without their sources.",
+            ),
+            (
+                "termination sources on a diagnostic that names no termination",
+                "cable.segment_reused",
+                {"segment_index": 0, "termination_sources": [{"kind": "dcim.interface", "pk": 1}]},
+                "Diagnostic 'cable.segment_reused' has unregistered display fields: termination_sources.",
             ),
         )
 

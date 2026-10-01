@@ -14,6 +14,7 @@ from django.urls import reverse
 from django.utils.html import escape
 from extras.models import Tag
 
+from netbox_data_import.cable_disclosure import TERMINATION_HIDDEN, TERMINATION_SOURCES
 from netbox_data_import.cable_policy import cable_type_label
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
 from netbox_data_import import adapters as adapter_registry
@@ -29,9 +30,12 @@ from netbox_data_import.preview_row_actions import (
 )
 from netbox_data_import.review_workspace import _SUMMARY_KEYS, ReviewWorkspace
 from netbox_data_import.tests.test_cable_module import (
+    DEVICE_B,
+    SERVER_PSU,
     CableTopologyMixin,
     direct_path,
     patched_path,
+    power_path,
 )
 from netbox_data_import.tests.helpers import (
     assert_absent_from,
@@ -2382,6 +2386,239 @@ class TraceWorkspaceCableDisclosureTest(CableTopologyMixin, TransactionTestCase)
         assert_absent_from(self, stored, label)
         assert_absent_from(self, stored, description)
         assert_absent_from(self, stored, tag_name)
+
+
+class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTestCase):
+    """Recheck cached termination names and models against the viewer of each workspace render."""
+
+    TERMINATION_MODELS = (Interface, FrontPort, RearPort, PowerPort, PowerOutlet)
+
+    def setUp(self):
+        self.build_topology()
+        self.build_power_topology()
+        # A NetBox label makes each port's display differ from the source text that names it.
+        ports = (self.eth0, self.eth1, self.psu, self.outlet, self.panel_1_rear, self.panel_2_rear)
+        for component in (*ports, *self.panel_1_fronts, *self.panel_2_fronts):
+            component.label = f"netbox-{component._meta.model_name}-{component.pk}"
+            component.save()
+        self.viewer = user_with_object_permission(
+            "trace-port-viewer",
+            [
+                (ImportProfile, ("view", "change"), {}),
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                *((model, ("view",), {}) for model in self.TERMINATION_MODELS),
+                (Cable, ("view", "add", "delete"), {}),
+            ],
+        )
+        self.client.force_login(self.viewer)
+
+    def open_workspace(self, *blocks):
+        """Upload the path blocks through the real setup flow and render the workspace."""
+        upload = BytesIO(trace_workbook_bytes(path_blocks=blocks))
+        upload.name = "traces.xlsx"
+        setup = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        self.assertEqual(setup.status_code, 200)
+        return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+    def set_view(self, model, allowed: bool):
+        """Grant or revoke the viewer's read access to one termination model, then drop cached grants."""
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+        from users.models import ObjectPermission
+
+        permission = ObjectPermission.objects.get(name=f"trace-port-viewer {model.__name__} view")
+        permission.enabled = allowed
+        permission.save(update_fields=("enabled",))
+        clear_user_permission_caches(self.viewer)
+
+    def reload(self):
+        """Render the cached preview again, as a browser reload does."""
+        return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+    def presented(self):
+        """Return the accepted plan and its presentation for the viewer, as the workspace builds them."""
+        workspace = ReviewWorkspace.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY], self.viewer)
+        return workspace.plan.units[0], workspace._presentation_units[0]
+
+    def test_revoking_view_hides_the_name_and_model_of_each_resolved_kind_on_reload(self):
+        """Every Cable End Kind the reviewed plan resolved hides its port name and model once hidden."""
+        cases = (
+            (Interface, patched_path()),
+            (FrontPort, patched_path()),
+            (RearPort, patched_path()),
+            (PowerPort, power_path()),
+            (PowerOutlet, power_path()),
+        )
+        for model, block in cases:
+            with self.subTest(model=model.__name__):
+                for granted in self.TERMINATION_MODELS:
+                    self.set_view(granted, True)
+                label = model._meta.label_lower
+                visible = self.open_workspace(block)
+                fields = {item["field_key"]: item for item in visible.context["selected_trace"].terminations}
+                hidden_keys = {key for key, item in fields.items() if item["selected_type"] == label}
+                self.assertTrue(hidden_keys)
+                names = {fields[key]["selected"] for key in hidden_keys}
+                for name in names:
+                    self.assertContains(visible, name)
+                # A planned end reads "<Device> <port name>", which names the port of that model.
+                displays = {f"{port.device} {port.name}" for port in model.objects.all()}
+                ends = [
+                    (segment["index"], end)
+                    for segment in visible.context["segment_policy_forms"]
+                    for end in ("left", "right")
+                    if segment[end] in displays
+                ]
+                self.assertTrue(ends)
+                self.set_view(model, False)
+
+                cached = self.reload()
+
+                for item in cached.context["selected_trace"].terminations:
+                    hidden = item["field_key"] in hidden_keys
+                    self.assertEqual(item["selected"] == TERMINATION_HIDDEN, hidden, item)
+                    self.assertEqual(item["selected_model"] == "", hidden, item)
+                for name in names:
+                    self.assertNotContains(cached, name)
+                segments = {segment["index"]: segment for segment in cached.context["segment_policy_forms"]}
+                for index, end in ends:
+                    self.assertEqual(segments[index][end], TERMINATION_HIDDEN)
+                shown_ends = [
+                    segment[end]
+                    for segment in cached.context["segment_policy_forms"]
+                    for end in ("left", "right")
+                    if (segment["index"], end) not in ends
+                ]
+                self.assertNotIn(TERMINATION_HIDDEN, shown_ends)
+
+    def test_the_incompatible_diagnostic_redacts_a_hidden_end_and_keeps_the_accepted_plan(self):
+        """A hidden end removes both models and its identity from the presented finding only."""
+        self.open_workspace(direct_path(from_end=SERVER_PSU, to_end=DEVICE_B))
+        accepted, _presented = self.presented()
+        finding = next(item for item in accepted.diagnostics if item.code == "cable.incompatible_terminations")
+        self.assertEqual(
+            (finding.display["left_model"], finding.display["right_model"]), ("dcim.powerport", "dcim.interface")
+        )
+        psu_identity = f"dcim.powerport:{self.psu.pk}"
+        self.assertIn(psu_identity, finding.identities)
+        self.set_view(PowerPort, False)
+
+        page = self.reload()
+        accepted, presented = self.presented()
+
+        shown = next(item for item in presented.diagnostics if item.code == "cable.incompatible_terminations")
+        self.assertEqual(
+            (shown.display["left_model"], shown.display["right_model"]), (TERMINATION_HIDDEN, TERMINATION_HIDDEN)
+        )
+        self.assertNotIn(TERMINATION_SOURCES, shown.display)
+        self.assertNotIn(psu_identity, shown.identities)
+        self.assertIn(f"dcim.interface:{self.eth1.pk}", shown.identities)
+        assert_absent_from(self, [diagnostic.to_dict() for diagnostic in presented.diagnostics], psu_identity)
+        unchanged = next(item for item in accepted.diagnostics if item.code == "cable.incompatible_terminations")
+        self.assertEqual(unchanged, finding)
+        self.assertNotContains(page, str(self.psu))
+
+    def test_a_finding_keeps_a_visible_port_it_names_outside_its_identities(self):
+        """The mapped peers of a refused pass-through are named by source alone, and still render while visible."""
+        RearPort.objects.create(device=self.panel_1, name="R2", type="8p8c", positions=1)
+        rear_identity = f"dcim.rearport:{self.panel_1_rear.pk}"
+        device_a = trace_termination("DEV-A", "", "eth0", "Port")
+        path = (
+            trace_endpoint_line(device_a),
+            trace_endpoint_line(DEVICE_B),
+            (
+                trace_segment(device_a, "Patch", trace_termination("PANEL-1", "", "F1", "Position Front")),
+                trace_segment(
+                    trace_termination("PANEL-1", "", "R2", "Punch-Down"),
+                    "Trunk",
+                    trace_termination("PANEL-2", "", "R1", "Punch-Down"),
+                ),
+                trace_segment(trace_termination("PANEL-2", "", "F1", "Position Front"), "Patch", DEVICE_B),
+            ),
+        )
+        self.open_workspace(path)
+        _accepted, presented = self.presented()
+        finding = next(item for item in presented.diagnostics if item.code == "cable.pass_through_not_mapped")
+        self.assertNotIn(rear_identity, finding.identities)
+        self.assertEqual(list(finding.display["mapped"]), [str(self.panel_1_rear)])
+        self.set_view(RearPort, False)
+
+        _accepted, presented = self.presented()
+
+        finding = next(item for item in presented.diagnostics if item.code == "cable.pass_through_not_mapped")
+        self.assertEqual(list(finding.display["mapped"]), [])
+        self.assertEqual((finding.display["entry"], finding.display["exit"]), (TERMINATION_HIDDEN, TERMINATION_HIDDEN))
+
+    def test_a_deleted_termination_redacts_its_cached_name(self):
+        """A row that no longer exists cannot authorize its cached port name."""
+        visible = self.open_workspace(power_path())
+        self.assertContains(visible, str(self.outlet))
+        name = str(self.outlet)
+        self.outlet.delete()
+
+        cached = self.reload()
+
+        self.assertNotContains(cached, name)
+        selected = {item["label"]: item["selected"] for item in cached.context["selected_trace"].terminations}
+        self.assertEqual(selected["PDU-1 OUT1"], TERMINATION_HIDDEN)
+
+    def test_a_cached_port_name_without_an_authorizable_source_redacts_on_render(self):
+        """The workspace does not trust a cached port name whose source is missing or malformed."""
+        self.open_workspace(power_path())
+        original = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        invalid_sources = (None, "1", {"kind": "dcim.cable", "pk": self.psu.pk}, {"kind": "dcim.powerport"})
+
+        for source in (*invalid_sources, "missing"):
+            with self.subTest(source=source):
+                data = copy.deepcopy(original)
+                trace = data["units"][0]["display"]["trace"]
+                field = next(item for item in trace["terminations"] if item["selected_type"] == "dcim.powerport")
+                segment = trace["segments"][0]
+                if source == "missing":
+                    for mapping, key in (
+                        (field, "disclosure_source"),
+                        (segment, "left_source"),
+                        (segment, "right_source"),
+                    ):
+                        mapping.pop(key, None)
+                else:
+                    field["disclosure_source"] = source
+                    segment["left_source"] = segment["right_source"] = source
+                session = self.client.session
+                session[PREVIEW_PLAN_SESSION_KEY] = data
+                session.save()
+
+                response = self.reload()
+
+                self.assertNotContains(response, str(self.psu))
+                trace = response.context["selected_trace"]
+                psu = next(item for item in trace.terminations if item["label"] == "DEV-A PSU1")
+                self.assertEqual((psu["selected"], psu["selected_model"]), (TERMINATION_HIDDEN, ""))
+                ends = response.context["segment_policy_forms"][0]
+                self.assertEqual((ends["left"], ends["right"]), (TERMINATION_HIDDEN, TERMINATION_HIDDEN))
+
+    def test_termination_sources_stay_out_of_the_accepted_fingerprint(self):
+        """Live presentation removes port names without moving any accepted decision input."""
+        plan = self.plan(direct_path(from_end=SERVER_PSU, to_end=DEVICE_B), actor=self.viewer)
+        stripped = plan.to_dict()
+
+        def remove_sources(value):
+            if isinstance(value, dict):
+                for key in ("disclosure_source", "left_source", "right_source", TERMINATION_SOURCES):
+                    value.pop(key, None)
+                for child in value.values():
+                    remove_sources(child)
+            elif isinstance(value, list):
+                for child in value:
+                    remove_sources(child)
+
+        remove_sources(stripped)
+
+        self.assertEqual(ImportPlan.from_dict(stripped).fingerprint, plan.fingerprint)
 
 
 class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase):

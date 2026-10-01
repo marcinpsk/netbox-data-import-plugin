@@ -24,6 +24,15 @@ from itertools import islice
 from operator import itemgetter
 from typing import Any
 
+from .cable_disclosure import (
+    DISCLOSURE_SOURCE,
+    SEGMENT_END_SOURCES,
+    disclosed_cable,
+    disclosed_policy,
+    disclosure_source,
+    termination_sources,
+    validate_diagnostic_disclosures,
+)
 from .catalog import OutputKind, TargetModuleKey
 from .database_identity import CANONICAL_NAME, matching_search, search_identity, with_database_identity
 from .field_keys import (
@@ -266,8 +275,6 @@ class _TraceAnalysis:
 
     def error(self, code: str, display: dict, identities=()) -> None:
         """Record one blocking or invalidating finding."""
-        from .cable_disclosure import validate_diagnostic_disclosures
-
         validate_diagnostic_disclosures(code, display)
         self.diagnostics.append(
             Diagnostic(code=code, severity=Severity.ERROR, identities=tuple(identities), display=display)
@@ -275,8 +282,6 @@ class _TraceAnalysis:
 
     def note(self, code: str, display: dict, identities=()) -> None:
         """Record one review note whose identities keep the unit honest about live state."""
-        from .cable_disclosure import validate_diagnostic_disclosures
-
         validate_diagnostic_disclosures(code, display)
         self.diagnostics.append(
             Diagnostic(code=code, severity=Severity.INFO, identities=tuple(identities), display=display)
@@ -284,8 +289,6 @@ class _TraceAnalysis:
 
     def warn(self, code: str, display: dict, identities=(), evidence=None) -> None:
         """Record a finding the operator has to see, which changes no disposition."""
-        from .cable_disclosure import validate_diagnostic_disclosures
-
         validate_diagnostic_disclosures(code, display)
         self.diagnostics.append(
             Diagnostic(
@@ -687,20 +690,20 @@ class _CableBatch:
         """Record how one Termination Reference was settled, for its badge and its picker."""
         key = _field_key(reference, role)
         label = _endpoint_label(reference)
-        analysis.terminations.setdefault(
-            key,
-            {
-                "field_key": key,
-                "label": f"{label} (mapped peer)" if role == MAPPED_PEER_ROLE else label,
-                "state": state,
-                "selected": "" if termination is None else termination.display,
-                "selected_type": "" if termination is None else termination.object_type,
-                "selectable": not reason,
-                "reason": reason,
-                # A segment NetBox cannot cable reopens both its ends, however they were resolved.
-                "incompatible": False,
-            },
-        )
+        record = {
+            "field_key": key,
+            "label": f"{label} (mapped peer)" if role == MAPPED_PEER_ROLE else label,
+            "state": state,
+            "selected": "" if termination is None else termination.display,
+            "selected_type": "" if termination is None else termination.object_type,
+            "selectable": not reason,
+            "reason": reason,
+            # A segment NetBox cannot cable reopens both its ends, however they were resolved.
+            "incompatible": False,
+        }
+        if termination is not None:
+            record[DISCLOSURE_SOURCE] = disclosure_source(*termination.key)
+        analysis.terminations.setdefault(key, record)
 
     def _stored_termination(self, analysis: _TraceAnalysis, reference, device, stored) -> _Termination | None:
         """Return the object one saved decision selected, rechecked against current target state."""
@@ -856,6 +859,7 @@ class _CableBatch:
                     "segment_index": index,
                     "cable_class": source_text(segment.cable_class),
                     "termination": left_ends[index].display,
+                    **termination_sources(left_ends[index].key),
                 },
                 identities=(left_ends[index].identity,),
             )
@@ -882,6 +886,7 @@ class _CableBatch:
                     "right_model": segment.right.object_type,
                     "left_field_key": ends[0],
                     "right_field_key": ends[1],
+                    **termination_sources(segment.left.key, segment.right.key),
                 },
                 identities=(segment.left.identity, segment.right.identity),
             )
@@ -899,7 +904,13 @@ class _CableBatch:
         if not peers:
             analysis.refuse(
                 "cable.pass_through_not_mapped",
-                {**_reference_display(reference), "entry": exit_end.display, "exit": entry_end.display, "mapped": []},
+                {
+                    **_reference_display(reference),
+                    "entry": exit_end.display,
+                    "exit": entry_end.display,
+                    "mapped": [],
+                    **termination_sources(exit_end.key, entry_end.key),
+                },
                 identities=(exit_end.identity,),
             )
             return None
@@ -912,7 +923,12 @@ class _CableBatch:
         """Record one same-port continuation and return the mapped peer it substitutes."""
         analysis.note(
             "cable.same_port_continuation",
-            {**_reference_display(reference), "port": exit_end.display, "peer": peer.display},
+            {
+                **_reference_display(reference),
+                "port": exit_end.display,
+                "peer": peer.display,
+                **termination_sources(exit_end.key, peer.key),
+            },
             identities=(exit_end.identity, peer.identity, _object_identity("dcim.portmapping", mapping.pk)),
         )
         return peer
@@ -933,6 +949,7 @@ class _CableBatch:
                 **_reference_display(reference),
                 "port": exit_end.display,
                 "peers": sorted(peer.display for peer, _mapping in peers.values()),
+                **termination_sources(exit_end.key, *sorted(peers)),
             },
             identities=(exit_end.identity, *sorted(_object_identity(*key) for key in peers)),
         )
@@ -952,21 +969,27 @@ class _CableBatch:
             for row in self._peers_of(exit_end):
                 peer = self._peer_termination(row, exit_end)
                 if peer is not None:
-                    mapped.append(peer.display)
+                    mapped.append(peer)
             analysis.refuse(
                 "cable.pass_through_not_mapped",
                 {
                     **_reference_display(reference),
                     "entry": exit_end.display,
                     "exit": entry_end.display,
-                    "mapped": sorted(mapped),
+                    "mapped": sorted(peer.display for peer in mapped),
+                    **termination_sources(exit_end.key, entry_end.key, *sorted({peer.key for peer in mapped})),
                 },
                 identities=(exit_end.identity, entry_end.identity),
             )
             return None
         analysis.note(
             "cable.pass_through_verified",
-            {**_reference_display(reference), "entry": exit_end.display, "exit": entry_end.display},
+            {
+                **_reference_display(reference),
+                "entry": exit_end.display,
+                "exit": entry_end.display,
+                **termination_sources(exit_end.key, entry_end.key),
+            },
             identities=(exit_end.identity, entry_end.identity, _object_identity("dcim.portmapping", mapping.pk)),
         )
         return entry_end
@@ -1065,8 +1088,6 @@ class _CableBatch:
         cable_visible = self._may_view(cable)
         if not cable_visible:
             return {"cable_visible": False}, ()
-        from .cable_disclosure import disclosed_cable
-
         return (
             disclosed_cable(cable),
             (_object_identity("dcim.cable", cable.pk),),
@@ -1166,7 +1187,12 @@ class _CableBatch:
                     "cable.multi_termination_conflict" if occupying.multi_termination else "cable.termination_occupied"
                 )
                 cable_display, cable_identities = self._cable_diagnostic_disclosure(occupying.cable)
-                display = {"segment_index": segment.index, "port": termination.display, **cable_display}
+                display = {
+                    "segment_index": segment.index,
+                    "port": termination.display,
+                    **termination_sources(termination.key),
+                    **cable_display,
+                }
                 identities = [termination.identity, *cable_identities]
                 analysis.block(code, display, identities=identities)
 
@@ -1212,8 +1238,6 @@ class _CableBatch:
         for stored in self._overrides_by_trace.get(analysis.trace.identity, ()):
             if stored.segment_key in stated:
                 continue
-            from .cable_disclosure import disclosed_policy
-
             analysis.note(
                 "cable.segment_override_lost",
                 disclosed_policy(
@@ -1269,7 +1293,6 @@ class _CableBatch:
 
     def _media_observation(self, analysis: _TraceAnalysis, segment: _DesiredSegment) -> dict:
         """Return what one segment says about the medium of the run it belongs to."""
-        from .cable_disclosure import DISCLOSURE_SOURCE, disclosed_policy
         from .cable_policy import cable_profile_splits_a_span, decisive_media_family, policy_choice_errors
 
         proven = analysis.proven.get(segment.index)
@@ -1396,6 +1419,7 @@ class _CableBatch:
                             "segment_index": segment.index,
                             "termination": termination.display,
                             "competing_trace": competitor.display["name"],
+                            **termination_sources(termination.key),
                         },
                         identities=(termination.identity,),
                     )
@@ -1416,8 +1440,6 @@ class _CableBatch:
             if len(policies) < 2:
                 continue
             for analysis, segment, policy in records:
-                from .cable_disclosure import disclosed_policy
-
                 row = self._policy_row(segment)
                 analysis.block(
                     "cable.resolved_segment_conflict",
@@ -1429,6 +1451,7 @@ class _CableBatch:
                             "cable_type": policy["cable_type"],
                             "cable_profile": policy["cable_profile"],
                             "terminations": segment.as_json(),
+                            **termination_sources(segment.left.key, segment.right.key),
                         },
                     ),
                     identities=(segment.left.identity, segment.right.identity),
@@ -1521,6 +1544,7 @@ class _CableBatch:
                     # An override cannot change a Cable this plan keeps, so the panel says which is which.
                     "retained": index in analysis.proven,
                     **self._policy_display(planned),
+                    **self._end_sources(planned),
                 }
             )
         cable_classes = list(dict.fromkeys(source_text(segment.cable_class) for segment in stated_segments))
@@ -1543,8 +1567,6 @@ class _CableBatch:
 
     def _cable_class_display(self, cable_class: str) -> dict:
         """Return one CableClass decision for the workspace policy table."""
-        from .cable_disclosure import disclosed_policy
-
         row = self._cable_class_mapping(cable_class)
         display = {
             "cable_class": cable_class,
@@ -1558,8 +1580,6 @@ class _CableBatch:
         """Return the Cable policy in force for one resolved segment, and whether it is an override."""
         if planned is None:
             return {"segment_key": "", "overridden": False, "cable_type": "", "cable_profile": "", "policy": {}}
-        from .cable_disclosure import disclosed_policy
-
         row = self._policy_row(planned)
         display = {
             "segment_key": planned.key,
@@ -1570,6 +1590,16 @@ class _CableBatch:
             "policy": (None if row is None else row.decided_policy()) or {},
         }
         return display if row is None else disclosed_policy(row, self._may_view(row), display)
+
+    @staticmethod
+    def _end_sources(planned: _DesiredSegment | None) -> dict:
+        """Return the rows that authorize a planned segment's two NetBox port names."""
+        if planned is None:
+            return {}
+        return {
+            source_key: disclosure_source(*end.key)
+            for source_key, end in zip(SEGMENT_END_SOURCES.values(), planned.terminations, strict=True)
+        }
 
     @staticmethod
     def _entered_through_claim(planned: _DesiredSegment | None, stated: _Termination | None) -> bool:

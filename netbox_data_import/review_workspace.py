@@ -836,11 +836,22 @@ class ReviewWorkspace:
     """Read-only presentation of the accepted Import Plan."""
 
     def __init__(self, plan: ImportPlan, viewer):
+        if viewer is None:
+            raise TypeError("ReviewWorkspace requires a live viewer.")
+        self.plan = plan
+        self._viewer = viewer
+
+    @cached_property
+    def _presentation_units(self) -> tuple:
+        """Return the viewer's redacted copy, built on first use so a command that renders nothing reads nothing."""
         from .cable_disclosure import present_units
 
-        self.plan = plan
-        self._presentation_units = present_units(plan.units, viewer)
-        self.units = tuple(WorkspaceUnit.from_unit(unit) for unit in self._presentation_units)
+        return present_units(self.plan.units, self._viewer)
+
+    @cached_property
+    def units(self) -> tuple[WorkspaceUnit, ...]:
+        """Return the presentation of every unit, in plan order."""
+        return tuple(WorkspaceUnit.from_unit(unit) for unit in self._presentation_units)
 
     @classmethod
     def from_dict(cls, data: dict, viewer) -> ReviewWorkspace:

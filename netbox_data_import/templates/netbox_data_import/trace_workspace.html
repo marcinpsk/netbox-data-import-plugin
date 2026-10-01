@@ -484,7 +484,7 @@
                   <span class="text-secondary">NetBox Device: {{ termination.resolved_device }}</span>
                 {% endif %}
                 {% if termination.selected %}
-                  <span class="text-secondary">{{ termination.selected }} ({{ termination.selected_model }})</span>
+                  <span class="text-secondary">{{ termination.selected }}{% if termination.selected_model %} ({{ termination.selected_model }}){% endif %}</span>
                 {% endif %}
               </div>
               {% with field_number=forloop.counter %}
