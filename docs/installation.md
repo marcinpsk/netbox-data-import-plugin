@@ -65,6 +65,26 @@ A saved decision for such a name now answers the spelling in the last column, an
 asks its question again. Choose it again. A name with a dotless `ı` (U+0131) now has the key of the
 same name with `i`, so its decision can merge with that name's decision, or both can be deleted.
 
+Python builds each key with its own Unicode case data, and PostgreSQL uppercases with the ICU
+library it was built with. The two agree on every code point when both state the same Unicode
+version. Python 3.14 and ICU 76, which the official `postgres:18` image uses, both state Unicode
+16.0. Python 3.12 (Unicode 15.0) and 3.13 (Unicode 15.1) disagree with an ICU of
+Unicode 16 on 27 code points, whose uppercase Unicode 16 added:
+
+| Code points | Characters |
+| --- | --- |
+| U+019B, U+0264 | Latin small lambda with stroke and small rams horn |
+| U+1C8A | Cyrillic small letter tje |
+| U+A7CD, U+A7DB | Latin small s with diagonal stroke and small lambda |
+| U+10D70 to U+10D85 | Garay small letters |
+
+On such an install, a source name or a NetBox name that contains one of these characters does not
+match its namesake: the key Python builds and the name the database compares differ, so the question
+stays open, and a picker search for that name finds nothing. A saved decision for such a name also
+stops matching when Python moves to another Unicode version, so choose it again after that upgrade.
+Run NetBox on Python 3.14 to avoid the gap. The plugin's `test_identity` fails on an install where
+the two sides disagree, and names both Unicode versions.
+
 ### Transform patterns use RE2
 
 The plugin now evaluates Column Transform Rule patterns with RE2. RE2 prevents a configured pattern

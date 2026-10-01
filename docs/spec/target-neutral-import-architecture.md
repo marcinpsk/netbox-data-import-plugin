@@ -623,7 +623,14 @@ A key that Python builds and a name the database compares meet only when both si
 Unicode case data. Python and the ICU library carry their own Unicode versions, so `test_identity`
 runs every code point PostgreSQL can store, each uppercase expansion in context, and each whitespace
 character in each position through both sides, on columns of three collations and on parameters. An
-upgrade that changes one side fails it.
+upgrade that changes one side fails it, and the failure names both Unicode versions. CI runs Python
+3.14 against PostgreSQL 18, which both state Unicode 16.0.
+
+Python 3.12 and 3.13 state Unicode 15, so on an install whose ICU states Unicode 16 (ICU 76 or
+later) they disagree on 27 code points: U+019B, U+0264, U+1C8A, U+A7CD, U+A7DB, and U+10D70 to
+U+10D85. A name that contains one of them does not match its NetBox namesake there, its picker search
+finds nothing, and its saved key stops matching when Python changes Unicode version. The installation
+upgrade notes state the gap for operators.
 
 A change of this definition is a schema change of every stored key. It needs a data migration that
 rekeys every live key, and a plan schema version that rebuilds each cached Import Plan. The
