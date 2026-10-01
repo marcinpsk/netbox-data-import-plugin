@@ -97,7 +97,13 @@ from .object_permissions import (
     delete_permission_scoped_objects,
     save_permission_scoped_object,
 )
-from .profile_yaml import DuplicateYamlKeyError, apply_profile_document, load_yaml_document, serialize_profile
+from .profile_yaml import (
+    DuplicateYamlKeyError,
+    ProfileDocumentInvalid,
+    apply_profile_document,
+    load_yaml_document,
+    serialize_profile,
+)
 from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
@@ -507,6 +513,8 @@ logger = logging.getLogger(__name__)
 UNREADABLE_PREVIEW = "This preview cannot be read. Re-read the preview."
 UNREADABLE_PREVIEW_ENDED = "This preview cannot be read. Start a new import."
 UNPLANNABLE_IMPORT = "This import could not be planned. The server log names the reason."
+UPLOAD_NOT_UTF8 = "The uploaded file is not UTF-8 text."
+UPLOAD_UNREADABLE = "Could not read the uploaded file. The server log names the reason."
 
 
 class ImportProfileListView(generic.ObjectListView):
@@ -704,8 +712,12 @@ class ImportProfileBulkImportView(generic.BulkImportView):
         if upload:
             try:
                 raw = upload.read().decode("utf-8-sig")
-            except (UnicodeDecodeError, OSError) as exc:
-                messages.error(request, f"Could not read uploaded file: {exc}")
+            except UnicodeDecodeError:
+                messages.error(request, UPLOAD_NOT_UTF8)
+                return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
+            except OSError:
+                logger.warning("ImportProfileBulkImportView: the uploaded file cannot be read.", exc_info=True)
+                messages.error(request, UPLOAD_UNREADABLE)
                 return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
         else:
             raw = request.POST.get("data", "").strip()
@@ -732,7 +744,7 @@ class ImportProfileBulkImportView(generic.BulkImportView):
                 profile, stats = apply_profile_document(data, request.user)
             except ObjectPermissionDenied as exc:
                 raise PermissionDenied from exc
-            except (TypeError, ValueError) as exc:  # The YAML helpers validate mapping types and required keys.
+            except ProfileDocumentInvalid as exc:
                 messages.error(request, str(exc))
                 return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
             summary = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stats.items())
@@ -3380,6 +3392,14 @@ class DeviceTypeAnalysisView(PermissionRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
+def _bulk_row_refusal(item, required: tuple[str, ...]) -> str:
+    """Return why one bulk YAML mapping row cannot be imported, or an empty string when it can."""
+    if not isinstance(item, dict):
+        return "A row is not a mapping."
+    missing = [key for key in required if key not in item]
+    return f"A row is missing the key(s): {', '.join(missing)}." if missing else ""
+
+
 class BulkYamlImportView(PermissionRequiredMixin, View):
     """Accept a YAML file and bulk-create ClassRoleMappings or DeviceTypeMappings for a profile.
 
@@ -3397,6 +3417,9 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
         """Import a list of class-role mapping items; return (created, skipped)."""
         created = skipped = 0
         for item in data:
+            if refusal := _bulk_row_refusal(item, ("source_class",)):
+                errors.append(refusal)
+                continue
             try:
                 rack_type = None
                 rack_type_present = "rack_type" in item
@@ -3432,8 +3455,6 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
                     created += 1
                 else:
                     skipped += 1
-            except (KeyError, ValueError) as exc:
-                errors.append(str(exc))
             except Exception:
                 logger.exception("BulkYamlImportView class_role row failed for profile_id=%s", profile.pk)
                 errors.append("A row failed due to an unexpected error — see server logs.")
@@ -3442,7 +3463,11 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
     def _import_device_type_rows(self, data, profile, errors):
         """Import a list of device-type mapping items; return (created, skipped)."""
         created = skipped = 0
+        required = ("source_make", "source_model", "netbox_manufacturer_slug", "netbox_device_type_slug")
         for item in data:
+            if refusal := _bulk_row_refusal(item, required):
+                errors.append(refusal)
+                continue
             try:
                 _, was_created = DeviceTypeMapping.objects.get_or_create(
                     profile=profile,
@@ -3457,8 +3482,6 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
                     created += 1
                 else:
                     skipped += 1
-            except (KeyError, ValueError) as exc:
-                errors.append(str(exc))
             except Exception:
                 logger.exception("BulkYamlImportView device_type row failed for profile_id=%s", profile.pk)
                 errors.append("A row failed due to an unexpected error — see server logs.")
@@ -3573,15 +3596,19 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
 
         try:
             data = load_yaml_document(yaml_file.read())
-        except (yaml.YAMLError, UnicodeDecodeError, OSError) as exc:
+        except yaml.YAMLError as exc:
             messages.error(request, f"Failed to parse YAML: {exc}")
+            return render(request, "netbox_data_import/import_profile_yaml.html")
+        except OSError:
+            logger.warning("ImportProfileYamlView: the uploaded file cannot be read.", exc_info=True)
+            messages.error(request, UPLOAD_UNREADABLE)
             return render(request, "netbox_data_import/import_profile_yaml.html")
 
         try:
             profile, stats = apply_profile_document(data, request.user)
         except ObjectPermissionDenied as exc:
             raise PermissionDenied from exc
-        except (TypeError, ValueError) as exc:  # The YAML helpers validate mapping types and required keys.
+        except ProfileDocumentInvalid as exc:
             messages.error(request, str(exc))
             return render(request, "netbox_data_import/import_profile_yaml.html")
 

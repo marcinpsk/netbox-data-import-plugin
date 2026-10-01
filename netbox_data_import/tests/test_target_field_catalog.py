@@ -27,6 +27,7 @@ from netbox_data_import.catalog import CATALOG, POLICY_SECTIONS, OutputKind, Tar
 from netbox_data_import.forms import ColumnMappingForm, ColumnTransformRuleForm, ImportProfileForm
 from netbox_data_import.models import ColumnMapping, ColumnTransformRule, ImportProfile
 from netbox_data_import.plan import Disposition
+from netbox_data_import.profile_yaml import ProfileDocumentInvalid
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_workbook.xlsx")
 
@@ -742,7 +743,7 @@ class ProfileAndPolicyBoundaryTest(TestCase):
         """The bulk YAML path must keep the adapter immutable."""
         from netbox_data_import.profile_yaml import apply_profile_document
 
-        with self.assertRaisesMessage(ValueError, "source adapter"):
+        with self.assertRaisesMessage(ProfileDocumentInvalid, "source adapter"):
             apply_profile_document({"profile": {"name": self.flat.name, "source_adapter": "trace_workbook"}})
 
     def test_bulk_csv_import_rejects_an_adapter_change_end_to_end(self):
@@ -916,7 +917,7 @@ class AdapterRuntimeSupportTest(TestCase):
         """The hierarchical YAML path validates through the same model rule."""
         from netbox_data_import.profile_yaml import apply_profile_document
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ProfileDocumentInvalid):
             apply_profile_document({"profile": {"name": "YAML Trace", "source_adapter": "trace_workbook"}})
         self.assertFalse(ImportProfile.objects.filter(name="YAML Trace").exists())
 

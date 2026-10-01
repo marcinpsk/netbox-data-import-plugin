@@ -35,6 +35,7 @@ from netbox_data_import.tests.helpers import (
     setup_preview_with_device_matches,
     update_webhook_rule,
 )
+from netbox_data_import.profile_yaml import ProfileDocumentInvalid
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 User = get_user_model()
@@ -68,6 +69,22 @@ class UnreadableUploadHandler(MemoryFileUploadHandler):
     def file_complete(self, file_size):
         upload = super().file_complete(file_size)
         upload.file = UnreadableUpload(upload.read())
+        return upload
+
+
+class FailingDiskUpload(BytesIO):
+    """Represent upload storage whose read fails with an operating-system error naming a server path."""
+
+    def read(self, *args, **kwargs):
+        raise OSError("Input/output error: '/var/tmp/private-upload-path'")
+
+
+class FailingDiskUploadHandler(MemoryFileUploadHandler):
+    """Receive a real multipart upload and supply storage whose read fails to the view."""
+
+    def file_complete(self, file_size):
+        upload = super().file_complete(file_size)
+        upload.file = FailingDiskUpload(upload.read())
         return upload
 
 
@@ -1564,7 +1581,7 @@ manufacturer_mappings:
         """A dangling Contact Role natural key fails at the adapter form boundary."""
         from netbox_data_import.profile_yaml import apply_profile_document
 
-        with self.assertRaisesMessage(ValueError, "primary_contact_role"):
+        with self.assertRaisesMessage(ProfileDocumentInvalid, "primary_contact_role"):
             apply_profile_document(
                 {
                     "profile": {
@@ -1578,7 +1595,7 @@ manufacturer_mappings:
         """A key the profile block does not define is an error, never ignored."""
         from netbox_data_import.profile_yaml import apply_profile_document
 
-        with self.assertRaisesMessage(ValueError, "stray_key"):
+        with self.assertRaisesMessage(ProfileDocumentInvalid, "stray_key"):
             apply_profile_document({"profile": {"name": "Stray Key", "stray_key": "Data"}})
 
     def test_post_creates_column_mappings(self):
@@ -1644,6 +1661,32 @@ manufacturer_mappings:
         resp = self.client.post(url, {"yaml_file": bad})
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "Failed to parse YAML:")
+
+    @override_settings(FILE_UPLOAD_HANDLERS=["netbox_data_import.tests.test_views.FailingDiskUploadHandler"])
+    def test_post_read_failure_names_no_server_path(self):
+        from netbox_data_import.views import UPLOAD_UNREADABLE
+
+        yaml_file = BytesIO(b"profile:\n  name: Unread\n")
+        yaml_file.name = "unread.yaml"
+        with self.assertLogs("netbox_data_import.views", level="WARNING"):
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:import_profile_yaml"), {"yaml_file": yaml_file}
+            )
+
+        self.assertContains(response, UPLOAD_UNREADABLE)
+        self.assertNotContains(response, "private-upload-path")
+
+    def test_post_states_a_document_error_in_plugin_words(self):
+        """A list where a row identity needs one value is refused with the document's own location."""
+        yaml_file = BytesIO(b"profile:\n  name: ListIdentity\nclass_role_mappings:\n  - source_class: [a, b]\n")
+        yaml_file.name = "list-identity.yaml"
+
+        response = self.client.post(reverse("plugins:netbox_data_import:import_profile_yaml"), {"yaml_file": yaml_file})
+
+        self.assertContains(
+            response, "&#x27;class_role_mappings[1]&#x27; key &#x27;source_class&#x27; must be a single value."
+        )
+        self.assertFalse(ImportProfile.objects.filter(name="ListIdentity").exists())
 
     def test_post_rejects_a_duplicate_profile_field(self):
         yaml_file = BytesIO(
@@ -3572,8 +3615,6 @@ manufacturer_mappings:
     def _url(self):
         return reverse("plugins:netbox_data_import:importprofile_bulk_import")
 
-    # --- GET ---
-
     def test_get_returns_200(self):
         """GET the bulk-import page returns 200."""
         resp = self.client.get(self._url())
@@ -3642,7 +3683,21 @@ column_mappings:
         upload.name = "profile.yaml"
         response = self.client.post(self._url(), {"upload_file": upload}, follow=True)
         self.assertRedirects(response, self._url())
-        self.assertContains(response, "Could not read uploaded file:")
+        # The decoder's own text names a byte and a position, so the page states one sentence.
+        self.assertContains(response, "The uploaded file is not UTF-8 text.")
+        self.assertNotContains(response, "codec")
+
+    @override_settings(FILE_UPLOAD_HANDLERS=["netbox_data_import.tests.test_views.FailingDiskUploadHandler"])
+    def test_bulk_upload_read_failure_names_no_server_path(self):
+        from netbox_data_import.views import UPLOAD_UNREADABLE
+
+        upload = BytesIO(b"profile: {}")
+        upload.name = "profile.yaml"
+        with self.assertLogs("netbox_data_import.views", level="WARNING"):
+            response = self.client.post(self._url(), {"upload_file": upload}, follow=True)
+
+        self.assertContains(response, UPLOAD_UNREADABLE)
+        self.assertNotContains(response, "private-upload-path")
 
     @override_settings(FILE_UPLOAD_HANDLERS=["netbox_data_import.tests.test_views.UnreadableUploadHandler"])
     def test_bulk_upload_unexpected_read_failure_propagates(self):
@@ -3859,35 +3914,35 @@ class ApplyProfileDocumentTest(BaseViewTestCase):
         """Raises ValueError when top-level 'profile' key is absent."""
         from netbox_data_import.profile_yaml import apply_profile_document
 
-        with self.assertRaises(ValueError, msg="profile key missing"):
+        with self.assertRaises(ProfileDocumentInvalid, msg="profile key missing"):
             apply_profile_document({"column_mappings": []})
 
     def test_non_dict_input_raises(self):
         """Raises ValueError when input is not a dict."""
         from netbox_data_import.profile_yaml import apply_profile_document
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ProfileDocumentInvalid):
             apply_profile_document("just a string")  # type: ignore[arg-type]
 
     def test_profile_scalar_raises(self):
         """Raises TypeError when profile value is a scalar, not a mapping."""
         from netbox_data_import.profile_yaml import apply_profile_document
 
-        with self.assertRaises(TypeError):
+        with self.assertRaises(ProfileDocumentInvalid):
             apply_profile_document({"profile": "not-a-dict"})
 
     def test_profile_list_raises(self):
         """Raises TypeError when profile value is a list, not a mapping."""
         from netbox_data_import.profile_yaml import apply_profile_document
 
-        with self.assertRaises(TypeError):
+        with self.assertRaises(ProfileDocumentInvalid):
             apply_profile_document({"profile": ["item1", "item2"]})
 
     def test_missing_name_raises(self):
         """Raises ValueError when profile dict has no 'name' field."""
         from netbox_data_import.profile_yaml import apply_profile_document
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ProfileDocumentInvalid):
             apply_profile_document({"profile": {"description": "no name"}})
 
     def test_creates_profile_and_returns_stats(self):
@@ -3913,7 +3968,7 @@ class ApplyProfileDocumentTest(BaseViewTestCase):
             # missing required 'target_field' key → descriptive ValueError
             "column_mappings": [{"source_column": "Name"}],
         }
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(ProfileDocumentInvalid) as cm:
             apply_profile_document(bad_data)
         self.assertIn("target_field", str(cm.exception))
         self.assertFalse(ImportProfile.objects.filter(name="AtomicRollbackProfile").exists())
@@ -3927,7 +3982,7 @@ class ApplyProfileDocumentTest(BaseViewTestCase):
             # dict instead of list
             "column_mappings": {"target_field": "device_name", "source_column": "Name"},
         }
-        with self.assertRaises(ValueError, msg="section type check"):
+        with self.assertRaises(ProfileDocumentInvalid, msg="section type check"):
             apply_profile_document(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name="SectionTypeProfile").exists())
 
@@ -3939,7 +3994,7 @@ class ApplyProfileDocumentTest(BaseViewTestCase):
             "profile": {"name": "SectionItemProfile"},
             "column_mappings": ["just-a-string"],
         }
-        with self.assertRaises(TypeError):
+        with self.assertRaises(ProfileDocumentInvalid):
             apply_profile_document(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name="SectionItemProfile").exists())
 
@@ -3951,7 +4006,7 @@ class ApplyProfileDocumentTest(BaseViewTestCase):
             "profile": {"name": "NullSectionProfile"},
             "column_mappings": None,
         }
-        with self.assertRaises(ValueError, msg="explicit null section must raise ValueError"):
+        with self.assertRaises(ProfileDocumentInvalid, msg="explicit null section must raise ValueError"):
             apply_profile_document(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name="NullSectionProfile").exists())
 
@@ -3980,7 +4035,7 @@ class ApplyProfileDocumentTest(BaseViewTestCase):
         bad_data = {
             "profile": {"name": "BadViewModeProfile", "adapter_config": {"preview_view_mode": "invalid"}},
         }
-        with self.assertRaises(ValueError, msg="invalid choice field must raise ValueError"):
+        with self.assertRaises(ProfileDocumentInvalid, msg="invalid choice field must raise ValueError"):
             apply_profile_document(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name="BadViewModeProfile").exists())
 
@@ -3992,7 +4047,7 @@ class ApplyProfileDocumentTest(BaseViewTestCase):
             "profile": {"name": "BadTargetFieldProfile"},
             "column_mappings": [{"source_column": "Col", "target_field": "not_a_real_field"}],
         }
-        with self.assertRaises(ValueError, msg="invalid target_field choice must raise ValueError"):
+        with self.assertRaises(ProfileDocumentInvalid, msg="invalid target_field choice must raise ValueError"):
             apply_profile_document(bad_data)
         # Full rollback: profile itself must not exist.
         self.assertFalse(ImportProfile.objects.filter(name="BadTargetFieldProfile").exists())
@@ -4073,7 +4128,7 @@ class ApplyProfileDocumentTest(BaseViewTestCase):
             "profile": {"name": "KeyErrProfile"},
             "column_mappings": [{"source_column": "Name"}],  # missing target_field
         }
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(ProfileDocumentInvalid) as cm:
             apply_profile_document(data)
         self.assertIn("column_mappings[1]", str(cm.exception))
         self.assertIn("target_field", str(cm.exception))
@@ -4093,7 +4148,7 @@ class ApplyProfileDocumentTest(BaseViewTestCase):
                 }
             ],
         }
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(ProfileDocumentInvalid) as cm:
             apply_profile_document(data)
         self.assertIn("device_type_mappings[1]", str(cm.exception))
 
@@ -4106,7 +4161,7 @@ class ApplyProfileDocumentTest(BaseViewTestCase):
             "profile": {"name": "MMKeyErrProfile"},
             "manufacturer_mappings": [{"source_make": "Cisco"}],  # missing netbox_manufacturer_slug
         }
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(ProfileDocumentInvalid) as cm:
             apply_profile_document(data)
         self.assertIn("manufacturer_mappings[1]", str(cm.exception))
         self.assertIn("netbox_manufacturer_slug", str(cm.exception))
@@ -4118,7 +4173,7 @@ class ApplyProfileDocumentTest(BaseViewTestCase):
         bad_data = {
             "profile": {"name": "X" * 200},  # exceeds max_length=100 for ImportProfile.name
         }
-        with self.assertRaises(ValueError, msg="overlength name must raise ValueError, not DataError"):
+        with self.assertRaises(ProfileDocumentInvalid, msg="overlength name must raise ValueError, not DataError"):
             apply_profile_document(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name__startswith="X" * 50).exists())
 
@@ -4261,7 +4316,7 @@ class RackTypeFeatureTest(BaseViewTestCase):
                 },
             ],
         }
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ProfileDocumentInvalid):
             apply_profile_document(data)
 
 
