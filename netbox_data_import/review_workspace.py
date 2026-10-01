@@ -84,21 +84,21 @@ PROFILE_POLICY_MOVED = (
 )
 
 
-class UnacceptableCablePolicy(Exception):
-    """The submitted Cable Type and Cable Profile do not validate as a policy decision."""
+class UnacceptablePolicyDecision(Exception):
+    """A profile policy decision does not validate, or it would overwrite a row the actor cannot view."""
 
     def __init__(self, errors):
         self.errors = errors
         super().__init__("; ".join(errors))
 
 
-def _refuse_hidden_policy(actor, row) -> None:
+def _refuse_blind_overwrite(actor, row) -> None:
     """Refuse a blind policy write against a row this actor cannot read."""
     if row is None or row.__class__.objects.restrict(actor, "view").filter(pk=row.pk).exists():
         return
     from .cable_disclosure import POLICY_WRITE_REFUSED
 
-    raise UnacceptableCablePolicy([POLICY_WRITE_REFUSED])
+    raise UnacceptablePolicyDecision([POLICY_WRITE_REFUSED])
 
 
 def _refuse_moved_policy(locked_profile, reviewed_fingerprint) -> None:
@@ -133,12 +133,12 @@ def save_cable_class_mapping_and_replan(
         lookup = {"profile": locked_profile, "cable_class": cable_class}
         # The row is read under the lock, so the form validates what the write will replace.
         stored = CableClassMapping.objects.filter(**lookup).first()
-        _refuse_hidden_policy(actor, stored)
+        _refuse_blind_overwrite(actor, stored)
         _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         instance = stored or CableClassMapping(**lookup)
         form = CableClassMappingForm({**data, "cable_class": cable_class}, instance=instance)
         if not form.is_valid():
-            raise UnacceptableCablePolicy(_form_messages(form))
+            raise UnacceptablePolicyDecision(_form_messages(form))
         save_permission_scoped_object(
             actor,
             CableClassMapping,
@@ -176,14 +176,14 @@ def save_cable_segment_override_and_replan(
         # The row is read under the lock, so the form validates what the write will replace.
         stored = CableSegmentOverride.objects.filter(**lookup).first()
         deciding = stored or CableClassMapping.objects.filter(profile=locked_profile, cable_class=cable_class).first()
-        _refuse_hidden_policy(actor, deciding)
+        _refuse_blind_overwrite(actor, deciding)
         _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         instance = stored or CableSegmentOverride(**lookup)
         instance.source_trace_identity = trace_identity
         instance.segment_index = segment_index
         form = CableSegmentOverrideForm(data, instance=instance)
         if not form.is_valid():
-            raise UnacceptableCablePolicy(_form_messages(form))
+            raise UnacceptablePolicyDecision(_form_messages(form))
         save_permission_scoped_object(
             actor,
             CableSegmentOverride,
@@ -212,7 +212,7 @@ def clear_cable_segment_override_and_replan(
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
         stored = CableSegmentOverride.objects.filter(profile=locked_profile, segment_key=segment_key).first()
-        _refuse_hidden_policy(actor, stored)
+        _refuse_blind_overwrite(actor, stored)
         _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         if stored is not None:
             delete_permission_scoped_objects(actor, CableSegmentOverride.objects.filter(pk=stored.pk))
@@ -306,7 +306,7 @@ def save_trace_location_resolution_and_replan(
         stored = TraceLocationResolution.objects.filter(
             profile=locked_profile, source_location_key_digest=lookup["source_location_key_digest"]
         ).first()
-        _refuse_hidden_policy(actor, stored)
+        _refuse_blind_overwrite(actor, stored)
         _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         reader = NetBoxReader.for_actor(actor).for_planning_context(
             planning_context, output_kinds=locked_profile.output_kinds
@@ -337,7 +337,7 @@ def clear_trace_location_resolution_and_replan(
         stored = TraceLocationResolution.objects.filter(
             profile=locked_profile, source_location_key_digest=index_digest(source_location_key)
         ).first()
-        _refuse_hidden_policy(actor, stored)
+        _refuse_blind_overwrite(actor, stored)
         _refuse_moved_policy(locked_profile, reviewed_fingerprint)
         if stored is not None:
             delete_permission_scoped_objects(actor, TraceLocationResolution.objects.filter(pk=stored.pk))

@@ -132,7 +132,7 @@ from .review_workspace import (
     PROFILE_POLICY_MOVED,
     ProfilePolicyMoved,
     ReviewWorkspace,
-    UnacceptableCablePolicy,
+    UnacceptablePolicyDecision,
     clear_cable_segment_override_and_replan,
     clear_trace_location_resolution_and_replan,
     save_cable_class_mapping_and_replan,
@@ -4564,7 +4564,7 @@ class TraceLocationMappingView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin
                 record_recalculated_preview(request.session, plan, user=request.user)
         except ProfilePolicyMoved as exc:
             return _preview_action_error(request, next_url, str(exc), status=409)
-        except UnacceptableCablePolicy as exc:
+        except UnacceptablePolicyDecision as exc:
             return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
         except IneligibleLocationSelection:
             return _preview_action_error(request, next_url, LOCATION_CHOICE_REFUSED, status=400)
@@ -4620,7 +4620,7 @@ class TraceCablePolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, Pe
                 record_recalculated_preview(request.session, plan, user=request.user)
         except ProfilePolicyMoved as exc:
             return _preview_action_error(request, next_url, str(exc), status=409)
-        except UnacceptableCablePolicy as exc:
+        except UnacceptablePolicyDecision as exc:
             return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
@@ -4688,7 +4688,7 @@ class TraceCableSegmentPolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
                 record_recalculated_preview(request.session, plan, user=request.user)
         except ProfilePolicyMoved as exc:
             return _preview_action_error(request, next_url, str(exc), status=409)
-        except UnacceptableCablePolicy as exc:
+        except UnacceptablePolicyDecision as exc:
             return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
