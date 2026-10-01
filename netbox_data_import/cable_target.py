@@ -79,11 +79,6 @@ class EligibleTerminations:
     total: int
 
 
-def _object_type_label(obj) -> str:
-    """Return the ``app_label.model_name`` key one target object is recorded under."""
-    return f"{obj._meta.app_label}.{obj._meta.model_name}"
-
-
 def _model_for_label(label: str):
     """Return the model class one recorded object-type label names."""
     from django.apps import apps
@@ -720,7 +715,7 @@ class _CableBatch:
 
     def _termination(self, component) -> _Termination:
         """Return the plan-side record of one resolved NetBox termination."""
-        label = _object_type_label(component)
+        label = component._meta.label_lower
         self._objects[(label, component.pk)] = component
         return _Termination(
             object_type=label,
@@ -978,7 +973,7 @@ class _CableBatch:
         locked = list(cables)
         sides: dict[int, dict[str, set]] = {}
         for row in terminations:
-            label = _object_type_label(row.termination_type.model_class())
+            label = row.termination_type.model_class()._meta.label_lower
             sides.setdefault(row.cable_id, {"A": set(), "B": set()})[row.cable_end].add((label, row.termination_id))
         if self.lock_plan_references:
             from core.models import ObjectType
@@ -1772,7 +1767,7 @@ def _cable_terminations(cable_id: int) -> list:
     from dcim.models import CableTermination
 
     return sorted(
-        [_object_type_label(row.termination_type.model_class()), row.termination_id]
+        [row.termination_type.model_class()._meta.label_lower, row.termination_id]
         for row in CableTermination.objects.filter(cable_id=cable_id).order_by("pk").select_for_update(of=("self",))
     )
 

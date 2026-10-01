@@ -3943,11 +3943,6 @@ def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]
     return unique
 
 
-def _object_type_label(obj) -> str:
-    """Return the ``app_label.model_name`` key one termination is offered under."""
-    return f"{obj._meta.app_label}.{obj._meta.model_name}"
-
-
 def _rebuild_schema_rejected_preview(request) -> None:
     """Replace a cached plan this release cannot read, keeping the preview the operator is inside.
 
@@ -4349,7 +4344,7 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
                 "candidates": [
                     {
                         "id": candidate.pk,
-                        "object_type": _object_type_label(candidate),
+                        "object_type": candidate._meta.label_lower,
                         "model": str(candidate._meta.verbose_name),
                         "name": candidate.name,
                         "display": str(candidate),
@@ -4754,7 +4749,7 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
             (
                 candidate
                 for candidate in found.candidates
-                if candidate.pk == object_id and _object_type_label(candidate) == object_type
+                if candidate.pk == object_id and candidate._meta.label_lower == object_type
             ),
             None,
         )

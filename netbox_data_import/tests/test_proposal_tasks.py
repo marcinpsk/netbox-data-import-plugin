@@ -50,7 +50,6 @@ class CandidateSnapshotTest(TestCase):
         )
         return snapshot_from(
             candidates,
-            label_for=lambda candidate: candidate._meta.label_lower,
             name_for=str,
             limit=limit,
         )

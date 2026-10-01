@@ -42,11 +42,6 @@ class DecisionReceipt:
     written_resolution_id: int
 
 
-def _label_for(candidate) -> str:
-    """Return the `app_label.model` key one termination is recorded under."""
-    return f"{candidate._meta.app_label}.{candidate._meta.model_name}"
-
-
 def _name_for(candidate) -> str:
     """Return the display name at snapshot time, which a rename changes."""
     return str(candidate)
@@ -88,7 +83,6 @@ class SelectTerminationTask:
         )
         return snapshot_from(
             CandidateSet(objects=eligible.candidates, total=eligible.total),
-            label_for=_label_for,
             name_for=_name_for,
             limit=limit,
         )
