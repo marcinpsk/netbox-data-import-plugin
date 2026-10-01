@@ -93,6 +93,53 @@ def _name_folds(source: str) -> set[str]:
     return found
 
 
+# NetBox models whose `name` the planner compares by name identity.
+NAME_IDENTITY_MODELS = frozenset(
+    {
+        "Device",
+        "Rack",
+        "Location",
+        "Interface",
+        "FrontPort",
+        "RearPort",
+        "ConsolePort",
+        "ConsoleServerPort",
+        "PowerPort",
+        "PowerOutlet",
+    }
+)
+EXACT_NAME_KEYWORDS = frozenset({"name", "name__in", "name__exact"})
+QUERY_METHODS = frozenset({"filter", "exclude", "get", "get_or_create", "update_or_create"})
+
+
+def _query_root(node) -> str:
+    """Return the model name a queryset chain starts from, `type` for `type(obj)`, or an empty string."""
+    while isinstance(node, (ast.Attribute, ast.Call)):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == "type":
+                return "type"
+            node = node.func
+        else:
+            node = node.value
+    return node.id if isinstance(node, ast.Name) else ""
+
+
+def _exact_name_lookups(source: str) -> set[int]:
+    """Return the line of each exact `name` lookup on a named NetBox model or a `type(obj)` queryset.
+
+    A queryset held in a variable or returned by a helper, such as `reader.devices()`, escapes this scan.
+    """
+    return {
+        node.lineno
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in QUERY_METHODS
+        and any(keyword.arg in EXACT_NAME_KEYWORDS for keyword in node.keywords)
+        and _query_root(node.func.value) in {*NAME_IDENTITY_MODELS, "type"}
+    }
+
+
 JS_FOLD = re.compile(
     r"\.(toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase|localeCompare)\s*\(|Intl\.Collator"
 )
@@ -322,6 +369,29 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         )
 
         self.assertEqual(_name_folds(source), NAME_FOLDS)
+
+    def test_no_netbox_name_is_looked_up_exactly(self):
+        """The planner matches Devices, Racks, Locations and ports by name identity, so every other read does too."""
+        offenders = {
+            str(path.relative_to(PACKAGE)): lines
+            for path in sorted(PACKAGE.rglob("*.py"))
+            if not {"tests", "migrations"} & set(path.relative_to(PACKAGE).parts)
+            if (lines := _exact_name_lookups(path.read_text(encoding="utf-8")))
+        }
+
+        self.assertEqual(offenders, {}, "compare the name with identity_in")
+
+    def test_the_exact_name_guard_reads_model_chains_and_type_calls(self):
+        source = (
+            "def lookups(device, name, user):\n"
+            "    Device.objects.filter(name=name)\n"
+            "    Rack.objects.restrict(user, 'view').filter(site=device.site, name=name)\n"
+            "    type(device).objects.filter(name__in=[name])\n"
+            "    ContactRole.objects.filter(name=name)\n"
+            "    Device.objects.filter(identity_in('name', [name]))\n"
+        )
+
+        self.assertEqual(_exact_name_lookups(source), {2, 3, 4})
 
     def test_browser_code_folds_case_only_where_the_allowlist_says_why(self):
         """A browser carries its own Unicode version, so it compares raw values and leaves identity to the server."""
