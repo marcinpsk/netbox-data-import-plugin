@@ -33,11 +33,33 @@ beforeEach(() => {
     json: async () => ({
       ok: true,
       candidates: [
-        { id: 1, display: "device-a", matched_hints: ["rack", "U position"], conflicting_hints: [] },
-        { id: 2, display: "device-b", matched_hints: [], conflicting_hints: ["rack"] },
+        {
+          id: 1,
+          display: "device-a",
+          matched_facts: [
+            { fact: "rack", source: "Rack A", mapped: "", netbox: "Rack A" },
+            { fact: "location", source: "Region >> DH4", mapped: "DH4", netbox: "Row T" },
+          ],
+          conflicting_facts: [],
+          import_location: { location: "1st Floor", netbox: "Row T" },
+        },
+        {
+          id: 2,
+          display: "device-b",
+          matched_facts: [],
+          conflicting_facts: [{ fact: "location", source: "Region >> DH4", mapped: "DH4", netbox: "DH5" }],
+          import_location: null,
+        },
+        {
+          id: 3,
+          display: "<img src=x onerror=alert(1)>",
+          matched_facts: [{ fact: "rack", source: "<b>Rack</b>", mapped: "", netbox: "<i>Rack</i>" }],
+          conflicting_facts: [],
+          import_location: null,
+        },
       ],
-      shown: 2,
-      total: 2,
+      shown: 3,
+      total: 3,
     }),
   })));
   document.body.innerHTML = `
@@ -76,16 +98,29 @@ afterEach(() => {
 });
 
 describe("trace Device picker", () => {
-  it("shows source-evidence explanations and saves only the selected offer", async () => {
+  it("names both values of each fact and saves only the selected offer", async () => {
     const candidates = await openPicker();
+    const lines = item => Array.from(item.children).slice(1).map(line => line.textContent);
 
-    expect(candidates[0].textContent).toContain("Matches: rack, U position");
-    expect(candidates[1].textContent).toContain("Differs: rack");
+    expect(lines(candidates[0])).toEqual([
+      "Matches rack: source Rack A, NetBox Rack A",
+      "Matches location: source Region >> DH4, mapped to DH4, NetBox Row T",
+      "In import Location 1st Floor (NetBox Row T)",
+    ]);
+    expect(lines(candidates[1])).toEqual(["Differs location: source Region >> DH4, mapped to DH4, NetBox DH5"]);
     candidates[0].click();
 
-    expect(candidates.map(item => item.getAttribute("aria-pressed"))).toEqual(["true", "false"]);
+    expect(candidates.map(item => item.getAttribute("aria-pressed"))).toEqual(["true", "false", "false"]);
     expect(node("traceDeviceId").value).toBe("1");
     expect(node("traceDeviceSubmit").disabled).toBe(false);
+  });
+
+  it("renders server text as text, never as markup", async () => {
+    const candidates = await openPicker();
+
+    expect(candidates[2].querySelector("img, b, i")).toBeNull();
+    expect(candidates[2].textContent).toContain("<img src=x onerror=alert(1)>");
+    expect(candidates[2].textContent).toContain("Matches rack: source <b>Rack</b>, NetBox <i>Rack</i>");
   });
 
   it("drops an in-flight search when the operator types again", async () => {
@@ -97,7 +132,7 @@ describe("trace Device picker", () => {
         ok: true,
         json: async () => ({
           ok: true,
-          candidates: [{ id: 9, display: "stale-device", matched_hints: [], conflicting_hints: [] }],
+          candidates: [{ id: 9, display: "stale-device", matched_facts: [], conflicting_facts: [], import_location: null }],
           shown: 1,
           total: 1,
         }),

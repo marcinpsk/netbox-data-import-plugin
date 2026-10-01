@@ -653,20 +653,20 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
     def test_sync_ends_the_preview_when_its_target_went_after_the_render(self):
         """The replan the sync now makes reads the planning target, which can go while it is reviewed."""
         from core.models import Job
-        from dcim.models import Location
+        from tenancy.models import Tenant
 
-        location = Location.objects.create(name="Room 9", slug="room-9", site=self.site)
+        tenant = Tenant.objects.create(name="Tenant 9", slug="tenant-9")
         self.client.force_login(self.actor)
         upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(),)))
         upload.name = "traces.xlsx"
         self.client.post(
             reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "location": location.pk, "excel_file": upload},
+            {"profile": self.profile.pk, "site": self.site.pk, "tenant": tenant.pk, "excel_file": upload},
             follow=True,
         )
         workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         chosen = workspace.context["traces"][0]
-        Location.objects.filter(pk=location.pk).delete()
+        Tenant.objects.filter(pk=tenant.pk).delete()
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
@@ -681,15 +681,15 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
     def test_the_workspace_ends_the_preview_when_its_target_goes_after_the_live_plan(self):
         """The proposal display resolves the target again, so loss after planning must still be contained."""
-        from dcim.models import Location
+        from tenancy.models import Tenant
 
-        location = Location.objects.create(name="Room 10", slug="room-10", site=self.site)
+        tenant = Tenant.objects.create(name="Tenant 10", slug="tenant-10")
         self.client.force_login(self.actor)
         upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(),)))
         upload.name = "traces.xlsx"
         self.client.post(
             reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "location": location.pk, "excel_file": upload},
+            {"profile": self.profile.pk, "site": self.site.pk, "tenant": tenant.pk, "excel_file": upload},
             follow=True,
         )
         target_reads = 0
@@ -697,11 +697,11 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         def delete_target_before_second_read(execute, sql, params, many, context):
             nonlocal deleting, target_reads
-            if not deleting and 'FROM "dcim_location"' in sql and params and location.pk in params:
+            if not deleting and 'FROM "tenancy_tenant"' in sql and params and tenant.pk in params:
                 target_reads += 1
                 if target_reads == 2:
                     deleting = True
-                    Location.objects.filter(pk=location.pk).delete()
+                    Tenant.objects.filter(pk=tenant.pk).delete()
                     deleting = False
             return execute(sql, params, many, context)
 
@@ -709,7 +709,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
             response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), follow=True)
 
         self.assertEqual(target_reads, 2)
-        self.assertFalse(Location.objects.filter(pk=location.pk).exists())
+        self.assertFalse(Tenant.objects.filter(pk=tenant.pk).exists())
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
         self.assertContains(response, "The saved import target is no longer available.")
         self.assertFalse(self.client.session["import_preview_pending"])
@@ -2113,10 +2113,10 @@ class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
 
     def test_a_target_deleted_while_the_decision_saves_ends_the_preview_with_its_reason(self):
         """The saved decision replans, so a target removed under it must not answer a 500."""
-        from dcim.models import Location
         from django.db.models.signals import post_save
+        from tenancy.models import Tenant
 
-        location = Location.objects.create(name="Room 1", slug="room-1", site=self.site)
+        tenant = Tenant.objects.create(name="Tenant 1", slug="tenant-1")
         self.client.force_login(self.actor)
         upload = BytesIO(
             trace_workbook_bytes(
@@ -2131,14 +2131,14 @@ class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
         upload.name = "traces.xlsx"
         self.client.post(
             reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "location": location.pk, "excel_file": upload},
+            {"profile": self.profile.pk, "site": self.site.pk, "tenant": tenant.pk, "excel_file": upload},
             follow=True,
         )
         field_key = termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface")
 
-        # The location goes on another connection between the eligibility recheck and the replan.
+        # The tenant goes on another connection between the eligibility recheck and the replan.
         with competing_write_during(
-            post_save, TerminationResolution, lambda: Location.objects.filter(pk=location.pk).delete()
+            post_save, TerminationResolution, lambda: Tenant.objects.filter(pk=tenant.pk).delete()
         ) as (observed, blocked):
             response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_resolve_termination"),
@@ -2154,7 +2154,7 @@ class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
 
         self.assertTrue(observed, "the decision never reached its TerminationResolution write")
         self.assertFalse(blocked, "the target deletion must complete before the replan")
-        self.assertFalse(Location.objects.filter(pk=location.pk).exists())
+        self.assertFalse(Tenant.objects.filter(pk=tenant.pk).exists())
         self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
         self.assertContains(response, "The saved import target is no longer available.")

@@ -17,7 +17,8 @@
   .ndi-trace-state-accepted { background-color: var(--tblr-success) !important; color: #fff !important; }
   .ndi-trace-state-stale { background-color: var(--tblr-warning) !important; color: #000 !important; }
   .ndi-trace-state-failed { background-color: var(--tblr-danger) !important; color: #fff !important; }
-  [data-bs-theme="dark"] .ndi-trace-state-auto { color: #08283a !important; }
+  [data-bs-theme="dark"] .ndi-trace-state-auto,
+  [data-bs-theme="dark"] .ndi-trace-state-manual { color: #08283a !important; }
   .ndi-proposal-card { overflow-wrap: anywhere; border: 1px solid var(--tblr-border-color); border-radius: var(--tblr-border-radius); padding: .75rem; }
   .ndi-proposal-card p { overflow-wrap: anywhere; white-space: pre-wrap; }
   .ndi-trace-actions { display: flex; flex-wrap: wrap; gap: 1rem; }
@@ -37,6 +38,10 @@
   .ndi-trace-claim { color: var(--tblr-secondary); font-size: .8rem; }
   .ndi-trace-reason { color: var(--tblr-secondary); font-size: .8rem; }
   .ndi-trace-severity-warning { background-color: var(--tblr-warning) !important; color: #000 !important; }
+  .ndi-location-path { overflow-wrap: anywhere; }
+  .ndi-location-actions { min-width: 24rem; }
+  .ndi-location-actions form { flex-wrap: nowrap; align-items: center; }
+  .ndi-location-actions .ts-wrapper { flex: 0 1 16rem; min-width: 0; }
 </style>
 
 <div hx-history="false">
@@ -119,6 +124,76 @@
         </div>
       </section>
     </div>
+  </div>
+</div>
+
+{% if import_location_unavailable %}
+  <div class="alert alert-info" role="status" data-trace-import-location-unavailable>
+    The import Location is no longer available, so it no longer ranks Device candidates. The preview is unchanged.
+  </div>
+{% endif %}
+
+<div class="card mb-3" data-trace-location-mappings>
+  <div class="card-header">Source Locations</div>
+  <div class="card-body">
+    <p class="text-secondary small mb-2">
+      Map a source Location path to a NetBox Location of this Site so it ranks and explains Device candidates.
+      A mapping never selects a Device.
+    </p>
+    {% if not location_mappings %}
+      <div class="text-secondary">No source Location paths</div>
+    {% else %}
+      {% if not location_choices %}
+        <div class="text-secondary mb-2">No Location in this Site is visible to you.</div>
+      {% endif %}
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0">
+          <thead><tr><th>Source Location path</th><th>State</th><th>NetBox Location</th><th></th></tr></thead>
+          <tbody>
+            {% for mapping in location_mappings %}
+              <tr data-location-key="{{ mapping.key }}">
+                <td class="ndi-location-path">{{ mapping.path }}</td>
+                <td>
+                  <span class="badge ndi-trace-state-{{ mapping.state_style }}">{{ mapping.state_label }}</span>
+                  {% if mapping.detail %}<div class="ndi-trace-reason mt-1">{{ mapping.detail }}</div>{% endif %}
+                </td>
+                <td>{{ mapping.location }}</td>
+                <td class="ndi-location-actions">
+                  <form method="post" class="d-flex gap-2"
+                        action="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
+                        hx-post="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
+                        hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
+                    {% csrf_token %}
+                    <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+                    <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
+                    <input type="hidden" name="location_key" value="{{ mapping.key }}">
+                    <label class="visually-hidden" for="locationMapping{{ forloop.counter }}">
+                      NetBox Location for {{ mapping.path }}</label>
+                    <select name="location_id" id="locationMapping{{ forloop.counter }}"
+                            class="form-select form-select-sm" {% if mapping.save_reason %}disabled{% endif %}>
+                      <option value="">Choose a Location</option>
+                      {% for location in location_choices %}
+                        <option value="{{ location.pk }}"{% if location.pk == mapping.location_id %} selected{% endif %}>{{ location.name }}</option>
+                      {% endfor %}
+                    </select>
+                    <button type="submit" class="btn btn-sm btn-primary" data-location-mapping-save
+                            {% if mapping.save_reason %}disabled{% endif %}>Save</button>
+                    {% if mapping.clearable %}
+                      <button type="submit" name="clear" value="1" class="btn btn-sm btn-outline-secondary"
+                              data-location-mapping-clear {% if mapping.clear_reason %}disabled{% endif %}>Clear</button>
+                    {% endif %}
+                  </form>
+                  {% if mapping.save_reason %}<div class="ndi-trace-reason mt-1">{{ mapping.save_reason }}</div>{% endif %}
+                  {% if mapping.clear_reason and mapping.clear_reason != mapping.save_reason %}
+                    <div class="ndi-trace-reason mt-1">{{ mapping.clear_reason }}</div>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
   </div>
 </div>
 

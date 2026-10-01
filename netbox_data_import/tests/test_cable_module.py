@@ -809,7 +809,9 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
             segments=(),
         )
         batch = SourceBatch(output_kinds=parsed.output_kinds, rows=(valid, invalid))
-        reader = NetBoxReader.for_actor(self.actor).for_planning_context(self.planning_context)
+        reader = NetBoxReader.for_actor(self.actor).for_planning_context(
+            self.planning_context, output_kinds=self.profile.output_kinds
+        )
 
         valid_unit, invalid_unit = CableModule().plan(batch, self.profile, None, reader)
         device_evidence = next(item for item in valid_unit.display["trace"]["devices"] if item["key"] == "dev-a")
@@ -825,7 +827,9 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         trace = parsed.rows[0]
         # SourceBatch.rows is typed dict | SourceTrace, so a dict is a legal argument here.
         batch = SourceBatch(output_kinds=parsed.output_kinds, rows=(trace, {"device": "DEV-A"}))
-        reader = NetBoxReader.for_actor(self.actor).for_planning_context(self.planning_context)
+        reader = NetBoxReader.for_actor(self.actor).for_planning_context(
+            self.planning_context, output_kinds=self.profile.output_kinds
+        )
 
         (unit,) = CableModule().plan(batch, self.profile, None, reader)
 
@@ -2260,7 +2264,9 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
             trace_identity=spliced.identity,
         )
         batch = SourceBatch(output_kinds=frozenset({OutputKind.SOURCE_TRACE}), rows=(spliced,))
-        reader = NetBoxReader.for_actor(self.actor).for_planning_context(self.planning_context)
+        reader = NetBoxReader.for_actor(self.actor).for_planning_context(
+            self.planning_context, output_kinds=self.profile.output_kinds
+        )
 
         (unit,) = CableModule().plan(batch, self.profile, None, reader)
 

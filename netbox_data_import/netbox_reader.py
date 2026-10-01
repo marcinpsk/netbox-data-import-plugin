@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from .catalog import import_location_required
 from .field_keys import CABLE_END_KINDS
 
 
@@ -14,31 +15,40 @@ class PlanningTargetUnavailable(Exception):
 class NetBoxReader:
     """Permission-scoped reads of the NetBox objects planning compares against."""
 
-    def __init__(self, actor, site=None, location=None, tenant=None):
+    def __init__(self, actor, site=None, location=None, tenant=None, *, location_unavailable=False):
         self._actor = actor
         self._site = site
         self._location = location
         self._tenant = tenant
+        self._location_unavailable = location_unavailable
 
     def for_target(self, *, site, location=None, tenant=None) -> NetBoxReader:
         """Bind the planning target without widening the actor's read scope."""
         return type(self)(self._actor, site=site, location=location, tenant=tenant)
 
-    def for_planning_context(self, planning_context) -> NetBoxReader:
-        """Resolve a planning context through this reader's permission scope."""
+    def for_planning_context(self, planning_context, *, output_kinds: frozenset[str]) -> NetBoxReader:
+        """Resolve a planning context for *output_kinds*, inside this reader's permission scope."""
         from dcim.models import Location, Site
         from tenancy.models import Tenant
 
         if planning_context.get("site_id") is None:
             raise PlanningTargetUnavailable("A planning context names the site the import writes into.")
         site = self._required(Site, planning_context["site_id"])
-        location = self._optional(Location, planning_context.get("location_id"))
-        if location is not None and location.site_id != site.pk:
+        location_id = planning_context.get("location_id")
+        location = None
+        if location_id is not None:
+            location = self._scoped(Location, "view").filter(pk=location_id, site=site).first()
+        location_unavailable = location_id is not None and location is None
+        # Section 6.1: a Location that only ranks candidates is evidence, not a target.
+        if location_unavailable and import_location_required(output_kinds):
+            self._required(Location, location_id)
             raise PlanningTargetUnavailable("The selected location does not belong to the selected site.")
-        return self.for_target(
+        return type(self)(
+            self._actor,
             site=site,
             location=location,
             tenant=self._optional(Tenant, planning_context.get("tenant_id")),
+            location_unavailable=location_unavailable,
         )
 
     def _required(self, model, pk):
@@ -61,6 +71,11 @@ class NetBoxReader:
     def location(self):
         """Return the location this import writes into, if the operator chose one."""
         return self._location
+
+    @property
+    def location_unavailable(self) -> bool:
+        """Return whether the chosen import Location is gone, hidden, or outside the site."""
+        return self._location_unavailable
 
     @property
     def tenant(self):

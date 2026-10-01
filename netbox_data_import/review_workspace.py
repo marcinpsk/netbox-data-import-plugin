@@ -17,6 +17,7 @@ from .models import (
     ImportProfile,
     TerminationResolution,
     TraceDeviceResolution,
+    TraceLocationResolution,
     index_digest,
     locked_profile_policy,
 )
@@ -229,6 +230,7 @@ def save_trace_device_resolution_and_replan(
     selected_device_id,
     search,
     limit,
+    reviewed_fingerprint,
 ):
     """Persist one offered Device selection, then request a fresh Import Plan."""
     from .netbox_reader import NetBoxReader
@@ -236,8 +238,12 @@ def save_trace_device_resolution_and_replan(
 
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
-        reader = NetBoxReader.for_actor(actor).for_planning_context(planning_context)
+        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        reader = NetBoxReader.for_actor(actor).for_planning_context(
+            planning_context, output_kinds=locked_profile.output_kinds
+        )
         offered = eligible_trace_devices(
+            profile=locked_profile,
             reader=reader,
             evidence=evidence,
             search=search,
@@ -270,6 +276,73 @@ def save_trace_device_resolution_and_replan(
         plan = ImportEngine.plan(locked_profile, source_document, actor, planning_context)
         # atomic-exit-safe: device-decision-saved-and-replanned
         return plan, chosen
+
+
+class IneligibleLocationSelection(Exception):
+    """The selected Location is not a visible Location of the selected Site."""
+
+
+def save_trace_location_resolution_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    source_location_key,
+    selected_location_id,
+    reviewed_fingerprint,
+):
+    """Map one source Location path to a visible Location of the selected Site, then replan."""
+    from .netbox_reader import NetBoxReader
+    from .trace_location_resolution import site_locations
+
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        lookup = {
+            "profile": locked_profile,
+            "source_location_key": source_location_key,
+            "source_location_key_digest": index_digest(source_location_key),
+        }
+        stored = TraceLocationResolution.objects.filter(
+            profile=locked_profile, source_location_key_digest=lookup["source_location_key_digest"]
+        ).first()
+        _refuse_hidden_policy(actor, stored)
+        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        reader = NetBoxReader.for_actor(actor).for_planning_context(
+            planning_context, output_kinds=locked_profile.output_kinds
+        )
+        # The recheck locks the target, so it cannot leave the Site before this decision commits.
+        location = site_locations(reader).filter(pk=selected_location_id).select_for_update(of=("self",)).first()
+        if location is None:
+            raise IneligibleLocationSelection(f"Location {selected_location_id} is not a visible Location of the Site.")
+        values = {"selected_location_id": location.pk, "selected_display_name": str(location)}
+        TraceLocationResolution(**lookup, **values).full_clean(validate_unique=False, validate_constraints=False)
+        save_permission_scoped_object(actor, TraceLocationResolution, lookup, values)
+        # atomic-exit-safe: location-mapping-saved-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+def clear_trace_location_resolution_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    source_location_key,
+    reviewed_fingerprint,
+):
+    """Drop one source Location mapping, so the path gives no Location evidence, then replan."""
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        stored = TraceLocationResolution.objects.filter(
+            profile=locked_profile, source_location_key_digest=index_digest(source_location_key)
+        ).first()
+        _refuse_hidden_policy(actor, stored)
+        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        if stored is not None:
+            delete_permission_scoped_objects(actor, TraceLocationResolution.objects.filter(pk=stored.pk))
+        # atomic-exit-safe: location-mapping-cleared-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
 
 
 _DIAGNOSTIC_MESSAGES = {

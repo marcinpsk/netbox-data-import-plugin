@@ -28,15 +28,19 @@
     node('traceDeviceSubmit').disabled = true;
   }
 
-  function hintText(candidate) {
-    var parts = [];
-    if ((candidate.matched_hints || []).length) {
-      parts.push('Matches: ' + candidate.matched_hints.join(', '));
-    }
-    if ((candidate.conflicting_hints || []).length) {
-      parts.push('Differs: ' + candidate.conflicting_hints.join(', '));
-    }
-    return parts.join('. ');
+  function factText(prefix, fact) {
+    var compared = fact.mapped
+      ? 'source ' + fact.source + ', mapped to ' + fact.mapped + ', NetBox ' + fact.netbox
+      : 'source ' + fact.source + ', NetBox ' + fact.netbox;
+    return prefix + ' ' + fact.fact + ': ' + compared;
+  }
+
+  function hintLines(candidate) {
+    var lines = (candidate.matched_facts || []).map(function (fact) { return factText('Matches', fact); })
+      .concat((candidate.conflicting_facts || []).map(function (fact) { return factText('Differs', fact); }));
+    var hint = candidate.import_location;
+    if (hint) lines.push('In import Location ' + hint.location + ' (NetBox ' + hint.netbox + ')');
+    return lines;
   }
 
   function renderCandidates(payload, offered) {
@@ -46,17 +50,19 @@
     (payload.candidates || []).forEach(function (candidate) {
       var item = document.createElement('button');
       var title = document.createElement('div');
-      var hints = document.createElement('div');
       item.type = 'button';
       item.className = 'list-group-item list-group-item-action';
       item.setAttribute('aria-pressed', 'false');
       item.dataset.candidateId = candidate.id;
       item.dataset.offeredSearch = offered;
       title.textContent = candidate.display || candidate.name;
-      hints.className = 'text-secondary small';
-      hints.textContent = hintText(candidate);
       item.appendChild(title);
-      if (hints.textContent) item.appendChild(hints);
+      hintLines(candidate).forEach(function (text) {
+        var line = document.createElement('div');
+        line.className = 'text-secondary small';
+        line.textContent = text;
+        item.appendChild(line);
+      });
       item.addEventListener('click', function () {
         Array.prototype.forEach.call(list.children, function (row) {
           row.classList.remove('active');

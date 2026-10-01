@@ -128,17 +128,21 @@ from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .plan import ImportPlan, PlanError, fingerprint_of, is_current_schema_version
 from .review_workspace import (
     IneligibleDeviceSelection,
+    IneligibleLocationSelection,
     PROFILE_POLICY_MOVED,
     ProfilePolicyMoved,
     ReviewWorkspace,
     UnacceptableCablePolicy,
     clear_cable_segment_override_and_replan,
+    clear_trace_location_resolution_and_replan,
     save_cable_class_mapping_and_replan,
     save_cable_segment_override_and_replan,
     save_termination_resolution_and_replan,
     save_trace_device_resolution_and_replan,
+    save_trace_location_resolution_and_replan,
 )
 from .trace_device_resolution import DeviceEvidence, eligible_trace_devices, source_device_key
+from .trace_location_resolution import present_location_mappings, site_locations, source_location_key
 
 
 def _safe_next_url(request, fallback: str) -> str:
@@ -3917,6 +3921,17 @@ def _workspace_device_questions(workspace) -> dict[str, dict]:
     return questions
 
 
+def _workspace_location_paths(workspace) -> dict[str, str]:
+    """Return each source Location path the active plan carries, by canonical key, in key order."""
+    paths: dict[str, str] = {}
+    for trace in workspace.traces:
+        for item in trace.devices:
+            for path in item.get("locations", ()):
+                if key := source_location_key(path):
+                    paths.setdefault(key, path)
+    return dict(sorted(paths.items()))
+
+
 def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]]:
     """Return findings once per message in first-seen order, keeping every lost override."""
     messages: set[str] = set()
@@ -4047,6 +4062,13 @@ class _TraceWorkspaceMixin:
             return None
 
 
+def _trace_reader(request, profile, planning_context):
+    """Return the operator's scoped reader for the import target of one trace preview."""
+    return NetBoxReader.for_actor(request.user).for_planning_context(
+        planning_context, output_kinds=profile.output_kinds
+    )
+
+
 def _trace_workspace_url(identity: str) -> str:
     """Return the workspace URL that reopens one trace."""
     url = reverse("plugins:netbox_data_import:trace_workspace")
@@ -4085,19 +4107,27 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         wanted = request.GET.get("trace", "")
         selected = next((trace for trace in traces if trace.identity == wanted), traces[0] if traces else None)
         summary = dict(workspace.trace_summary)
-        from .models import TerminationResolution, TraceDeviceResolution
+        from .models import TerminationResolution, TraceDeviceResolution, TraceLocationResolution
 
-        summary["saved_decisions"] = (
-            TerminationResolution.objects.restrict(request.user, "view").filter(profile=profile).count()
-            + TraceDeviceResolution.objects.restrict(request.user, "view").filter(profile=profile).count()
+        summary["saved_decisions"] = sum(
+            model.objects.restrict(request.user, "view").filter(profile=profile).count()
+            for model in (TerminationResolution, TraceDeviceResolution, TraceLocationResolution)
         )
         summary["preview_state"] = self._preview_state(request, drift)
         from .proposal_presentation import ProposalPresentation, group_terminations
 
         try:
-            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+            reader = _trace_reader(request, profile, planning_context)
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
+        location_choices = list(site_locations(reader).order_by("name", "pk"))
+        location_mappings = present_location_mappings(
+            profile=profile,
+            viewer=request.user,
+            reader=reader,
+            paths=_workspace_location_paths(workspace),
+            has_locations=bool(location_choices),
+        )
         proposal_display = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
         proposal_fields = proposal_display.fields(selected.terminations if selected else [])
         if selected is not None:
@@ -4173,6 +4203,9 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "cable_policy_forms": cable_policy_forms,
                 "segment_policy_forms": segment_policy_forms,
                 "summary": summary,
+                "location_mappings": location_mappings,
+                "location_choices": location_choices,
+                "import_location_unavailable": reader.location_unavailable,
                 "drift": drift,
                 "retained_sync_reason": retained_reason,
                 "preview_revision": current_preview_revision(request.session),
@@ -4331,7 +4364,7 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
     @staticmethod
     def _eligible(request, profile, planning_context, field_key, search, limit):
         """Return the eligible page, inside the caller's own read scope."""
-        reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+        reader = _trace_reader(request, profile, planning_context)
         return eligible_terminations(field_key, reader, profile=profile, search=search, limit=limit)
 
 
@@ -4346,7 +4379,7 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
         loaded = self.reviewed_preview(request)
         if loaded is None:
             return JsonResponse({"ok": False, "error": "No current import preview matches this request."}, status=409)
-        _profile, _document, workspace, planning_context = loaded
+        profile, _document, workspace, planning_context = loaded
         device_key = source_device_key(request.GET.get("device_key", ""))
         question = _workspace_device_questions(workspace).get(device_key)
         if question is None:
@@ -4369,8 +4402,10 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
         except (TypeError, ValueError):
             return JsonResponse({"ok": False, "error": "That Device cannot be resolved here."}, status=400)
         try:
-            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
-            found = eligible_trace_devices(reader=reader, evidence=evidence, search=search, limit=limit)
+            reader = _trace_reader(request, profile, planning_context)
+            found = eligible_trace_devices(
+                profile=profile, reader=reader, evidence=evidence, search=search, limit=limit
+            )
         except PlanningTargetUnavailable:
             return JsonResponse({"ok": False, "error": "That Device cannot be resolved here."}, status=400)
         return JsonResponse(
@@ -4381,8 +4416,11 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
                         "id": candidate.device.pk,
                         "name": candidate.device.name,
                         "display": str(candidate.device),
-                        "matched_hints": candidate.matched_hints,
-                        "conflicting_hints": candidate.conflicting_hints,
+                        "matched_facts": [fact.to_dict() for fact in candidate.matched],
+                        "conflicting_facts": [fact.to_dict() for fact in candidate.conflicting],
+                        "import_location": (
+                            candidate.import_location.to_dict() if candidate.import_location is not None else None
+                        ),
                     }
                     for candidate in found.candidates
                 ],
@@ -4450,8 +4488,11 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
                     selected_device_id=device_id,
                     search=search,
                     limit=ELIGIBLE_TERMINATION_LIMIT,
+                    reviewed_fingerprint=workspace.plan.profile_fingerprint,
                 )
                 record_recalculated_preview(request.session, plan, user=request.user)
+        except ProfilePolicyMoved as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
         except IneligibleDeviceSelection:
             return _preview_action_error(
                 request,
@@ -4464,6 +4505,80 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
         except PreviewLocked as exc:
             return _preview_action_error(request, next_url, str(exc), status=409)
         messages.success(request, f"Source Device resolved to '{chosen}'.")
+        return redirect(next_url)
+
+
+LOCATION_CHOICE_REFUSED = "Choose a visible Location in the selected Site."
+
+
+class TraceLocationMappingView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+    """Map one source Location path the reviewed preview carries, or clear its mapping, then replan."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Write the decision under the profile lock, so it and its replan commit together."""
+        next_url = _trace_workspace_url(request.POST.get("trace", ""))
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, workspace, planning_context = loaded
+        if stale_reason := _stale_preview_reason(request):
+            return _preview_action_error(request, next_url, stale_reason, status=409)
+        if retained_reason := _retained_sync_block_reason(request):
+            return _preview_action_error(request, next_url, retained_reason, status=409)
+        refusal = self.refuse_unregistered_adapter(request, profile)
+        if refusal is not None:
+            return refusal
+        key = source_location_key(request.POST.get("location_key", ""))
+        paths = _workspace_location_paths(workspace)
+        # A review command answers a question this preview asked, never one the caller invented.
+        if key not in paths:
+            return _preview_action_error(
+                request, next_url, "This preview carries no such source Location path.", status=400
+            )
+        clearing = bool(request.POST.get("clear"))
+        location_id = None
+        if not clearing:
+            try:
+                location_id = int(request.POST.get("location_id", ""))
+            except (TypeError, ValueError):
+                return _preview_action_error(request, next_url, LOCATION_CHOICE_REFUSED, status=400)
+        try:
+            with transaction.atomic():
+                if clearing:
+                    plan = clear_trace_location_resolution_and_replan(
+                        profile=profile,
+                        source_document=document,
+                        actor=request.user,
+                        planning_context=planning_context,
+                        source_location_key=key,
+                        reviewed_fingerprint=workspace.plan.profile_fingerprint,
+                    )
+                else:
+                    plan = save_trace_location_resolution_and_replan(
+                        profile=profile,
+                        source_document=document,
+                        actor=request.user,
+                        planning_context=planning_context,
+                        source_location_key=key,
+                        selected_location_id=location_id,
+                        reviewed_fingerprint=workspace.plan.profile_fingerprint,
+                    )
+                record_recalculated_preview(request.session, plan, user=request.user)
+        except ProfilePolicyMoved as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
+        except UnacceptableCablePolicy as exc:
+            return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
+        except IneligibleLocationSelection:
+            return _preview_action_error(request, next_url, LOCATION_CHOICE_REFUSED, status=400)
+        except PlanningTargetUnavailable:
+            return self.discard_unavailable_target(request)
+        except PreviewLocked as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
+        settled = "cleared for" if clearing else "saved for"
+        messages.success(request, f"Location mapping {settled} '{paths[key]}'.")
         return redirect(next_url)
 
 
@@ -4623,7 +4738,7 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
                 request, next_url, "This preview asked no question about that termination.", status=400
             )
         try:
-            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+            reader = _trace_reader(request, profile, planning_context)
             # The recheck repeats the query that made the offer, so a searched candidate still counts.
             found = eligible_terminations(
                 field_key,
@@ -4698,7 +4813,7 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
     def proposal_context(self, request):
         """Return the preview and scoped reader, refusing requests without a preview."""
         profile, document, workspace, planning_context = self.proposal_preview(request)
-        reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+        reader = _trace_reader(request, profile, planning_context)
         return profile, document, workspace, planning_context, reader
 
     def dispatch(self, request, *args, **kwargs):
@@ -4865,7 +4980,7 @@ class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
             {"field_key": field_key, "state": "", "offered": False},
         )
         try:
-            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+            reader = _trace_reader(request, profile, planning_context)
         except PlanningTargetUnavailable:
             reader = None
         presentation = ProposalPresentation(profile=profile, actor=request.user, reader=reader)

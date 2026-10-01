@@ -608,9 +608,50 @@ matching.
 
 Without a saved choice, one exact Device-name match inside the actor's view scope and selected Site
 resolves automatically. Zero or several matches leave one Device question open in the Trace Review
-Workspace. Rack, Location, and U position can rank candidates and explain the order. The operator
-must select the Device. Each placement hint is used only when the actor can also view its related
-Rack or Location.
+Workspace. Rack, Location, and U position can rank candidates and explain the order. They never
+select a Device: the operator must select it. Each placement hint is used only when the actor can
+also view its related Rack or Location.
+
+The source Location is an opaque path, for example `Region >> Building >> 1st Floor >> DH4 >> T`. The
+plugin never splits or interprets it, so it never compares it with a NetBox Location name. Its key is
+`identity_text` of the source value, used for evidence collection, lookup, the digest, and
+uniqueness; the source text is kept separately for display. An empty key is not a path. Separator
+spelling is part of the key, so `A>>B` and `A >> B` are two paths.
+
+The operator can map one source Location path to one NetBox Location in the selected Site. A
+`TraceLocationResolution` row holds that mapping for the Import Profile, and later source documents
+reuse it for the same key. The mapping is optional and never blocks a unit.
+
+A Device's placement Location is its own Location when `location_id` is set, and its Rack's Location
+only when the Device has no Location of its own. An own Location the actor cannot view contributes no
+evidence and does not enable the Rack fallback. The Rack fallback needs both the Rack and its
+Location to be visible.
+
+Location evidence compares only through a mapping whose Location the actor can view:
+
+- A mapped path matches a Device whose placement Location is the mapped Location or one of its
+  descendants. Containment is structural between the two visible Locations, so a hidden
+  intermediate Location does not break it, and it is never shown or counted.
+- A mapped path conflicts with a Device whose placement Location is outside that subtree. The
+  conflict shows the source path, the mapped Location, and the Device's placement Location.
+- An unmapped path, and a Device with no visible placement Location, contribute neither a match nor
+  a conflict.
+
+One Device label can carry several distinct source Location paths. Each mapped path is evaluated and
+explained. Location adds one score when any mapped path matches; repeated occurrences and unmapped
+paths add nothing.
+
+A mapping whose Location is deleted, hidden from the actor, or outside the selected Site is stale.
+A stale mapping acts as unmapped, the workspace marks it stale, and its display snapshot is never
+shown. It is not removed automatically.
+
+The Location the operator selects on the import page is a ranking hint for trace imports, shown as
+an "import Location" hint separate from source evidence. A Device whose placement Location is that
+Location or one of its descendants gets the hint. Candidate order is: exact name, then source
+placement evidence (more matches, then fewer conflicts), then the import Location hint, then name,
+then ID. The hint never filters candidates and never makes a conflict, because one trace can cross
+Locations. For a trace-only import, an import-page Location that is deleted, hidden, or moved out of
+the Site is unavailable evidence: the workspace shows a neutral notice and keeps the preview.
 
 A saved Device that is deleted, hidden, or outside the selected Site becomes stale. Planning does not
 fall back to another exact-name match and does not show the saved display snapshot. A placement
@@ -1229,6 +1270,7 @@ index, and projection column.
 | --- | --- | --- | --- |
 | `SourceDocument` | The stored uploaded workbook that `source_document` references | Content fingerprint indexed per Import Profile | T2 |
 | `TraceDeviceResolution` | A trace source Device label selected as one NetBox Device | (Import Profile, normalized source Device key) unique | T6 |
+| `TraceLocationResolution` | A trace source Location path mapped to one NetBox Location | (Import Profile, source Location key) unique | Location evidence |
 | `TerminationResolution` | The trace-side Row Resolution written by manual selection or proposal acceptance | (Import Profile, task type, field key) unique | T4 |
 | `CableClassMapping` | Cable target policy for one CableClass value | (Import Profile, CableClass value) unique | T4 |
 | `CableSegmentOverride` | Cable target policy forced on one planned segment | (Import Profile, resolved termination pair) unique | T4 |
@@ -1259,6 +1301,14 @@ selection for both the `termination` and `mapped_peer` roles. `SourceResolution`
 Device ID, and a display snapshot. The plain Device ID preserves a stale decision after Device
 deletion so the operator can replace it. The snapshot is never shown unless the Device is still in
 the actor's view scope. Installation-local Device IDs are not part of portable profile YAML.
+
+`TraceLocationResolution` stores the canonical source Location key, its fixed-width digest, the
+selected Location ID, and a display snapshot. Like `TraceDeviceResolution`, the plain ID keeps a
+stale decision after Location deletion so the operator can replace it, the snapshot is shown only
+while the Location is in the actor's view scope, and the row is not part of portable profile YAML
+(the YAML omits the whole section). It is a registered policy section, so a mapping change changes
+the profile fingerprint. It has no REST or GraphQL surface in this delivery, the same as
+`TraceDeviceResolution`.
 
 `CableSegmentOverride` stores the Import Profile, the resolved termination pair key, the forced Cable
 Type and Cable Profile, and the Source Trace identity and segment position the decision was made from.
@@ -1384,6 +1434,21 @@ without help.
 The searchable picker is scoped to eligible candidates of the admitted models on the resolved Device,
 shows each candidate's model, and shows a visible "N of M eligible" count. A resolved termination
 shows its selected object's own model, not the claimed kind.
+
+The workspace lists, at batch level and independent of the selected trace, each distinct source
+Location path of the batch with its state: unmapped, mapped (with the Location), or stale. With no
+paths it says "No source Location paths"; with paths but no visible Location in the Site it says so
+separately. A picker offers the visible Locations of the selected Site.
+
+A mapping row's state, target, snapshot, and every explanation derived from it need view permission
+on that row. Add, change, and delete are checked separately with object constraints, on the server,
+and a hidden row is never overwritten blind. An unavailable action renders disabled with its reason.
+Save and clear run in the same coordinated transaction as other policy writes: active-preview claim,
+profile lock, reviewed-profile fingerprint check, source-key membership, scoped target recheck,
+write, replan, and revision advance. Any failure rolls back all of it.
+
+A Device candidate's explanation names each matched and each conflicting fact with both values,
+never only the fact name.
 
 Proposal card contract:
 
@@ -1872,7 +1937,9 @@ variables.
   picker before its termination picker.
 - Selecting a Device writes one profile-owned `TraceDeviceResolution` and replans. A later source
   document reuses it for the same normalized label and for every port under that label.
-- Rack, Location, and U position only rank visible Device candidates. They never select one.
+- Rack, Location, and U position only rank visible Device candidates. They never select one. Source
+  Location evidence compares only through a `TraceLocationResolution` mapping, and the import-page
+  Location ranks candidates after source evidence without filtering them.
 - Selecting a candidate writes a `TerminationResolution` row through its owning model and triggers a
   replan; no review command edits an Import Plan.
 - A termination matched by the exact-name rule shows `automatically resolved`; one selected by an

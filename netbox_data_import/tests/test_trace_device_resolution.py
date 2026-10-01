@@ -21,7 +21,13 @@ from netbox_data_import.field_keys import (
     parse_termination_field_key,
     termination_field_key,
 )
-from netbox_data_import.models import ImportProfile, SourceDocument, TerminationResolution, TraceDeviceResolution
+from netbox_data_import.models import (
+    ImportProfile,
+    SourceDocument,
+    TerminationResolution,
+    TraceDeviceResolution,
+    TraceLocationResolution,
+)
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.object_permissions import ObjectPermissionDenied, clear_user_permission_caches
 from netbox_data_import.plan import Disposition
@@ -29,6 +35,7 @@ from netbox_data_import.preview_row_actions import PREVIEW_PLAN_SESSION_KEY
 from netbox_data_import.profile_yaml import serialize_profile
 from netbox_data_import.review_workspace import save_trace_device_resolution_and_replan
 from netbox_data_import.trace_device_resolution import (
+    CandidateFact,
     DeviceEvidence,
     UNRESOLVED,
     eligible_trace_devices,
@@ -278,12 +285,25 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
             u_positions=("12",),
         )
 
+    def setUp(self):
+        TraceLocationResolution.objects.create(
+            profile=self.profile,
+            source_location_key="trace room",
+            selected_location_id=self.location.pk,
+            selected_display_name=str(self.location),
+        )
+
     def reader(self, actor=None):
         reader = NetBoxReader.for_actor(actor) if actor is not None else NetBoxReader.unrestricted()
         return reader.for_target(site=self.site)
 
+    def eligible(self, reader, evidence=None, **options):
+        return eligible_trace_devices(
+            profile=self.profile, reader=reader, evidence=evidence or self.evidence, limit=20, **options
+        )
+
     def test_placement_evidence_ranks_and_explains_but_does_not_resolve(self):
-        page = eligible_trace_devices(reader=self.reader(), evidence=self.evidence, limit=20)
+        page = self.eligible(self.reader())
         outcome = resolve_trace_devices(
             profile=self.profile,
             reader=self.reader(),
@@ -291,35 +311,67 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
         )[self.evidence.key]
 
         self.assertEqual(page.candidates[0].device, self.hinted)
-        self.assertEqual(page.candidates[0].matched_hints, ("location", "rack", "U position"))
+        self.assertEqual(
+            page.candidates[0].matched,
+            (
+                CandidateFact("location", source="Trace Room", mapped="Trace Room", netbox="Trace Room"),
+                CandidateFact("rack", source="Trace Rack", netbox="Trace Rack"),
+                CandidateFact("U position", source="12", netbox="12"),
+            ),
+        )
         self.assertEqual(outcome.state, UNRESOLVED)
         self.assertIsNone(outcome.device)
 
     def test_canonical_device_name_matching_has_priority_in_candidate_ranking(self):
         exact = self.make_device("Source  Alias")
 
-        page = eligible_trace_devices(reader=self.reader(), evidence=self.evidence, limit=20)
+        page = self.eligible(self.reader())
 
         self.assertEqual(page.candidates[0].device, exact)
-        self.assertIn("name", page.candidates[0].matched_hints)
+        self.assertEqual(
+            page.candidates[0].matched[0], CandidateFact("name", source="Source Alias", netbox="Source  Alias")
+        )
 
-    def test_canonical_placement_names_contribute_to_candidate_ranking(self):
-        self.location.name = "Trace  Room"
-        self.location.save(update_fields=("name",))
+    def test_canonical_rack_names_contribute_to_candidate_ranking(self):
         self.rack.name = "Trace  Rack"
         self.rack.save(update_fields=("name",))
         evidence = DeviceEvidence(
             key="source alias",
             labels=("Source Alias",),
-            locations=("Trace Room",),
+            locations=(),
             racks=("Trace Rack",),
             u_positions=(),
         )
 
-        page = eligible_trace_devices(reader=self.reader(), evidence=evidence, limit=20)
+        page = self.eligible(self.reader(), evidence)
 
         self.assertEqual(page.candidates[0].device, self.hinted)
-        self.assertEqual(page.candidates[0].matched_hints, ("location", "rack"))
+        self.assertEqual(
+            page.candidates[0].matched, (CandidateFact("rack", source="Trace Rack", netbox="Trace  Rack"),)
+        )
+
+    def test_a_source_rack_no_netbox_rack_matches_conflicts_with_every_visible_rack(self):
+        evidence = DeviceEvidence(
+            key="source alias", labels=("Source Alias",), locations=(), racks=("Absent Rack",), u_positions=()
+        )
+
+        candidate = next(
+            item for item in self.eligible(self.reader(), evidence).candidates if item.device == self.hinted
+        )
+
+        self.assertEqual(candidate.conflicting, (CandidateFact("rack", source="Absent Rack", netbox="Trace Rack"),))
+
+    def test_a_source_position_that_is_not_a_number_conflicts_with_every_placed_position(self):
+        evidence = DeviceEvidence(
+            key="source alias", labels=("Source Alias",), locations=(), racks=(), u_positions=("U12",)
+        )
+
+        page = self.eligible(self.reader(), evidence)
+
+        hinted = next(item for item in page.candidates if item.device == self.hinted)
+        unplaced = next(item for item in page.candidates if item.device == self.other)
+        self.assertEqual(hinted.conflicting, (CandidateFact("U position", source="U12", netbox="12"),))
+        self.assertEqual(unplaced.conflicting, ())
 
     def test_hidden_rack_and_location_do_not_affect_candidate_explanations(self):
         actor = user_with_object_permission(
@@ -328,15 +380,15 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
                 (Device, ("view",), {"site_id": self.site.pk}),
                 (Rack, ("view",), {"name": "Another Rack"}),
                 (Location, ("view",), {"name": "Another Location"}),
+                (TraceLocationResolution, ("view",), {}),
             ],
         )
 
-        page = eligible_trace_devices(reader=self.reader(actor), evidence=self.evidence, limit=20)
+        page = self.eligible(self.reader(actor))
         candidate = next(item for item in page.candidates if item.device.pk == self.hinted.pk)
 
-        self.assertEqual(candidate.matched_hints, ("U position",))
-        self.assertNotIn("rack", candidate.conflicting_hints)
-        self.assertNotIn("location", candidate.conflicting_hints)
+        self.assertEqual(candidate.matched, (CandidateFact("U position", source="12", netbox="12"),))
+        self.assertEqual(candidate.conflicting, ())
 
     def test_candidate_rows_lock_in_primary_key_order_but_keep_rank_order(self):
         locked_queries = []
@@ -348,7 +400,7 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
             return result
 
         with connection.execute_wrapper(capture_locked_query):
-            page = eligible_trace_devices(reader=self.reader(), evidence=self.evidence, limit=20, lock_rows=True)
+            page = self.eligible(self.reader(), lock_rows=True)
 
         self.assertEqual(page.candidates[0].device, self.hinted)
         self.assertEqual(len(locked_queries), 1)
@@ -365,13 +417,7 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
             return result
 
         with connection.execute_wrapper(rename_after_ranked_ids_are_read):
-            page = eligible_trace_devices(
-                reader=self.reader(),
-                evidence=self.evidence,
-                search="Candidate Z",
-                limit=20,
-                lock_rows=True,
-            )
+            page = self.eligible(self.reader(), search="Candidate Z", lock_rows=True)
 
         self.assertTrue(renamed)
         self.assertEqual(page.candidates, ())
@@ -914,6 +960,7 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
                 selected_device_id=self.device_a.pk,
                 search="DEV-A",
                 limit=20,
+                reviewed_fingerprint=self.profile.planning_fingerprint,
             )
 
         self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
@@ -966,6 +1013,7 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
                 selected_device_id=self.device_b.pk,
                 search="DEV-B",
                 limit=20,
+                reviewed_fingerprint=self.profile.planning_fingerprint,
             )
 
         existing.refresh_from_db()

@@ -361,7 +361,23 @@ letters after case and whitespace normalization. The choice applies to all ports
 Device.
 
 Rack, Location, and U position are search hints. They can change the candidate order, but they never
-select a Device. A Rack or Location hint is used only when you can view that NetBox object.
+select a Device. A Rack or Location hint is used only when you can view that NetBox object. Each
+candidate names every hint it matches or contradicts, with the source value and the NetBox value.
+
+The source Location column holds a path, for example `Region >> Building >> 1st Floor >> DH4 >> T`.
+The plugin does not split the path and does not compare it with a NetBox Location name. To use a path
+as a hint, map it to a NetBox Location of the Site under **Source Locations** in the workspace. A
+Device in the mapped Location, or in a Location below it, then matches the path. A Device in another
+Location of the Site conflicts with it. An unmapped path is not a hint. The Import Profile stores the
+mapping, and a later trace file reuses it for the same path. The separator spelling is part of the
+path, so `A>>B` and `A >> B` are two paths. Profile YAML does not include these mappings.
+
+A Device's Location is its own Location. Only a Device with no Location of its own uses its Rack's
+Location.
+
+The Location you select on the import page also ranks candidates, after the source hints, and never
+removes one. If that Location is deleted, hidden from you, or moved to another Site, the workspace
+shows a notice and keeps the preview.
 
 The trace workbook layout is not configurable in this release. A later adapter setting can map other
 sheet names and columns to the same Source Trace values. Device choices do not depend on Excel column

@@ -110,7 +110,7 @@ class ImportEngine:
                 diagnostics=source_batch.diagnostics,
                 unused_columns=source_batch.unused_columns,
             )
-        reader = NetBoxReader.for_actor(actor).for_planning_context(planning_context)
+        reader = NetBoxReader.for_actor(actor).for_planning_context(planning_context, output_kinds=profile.output_kinds)
 
         units = []
         for declaration in catalog.TARGET_MODULES:
@@ -180,7 +180,9 @@ class ImportEngine:
         try:
             if job is not None:
                 execution.link_job(job)
-            target = NetBoxReader.for_actor(actor).for_planning_context(accepted.planning_context)
+            target = NetBoxReader.for_actor(actor).for_planning_context(
+                accepted.planning_context, output_kinds=profile.output_kinds
+            )
             execution.site_name = str(target.site)
             execution.save(update_fields=["site_name"])
             # One lock over the replan, the comparison and the writes: policy cannot move between them.
@@ -245,7 +247,9 @@ class ImportEngine:
             progress_callback(len(units), total)
         context = ExecutionContext(
             actor=actor,
-            reader=NetBoxReader.for_actor(actor).for_planning_context(accepted.planning_context),
+            reader=NetBoxReader.for_actor(actor).for_planning_context(
+                accepted.planning_context, output_kinds=profile.output_kinds
+            ),
             profile=profile,
         )
         completed: list[str] = []
