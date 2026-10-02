@@ -13,6 +13,7 @@ import re
 from copy import copy
 from dataclasses import dataclass
 from typing import Any
+from .public_refusal import PublicRefusal
 
 # `oob_ip` carries no family in NetBox, so it takes either.
 IP_FIELD_FAMILY: dict[str, int | None] = {"primary_ip4": 4, "primary_ip6": 6, "oob_ip": None}
@@ -21,7 +22,7 @@ IP_FIELD_FAMILY: dict[str, int | None] = {"primary_ip4": 4, "primary_ip6": 6, "o
 _IP_TOKEN = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f:.]{1,45}(?:/\d{1,3})?(?![0-9A-Za-z])")
 
 
-class IPAssignmentError(Exception):
+class IPAssignmentError(PublicRefusal):
     """The address cannot be placed, with the repair the operator has to make."""
 
 

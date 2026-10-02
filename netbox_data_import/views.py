@@ -1025,14 +1025,15 @@ class ImportSetupView(PermissionRequiredMixin, View):
             # The form validated the profile, and the setup lock found it deleted since then.
             raise Http404("The import profile is no longer available.") from None
         except (adapters.SourceUnreadable, adapters.UnknownSourceAdapter, PlanningTargetUnavailable) as exc:
-            messages.error(request, f"Failed to parse file: {exc}")
+            logger.warning("ImportSetupView: source planning refused", exc_info=True)
+            messages.error(request, f"Failed to parse file: {operator_failure_message(exc)}")
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
         except PlanError:
             logger.warning("ImportSetupView: planning produced an unreadable Import Plan.", exc_info=True)
             messages.error(request, UNPLANNABLE_IMPORT)
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
         except PreviewCommandRefused as exc:
-            messages.error(request, str(exc))
+            messages.error(request, exc.operator_message)
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
         return redirect(_review_workspace_url(profile))
 
@@ -1519,9 +1520,9 @@ class _PreviewCommandMixin:
         except (StalePreview, ProfilePolicyMoved) as exc:
             return _stale_response(request, exc, self.refusal_url(request), json=self._answers_json(request))
         except PreviewCommandRefused as exc:
-            return self._refusal(request, str(exc), exc.status)
+            return self._refusal(request, exc.operator_message, exc.status)
         except StaleSourceDocument as exc:
-            return self._refusal(request, str(exc), 409, reverse("plugins:netbox_data_import:import_setup"))
+            return self._refusal(request, exc.operator_message, 409, reverse("plugins:netbox_data_import:import_setup"))
         except PlanningTargetUnavailable:
             return self._refusal(request, TARGET_GONE, 409, reverse("plugins:netbox_data_import:import_setup"))
         except ObjectPermissionDenied as exc:
@@ -1558,12 +1559,12 @@ class _PreviewCommandMixin:
 
 def _stale_json(exc):
     """Refuse a stale preview read or command in the JSON envelope every preview script reads."""
-    return JsonResponse({"ok": False, "error": str(exc), "code": "preview_stale"}, status=409)
+    return JsonResponse({"ok": False, "error": exc.operator_message, "code": "preview_stale"}, status=409)
 
 
 def _stale_response(request, exc, url, *, json=False):
     """Refuse a command made against a preview that is not the active one, with HTTP 409 in every format."""
-    message = str(exc)
+    message = exc.operator_message
     if json or _wants_json(request):
         return _stale_json(exc)
     if request.headers.get("HX-Request") == "true":
@@ -2387,7 +2388,7 @@ class SyncDeviceFieldView(_PreviewCommandMixin, _AjaxPermissionView):
         try:
             target = ip_assignment.resolve(device, field, value)
         except ip_assignment.IPAssignmentError as exc:
-            raise PreviewCommandRefused(str(exc)) from exc
+            raise PreviewCommandRefused(exc.operator_message) from exc
 
         if target.already_held:
             # The device carries it already, so only the field moves. No IPAM row is written.
@@ -2402,7 +2403,7 @@ class SyncDeviceFieldView(_PreviewCommandMixin, _AjaxPermissionView):
         except ValidationError as exc:
             raise PreviewCommandRefused("; ".join(exc.messages)) from exc
         except ObjectPermissionDenied as exc:
-            raise PreviewCommandRefused(f"Permission denied: {exc} for this IP address.") from exc
+            raise PreviewCommandRefused("Permission denied: cannot assign this IP address.") from exc
         setattr(device, field, address)
         device.save(update_fields=[field])
         return f"{address.address} on {target.interface.name}"
@@ -4375,9 +4376,9 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
         except (Http404, ResolutionProposal.DoesNotExist):
             return JsonResponse({"ok": False, "error": "That proposal is no longer available."}, status=404)
         except ActiveProposalExists as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=409)
+            return JsonResponse({"ok": False, "error": exc.operator_message}, status=409)
         except UnusableCandidateSet as exc:
-            return JsonResponse({"ok": False, "error": str(exc), "reason": exc.reason}, status=400)
+            return JsonResponse({"ok": False, "error": exc.operator_message, "reason": exc.reason}, status=400)
         except (InvalidProposalTarget, InvalidProposalCandidate, UnsupportedProposalRole) as exc:
             logger.warning("%s: termination refused: %s", type(self).__name__, exc)
             return JsonResponse({"ok": False, "error": TERMINATION_UNRESOLVABLE}, status=400)
@@ -5144,7 +5145,7 @@ class _CreateDeviceRole(PreviewCommand):
         if role.pk is None:
             role.name = self.name
             role.color = self.color
-            _validate_model_instance(role, f"device role '{self.name}'")
+            role.full_clean(validate_unique=False)
         result = save_permission_scoped_object(
             preview.actor, DeviceRole, {"slug": self.slug}, {"name": self.name, "color": self.color}, on_existing="keep"
         )
@@ -5181,7 +5182,7 @@ class QuickCreateDeviceRoleView(_PreviewCommandMixin, _AjaxPermissionView):
         except IntegrityError:
             logger.exception("QuickCreateDeviceRoleView: integrity error creating role slug=%s", slug)
             return JsonResponse({"error": "A device role with that slug already exists."}, status=400)
-        except (PreviewCommandRefused, ValidationError):
+        except ValidationError:
             logger.exception("QuickCreateDeviceRoleView: validation error creating role slug=%s", slug)
             return JsonResponse({"error": "Invalid role data."}, status=400)
         except DatabaseError:
@@ -5281,12 +5282,12 @@ def _refused_row_write_response(exc, row_number):
     The worker reports the same failures, so both read the message from one place.
     """
     if isinstance(exc, PreviewCommandRefused):
-        return JsonResponse({"ok": False, "error": str(exc)}, status=exc.status)
+        return JsonResponse({"ok": False, "error": exc.operator_message}, status=exc.status)
     if isinstance(exc, PlanError):
         logger.warning("SyncSingleRowView: the Import Plan for row_number=%s is unreadable.", row_number, exc_info=exc)
         return JsonResponse({"ok": False, "error": UNREADABLE_PREVIEW}, status=409)
     if isinstance(exc, (PlanningTargetUnavailable, PreconditionFailed, SelectionError, StalePlan, StaleSourceDocument)):
-        return JsonResponse({"ok": False, "error": str(exc)}, status=409)
+        return JsonResponse({"ok": False, "error": exc.operator_message}, status=409)
     if isinstance(exc, (DatabaseError, ObjectPermissionDenied, ValidationError)):
         if isinstance(exc, DatabaseError):
             logger.error("SyncSingleRowView: database error for row_number=%s", row_number, exc_info=exc)

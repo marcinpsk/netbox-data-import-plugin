@@ -6,9 +6,10 @@ from __future__ import annotations
 
 from .catalog import import_location_required
 from .field_keys import CABLE_END_KINDS
+from .public_refusal import PublicRefusal
 
 
-class PlanningTargetUnavailable(Exception):
+class PlanningTargetUnavailable(PublicRefusal):
     """The planning context names a target this reader cannot resolve."""
 
 

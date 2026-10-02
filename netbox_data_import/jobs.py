@@ -228,17 +228,17 @@ class ImportJobRunner(JobRunner):
             except DatabaseError as exc:
                 logger.exception("Import execution failed with a database error")
                 self._fail(operator_failure_message(exc))
+            except (EngineConfigurationError, SourceUnreadable, UnknownSourceAdapter) as exc:
+                logger.exception("Import execution failed before its source could be planned")
+                self._fail(operator_failure_message(exc))
             except (
-                EngineConfigurationError,
                 ObjectPermissionDenied,
                 PlanError,
                 PlanningTargetUnavailable,
                 PreconditionFailed,
                 SelectionError,
-                SourceUnreadable,
                 StalePlan,
                 StaleSourceDocument,
-                UnknownSourceAdapter,
                 ValidationError,
             ) as exc:
                 self._fail(operator_failure_message(exc))

@@ -1839,6 +1839,24 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
     def _post(self, payload):
         return self.client.post(self._url(), {**preview_claim(self.client), **payload})
 
+    def test_a_retired_adapter_preserves_the_coordinator_refusal(self):
+        """A policy refusal states its own reason and writes no role or preview revision."""
+        from dcim.models import DeviceRole
+
+        coordinator = preview_coordinator(self.client)
+        revision = coordinator.revision
+        ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired_adapter")
+
+        with self.assertNoLogs("netbox_data_import.views", level="ERROR"):
+            response = self._post({"name": "Refused Role", "slug": "refused-role"})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("retired_adapter", response.json()["error"])
+        self.assertFalse(DeviceRole.objects.filter(slug="refused-role").exists())
+        coordinator.refresh_from_db()
+        self.assertEqual(coordinator.revision, revision)
+
     def test_creates_role(self):
         """POST creates a new DeviceRole and returns JSON with its id."""
         from dcim.models import DeviceRole
