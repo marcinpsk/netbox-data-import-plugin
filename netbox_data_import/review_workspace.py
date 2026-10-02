@@ -4,12 +4,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from functools import cached_property
 from types import MappingProxyType
 from typing import Any
 
-from .cable_target import UNRESOLVED
+from .cable_disclosure import CABLE_SEGMENT_OVERRIDE_ROW, DISCLOSURE_SOURCE, POLICY_HIDDEN, POLICY_VISIBLE
+from .cable_policy import cable_media_family_label, cable_type_label
+from .cable_target import UNRESOLVED, AskedTermination
 from .import_engine import ImportEngine
 from .models import (
     CableClassMapping,
@@ -17,10 +20,11 @@ from .models import (
     ImportProfile,
     TerminationResolution,
     TraceDeviceResolution,
+    TraceLocationResolution,
     index_digest,
     locked_profile_policy,
 )
-from .object_permissions import delete_permission_scoped_objects, save_permission_scoped_object
+from .object_permissions import POLICY_WRITE_REFUSED, delete_permission_scoped_objects, save_permission_scoped_object
 from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
     effective_device_name,
@@ -48,6 +52,7 @@ def save_termination_resolution_and_replan(
     selected_object_type,
     selected_object_id,
     selected_display_name,
+    reviewed_fingerprint,
 ):
     """Persist one manual termination selection, then request a fresh Import Plan."""
     values = {
@@ -57,6 +62,7 @@ def save_termination_resolution_and_replan(
     }
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
         lookup = {
             "profile": locked_profile,
             "task_type": task_type,
@@ -83,24 +89,22 @@ PROFILE_POLICY_MOVED = (
 )
 
 
-class UnacceptableCablePolicy(Exception):
-    """The submitted Cable Type and Cable Profile do not validate as a policy decision."""
+class UnacceptablePolicyDecision(Exception):
+    """A profile policy decision does not validate, or it would overwrite a row the actor cannot view."""
 
     def __init__(self, errors):
         self.errors = errors
         super().__init__("; ".join(errors))
 
 
-def _refuse_hidden_policy(actor, row) -> None:
+def _refuse_blind_overwrite(actor, row) -> None:
     """Refuse a blind policy write against a row this actor cannot read."""
     if row is None or row.__class__.objects.restrict(actor, "view").filter(pk=row.pk).exists():
         return
-    from .cable_disclosure import POLICY_WRITE_REFUSED
-
-    raise UnacceptableCablePolicy([POLICY_WRITE_REFUSED])
+    raise UnacceptablePolicyDecision([POLICY_WRITE_REFUSED])
 
 
-def _refuse_moved_policy(locked_profile, reviewed_fingerprint) -> None:
+def refuse_moved_policy(locked_profile, reviewed_fingerprint) -> None:
     """Refuse a decision made against a policy that has already moved under this preview.
 
     A preview revision is per session, so it cannot see another operator's profile edit.
@@ -132,12 +136,12 @@ def save_cable_class_mapping_and_replan(
         lookup = {"profile": locked_profile, "cable_class": cable_class}
         # The row is read under the lock, so the form validates what the write will replace.
         stored = CableClassMapping.objects.filter(**lookup).first()
-        _refuse_hidden_policy(actor, stored)
-        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        _refuse_blind_overwrite(actor, stored)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
         instance = stored or CableClassMapping(**lookup)
         form = CableClassMappingForm({**data, "cable_class": cable_class}, instance=instance)
         if not form.is_valid():
-            raise UnacceptableCablePolicy(_form_messages(form))
+            raise UnacceptablePolicyDecision(_form_messages(form))
         save_permission_scoped_object(
             actor,
             CableClassMapping,
@@ -175,14 +179,14 @@ def save_cable_segment_override_and_replan(
         # The row is read under the lock, so the form validates what the write will replace.
         stored = CableSegmentOverride.objects.filter(**lookup).first()
         deciding = stored or CableClassMapping.objects.filter(profile=locked_profile, cable_class=cable_class).first()
-        _refuse_hidden_policy(actor, deciding)
-        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        _refuse_blind_overwrite(actor, deciding)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
         instance = stored or CableSegmentOverride(**lookup)
         instance.source_trace_identity = trace_identity
         instance.segment_index = segment_index
         form = CableSegmentOverrideForm(data, instance=instance)
         if not form.is_valid():
-            raise UnacceptableCablePolicy(_form_messages(form))
+            raise UnacceptablePolicyDecision(_form_messages(form))
         save_permission_scoped_object(
             actor,
             CableSegmentOverride,
@@ -211,8 +215,8 @@ def clear_cable_segment_override_and_replan(
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
         stored = CableSegmentOverride.objects.filter(profile=locked_profile, segment_key=segment_key).first()
-        _refuse_hidden_policy(actor, stored)
-        _refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        _refuse_blind_overwrite(actor, stored)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
         if stored is not None:
             delete_permission_scoped_objects(actor, CableSegmentOverride.objects.filter(pk=stored.pk))
         # atomic-exit-safe: segment-override-cleared-and-replanned
@@ -229,6 +233,8 @@ def save_trace_device_resolution_and_replan(
     selected_device_id,
     search,
     limit,
+    offset,
+    reviewed_fingerprint,
 ):
     """Persist one offered Device selection, then request a fresh Import Plan."""
     from .netbox_reader import NetBoxReader
@@ -236,12 +242,17 @@ def save_trace_device_resolution_and_replan(
 
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
-        reader = NetBoxReader.for_actor(actor).for_planning_context(planning_context)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        reader = NetBoxReader.for_actor(actor).for_planning_context(
+            planning_context, output_kinds=locked_profile.output_kinds
+        )
         offered = eligible_trace_devices(
+            profile=locked_profile,
             reader=reader,
             evidence=evidence,
             search=search,
             limit=limit,
+            offset=offset,
             lock_rows=True,
         )
         chosen = next(
@@ -272,16 +283,107 @@ def save_trace_device_resolution_and_replan(
         return plan, chosen
 
 
-_DIAGNOSTIC_MESSAGES = {
+class IneligibleLocationSelection(Exception):
+    """The selected Location is not a visible Location of the selected Site."""
+
+
+def save_trace_location_resolution_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    source_location_key,
+    selected_location_id,
+    reviewed_fingerprint,
+):
+    """Map one source Location path to a visible Location of the selected Site, then replan."""
+    from .netbox_reader import NetBoxReader
+    from .trace_location_resolution import site_locations
+
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        lookup = {
+            "profile": locked_profile,
+            "source_location_key": source_location_key,
+            "source_location_key_digest": index_digest(source_location_key),
+        }
+        stored = TraceLocationResolution.objects.filter(
+            profile=locked_profile, source_location_key_digest=lookup["source_location_key_digest"]
+        ).first()
+        _refuse_blind_overwrite(actor, stored)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        reader = NetBoxReader.for_actor(actor).for_planning_context(
+            planning_context, output_kinds=locked_profile.output_kinds
+        )
+        # The recheck locks the target, so it cannot leave the Site before this decision commits.
+        location = site_locations(reader).filter(pk=selected_location_id).select_for_update(of=("self",)).first()
+        if location is None:
+            raise IneligibleLocationSelection(f"Location {selected_location_id} is not a visible Location of the Site.")
+        values = {"selected_location_id": location.pk, "selected_display_name": str(location)}
+        TraceLocationResolution(**lookup, **values).full_clean(validate_unique=False, validate_constraints=False)
+        save_permission_scoped_object(actor, TraceLocationResolution, lookup, values)
+        # atomic-exit-safe: location-mapping-saved-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+def clear_trace_location_resolution_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    source_location_key,
+    reviewed_fingerprint,
+):
+    """Drop one source Location mapping, so the path gives no Location evidence, then replan."""
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        stored = TraceLocationResolution.objects.filter(
+            profile=locked_profile, source_location_key_digest=index_digest(source_location_key)
+        ).first()
+        _refuse_blind_overwrite(actor, stored)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        if stored is not None:
+            delete_permission_scoped_objects(actor, TraceLocationResolution.objects.filter(pk=stored.pk))
+        # atomic-exit-safe: location-mapping-cleared-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+def _media_family_message(display) -> str:
+    """Return the wording for one media mismatch from its redacted segments."""
+    segments = display["segments"]
+    statements = []
+    for segment in segments:
+        position = segment["segment_index"] + 1
+        if not segment["visible"]:
+            hidden = POLICY_HIDDEN if segment["origin"] == "policy" else "a Cable you cannot view"
+            statements.append(f"segment {position} uses {hidden}")
+            continue
+        family = cable_media_family_label(segment["family"])
+        statement = f"segment {position} is {cable_type_label(segment['cable_type'])} ({family})"
+        if segment["retained"]:
+            statement += ", on the Cable this import keeps"
+        statements.append(statement)
+    remedy = (
+        "Correct those Cables in NetBox, then re-read."
+        if all(segment["retained"] for segment in segments)
+        else "Force the segment that states the wrong medium, or correct the source."
+    )
+    return f"Verified pass-throughs join these segments, and {'; '.join(statements)}. {remedy}"
+
+
+# Operator wording per code: a sentence, or a function of the presented display.
+_DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     "cable.ambiguous_mapped_peer": (
         "NetBox maps this port to several peer ports. Choose the peer port this trace continues through."
     ),
     "cable.attribute_drift": "The existing Cable carries attributes this import would not have written.",
     "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Set the Cable policy for it.",
-    "cable.media_family_mismatch": (
-        "Verified pass-throughs join segments that state different media families. "
-        "Force the segment that states the wrong medium, or correct the Cable in NetBox."
+    "cable.incompatible_terminations": (
+        "NetBox cannot cable these two terminations together. Choose another termination for the end that is wrong."
     ),
+    "cable.media_family_mismatch": _media_family_message,
     "cable.multi_termination_conflict": (
         "A Cable with several terminations on one side holds a port this trace needs. Correct that Cable in NetBox."
     ),
@@ -307,7 +409,7 @@ _DIAGNOSTIC_MESSAGES = {
     "cable.segment_reused": "An existing Cable already proves this segment, so the import keeps it.",
     "cable.segment_self_connection": "Both ends of this segment name one termination. Correct the source path.",
     "cable.termination_kind_mismatch": (
-        "The saved selection is a different kind of port than the stated PortClass. Choose the termination again."
+        "The stated PortClass does not admit the kind of port the saved selection names. Choose the termination again."
     ),
     "cable.termination_occupied": (
         "Another Cable already occupies this termination. "
@@ -316,7 +418,9 @@ _DIAGNOSTIC_MESSAGES = {
     "cable.termination_unresolved": (
         "No single port on the resolved Device matches this name. Choose the termination for it."
     ),
-    "cable.unsupported_termination_kind": "A Cable can end on an Interface, a Front Port, or a Rear Port only.",
+    "cable.unsupported_termination_kind": (
+        "The saved selection is not a kind of port this import can cable. Choose the termination again."
+    ),
     "device.add_permission": "Permission denied: dcim.add_device",
     "device.already_bound": "Another source row is already linked to this device.",
     "device.ambiguous_asset_tag": "Multiple devices have this asset tag.",
@@ -451,11 +555,12 @@ def _states_a_trace(unit: SynchronizationUnit) -> bool:
 
 
 def _diagnostic_message(diagnostic) -> str:
-    """Return the operator wording for one diagnostic."""
-    message = str(diagnostic.display.get("message") or "") or _DIAGNOSTIC_MESSAGES.get(diagnostic.code, diagnostic.code)
+    """Return the operator wording for one diagnostic, which must be a presentation copy."""
+    wording = _DIAGNOSTIC_MESSAGES.get(diagnostic.code, diagnostic.code)
+    message = str(diagnostic.display.get("message") or "") or (
+        wording(diagnostic.display) if callable(wording) else wording
+    )
     if diagnostic.code == "cable.segment_override_lost":
-        from .cable_disclosure import CABLE_SEGMENT_OVERRIDE_ROW, DISCLOSURE_SOURCE, POLICY_VISIBLE
-
         source = diagnostic.display.get(DISCLOSURE_SOURCE)
         if (
             diagnostic.display.get(POLICY_VISIBLE) is True
@@ -677,6 +782,15 @@ class TraceAction:
     reason: str = ""
 
 
+def _termination_model_name(label: str) -> str:
+    """Return the NetBox name of the model one resolved termination selected, or nothing while open."""
+    if not label:
+        return ""
+    from django.apps import apps
+
+    return str(apps.get_model(label)._meta.verbose_name)
+
+
 @dataclass(frozen=True)
 class TraceWorkspaceUnit:
     """One Source Trace as the review workspace shows it."""
@@ -723,7 +837,10 @@ class TraceWorkspaceUnit:
             resolution_started=bool(workspace.get("resolution_started")),
             topology_known=bool(workspace.get("topology_known")),
             devices=[dict(item) for item in workspace.get("devices") or ()],
-            terminations=[dict(item) for item in workspace.get("terminations") or ()],
+            terminations=[
+                {**item, "selected_model": _termination_model_name(item["selected_type"])}
+                for item in workspace.get("terminations") or ()
+            ],
             findings=findings,
             actions=cls._actions(unit, findings, str(display.get("detail") or "")),
         )
@@ -742,15 +859,38 @@ class TraceWorkspaceUnit:
         return (sync,)
 
 
+def _asked_termination(record: dict, devices: dict) -> AskedTermination | None:
+    """Return the question one termination record states, or None when the record lacks its source values."""
+    from .field_keys import parse_termination_field_key
+    from .trace_device_resolution import DeviceEvidence
+
+    try:
+        device = DeviceEvidence.from_dict(devices[parse_termination_field_key(record["field_key"])["device"]])
+        return AskedTermination(field_key=record["field_key"], device=device, port=record["source_port"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 class ReviewWorkspace:
     """Read-only presentation of the accepted Import Plan."""
 
     def __init__(self, plan: ImportPlan, viewer):
+        if viewer is None:
+            raise TypeError("ReviewWorkspace requires a live viewer.")
+        self.plan = plan
+        self._viewer = viewer
+
+    @cached_property
+    def _presentation_units(self) -> tuple:
+        """Return the viewer's redacted copy, built on first use so a command that renders nothing reads nothing."""
         from .cable_disclosure import present_units
 
-        self.plan = plan
-        self._presentation_units = present_units(plan.units, viewer)
-        self.units = tuple(WorkspaceUnit.from_unit(unit) for unit in self._presentation_units)
+        return present_units(self.plan.units, self._viewer)
+
+    @cached_property
+    def units(self) -> tuple[WorkspaceUnit, ...]:
+        """Return the presentation of every unit, in plan order."""
+        return tuple(WorkspaceUnit.from_unit(unit) for unit in self._presentation_units)
 
     @classmethod
     def from_dict(cls, data: dict, viewer) -> ReviewWorkspace:
@@ -792,6 +932,20 @@ class ReviewWorkspace:
         Cached because one page reads it twice, and each build reserializes every change.
         """
         return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self._presentation_units if _states_a_trace(unit))
+
+    @cached_property
+    def asked_terminations(self) -> MappingProxyType:
+        """Return each termination question this preview asked, by field key, with the source values it matched.
+
+        A key the source states two ways, or a record without its source values, maps to None, so no
+        lookup guesses which source spelling the question meant.
+        """
+        asked: dict[str, set] = {}
+        for trace in self.traces:
+            devices = {item.get("key"): item for item in trace.devices}
+            for item in trace.terminations:
+                asked.setdefault(item["field_key"], set()).add(_asked_termination(item, devices))
+        return MappingProxyType({key: next(iter(found)) if len(found) == 1 else None for key, found in asked.items()})
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:
         """Return the unit and every unit owning a change it depends on, transitively.
@@ -1018,4 +1172,4 @@ class ReviewWorkspace:
         return replace(unit, **values)
 
 
-__all__ = ("AutoMatchSummary", "ReviewWorkspace", "WorkspaceUnit")
+__all__ = ("AutoMatchSummary", "ReviewWorkspace", "WorkspaceUnit", "refuse_moved_policy")

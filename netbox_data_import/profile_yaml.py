@@ -123,6 +123,10 @@ _SCHEMAS_BY_KEY = {schema.key: schema for schema in _POLICY_DOCUMENT_SCHEMAS}
 _PROFILE_FIELDS = ("description", "source_adapter")
 
 
+class ProfileDocumentInvalid(Exception):
+    """A profile YAML document breaks the document schema, and the message names the part that does."""
+
+
 class DuplicateYamlKeyError(ConstructorError):
     """A YAML mapping repeats a key whose first value would otherwise be discarded."""
 
@@ -297,16 +301,18 @@ def _serialize_policy_row(schema: PolicyDocumentSchema, row) -> dict[str, Any]:
 def _validate_document_shape(data: Any) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     """Validate the document container and return its profile and section mappings."""
     if not isinstance(data, dict) or "profile" not in data:
-        raise ValueError("YAML must contain a top-level 'profile' key.")
+        raise ProfileDocumentInvalid("YAML must contain a top-level 'profile' key.")
+    _require_string_keys(data, "Top-level")
     profile_data = data["profile"]
     if not isinstance(profile_data, dict):
-        raise TypeError("The 'profile' value must be a mapping (dict), not a scalar or list.")
+        raise ProfileDocumentInvalid("The 'profile' value must be a mapping (dict), not a scalar or list.")
+    _require_string_keys(profile_data, "'profile'")
     if not profile_data.get("name"):
-        raise ValueError("Profile YAML must include a 'name' field.")
+        raise ProfileDocumentInvalid("Profile YAML must include a 'name' field.")
 
     unknown = sorted(set(data) - {"profile", *_SCHEMAS_BY_KEY})
     if unknown:
-        raise ValueError(f"Unknown profile YAML section(s): {', '.join(unknown)}")
+        raise ProfileDocumentInvalid(f"Unknown profile YAML section(s): {', '.join(unknown)}")
 
     sections = {}
     for key in data:
@@ -314,15 +320,23 @@ def _validate_document_shape(data: Any) -> tuple[dict[str, Any], dict[str, list[
             continue
         value = data[key]
         if not isinstance(value, list):
-            raise ValueError(  # noqa: TRY004 - Keep the established document-validation interface.
+            raise ProfileDocumentInvalid(
                 f"'{key}' must be a list of mappings; use [] to explicitly remove all entries, "
                 f"got {type(value).__name__}."
             )
         for index, row in enumerate(value, 1):
             if not isinstance(row, dict):
-                raise TypeError(f"'{key}[{index}]' must be a mapping, got {type(row).__name__}.")
+                raise ProfileDocumentInvalid(f"'{key}[{index}]' must be a mapping, got {type(row).__name__}.")
+            _require_string_keys(row, f"'{key}[{index}]'")
         sections[key] = value
     return profile_data, sections
+
+
+def _require_string_keys(mapping: dict, label: str) -> None:
+    """Reject a key that is not a string: YAML also reads a number, a boolean or a date as a key."""
+    for key in mapping:
+        if not isinstance(key, str):
+            raise ProfileDocumentInvalid(f"{label} keys must be strings, got {key!r}.")
 
 
 def _profile_values(profile_data: dict[str, Any]) -> dict[str, Any]:
@@ -330,7 +344,7 @@ def _profile_values(profile_data: dict[str, Any]) -> dict[str, Any]:
     accepted = {"name", "adapter_config", *_PROFILE_FIELDS}
     unknown = sorted(set(profile_data) - accepted)
     if unknown:
-        raise ValueError(f"Unknown profile key(s): {', '.join(unknown)}")
+        raise ProfileDocumentInvalid(f"Unknown profile key(s): {', '.join(unknown)}")
     values = {field: profile_data[field] for field in _PROFILE_FIELDS if field in profile_data}
     if "adapter_config" in profile_data:
         values["adapter_config"] = profile_data["adapter_config"]
@@ -342,17 +356,23 @@ def _validate_section_applicability(profile: ImportProfile, sections: dict[str, 
     for key in sections:
         section = policy_section(key)
         if section is None or not section.applies_to(profile.output_kinds):
-            raise ValueError(f"Policy section '{key}' does not apply to source adapter '{profile.source_adapter}'.")
+            raise ProfileDocumentInvalid(
+                f"Policy section '{key}' does not apply to source adapter '{profile.source_adapter}'."
+            )
 
 
 def _prepare_policy_row(schema: PolicyDocumentSchema, row: dict[str, Any], index: int, actor=None) -> dict[str, Any]:
     """Validate one row's keys and resolve its stable related-object references."""
     missing = [field for field in schema.required_fields if field not in row]
     if missing:
-        raise ValueError(f"'{schema.key}[{index}]' missing required key(s): {', '.join(missing)}")
+        raise ProfileDocumentInvalid(f"'{schema.key}[{index}]' missing required key(s): {', '.join(missing)}")
     unknown = sorted(set(row) - set(schema.fields))
     if unknown:
-        raise ValueError(f"'{schema.key}[{index}]' has unknown key(s): {', '.join(unknown)}")
+        raise ProfileDocumentInvalid(f"'{schema.key}[{index}]' has unknown key(s): {', '.join(unknown)}")
+    # An identity or a lookup compares one value, so a list or a mapping there cannot name a row.
+    for name in (*schema.identity_fields, *(natural_key.name for natural_key in schema.natural_keys)):
+        if isinstance(row.get(name), (dict, list)):
+            raise ProfileDocumentInvalid(f"'{schema.key}[{index}]' key '{name}' must be a single value.")
 
     prepared = dict(row)
     for natural_key in schema.natural_keys:
@@ -365,7 +385,7 @@ def _prepare_policy_row(schema: PolicyDocumentSchema, row: dict[str, Any], index
         try:
             prepared[natural_key.name] = visible.get(**{natural_key.lookup: value})
         except related_model.DoesNotExist as exc:
-            raise ValueError(
+            raise ProfileDocumentInvalid(
                 f"{schema.key}[{index}]: {related_model._meta.verbose_name.title()} with "
                 f"{natural_key.lookup} '{value}' not found"
             ) from exc
@@ -379,7 +399,7 @@ def _validate_distinct_policy_identities(schema: PolicyDocumentSchema, rows: lis
         identity = tuple(row[name] for name in schema.identity_fields)
         if identity in seen:
             display = "/".join(str(value) for value in identity)
-            raise ValueError(f"Duplicate {schema.key} identity: {display}")
+            raise ProfileDocumentInvalid(f"Duplicate {schema.key} identity: {display}")
         seen.add(identity)
 
 
@@ -454,7 +474,13 @@ def _validate_instance(instance, label: str) -> None:
             message = "; ".join(f"{field}: {', '.join(errors)}" for field, errors in exc.message_dict.items())
         else:
             message = "; ".join(exc.messages)
-        raise ValueError(f"Validation error in {label}: {message}") from exc
+        raise ProfileDocumentInvalid(f"Validation error in {label}: {message}") from exc
 
 
-__all__ = ("DuplicateYamlKeyError", "apply_profile_document", "load_yaml_document", "serialize_profile")
+__all__ = (
+    "DuplicateYamlKeyError",
+    "ProfileDocumentInvalid",
+    "apply_profile_document",
+    "load_yaml_document",
+    "serialize_profile",
+)

@@ -17,15 +17,18 @@ import json
 import logging
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 logger = logging.getLogger(__name__)
 
 _DIAGNOSTIC_CODE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*\.[a-z0-9]+(?:_[a-z0-9]+)*$")
+
+# Diagnostic code namespace -> the display validator its Target Module registers at application start.
+_DISPLAY_VALIDATORS: dict[str, Callable[[str, dict], None]] = {}
 
 
 class PlanError(Exception):
@@ -123,6 +126,24 @@ def _frozen_json(value: Any, label: str) -> Any:
     except (TypeError, ValueError) as exc:
         logger.warning("%s is not JSON-serializable plan data.", label, exc_info=True)
         raise PlanInvalid(f"{label} must be JSON-serializable plan data.") from exc
+
+
+def register_diagnostic_display(namespace: str, validator: Callable[[str, dict], None]) -> None:
+    """Register the validator that refuses an unknown display field for every code in *namespace*.
+
+    The validator raises ValueError. A namespace no Target Module registers is not checked: only a
+    registered display carries row text that a render must recheck.
+    """
+    registered = _DISPLAY_VALIDATORS.setdefault(namespace, validator)
+    if registered is not validator:
+        raise ValueError(f"Diagnostic namespace '{namespace}' already has a display validator.")
+
+
+def validate_diagnostic_display(code: str, display: Mapping[str, Any]) -> None:
+    """Raise ValueError when the validator registered for the code's namespace refuses *display*."""
+    validator = _DISPLAY_VALIDATORS.get(code.partition(".")[0])
+    if validator is not None:
+        validator(code, _thaw_json(display))
 
 
 def _plan_mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -225,14 +246,20 @@ class Diagnostic:
 
     @classmethod
     def from_dict(cls, data: dict) -> Diagnostic:
-        """Rebuild a diagnostic from its serialized form."""
-        return cls(
+        """Rebuild a diagnostic, refusing a display field its namespace's registered validator does not permit.
+
+        A cached plan can predate a display change, and an unknown field can hold a value no render
+        rechecks, so the plan has to be planned again instead of reused.
+        """
+        diagnostic = cls(
             code=data["code"],
             severity=data["severity"],
             identities=tuple(data.get("identities", ())),
             display=data.get("display", {}),
             evidence=data.get("evidence", {}),
         )
+        validate_diagnostic_display(diagnostic.code, diagnostic.display)
+        return diagnostic
 
 
 @dataclass(frozen=True)
@@ -559,4 +586,6 @@ __all__ = (
     "fingerprint_of",
     "is_current_schema_version",
     "merge_changes",
+    "register_diagnostic_display",
+    "validate_diagnostic_display",
 )

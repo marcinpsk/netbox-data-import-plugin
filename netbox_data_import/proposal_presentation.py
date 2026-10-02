@@ -41,14 +41,18 @@ RECENT_PROPOSAL_HISTORY_LIMIT = 10
 
 
 def group_terminations(fields):
-    """Keep exact matches without proposal history in the compact settled group."""
+    """Keep exact matches without proposal history in the compact settled group.
+
+    An end of a segment NetBox cannot cable stays in attention, so its picker can correct the match.
+    """
     attention, settled = [], []
     for field in fields:
-        display = field["proposal"]
-        group = (
-            settled if display["field_state"] == AUTOMATICALLY_RESOLVED and not field["proposal_history"] else attention
+        settles = (
+            field["proposal"]["field_state"] == AUTOMATICALLY_RESOLVED
+            and not field["proposal_history"]
+            and not field["incompatible"]
         )
-        group.append(field)
+        (settled if settles else attention).append(field)
     return attention, settled
 
 
@@ -61,13 +65,19 @@ def _action(key, label, reason):
     }
 
 
+# Freshness reads NetBox from the source values the preview states, and this preview states none for the field.
+PROPOSAL_FRESHNESS_UNCHECKED = "This preview does not state this field's source values, so freshness is unchecked."
+
+
 class ProposalPresentation:
     """Read one profile's proposal display with one backend lookup per response."""
 
-    def __init__(self, *, profile, actor, reader):
+    def __init__(self, *, profile, actor, reader, asked):
         self.profile = profile
         self.actor = actor
         self.reader = reader
+        # The questions the preview asked, by field key, which every NetBox read starts from.
+        self.asked = asked
         self._inventory = {}
         self._write_assessments = {}
         self.preview_allowed = ImportProfile.objects.restrict(actor, "change").filter(pk=profile.pk).exists()
@@ -151,6 +161,8 @@ class ProposalPresentation:
         inventory = self.field_inventory(field) if proposal is not None or self.preview_allowed else None
         if self.reader is None:
             payload["staleness_error"] = "The saved import target is gone or outside your view scope."
+        elif proposal is not None and inventory is None:
+            payload["staleness_error"] = PROPOSAL_FRESHNESS_UNCHECKED
         elif proposal is not None:
             stale = proposal_staleness(proposal, inventory=inventory)
             payload["staleness"] = {
@@ -162,15 +174,16 @@ class ProposalPresentation:
         return payload
 
     def field_inventory(self, field):
-        """Return one cached inventory read for fields that share device, kind, and role."""
+        """Return one cached inventory read for fields that share Device evidence, kind, and role."""
         parsed = parse_termination_field_key(field["field_key"])
-        if self.reader is None or parsed["role"] != TERMINATION_ROLE:
+        asked = self.asked.get(field["field_key"])
+        if self.reader is None or parsed["role"] != TERMINATION_ROLE or asked is None:
             return None
-        key = (parsed["device"], parsed["kind"], parsed["role"])
+        key = (asked.device, parsed["kind"], parsed["role"])
         if key not in self._inventory:
             self._inventory[key] = proposal_task(SELECT_TERMINATION_TASK).inventory(
                 profile=self.profile,
-                field_key=field["field_key"],
+                asked=asked,
                 netbox_reader=self.reader,
                 limit=proposal_eligible_set_limit(),
             )

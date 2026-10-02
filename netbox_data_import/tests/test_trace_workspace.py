@@ -6,22 +6,23 @@ import copy
 import re
 from io import BytesIO
 
-from dcim.models import Cable, Device, FrontPort, Interface, RearPort, Site
+from dcim.models import Cable, Device, FrontPort, Interface, PortMapping, PowerOutlet, PowerPort, RearPort, Site
 from django.db import connection
-from django.test import TestCase, TransactionTestCase
+from django.test import Client, TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils.html import escape
 from extras.models import Tag
 
+from netbox_data_import.cable_disclosure import TERMINATION_HIDDEN, TERMINATION_SOURCES
 from netbox_data_import.cable_policy import cable_type_label
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
 from netbox_data_import import adapters as adapter_registry
 from netbox_data_import.adapters import TraceWorkbookAdapter
 from netbox_data_import.catalog import OutputKind
-from netbox_data_import.field_keys import termination_field_key
+from netbox_data_import.field_keys import MAPPED_PEER_ROLE, termination_field_key
 from netbox_data_import.models import CableClassMapping, CableSegmentOverride, ImportProfile, TerminationResolution
-from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
+from netbox_data_import.plan import Disposition, ImportPlan, PlanInvalid, PlannedChange, SynchronizationUnit
 from netbox_data_import.preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
@@ -29,14 +30,19 @@ from netbox_data_import.preview_row_actions import (
 )
 from netbox_data_import.review_workspace import _SUMMARY_KEYS, ReviewWorkspace
 from netbox_data_import.tests.test_cable_module import (
+    DEVICE_A,
+    DEVICE_B,
+    SERVER_PSU,
     CableTopologyMixin,
     direct_path,
     patched_path,
+    power_path,
 )
 from netbox_data_import.tests.helpers import (
     assert_absent_from,
     cables_on,
     competing_write_during,
+    executed_sql,
     trace_endpoint_line,
     trace_segment,
     trace_termination,
@@ -44,7 +50,13 @@ from netbox_data_import.tests.helpers import (
     user_with_object_permission,
 )
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
-from netbox_data_import.views import _review_workspace_url, _trace_workspace_url
+from netbox_data_import.views import (
+    CANDIDATE_OFFSET_INVALID,
+    CANDIDATE_OFFSET_MAX,
+    TERMINATION_UNRESOLVABLE,
+    _review_workspace_url,
+    _trace_workspace_url,
+)
 
 
 class _MixedOutputTestAdapter(TraceWorkbookAdapter):
@@ -653,20 +665,20 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
     def test_sync_ends_the_preview_when_its_target_went_after_the_render(self):
         """The replan the sync now makes reads the planning target, which can go while it is reviewed."""
         from core.models import Job
-        from dcim.models import Location
+        from tenancy.models import Tenant
 
-        location = Location.objects.create(name="Room 9", slug="room-9", site=self.site)
+        tenant = Tenant.objects.create(name="Tenant 9", slug="tenant-9")
         self.client.force_login(self.actor)
         upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(),)))
         upload.name = "traces.xlsx"
         self.client.post(
             reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "location": location.pk, "excel_file": upload},
+            {"profile": self.profile.pk, "site": self.site.pk, "tenant": tenant.pk, "excel_file": upload},
             follow=True,
         )
         workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         chosen = workspace.context["traces"][0]
-        Location.objects.filter(pk=location.pk).delete()
+        Tenant.objects.filter(pk=tenant.pk).delete()
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
@@ -681,15 +693,15 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
     def test_the_workspace_ends_the_preview_when_its_target_goes_after_the_live_plan(self):
         """The proposal display resolves the target again, so loss after planning must still be contained."""
-        from dcim.models import Location
+        from tenancy.models import Tenant
 
-        location = Location.objects.create(name="Room 10", slug="room-10", site=self.site)
+        tenant = Tenant.objects.create(name="Tenant 10", slug="tenant-10")
         self.client.force_login(self.actor)
         upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(),)))
         upload.name = "traces.xlsx"
         self.client.post(
             reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "location": location.pk, "excel_file": upload},
+            {"profile": self.profile.pk, "site": self.site.pk, "tenant": tenant.pk, "excel_file": upload},
             follow=True,
         )
         target_reads = 0
@@ -697,11 +709,11 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         def delete_target_before_second_read(execute, sql, params, many, context):
             nonlocal deleting, target_reads
-            if not deleting and 'FROM "dcim_location"' in sql and params and location.pk in params:
+            if not deleting and 'FROM "tenancy_tenant"' in sql and params and tenant.pk in params:
                 target_reads += 1
                 if target_reads == 2:
                     deleting = True
-                    Location.objects.filter(pk=location.pk).delete()
+                    Tenant.objects.filter(pk=tenant.pk).delete()
                     deleting = False
             return execute(sql, params, many, context)
 
@@ -709,7 +721,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
             response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), follow=True)
 
         self.assertEqual(target_reads, 2)
-        self.assertFalse(Location.objects.filter(pk=location.pk).exists())
+        self.assertFalse(Tenant.objects.filter(pk=tenant.pk).exists())
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
         self.assertContains(response, "The saved import target is no longer available.")
         self.assertFalse(self.client.session["import_preview_pending"])
@@ -1450,27 +1462,43 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
     def setUpTestData(cls):
         cls.build_topology()
 
-    def open_workspace(self, *blocks):
+    def open_workspace(self, *blocks, client=None):
         """Upload the given path blocks and leave the wizard on a materialized preview."""
-        self.client.force_login(self.actor)
+        client = client or self.client
+        client.force_login(self.actor)
         upload = BytesIO(trace_workbook_bytes(path_blocks=blocks))
         upload.name = "traces.xlsx"
-        response = self.client.post(
+        response = client.post(
             reverse("plugins:netbox_data_import:import_setup"),
             {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
             follow=True,
         )
         self.assertEqual(response.status_code, 200)
 
-    def open_blocked_workspace(self):
+    def open_blocked_workspace(self, client=None):
         """Leave the wizard on a preview whose one trace waits on a termination decision."""
         self.open_workspace(
             direct_path(
                 from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
                 to_end=trace_termination("DEV-B", "", "eth1", "Port"),
-            )
+            ),
+            client=client,
         )
         return termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface")
+
+    def resolve(self, field_key, port, client=None):
+        """Post one termination decision the way the picker posts it, asking for JSON."""
+        client = client or self.client
+        return client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_termination"),
+            {
+                "field_key": field_key,
+                "object_type": port._meta.label_lower,
+                "object_id": port.pk,
+                "preview_revision": client.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+            headers={"accept": "application/json"},
+        )
 
     def candidates(self, field_key, **params):
         """Ask the picker endpoint the way the picker itself asks: JSON, with the revision."""
@@ -1521,6 +1549,194 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         self.assertEqual(payload["shown"], 3)
         self.assertEqual(payload["total"], 7)
 
+    def test_a_termination_on_a_later_page_is_offered_and_saved_from_that_page(self):
+        """The picker pages past the first twenty candidates, and the write rechecks the page it offered."""
+        field_key = self.open_blocked_workspace()
+        spares = [
+            Interface.objects.create(device=self.device_a, name=f"spare-{number:02}", type="1000base-t")
+            for number in range(1, 22)
+        ]
+        choice = {
+            "field_key": field_key,
+            "object_type": "dcim.interface",
+            "object_id": spares[-1].pk,
+            "search": "spare",
+            "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+        }
+        url = reverse("plugins:netbox_data_import:trace_resolve_termination")
+
+        second = self.candidates(field_key, search="spare", offset=20).json()
+        refused = self.client.post(url, choice, headers={"accept": "application/json"})
+        malformed = self.client.post(url, {**choice, "offset": "-1"}, headers={"accept": "application/json"})
+        saved = self.client.post(url, {**choice, "offset": 20}, headers={"accept": "application/json"})
+
+        self.assertEqual(
+            ([item["id"] for item in second["candidates"]], second["total"], second["offset"]),
+            ([spares[-1].pk], 21, 20),
+        )
+
+        self.assertEqual(refused.status_code, 400)
+        self.assertContains(malformed, CANDIDATE_OFFSET_INVALID, status_code=400)
+        self.assertEqual(saved.status_code, 302, saved.content)
+        self.assertEqual(TerminationResolution.objects.get(profile=self.profile).selected_object_id, spares[-1].pk)
+
+    def test_the_picker_rejects_invalid_offsets(self):
+        """A malformed or negative offset is an invalid request."""
+        field_key = self.open_blocked_workspace()
+
+        for offset in ("next", "-1", str(CANDIDATE_OFFSET_MAX + 1), str(2**63)):
+            with self.subTest(offset=offset):
+                response = self.candidates(field_key, offset=offset)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["error"], CANDIDATE_OFFSET_INVALID)
+
+    def panel_rear(self, panel, name, fronts):
+        """Add one rear port to *panel* whose front ports all map to it, and return those front ports."""
+        rear = RearPort.objects.create(device=panel, name=name, type="8p8c", positions=len(fronts))
+        ports = []
+        for position, front_name in enumerate(fronts, 1):
+            front = FrontPort.objects.create(device=panel, name=front_name, type="8p8c")
+            PortMapping.objects.create(
+                front_port=front, rear_port=rear, front_port_position=1, rear_port_position=position
+            )
+            ports.append(front)
+        return ports
+
+    def test_a_mapped_peer_question_offers_the_peers_of_the_rear_port_the_plan_matched(self):
+        """A capital sharp s folds to "ss" in the field key, but the picker starts from the source spelling."""
+        Device.objects.filter(name="PANEL-1", site=self.site).delete()
+        panel = self.make_device("PANEL-1")
+        own = {
+            "STRAẞE": self.panel_rear(panel, "STRAẞE", ("F1", "F2")),
+            "Straße": self.panel_rear(panel, "Straße", ("F3", "F4")),
+        }
+        for spelling, fronts in own.items():
+            with self.subTest(spelling=spelling):
+                rear = trace_termination("PANEL-1", "", spelling, "Punch-Down")
+                self.open_workspace(
+                    (
+                        trace_endpoint_line(DEVICE_A),
+                        trace_endpoint_line(DEVICE_B),
+                        (
+                            trace_segment(DEVICE_A, "Patch", rear),
+                            trace_segment(rear, "Trunk", trace_termination("PANEL-2", "", "R1", "Punch-Down")),
+                            trace_segment(trace_termination("PANEL-2", "", "F1", "Position Front"), "Patch", DEVICE_B),
+                        ),
+                    )
+                )
+                field_key = termination_field_key(
+                    device="PANEL-1", cards="", port=spelling, kind="rear_port", role=MAPPED_PEER_ROLE
+                )
+
+                payload = self.candidates(field_key).json()
+
+                self.assertEqual(
+                    ([item["id"] for item in payload["candidates"]], payload["total"]),
+                    ([front.pk for front in fronts], 2),
+                )
+
+    def test_a_device_named_with_a_capital_sharp_s_offers_its_ports(self):
+        """The resolved Device comes from the source label the plan matched, not from the folded key."""
+        device = self.make_device("STRAẞE-SW")
+        port = Interface.objects.create(device=device, name="uplink", type="1000base-t")
+        self.open_workspace(
+            direct_path(from_end=trace_termination("STRAẞE-SW", "", "absent-port", "Port"), to_end=DEVICE_B)
+        )
+        field_key = termination_field_key(device="STRAẞE-SW", cards="", port="absent-port", kind="interface")
+
+        payload = self.candidates(field_key).json()
+
+        self.assertEqual(([item["id"] for item in payload["candidates"]], payload["total"]), ([port.pk], 1))
+
+    def test_a_cached_question_without_its_source_spelling_is_refused_rather_than_guessed(self):
+        """A plan cached before the record kept its source spelling names no port, so the read and the write refuse."""
+        field_key = self.open_blocked_workspace()
+        session = self.client.session
+        plan = session[PREVIEW_PLAN_SESSION_KEY]
+        for unit in plan["units"]:
+            for record in unit["display"].get("trace", {}).get("terminations", ()):
+                record.pop("source_port")
+        session[PREVIEW_PLAN_SESSION_KEY] = plan
+        session.save()
+
+        read = self.candidates(field_key)
+        write = self.resolve(field_key, self.eth0)
+
+        self.assertEqual((read.status_code, read.json()["error"]), (400, TERMINATION_UNRESOLVABLE))
+        self.assertContains(write, TERMINATION_UNRESOLVABLE, status_code=400)
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+
+    def test_a_candidate_deleted_after_ranking_drops_out_of_the_read_and_the_write(self):
+        """A port deleted between the ranked page and its row load is not offered, and nothing fails."""
+        field_key = self.open_blocked_workspace()
+        gone = [
+            Interface.objects.create(device=self.device_a, name=f"race-gone-{number}", type="1000base-t")
+            for number in range(2)
+        ]
+        kept = Interface.objects.create(device=self.device_a, name="race-kept", type="1000base-t")
+        gone_ids = [port.pk for port in gone]
+
+        def delete_after_ranking(port):
+            ranked = []
+
+            def wrapper(execute, sql, params, many, context):
+                result = execute(sql, params, many, context)
+                # Only the ranking query orders the raw name by the bytewise collation.
+                if not ranked and '"name" COLLATE "C"' in sql:
+                    ranked.append(sql)
+                    port.delete()
+                return result
+
+            return wrapper
+
+        with connection.execute_wrapper(delete_after_ranking(gone[0])):
+            read = self.candidates(field_key, search="race")
+        with connection.execute_wrapper(delete_after_ranking(gone[1])):
+            saved = self.client.post(
+                reverse("plugins:netbox_data_import:trace_resolve_termination"),
+                {
+                    "field_key": field_key,
+                    "object_type": kept._meta.label_lower,
+                    "object_id": kept.pk,
+                    "search": "race",
+                    "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+                },
+                headers={"accept": "application/json"},
+            )
+
+        self.assertEqual(read.status_code, 200, read.content[:300])
+        self.assertEqual([item["id"] for item in read.json()["candidates"]], [gone_ids[1], kept.pk])
+        self.assertEqual(saved.status_code, 302, saved.content[:300])
+        self.assertEqual(TerminationResolution.objects.get(profile=self.profile).selected_object_id, kept.pk)
+        self.assertFalse(Interface.objects.filter(pk__in=gone_ids).exists())
+
+    def test_the_largest_offset_reads_an_empty_page_and_an_overflowing_write_is_refused(self):
+        """The bound leaves room for one page, and the write applies the same bound as the read."""
+        field_key = self.open_blocked_workspace()
+        port = Interface.objects.get(device=self.device_a, name="eth0")
+
+        with executed_sql() as statements:
+            last = self.candidates(field_key, offset=CANDIDATE_OFFSET_MAX)
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_termination"),
+            {
+                "field_key": field_key,
+                "object_type": port._meta.label_lower,
+                "object_id": port.pk,
+                "offset": 2**63,
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+            headers={"accept": "application/json"},
+        )
+
+        self.assertEqual(last.status_code, 200)
+        self.assertEqual((last.json()["candidates"], last.json()["offset"]), ([], CANDIDATE_OFFSET_MAX))
+        self.assertGreater(last.json()["total"], 0)
+        self.assertContains(refused, CANDIDATE_OFFSET_INVALID, status_code=400)
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+        self.assertEqual([sql for sql in statements if "OFFSET" in sql], [])
+
     def test_the_picker_rejects_invalid_limits(self):
         """A malformed or out-of-range limit is an invalid request."""
         field_key = self.open_blocked_workspace()
@@ -1546,6 +1762,86 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
 
         self.assertEqual([item["name"] for item in payload["candidates"]], ["mgmt0"])
         self.assertEqual(payload["total"], 1)
+
+    def test_the_picker_names_the_object_type_and_model_of_every_candidate(self):
+        """An interface claim offers console and power ports too, so each candidate states its model."""
+        field_key = self.open_blocked_workspace()
+        PowerPort.objects.create(device=self.device_a, name="psu0")
+
+        payload = self.candidates(field_key).json()
+
+        self.assertEqual(
+            [(item["object_type"], item["model"], item["name"]) for item in payload["candidates"]],
+            [("dcim.interface", "interface", "eth0"), ("dcim.powerport", "power port", "psu0")],
+        )
+        self.assertEqual((payload["shown"], payload["total"]), (2, 2))
+
+    def test_a_power_port_that_shares_an_interface_id_is_saved_as_the_power_port(self):
+        """A candidate is its model and its id together, so one numeric id never selects the other row."""
+        field_key = self.open_blocked_workspace()
+        shared_id = 900_001
+        Interface.objects.create(pk=shared_id, device=self.device_a, name="eth-shared", type="1000base-t")
+        PowerPort.objects.create(pk=shared_id, device=self.device_a, name="psu-shared")
+        offered = self.candidates(field_key).json()["candidates"]
+        self.assertEqual(
+            sorted((item["object_type"], item["id"]) for item in offered if item["id"] == shared_id),
+            [("dcim.interface", shared_id), ("dcim.powerport", shared_id)],
+        )
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_termination"),
+            {
+                "field_key": field_key,
+                "object_type": "dcim.powerport",
+                "object_id": shared_id,
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        stored = TerminationResolution.objects.get(profile=self.profile, field_key=field_key)
+        self.assertEqual(
+            (stored.selected_object_type.app_label, stored.selected_object_type.model, stored.selected_object_id),
+            ("dcim", "powerport", shared_id),
+        )
+        self.assertEqual(stored.selected_display_name, "psu-shared")
+
+    def test_both_ends_of_an_incompatible_segment_stay_open_to_the_picker(self):
+        """An automatic match NetBox cannot cable is offered for correction, not settled out of sight."""
+        PowerOutlet.objects.create(device=self.make_device("PDU-1"), name="OUT1")
+        self.open_workspace(direct_path(to_end=trace_termination("PDU-1", "", "OUT1", "Port")))
+        expected = [
+            termination_field_key(device="DEV-A", cards="", port="eth0", kind="interface"),
+            termination_field_key(device="PDU-1", cards="", port="OUT1", kind="interface"),
+        ]
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertEqual([item["field_key"] for item in response.context["attention_terminations"]], expected)
+        self.assertEqual(response.context["settled_terminations"], [])
+        html = response.content.decode()
+        for field_key in expected:
+            button = re.search(rf'<button\b[^>]*data-trace-picker="{re.escape(escape(field_key))}"[^>]*>', html)
+            self.assertIsNotNone(button, field_key)
+            self.assertNotIn("disabled", button.group())
+
+    def test_a_settled_termination_names_the_model_it_resolved_to(self):
+        """The Kind cell states the selected object's own model, not the kind the PortClass claims."""
+        PowerPort.objects.create(device=self.device_a, name="PSU1")
+        PowerOutlet.objects.create(device=self.make_device("PDU-1"), name="OUT1")
+        self.open_workspace(
+            direct_path(
+                from_end=trace_termination("DEV-A", "", "PSU1", "Port"),
+                to_end=trace_termination("PDU-1", "", "OUT1", "Port"),
+            )
+        )
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        settled = re.search(r"<details\b[^>]*data-trace-settled.*?</details>", response.content.decode(), re.DOTALL)
+        self.assertIsNotNone(settled)
+        self.assertRegex(settled.group(), r"<td>DEV-A PSU1</td>\s*<td>power port</td>")
+        self.assertRegex(settled.group(), r"<td>PDU-1 OUT1</td>\s*<td>power outlet</td>")
 
     def test_choosing_a_candidate_saves_the_decision_and_replans(self):
         """The decision is a TerminationResolution row, and the plan is asked for again."""
@@ -1687,6 +1983,34 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertFalse(TerminationResolution.objects.filter(field_key=elsewhere).exists())
+
+    def test_the_picker_refuses_a_field_key_the_workspace_never_asked_about(self):
+        """The candidate read answers only a question this preview asked, as the resolve command does."""
+        self.open_blocked_workspace()
+        # PANEL-1 exists in NetBox, but this workbook never names it.
+        elsewhere = termination_field_key(device="PANEL-1", cards="", port="F1", kind="front_port")
+
+        response = self.candidates(elsewhere)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json(), {"ok": False, "error": "This preview asked no question about that termination."}
+        )
+
+    def test_a_termination_decision_against_a_moved_policy_is_refused(self):
+        """Two sessions on one profile: the revision is per session, the fingerprint is not."""
+        field_key = self.open_blocked_workspace()
+        other = Client()
+        self.open_blocked_workspace(client=other)
+        self.assertEqual(self.resolve(field_key, self.eth0, client=other).status_code, 302)
+        later_choice = Interface.objects.create(device=self.device_a, name="eth9", type="1000base-t")
+
+        refused = self.resolve(field_key, later_choice)
+
+        self.assertEqual(refused.status_code, 409)
+        self.assertIn("policy changed since this preview was planned", refused.json()["error"])
+        stored = TerminationResolution.objects.get(profile=self.profile, field_key=field_key)
+        self.assertEqual(stored.selected_object_id, self.eth0.pk)
 
     def test_a_stale_form_post_is_refused_by_the_resolve_command(self):
         """A decision taken against a preview that has moved on is not the decision it looks like."""
@@ -1949,6 +2273,52 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
         self.assertTrue(cables_on(second).exists())
         self.assertTrue(cables_on(other).exists())
 
+    def test_a_media_warning_on_a_blocked_trace_does_not_stop_an_independent_sync(self):
+        """The queued plan carries every unit, so a presentation-only display field would fail in the worker."""
+        from core.models import Job
+
+        from netbox_data_import.models import ExecutionOutcome, ImportExecution
+
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(cable_type="mmf-om4")
+        spare = Interface.objects.create(device=self.device_a, name="spare", type="1000base-t")
+        self.connect(self.eth0, spare)
+        second = Interface.objects.create(device=self.make_device("DEV-G"), name="eth0", type="1000base-t")
+        other = Interface.objects.create(device=self.make_device("DEV-H"), name="eth0", type="1000base-t")
+        independent = direct_path(
+            from_end=trace_termination("DEV-G", "", "eth0", "Port"),
+            to_end=trace_termination("DEV-H", "", "eth0", "Port"),
+        )
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(), independent)))
+        upload.name = "traces.xlsx"
+        self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        traces = {trace.endpoints["from"]: trace for trace in workspace.context["traces"]}
+        blocked = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY]).unit(
+            traces["DEV-A eth0"].identity
+        )
+        self.assertEqual(blocked.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.media_family_mismatch", [item.code for item in blocked.diagnostics])
+
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {
+                "identity": traces["DEV-G eth0"].identity,
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+        )
+        self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
+        self.run_rq_jobs()
+
+        execution = ImportExecution.objects.get()
+        self.assertEqual(execution.outcome, ExecutionOutcome.SUCCEEDED, execution.failure_detail)
+        self.assertTrue(cables_on(second, other).exists())
+        self.assertFalse(cables_on(self.eth0, self.panel_1_fronts[0]).exists())
+
     def test_a_replanned_trace_is_executed_again_rather_than_reported_done(self):
         """One trace identity spans two workbooks, so the execution key cannot be the selection alone."""
         from core.models import Job
@@ -2033,10 +2403,10 @@ class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
 
     def test_a_target_deleted_while_the_decision_saves_ends_the_preview_with_its_reason(self):
         """The saved decision replans, so a target removed under it must not answer a 500."""
-        from dcim.models import Location
         from django.db.models.signals import post_save
+        from tenancy.models import Tenant
 
-        location = Location.objects.create(name="Room 1", slug="room-1", site=self.site)
+        tenant = Tenant.objects.create(name="Tenant 1", slug="tenant-1")
         self.client.force_login(self.actor)
         upload = BytesIO(
             trace_workbook_bytes(
@@ -2051,14 +2421,14 @@ class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
         upload.name = "traces.xlsx"
         self.client.post(
             reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "location": location.pk, "excel_file": upload},
+            {"profile": self.profile.pk, "site": self.site.pk, "tenant": tenant.pk, "excel_file": upload},
             follow=True,
         )
         field_key = termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface")
 
-        # The location goes on another connection between the eligibility recheck and the replan.
+        # The tenant goes on another connection between the eligibility recheck and the replan.
         with competing_write_during(
-            post_save, TerminationResolution, lambda: Location.objects.filter(pk=location.pk).delete()
+            post_save, TerminationResolution, lambda: Tenant.objects.filter(pk=tenant.pk).delete()
         ) as (observed, blocked):
             response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_resolve_termination"),
@@ -2074,7 +2444,7 @@ class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
 
         self.assertTrue(observed, "the decision never reached its TerminationResolution write")
         self.assertFalse(blocked, "the target deletion must complete before the replan")
-        self.assertFalse(Location.objects.filter(pk=location.pk).exists())
+        self.assertFalse(Tenant.objects.filter(pk=tenant.pk).exists())
         self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
         self.assertContains(response, "The saved import target is no longer available.")
@@ -2302,6 +2672,402 @@ class TraceWorkspaceCableDisclosureTest(CableTopologyMixin, TransactionTestCase)
         assert_absent_from(self, stored, label)
         assert_absent_from(self, stored, description)
         assert_absent_from(self, stored, tag_name)
+
+
+class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTestCase):
+    """Recheck cached termination names and models against the viewer of each workspace render."""
+
+    TERMINATION_MODELS = (Interface, FrontPort, RearPort, PowerPort, PowerOutlet)
+
+    def setUp(self):
+        self.build_topology()
+        self.build_power_topology()
+        # A NetBox label makes each port's display differ from the source text that names it.
+        ports = (self.eth0, self.eth1, self.psu, self.outlet, self.panel_1_rear, self.panel_2_rear)
+        for component in (*ports, *self.panel_1_fronts, *self.panel_2_fronts):
+            component.label = f"netbox-{component._meta.model_name}-{component.pk}"
+            component.save()
+        self.viewer = user_with_object_permission(
+            "trace-port-viewer",
+            [
+                (ImportProfile, ("view", "change"), {}),
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                *((model, ("view",), {}) for model in self.TERMINATION_MODELS),
+                (Cable, ("view", "add", "delete"), {}),
+            ],
+        )
+        self.client.force_login(self.viewer)
+
+    def open_workspace(self, *blocks):
+        """Upload the path blocks through the real setup flow and render the workspace."""
+        upload = BytesIO(trace_workbook_bytes(path_blocks=blocks))
+        upload.name = "traces.xlsx"
+        setup = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        self.assertEqual(setup.status_code, 200)
+        return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+    def set_view(self, model, allowed: bool):
+        """Grant or revoke the viewer's read access to one termination model, then drop cached grants."""
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+        from users.models import ObjectPermission
+
+        permission = ObjectPermission.objects.get(name=f"trace-port-viewer {model.__name__} view")
+        permission.enabled = allowed
+        permission.save(update_fields=("enabled",))
+        clear_user_permission_caches(self.viewer)
+
+    def reload(self):
+        """Render the cached preview again, as a browser reload does."""
+        return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+    def presented(self):
+        """Return the accepted plan and its presentation for the viewer, as the workspace builds them."""
+        workspace = ReviewWorkspace.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY], self.viewer)
+        return workspace.plan.units[0], workspace._presentation_units[0]
+
+    def test_revoking_view_hides_the_name_and_model_of_each_resolved_kind_on_reload(self):
+        """Every Cable End Kind the reviewed plan resolved hides its port name and model once hidden."""
+        cases = (
+            (Interface, patched_path()),
+            (FrontPort, patched_path()),
+            (RearPort, patched_path()),
+            (PowerPort, power_path()),
+            (PowerOutlet, power_path()),
+        )
+        for model, block in cases:
+            with self.subTest(model=model.__name__):
+                for granted in self.TERMINATION_MODELS:
+                    self.set_view(granted, True)
+                label = model._meta.label_lower
+                visible = self.open_workspace(block)
+                fields = {item["field_key"]: item for item in visible.context["selected_trace"].terminations}
+                hidden_keys = {key for key, item in fields.items() if item["selected_type"] == label}
+                self.assertTrue(hidden_keys)
+                names = {fields[key]["selected"] for key in hidden_keys}
+                for name in names:
+                    self.assertContains(visible, name)
+                # A planned end reads "<Device> <port name>", which names the port of that model.
+                displays = {f"{port.device} {port.name}" for port in model.objects.all()}
+                ends = [
+                    (segment["index"], end)
+                    for segment in visible.context["segment_policy_forms"]
+                    for end in ("left", "right")
+                    if segment[end] in displays
+                ]
+                self.assertTrue(ends)
+                self.set_view(model, False)
+
+                cached = self.reload()
+
+                for item in cached.context["selected_trace"].terminations:
+                    hidden = item["field_key"] in hidden_keys
+                    self.assertEqual(item["selected"] == TERMINATION_HIDDEN, hidden, item)
+                    self.assertEqual(item["selected_model"] == "", hidden, item)
+                for name in names:
+                    self.assertNotContains(cached, name)
+                segments = {segment["index"]: segment for segment in cached.context["segment_policy_forms"]}
+                for index, end in ends:
+                    self.assertEqual(segments[index][end], TERMINATION_HIDDEN)
+                shown_ends = [
+                    segment[end]
+                    for segment in cached.context["segment_policy_forms"]
+                    for end in ("left", "right")
+                    if (segment["index"], end) not in ends
+                ]
+                self.assertNotIn(TERMINATION_HIDDEN, shown_ends)
+
+    def test_the_incompatible_diagnostic_redacts_a_hidden_end_and_keeps_the_accepted_plan(self):
+        """A hidden end removes both models and its identity from the presented finding only."""
+        self.open_workspace(direct_path(from_end=SERVER_PSU, to_end=DEVICE_B))
+        accepted, _presented = self.presented()
+        finding = next(item for item in accepted.diagnostics if item.code == "cable.incompatible_terminations")
+        self.assertEqual(
+            (finding.display["left_model"], finding.display["right_model"]), ("dcim.powerport", "dcim.interface")
+        )
+        psu_identity = f"dcim.powerport:{self.psu.pk}"
+        self.assertIn(psu_identity, finding.identities)
+        self.set_view(PowerPort, False)
+
+        page = self.reload()
+        accepted, presented = self.presented()
+
+        shown = next(item for item in presented.diagnostics if item.code == "cable.incompatible_terminations")
+        self.assertEqual(
+            (shown.display["left_model"], shown.display["right_model"]), (TERMINATION_HIDDEN, TERMINATION_HIDDEN)
+        )
+        self.assertNotIn(TERMINATION_SOURCES, shown.display)
+        self.assertNotIn(psu_identity, shown.identities)
+        self.assertIn(f"dcim.interface:{self.eth1.pk}", shown.identities)
+        assert_absent_from(self, [diagnostic.to_dict() for diagnostic in presented.diagnostics], psu_identity)
+        unchanged = next(item for item in accepted.diagnostics if item.code == "cable.incompatible_terminations")
+        self.assertEqual(unchanged, finding)
+        self.assertNotContains(page, str(self.psu))
+
+    def test_a_finding_keeps_a_visible_port_it_names_outside_its_identities(self):
+        """The mapped peers of a refused pass-through are named by source alone, and still render while visible."""
+        RearPort.objects.create(device=self.panel_1, name="R2", type="8p8c", positions=1)
+        rear_identity = f"dcim.rearport:{self.panel_1_rear.pk}"
+        device_a = trace_termination("DEV-A", "", "eth0", "Port")
+        path = (
+            trace_endpoint_line(device_a),
+            trace_endpoint_line(DEVICE_B),
+            (
+                trace_segment(device_a, "Patch", trace_termination("PANEL-1", "", "F1", "Position Front")),
+                trace_segment(
+                    trace_termination("PANEL-1", "", "R2", "Punch-Down"),
+                    "Trunk",
+                    trace_termination("PANEL-2", "", "R1", "Punch-Down"),
+                ),
+                trace_segment(trace_termination("PANEL-2", "", "F1", "Position Front"), "Patch", DEVICE_B),
+            ),
+        )
+        self.open_workspace(path)
+        _accepted, presented = self.presented()
+        finding = next(item for item in presented.diagnostics if item.code == "cable.pass_through_not_mapped")
+        self.assertNotIn(rear_identity, finding.identities)
+        self.assertEqual(list(finding.display["mapped"]), [str(self.panel_1_rear)])
+        self.set_view(RearPort, False)
+
+        _accepted, presented = self.presented()
+
+        finding = next(item for item in presented.diagnostics if item.code == "cable.pass_through_not_mapped")
+        self.assertEqual(list(finding.display["mapped"]), [])
+        self.assertEqual((finding.display["entry"], finding.display["exit"]), (TERMINATION_HIDDEN, TERMINATION_HIDDEN))
+
+    def test_a_deleted_termination_redacts_its_cached_name(self):
+        """A row that no longer exists cannot authorize its cached port name."""
+        visible = self.open_workspace(power_path())
+        self.assertContains(visible, str(self.outlet))
+        name = str(self.outlet)
+        self.outlet.delete()
+
+        cached = self.reload()
+
+        self.assertNotContains(cached, name)
+        selected = {item["label"]: item["selected"] for item in cached.context["selected_trace"].terminations}
+        self.assertEqual(selected["PDU-1 OUT1"], TERMINATION_HIDDEN)
+
+    def test_revoking_view_on_a_device_hides_its_cached_name_on_reload(self):
+        """A Device question and a planned end name the resolved Device only while the viewer may view it."""
+        from users.models import ObjectPermission
+
+        from netbox_data_import.cable_disclosure import DEVICE_HIDDEN
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+
+        # NetBox spells the Device apart from the source label, so the page shows it only where NetBox names it.
+        Device.objects.filter(pk=self.device_a.pk).update(name="Dev-A")
+        visible = self.open_workspace(patched_path())
+        self.assertContains(visible, "Dev-A")
+        permission = ObjectPermission.objects.get(name="trace-port-viewer Device view")
+        permission.constraints = {"name__in": ["DEV-B", "PANEL-1", "PANEL-2"]}
+        permission.save()
+        clear_user_permission_caches(self.viewer)
+
+        cached = self.reload()
+
+        self.assertNotContains(cached, "Dev-A")
+        devices = {item["key"]: item["selected"] for item in cached.context["selected_trace"].devices}
+        self.assertEqual(devices["dev-a"], DEVICE_HIDDEN)
+        self.assertEqual(devices["dev-b"], "DEV-B")
+        ends = [(segment["left"], segment["right"]) for segment in cached.context["segment_policy_forms"]]
+        self.assertEqual(ends[0][0], TERMINATION_HIDDEN)
+        self.assertNotIn(TERMINATION_HIDDEN, [end for pair in ends for end in pair][1:])
+
+    def test_a_saved_selection_the_viewer_cannot_view_names_no_port_in_any_copy(self):
+        """A saved decision's stored port name reaches neither the plan, the page, nor the queued Job."""
+        from core.models import Job, ObjectType
+        from django_rq import get_queue
+        from users.models import ObjectPermission
+
+        from netbox_data_import.field_keys import SELECT_TERMINATION_TASK
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+
+        hidden_interface = Interface.objects.create(device=self.device_a, name="saved-hidden-if", type="1000base-t")
+        hidden_front = FrontPort.objects.create(device=self.panel_2, name="saved-hidden-front", type="8p8c")
+        for (device, port), selected in ((("DEV-A", "eth0"), hidden_interface), (("DEV-B", "eth1"), hidden_front)):
+            TerminationResolution.objects.create(
+                profile=self.profile,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key=termination_field_key(device=device, cards="", port=port, kind="interface"),
+                selected_object_type=ObjectType.objects.get_for_model(selected),
+                selected_object_id=selected.pk,
+                selected_display_name=str(selected),
+            )
+        for model, hidden in ((Interface, hidden_interface), (FrontPort, hidden_front)):
+            permission = ObjectPermission.objects.get(name=f"trace-port-viewer {model.__name__} view")
+            permission.constraints = {"id__in": list(model.objects.exclude(pk=hidden.pk).values_list("pk", flat=True))}
+            permission.save()
+        clear_user_permission_caches(self.viewer)
+        names = (str(hidden_interface), str(hidden_front))
+
+        page = self.open_workspace(patched_path(), power_path())
+        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        blocked = next(unit for unit in accepted.units if unit.disposition == Disposition.BLOCKED)
+        self.assertEqual(
+            {item.code for item in blocked.diagnostics}
+            & {"cable.termination_unresolved", "cable.termination_kind_mismatch"},
+            {"cable.termination_unresolved", "cable.termination_kind_mismatch"},
+        )
+        actionable = next(unit for unit in accepted.units if unit.disposition == Disposition.ACTIONABLE)
+        queued = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {
+                "identity": actionable.identity,
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+        )
+
+        self.assertEqual(queued.status_code, 302)
+        job = Job.objects.latest("pk")
+        worker_input = get_queue(job.queue_name).fetch_job(str(job.job_id)).kwargs["accepted_plan"]
+        self.assertEqual(len(worker_input["units"]), 2)
+        for name in names:
+            self.assertNotContains(page, name)
+            assert_absent_from(self, accepted.to_dict(), name)
+            assert_absent_from(self, worker_input, name)
+
+    def test_a_cached_plan_with_a_removed_display_field_is_refused_before_reuse_or_enqueue(self):
+        """A plan cached before the saved port name left the diagnostics still carries it, so it is never reused."""
+        from core.models import Job
+
+        self.open_workspace(
+            direct_path(from_end=trace_termination("DEV-A", "", "absent-port", "Port")),
+            power_path(),
+        )
+        session = self.client.session
+        stale = session[PREVIEW_PLAN_SESSION_KEY]
+        pre_change = 0
+        for unit in stale["units"]:
+            for diagnostic in unit["diagnostics"]:
+                if diagnostic["code"] == "cable.termination_unresolved":
+                    diagnostic["display"]["selected_display_name"] = "saved-hidden-port"
+                    pre_change += 1
+        session[PREVIEW_PLAN_SESSION_KEY] = stale
+        session.save()
+        actionable = next(unit["identity"] for unit in stale["units"] if unit["disposition"] == Disposition.ACTIONABLE)
+        jobs = Job.objects.count()
+
+        queued = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {"identity": actionable, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
+            follow=True,
+        )
+
+        self.assertGreater(pre_change, 0)
+        self.assertEqual(Job.objects.count(), jobs)
+        with self.assertRaises(PlanInvalid):
+            ImportPlan.from_dict(stale)
+        self.assertContains(queued, "No import preview in progress.")
+        self.assertNotContains(queued, "saved-hidden-port")
+        self.assertNotContains(self.reload(), "saved-hidden-port", status_code=302)
+
+    def test_a_cached_port_name_without_an_authorizable_source_redacts_on_render(self):
+        """The workspace does not trust a cached port name whose source is missing or malformed."""
+        self.open_workspace(power_path())
+        original = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        invalid_sources = (None, "1", {"kind": "dcim.cable", "pk": self.psu.pk}, {"kind": "dcim.powerport"})
+
+        for source in (*invalid_sources, "missing"):
+            with self.subTest(source=source):
+                data = copy.deepcopy(original)
+                trace = data["units"][0]["display"]["trace"]
+                field = next(item for item in trace["terminations"] if item["selected_type"] == "dcim.powerport")
+                segment = trace["segments"][0]
+                if source == "missing":
+                    for mapping, key in (
+                        (field, "disclosure_source"),
+                        (segment, "left_sources"),
+                        (segment, "right_sources"),
+                    ):
+                        mapping.pop(key, None)
+                else:
+                    field["disclosure_source"] = source
+                    # Each end keeps its valid Device source, so only the port source can hide it.
+                    for key in ("left_sources", "right_sources"):
+                        segment[key][0] = source
+                session = self.client.session
+                session[PREVIEW_PLAN_SESSION_KEY] = data
+                session.save()
+
+                response = self.reload()
+
+                self.assertNotContains(response, str(self.psu))
+                trace = response.context["selected_trace"]
+                psu = next(item for item in trace.terminations if item["label"] == "DEV-A PSU1")
+                self.assertEqual((psu["selected"], psu["selected_model"]), (TERMINATION_HIDDEN, ""))
+                ends = response.context["segment_policy_forms"][0]
+                self.assertEqual((ends["left"], ends["right"]), (TERMINATION_HIDDEN, TERMINATION_HIDDEN))
+
+    def test_a_cached_device_name_without_an_authorizable_source_redacts_on_render(self):
+        """The workspace does not trust a cached Device name whose source is missing or malformed."""
+        from netbox_data_import.cable_disclosure import DEVICE_HIDDEN
+
+        self.open_workspace(power_path())
+        original = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        invalid_sources = (None, "1", {"kind": "dcim.interface", "pk": self.device_a.pk}, {"kind": "dcim.device"})
+
+        for source in (*invalid_sources, "missing"):
+            with self.subTest(source=source):
+                data = copy.deepcopy(original)
+                trace = data["units"][0]["display"]["trace"]
+                question = next(item for item in trace["devices"] if item["key"] == "dev-a")
+                ends = trace["segments"][0]["left_sources"]
+                if source == "missing":
+                    question.pop("disclosure_source")
+                    ends.pop()
+                else:
+                    question["disclosure_source"] = ends[1] = source
+                session = self.client.session
+                session[PREVIEW_PLAN_SESSION_KEY] = data
+                session.save()
+
+                response = self.reload()
+
+                devices = {item["key"]: item["selected"] for item in response.context["selected_trace"].devices}
+                self.assertEqual((devices["dev-a"], devices["pdu-1"]), (DEVICE_HIDDEN, "PDU-1"))
+                segment = response.context["segment_policy_forms"][0]
+                self.assertEqual(segment["left"], TERMINATION_HIDDEN)
+                self.assertEqual(segment["right"], f"PDU-1 {self.outlet.name}")
+
+    def test_termination_sources_stay_out_of_the_accepted_fingerprint(self):
+        """Live presentation removes port and Device names without moving any accepted decision input."""
+        from dataclasses import replace
+
+        plan = self.plan(direct_path(from_end=SERVER_PSU, to_end=DEVICE_B), actor=self.viewer)
+
+        def remove_sources(value):
+            if isinstance(value, dict):
+                for key in ("disclosure_source", "left_sources", "right_sources", TERMINATION_SOURCES):
+                    value.pop(key, None)
+                for child in value.values():
+                    remove_sources(child)
+            elif isinstance(value, list):
+                for child in value:
+                    remove_sources(child)
+            return value
+
+        # The objects are rebuilt directly, because deserialization refuses a display without its sources.
+        stripped = replace(
+            plan,
+            units=tuple(
+                replace(
+                    unit,
+                    display=remove_sources(unit.to_dict()["display"]),
+                    diagnostics=tuple(
+                        replace(item, display=remove_sources(item.to_dict()["display"])) for item in unit.diagnostics
+                    ),
+                )
+                for unit in plan.units
+            ),
+        )
+
+        self.assertNotEqual(stripped.to_dict(), plan.to_dict())
+        self.assertEqual(stripped.fingerprint, plan.fingerprint)
 
 
 class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase):
@@ -2737,15 +3503,12 @@ class TraceWorkspacePolicyDisclosureTest(CableTopologyMixin, TransactionTestCase
         session[PREVIEW_PLAN_SESSION_KEY] = data
         session.save()
 
-        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), follow=True)
 
-        finding = next(
-            item
-            for item in response.context["selected_trace"].findings
-            if item["code"] == "cable.media_family_mismatch"
-        )
-        self.assertIn("a Cable you cannot view", finding["message"])
-        self.assertNotIn(cable_type_label("mmf-om4"), finding["message"])
+        with self.assertRaises(PlanInvalid):
+            ImportPlan.from_dict(data)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, cable_type_label("mmf-om4"))
 
     def test_policy_view_changes_only_presentation_not_the_plan_decision(self):
         """The unrestricted policy decision and fingerprint do not depend on policy view access."""

@@ -439,6 +439,7 @@ class BackgroundRefusalTest(TransactionTestCase):
         from netbox_data_import.plan import ImportPlan
         from netbox_data_import.profile_yaml import apply_profile_document, serialize_profile
         from netbox_data_import.proposal_decisions import accept_proposal, reject_proposal
+        from netbox_data_import.tests.helpers import asked_termination
 
         site = make_dcim_objects("Entry")[0]
         plan = ImportPlan(
@@ -455,7 +456,12 @@ class BackgroundRefusalTest(TransactionTestCase):
         entries = {
             "locked_resolution_policy": enter_resolution_lock,
             "accept_proposal": partial(
-                accept_proposal, 1, operator=self.user, netbox_reader=NetBoxReader.for_actor(self.user)
+                accept_proposal,
+                1,
+                asked=asked_termination(device="DEV-A", cards="", port="eth0", kind="interface"),
+                operator=self.user,
+                netbox_reader=NetBoxReader.for_actor(self.user),
+                reviewed_fingerprint=plan.profile_fingerprint,
             ),
             "reject_proposal": partial(reject_proposal, 1, operator=self.user),
             "apply_profile_document": partial(apply_profile_document, serialize_profile(self.profile), actor=self.user),

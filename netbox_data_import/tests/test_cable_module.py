@@ -3,6 +3,7 @@
 """Plan and write cable traces through the real adapter, engine, and Cable Target Module."""
 
 import json
+import re
 import secrets
 import uuid
 from contextlib import suppress
@@ -15,10 +16,15 @@ from dcim.models import (
     Cable,
     CableTermination,
     ConsolePort,
+    ConsoleServerPort,
     Device,
     FrontPort,
     Interface,
     PortMapping,
+    PowerFeed,
+    PowerOutlet,
+    PowerPanel,
+    PowerPort,
     RearPort,
     Site,
 )
@@ -36,7 +42,7 @@ from netbox_data_import.cable_policy import (
     cable_type_label,
     decisive_media_family,
 )
-from netbox_data_import.cable_target import CableModule, eligible_terminations
+from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT, CableModule, eligible_terminations
 from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import (
     MAPPED_PEER_ROLE,
@@ -61,6 +67,8 @@ from netbox_data_import.plan import Disposition, PlannedChange, Severity, finger
 from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.tests.helpers import (
+    asked_termination,
+    executed_sql,
     assert_absent_from,
     make_dcim_objects,
     competing_write_during,
@@ -82,6 +90,8 @@ PANEL_2_FRONT = trace_termination("PANEL-2", "", "F1", "Position Front")
 PANEL_2_REAR = trace_termination("PANEL-2", "", "R1", "Punch-Down")
 PANEL_3_FRONT = trace_termination("PANEL-3", "", "F1", "Position Front")
 PANEL_3_REAR = trace_termination("PANEL-3", "", "R1", "Punch-Down")
+SERVER_PSU = trace_termination("DEV-A", "", "PSU1", "Port")
+PDU_OUTLET = trace_termination("PDU-1", "", "OUT1", "Port")
 
 
 def patched_path(from_end=DEVICE_A, to_end=DEVICE_B):
@@ -103,6 +113,15 @@ def direct_path(from_end=DEVICE_A, to_end=DEVICE_B):
         trace_endpoint_line(from_end),
         trace_endpoint_line(to_end),
         (trace_segment(from_end, "Patch", to_end),),
+    )
+
+
+def power_path(from_end=SERVER_PSU, to_end=PDU_OUTLET):
+    """Return one path block whose single segment is a power cord the source records as two Ports."""
+    return (
+        trace_endpoint_line(from_end),
+        trace_endpoint_line(to_end),
+        (trace_segment(from_end, "Power", to_end),),
     )
 
 
@@ -163,6 +182,21 @@ class CableTopologyMixin:
         cls.planning_context = {"site_id": cls.site.pk, "location_id": None, "tenant_id": None}
 
     @classmethod
+    def build_power_topology(cls):
+        """Add a server power inlet, a PDU outlet, and the Cable policy a power cord plans with."""
+        CableClassMapping.objects.create(
+            profile=cls.profile,
+            cable_class="Power",
+            cable_type_resolved=True,
+            cable_type="power",
+            cable_profile_resolved=True,
+            cable_profile="single-1c1p",
+        )
+        cls.pdu = cls.make_device("PDU-1")
+        cls.psu = PowerPort.objects.create(device=cls.device_a, name="PSU1")
+        cls.outlet = PowerOutlet.objects.create(device=cls.pdu, name="OUT1")
+
+    @classmethod
     def make_device(cls, name):
         """Create one Device at the shared site."""
         return Device.objects.create(name=name, site=cls.site, device_type=cls.device_type, role=cls.role)
@@ -213,6 +247,10 @@ class CableTopologyMixin:
         )
         self.document = document
         return ImportEngine.plan(self.profile, document, actor or self.actor, self.planning_context)
+
+    def reader(self, actor=None):
+        """Return a reader scoped to *actor*, the superuser by default, bound to the import target."""
+        return NetBoxReader.for_actor(actor or self.actor).for_target(site=self.site)
 
     def unit(self, *blocks, actor=None):
         """Plan one path block and return the single unit it produces."""
@@ -444,7 +482,7 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         _panel, fronts, _rear = self.rebuild_panel("PANEL-1", fronts=2)
         blocked = self.unit(same_rear_port_path())
         self.assertEqual(blocked.disposition, Disposition.BLOCKED)
-        field_key = termination_field_key(
+        asked = asked_termination(
             device="PANEL-1",
             cards="",
             port="R1",
@@ -452,7 +490,7 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
             role=MAPPED_PEER_ROLE,
         )
         reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
-        result = eligible_terminations(field_key, reader, profile=self.profile)
+        result = eligible_terminations(asked, reader, profile=self.profile)
         self.assertEqual(result.candidates, tuple(fronts))
         self.save_resolution(PANEL_1_REAR, result.candidates[1], role=MAPPED_PEER_ROLE)
 
@@ -532,7 +570,8 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(unit.disposition, Disposition.BLOCKED)
         unresolved = next(item for item in unit.diagnostics if item.code == "cable.termination_unresolved")
-        self.assertEqual(unresolved.display["selected_display_name"], str(elsewhere))
+        self.assertEqual(unresolved.display, {"device": "DEV-A", "cards": "", "port": "eth0", "port_class": "Port"})
+        assert_absent_from(self, unit.to_dict(), str(elsewhere))
 
     def test_a_stored_termination_resolution_with_the_wrong_kind_is_blocked(self):
         """A FrontPort selection cannot satisfy a source reference whose PortClass claims a RearPort."""
@@ -544,7 +583,7 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         self.assertEqual(unit.changes, ())
         mismatch = next(item for item in unit.diagnostics if item.code == "cable.termination_kind_mismatch")
         self.assertEqual(mismatch.display["claimed_kind"], "rear_port")
-        self.assertEqual(mismatch.display["selected_kind"], "front_port")
+        self.assertEqual(mismatch.display["selected_object_type"], "dcim.frontport")
 
     def test_a_same_port_continuation_through_an_unmapped_port_is_invalid(self):
         """A rear port NetBox maps to nothing cannot continue the path to a second cable."""
@@ -557,14 +596,15 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         self.assertEqual(list(finding.display["mapped"]), [])
 
     def test_a_resolved_object_of_an_unsupported_kind_is_invalid(self):
-        """No operator decision makes a console port a cable end this module writes."""
-        console = ConsolePort.objects.create(device=self.device_a, name="con0", type="rj-45")
-        self.save_resolution(DEVICE_A, console)
+        """NetBox can cable a power feed, but no claimed kind admits one, so no decision makes it an end."""
+        feed = PowerFeed.objects.create(power_panel=PowerPanel.objects.create(site=self.site, name="PP-1"), name="F-1")
+        self.save_resolution(DEVICE_A, feed)
 
         unit = self.unit(patched_path())
 
         self.assertEqual(unit.disposition, Disposition.INVALID)
-        self.assertIn("cable.unsupported_termination_kind", self.codes(unit))
+        unsupported = next(item for item in unit.diagnostics if item.code == "cable.unsupported_termination_kind")
+        self.assertEqual(unsupported.display["selected_object_type"], "dcim.powerfeed")
 
     def test_a_contradicted_pass_through_claim_is_invalid(self):
         """A panel NetBox does not map cannot realize the path, and the finding names both ports."""
@@ -776,7 +816,9 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
             segments=(),
         )
         batch = SourceBatch(output_kinds=parsed.output_kinds, rows=(valid, invalid))
-        reader = NetBoxReader.for_actor(self.actor).for_planning_context(self.planning_context)
+        reader = NetBoxReader.for_actor(self.actor).for_planning_context(
+            self.planning_context, output_kinds=self.profile.output_kinds
+        )
 
         valid_unit, invalid_unit = CableModule().plan(batch, self.profile, None, reader)
         device_evidence = next(item for item in valid_unit.display["trace"]["devices"] if item["key"] == "dev-a")
@@ -792,7 +834,9 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         trace = parsed.rows[0]
         # SourceBatch.rows is typed dict | SourceTrace, so a dict is a legal argument here.
         batch = SourceBatch(output_kinds=parsed.output_kinds, rows=(trace, {"device": "DEV-A"}))
-        reader = NetBoxReader.for_actor(self.actor).for_planning_context(self.planning_context)
+        reader = NetBoxReader.for_actor(self.actor).for_planning_context(
+            self.planning_context, output_kinds=self.profile.output_kinds
+        )
 
         (unit,) = CableModule().plan(batch, self.profile, None, reader)
 
@@ -1128,6 +1172,272 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
 
         stored = CableImportSource.objects.get(cable=cable, profile=self.profile)
         self.assertEqual(stored.trace_identity, identity)
+
+
+class CableEndKindTest(CableTopologyMixin, TestCase):
+    """Section 6.1: the interface claim admits console and power ports, in one fixed match order."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+        cls.build_power_topology()
+
+    def termination_records(self, unit):
+        """Return the workspace termination records of one unit, keyed by source label."""
+        return {item["label"]: item for item in unit.display["trace"]["terminations"]}
+
+    def restricted_actor(self, username, *grants):
+        """Return an actor who may plan Cables and view Devices, plus the given model grants."""
+        return user_with_object_permission(
+            username,
+            [(Site, ("view",), {}), (Device, ("view",), {}), (Cable, ("add",), {}), *grants],
+        )
+
+    def test_an_interface_name_match_wins_over_a_power_port_of_the_same_name(self):
+        """The exact-name rule stops at the first admitted model that holds the name."""
+        interface = Interface.objects.create(device=self.device_a, name="02", type="1000base-t")
+        PowerPort.objects.create(device=self.device_a, name="02")
+
+        unit = self.unit(direct_path(from_end=trace_termination("DEV-A", "", "02", "Port")))
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(
+            self.termination_pairs(unit.changes[0]),
+            sorted([("dcim.interface", interface.pk), ("dcim.interface", self.eth1.pk)]),
+        )
+
+    def test_a_port_no_interface_matches_resolves_to_its_one_power_port(self):
+        """A power inlet and a PDU outlet the source records as Ports resolve automatically."""
+        unit = self.unit(power_path())
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(
+            self.termination_pairs(unit.changes[0]),
+            sorted([("dcim.poweroutlet", self.outlet.pk), ("dcim.powerport", self.psu.pk)]),
+        )
+        records = self.termination_records(unit)
+        self.assertEqual(
+            (records["DEV-A PSU1"]["state"], records["DEV-A PSU1"]["selected_type"]),
+            ("automatically resolved", "dcim.powerport"),
+        )
+        self.assertEqual(
+            (records["PDU-1 OUT1"]["state"], records["PDU-1 OUT1"]["selected_type"]),
+            ("automatically resolved", "dcim.poweroutlet"),
+        )
+
+    def test_several_interface_matches_never_fall_through_to_a_power_port(self):
+        """Several matches in the first model leave the field open, though a later model holds one."""
+        Interface.objects.create(device=self.device_a, name="Port 02", type="1000base-t")
+        Interface.objects.create(device=self.device_a, name="port 02", type="1000base-t")
+        PowerPort.objects.create(device=self.device_a, name="PORT 02")
+
+        unit = self.unit(direct_path(from_end=trace_termination("DEV-A", "", "port 02", "Port")))
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.termination_unresolved", self.codes(unit))
+        record = self.termination_records(unit)["DEV-A port 02"]
+        self.assertEqual((record["state"], record["selected"], record["selected_type"]), ("unresolved", "", ""))
+
+    def test_a_hidden_interface_match_never_falls_through_to_a_visible_power_port(self):
+        """Precedence reads every row, so a hidden match stops the rule and discloses nothing."""
+        hidden = Interface.objects.create(device=self.device_a, name="02", label="hidden-label", type="1000base-t")
+        PowerPort.objects.create(device=self.device_a, name="02")
+        source = trace_termination("DEV-A", "", "02", "Port")
+        actor = self.restricted_actor(
+            "cable-hidden-interface",
+            (Interface, ("view",), {"name__in": ["eth0", "eth1"]}),
+            (PowerPort, ("view",), {}),
+        )
+        self.assertFalse(actor.has_perm("dcim.view_interface", hidden))
+
+        unit = self.unit(direct_path(from_end=source), actor=actor)
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        unresolved = next(item for item in unit.diagnostics if item.code == "cable.termination_unresolved")
+        self.assertEqual(unresolved.display, {"device": "DEV-A", "cards": "", "port": "02", "port_class": "Port"})
+        self.assertEqual(unresolved.identities, ())
+        self.assertEqual(self.termination_records(unit)["DEV-A 02"]["state"], "unresolved")
+        assert_absent_from(self, unit.to_dict(), f"dcim.interface:{hidden.pk}")
+        assert_absent_from(self, unit.to_dict(), "hidden-label")
+
+    def test_a_hidden_second_match_leaves_the_field_open_for_every_actor(self):
+        """Two actors never resolve one source port to two objects, whatever each may view."""
+        Interface.objects.create(device=self.device_a, name="Xe02", type="1000base-t")
+        hidden = Interface.objects.create(device=self.device_a, name="xe02", label="hidden-label", type="1000base-t")
+        restricted = self.restricted_actor(
+            "cable-hidden-duplicate",
+            (Interface, ("view",), {"name__in": ["eth0", "eth1", "Xe02"]}),
+        )
+        source = trace_termination("DEV-A", "", "XE02", "Port")
+
+        for actor in (self.actor, restricted):
+            with self.subTest(actor=actor.username):
+                unit = self.unit(direct_path(from_end=source), actor=actor)
+
+                self.assertEqual(unit.disposition, Disposition.BLOCKED)
+                unresolved = next(item for item in unit.diagnostics if item.code == "cable.termination_unresolved")
+                self.assertEqual(
+                    unresolved.display, {"device": "DEV-A", "cards": "", "port": "XE02", "port_class": "Port"}
+                )
+                assert_absent_from(self, unit.to_dict(), f"dcim.interface:{hidden.pk}")
+
+    def test_the_exact_name_rule_compares_names_as_the_picker_search_does(self):
+        """Python folds both 'ẞ' and 'ß' to 'ss' and PostgreSQL does not, so only the database decides a match."""
+        from netbox_data_import.database_identity import database_identities
+
+        sharp = Interface.objects.create(device=self.device_a, name="Straße", type="1000base-t")
+        capital = Interface.objects.create(device=self.device_a, name="STRAẞE", type="1000base-t")
+        self.assertNotEqual(*database_identities(("Straße", "STRAẞE")).values())
+        asked = asked_termination(device="DEV-A", cards="", port="Straße", kind="interface")
+
+        for port, expected in (("STRASSE", sharp), ("straẞe", capital)):
+            with self.subTest(port=port):
+                unit = self.unit(direct_path(from_end=trace_termination("DEV-A", "", port, "Port")))
+                ranked = eligible_terminations(asked, self.reader(), profile=self.profile, search=port, limit=1)
+
+                self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+                self.assertIn(("dcim.interface", expected.pk), self.termination_pairs(unit.changes[0]))
+                self.assertEqual(ranked.candidates, (expected,))
+
+    def test_a_device_name_outside_ascii_resolves_to_its_namesake(self):
+        """A stored name and a source value are compared under one collation, so 'Straße' finds 'Straße'."""
+        device = self.make_device("Straße-1")
+        port = FrontPort.objects.create(device=device, name="Weiß", type="8p8c")
+        source = trace_termination("Straße-1", "", "eth9", "Port")
+        Interface.objects.create(device=device, name="eth9", type="1000base-t")
+        asked = asked_termination(device="Straße-1", cards="", port="Weiß", kind="front_port")
+
+        unit = self.unit(direct_path(from_end=source))
+        found = eligible_terminations(asked, self.reader(), profile=self.profile, search="Weiß")
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+        self.assertEqual(found.candidates, (port,))
+
+    def test_the_exact_name_rule_materializes_only_the_rows_it_compares(self):
+        """A dense Device is filtered by name identity in the database, never loaded whole."""
+        from django.db.models.signals import post_init
+
+        Interface.objects.bulk_create(
+            Interface(device=self.device_a, name=f"if-{number:04}", type="1000base-t") for number in range(400)
+        )
+        PowerPort.objects.bulk_create(PowerPort(device=self.device_a, name=f"pp-{number:04}") for number in range(400))
+        admitted = (Interface, ConsolePort, ConsoleServerPort, PowerPort, PowerOutlet)
+        materialized = []
+
+        def count(sender, instance, **kwargs):
+            materialized.append(sender)
+
+        for model in admitted:
+            post_init.connect(count, sender=model)
+        try:
+            unit = self.unit(direct_path())
+        finally:
+            for model in admitted:
+                post_init.disconnect(count, sender=model)
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+        self.assertLessEqual(len(materialized), 6, materialized)
+
+    def test_a_match_in_a_model_the_actor_cannot_view_at_all_stays_open(self):
+        """An actor with no power-port grant cannot resolve to a power port, and learns nothing of it."""
+        actor = self.restricted_actor("cable-no-power", (PowerOutlet, ("view",), {}))
+
+        unit = self.unit(power_path(), actor=actor)
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        records = self.termination_records(unit)
+        self.assertEqual(records["DEV-A PSU1"]["state"], "unresolved")
+        self.assertEqual(records["PDU-1 OUT1"]["state"], "automatically resolved")
+        assert_absent_from(self, unit.to_dict(), f"dcim.powerport:{self.psu.pk}")
+
+    def test_a_stored_power_port_selection_under_an_interface_key_resolves(self):
+        """The field key keeps the claimed kind, and a power port is a model that claim admits."""
+        renamed = trace_termination("DEV-A", "", "power-a", "Port")
+        self.save_resolution(renamed, self.psu)
+
+        unit = self.unit(power_path(from_end=renamed))
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(
+            self.termination_pairs(unit.changes[0]),
+            sorted([("dcim.poweroutlet", self.outlet.pk), ("dcim.powerport", self.psu.pk)]),
+        )
+        record = self.termination_records(unit)["DEV-A power-a"]
+        self.assertEqual((record["state"], record["selected_type"]), ("manually resolved", "dcim.powerport"))
+
+    def test_a_stored_interface_selection_under_a_front_port_key_is_a_kind_mismatch(self):
+        """A front-port claim admits only a Front Port, so a saved Interface answers the wrong question."""
+        self.save_resolution(PANEL_1_FRONT, self.eth0)
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        mismatch = next(item for item in unit.diagnostics if item.code == "cable.termination_kind_mismatch")
+        self.assertEqual(mismatch.display["claimed_kind"], "front_port")
+        self.assertEqual(mismatch.display["selected_object_type"], "dcim.interface")
+
+    def test_an_interface_to_power_outlet_segment_is_blocked_as_incompatible(self):
+        """NetBox cannot cable an Ethernet port to a PDU outlet, so the unit stops before any write."""
+        unit = self.unit(direct_path(to_end=PDU_OUTLET))
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(unit.changes, ())
+        incompatible = next(item for item in unit.diagnostics if item.code == "cable.incompatible_terminations")
+        self.assertEqual(
+            incompatible.to_dict()["display"],
+            {
+                "segment_index": 0,
+                "left_model": "dcim.interface",
+                "right_model": "dcim.poweroutlet",
+                "left_field_key": termination_field_key(device="DEV-A", cards="", port="eth0", kind="interface"),
+                "right_field_key": termination_field_key(device="PDU-1", cards="", port="OUT1", kind="interface"),
+                "termination_sources": [
+                    {"kind": "dcim.interface", "pk": self.eth0.pk},
+                    {"kind": "dcim.poweroutlet", "pk": self.outlet.pk},
+                ],
+            },
+        )
+        self.assertEqual(
+            incompatible.identities,
+            (f"dcim.interface:{self.eth0.pk}", f"dcim.poweroutlet:{self.outlet.pk}"),
+        )
+        records = self.termination_records(unit)
+        self.assertEqual(
+            {label: (record["state"], record["incompatible"]) for label, record in records.items()},
+            {
+                "DEV-A eth0": ("automatically resolved", True),
+                "PDU-1 OUT1": ("automatically resolved", True),
+            },
+        )
+
+    def test_a_console_port_through_a_panel_reaches_a_console_server_port(self):
+        """Each segment is a pair NetBox can cable, so a console run through a mapped panel plans."""
+        console = ConsolePort.objects.create(device=self.device_a, name="con0")
+        line = ConsoleServerPort.objects.create(device=self.make_device("CS-1"), name="ttyS1")
+        source = trace_termination("DEV-A", "", "con0", "Port")
+        target = trace_termination("CS-1", "", "ttyS1", "Port")
+        block = (
+            trace_endpoint_line(source),
+            trace_endpoint_line(target),
+            (
+                trace_segment(source, "Patch", PANEL_1_FRONT),
+                trace_segment(PANEL_1_REAR, "Trunk", target),
+            ),
+        )
+
+        unit = self.unit(block)
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+        self.assertIn("cable.pass_through_verified", self.codes(unit))
+        self.assertEqual(
+            sorted(self.termination_pairs(change) for change in unit.changes),
+            sorted(
+                [
+                    sorted([("dcim.consoleport", console.pk), ("dcim.frontport", self.panel_1_fronts[0].pk)]),
+                    sorted([("dcim.consoleserverport", line.pk), ("dcim.rearport", self.panel_1_rear.pk)]),
+                ]
+            ),
+        )
 
 
 class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
@@ -1588,6 +1898,29 @@ class CableDisclosureSchemaTest(SimpleTestCase):
                 },
                 "Diagnostic 'cable.segment_override_lost' has a source for a hidden policy.",
             ),
+            (
+                "termination field without sources",
+                "cable.planned_termination_conflict",
+                {"segment_index": 0, "competing_trace": "B", "termination": "eth0"},
+                "Diagnostic 'cable.planned_termination_conflict' names terminations without their sources.",
+            ),
+            (
+                "termination source of another row kind",
+                "cable.planned_termination_conflict",
+                {
+                    "segment_index": 0,
+                    "competing_trace": "B",
+                    "termination": "eth0",
+                    "termination_sources": [{"kind": CABLE_ROW, "pk": 1}],
+                },
+                "Diagnostic 'cable.planned_termination_conflict' names terminations without their sources.",
+            ),
+            (
+                "termination sources on a diagnostic that names no termination",
+                "cable.segment_reused",
+                {"segment_index": 0, "termination_sources": [{"kind": "dcim.interface", "pk": 1}]},
+                "Diagnostic 'cable.segment_reused' has unregistered display fields: termination_sources.",
+            ),
         )
 
         for label, code, display, message in cases:
@@ -1679,6 +2012,56 @@ class CableDisclosureSchemaTest(SimpleTestCase):
         self.assertIs(presented.display[POLICY_VISIBLE], False)
         self.assertNotIn(DISCLOSURE_SOURCE, presented.display)
 
+    def test_every_redacted_diagnostic_stays_inside_its_registered_schema(self):
+        """A queued plan is read back by the worker, so redaction may remove a disclosure but never add a field."""
+        from netbox_data_import.cable_disclosure import (
+            _DIAGNOSTIC_DISCLOSURE_FIELDS,
+            CABLE_CLASS_MAPPING_ROW,
+            CABLE_ROW,
+            DISCLOSURE_SOURCE,
+            POLICY_VISIBLE,
+            TERMINATION_SOURCES,
+            _diagnostic,
+            redact_deleted_cables,
+        )
+        from netbox_data_import.plan import Diagnostic, ImportPlan, SynchronizationUnit
+
+        deleted = {"kind": CABLE_ROW, "pk": 9}
+        mapping = {"kind": CABLE_CLASS_MAPPING_ROW, "pk": 3}
+        media_segment = {"retained": True, "visible": True, "cable_type": "cat6", "family": "cat6"}
+        diagnostics = []
+        for code, (public, cable, policy, termination) in _DIAGNOSTIC_DISCLOSURE_FIELDS.items():
+            display = dict.fromkeys(public, "value")
+            if code == "cable.media_family_mismatch":
+                display["segments"] = [
+                    {**media_segment, "segment_index": 0, "origin": "cable", DISCLOSURE_SOURCE: deleted},
+                    {**media_segment, "segment_index": 1, "origin": "policy", DISCLOSURE_SOURCE: mapping},
+                ]
+            elif cable:
+                display.update(dict.fromkeys(cable, "Cable 9"), cable_visible=True, **{DISCLOSURE_SOURCE: deleted})
+            elif policy:
+                display.update(dict.fromkeys(policy, "cat6"), **{POLICY_VISIBLE: True, DISCLOSURE_SOURCE: mapping})
+            if termination:
+                display.update(dict.fromkeys(termination, "eth0"))
+                display[TERMINATION_SOURCES] = [{"kind": "dcim.interface", "pk": 5}]
+            diagnostics.append(Diagnostic(code=code, severity=Severity.ERROR, display=display))
+        delete = PlannedChange(
+            identity="cable:delete:9", target_module="cable", operation="delete", payload={"cable_id": 9}
+        )
+        plan = ImportPlan(
+            units=(SynchronizationUnit("cable:trace:x", Disposition.ACTIONABLE, (delete,), tuple(diagnostics)),)
+        )
+
+        queued = ImportPlan.from_dict(redact_deleted_cables(plan.to_dict()))
+
+        redacted = {item.code: item.display for item in queued.units[0].diagnostics}
+        self.assertIs(redacted["cable.segment_reused"]["cable_visible"], False)
+        self.assertIs(redacted["cable.media_family_mismatch"]["segments"][0]["visible"], False)
+        for diagnostic in diagnostics:
+            with self.subTest(code=diagnostic.code):
+                hidden = _diagnostic(diagnostic, {})
+                self.assertLessEqual(set(hidden.display), set(diagnostic.display))
+
     def test_disclosure_boundaries_reject_unsupported_callers(self):
         """Only policy models and a live workspace viewer may enter presentation."""
         from netbox_data_import.cable_disclosure import policy_row_kind, present_units
@@ -1715,6 +2098,14 @@ class CableModuleContractTest(SimpleTestCase):
         batch = SourceBatch(output_kinds=frozenset({OutputKind.DEVICE_SOURCE_ROW}))
 
         self.assertEqual(CableModule().plan(batch, None, None, None), [])
+
+    def test_every_cable_end_kind_is_a_model_netbox_can_cable(self):
+        """Every admitted model is a termination that NetBox's own compatible-termination table names."""
+        from dcim.constants import COMPATIBLE_TERMINATION_TYPES
+
+        from netbox_data_import.field_keys import CABLE_END_KINDS
+
+        self.assertLessEqual({label.partition(".")[2] for label in CABLE_END_KINDS}, set(COMPATIBLE_TERMINATION_TYPES))
 
 
 class CablePolicyDisclosureRegistryTest(CableTopologyMixin, TestCase):
@@ -2014,7 +2405,9 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
             trace_identity=spliced.identity,
         )
         batch = SourceBatch(output_kinds=frozenset({OutputKind.SOURCE_TRACE}), rows=(spliced,))
-        reader = NetBoxReader.for_actor(self.actor).for_planning_context(self.planning_context)
+        reader = NetBoxReader.for_actor(self.actor).for_planning_context(
+            self.planning_context, output_kinds=self.profile.output_kinds
+        )
 
         (unit,) = CableModule().plan(batch, self.profile, None, reader)
 
@@ -2033,10 +2426,10 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
     def test_candidates_are_the_claimed_kind_on_the_resolved_device(self):
         """A front-port question never offers an interface, and never leaves the device."""
         Interface.objects.create(device=self.panel_1, name="mgmt0", type="1000base-t")
-        field_key = termination_field_key(device="PANEL-1", cards="", port="F1", kind="front_port")
+        asked = asked_termination(device="PANEL-1", cards="", port="F1", kind="front_port")
         reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
 
-        result = eligible_terminations(field_key, reader, profile=self.profile)
+        result = eligible_terminations(asked, reader, profile=self.profile)
 
         self.assertEqual(result.candidates, tuple(FrontPort.objects.filter(device=self.panel_1).order_by("name", "pk")))
         self.assertEqual(result.total, 1)
@@ -2045,13 +2438,256 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         """The result reports all search matches while returning only the requested first page."""
         for name in ("Eligible 3", "Eligible 1", "Eligible 2", "Excluded"):
             FrontPort.objects.create(device=self.panel_1, name=name, type="8p8c")
-        field_key = termination_field_key(device="PANEL-1", cards="", port="F1", kind="front_port")
+        asked = asked_termination(device="PANEL-1", cards="", port="F1", kind="front_port")
         reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
 
-        result = eligible_terminations(field_key, reader, profile=self.profile, search="ELIGIBLE", limit=2)
+        result = eligible_terminations(asked, reader, profile=self.profile, search="ELIGIBLE", limit=2)
 
         self.assertEqual([candidate.name for candidate in result.candidates], ["Eligible 1", "Eligible 2"])
         self.assertEqual(result.total, 3)
+
+    def add_console_and_power_ports(self):
+        """Give DEV-A one port of every model the interface claim admits, two of them named alike."""
+        Interface.objects.create(device=self.device_a, name="p02", type="1000base-t")
+        ConsolePort.objects.create(device=self.device_a, name="p02")
+        ConsolePort.objects.create(device=self.device_a, name="con0")
+        ConsoleServerPort.objects.create(device=self.device_a, name="srv0")
+        PowerPort.objects.create(device=self.device_a, name="psu0")
+        PowerOutlet.objects.create(device=self.device_a, name="out0")
+        return asked_termination(device="DEV-A", cards="", port="absent", kind="interface")
+
+    @staticmethod
+    def offered(result):
+        """Return each offered candidate as its object type and name, in the offered order."""
+        return [(candidate._meta.label_lower, candidate.name) for candidate in result.candidates]
+
+    def test_candidates_are_every_admitted_model_in_one_stable_order(self):
+        """Name orders the one set, and the model match order breaks a tie between two models."""
+        asked = self.add_console_and_power_ports()
+
+        result = eligible_terminations(asked, self.reader(), profile=self.profile)
+
+        self.assertEqual(
+            self.offered(result),
+            [
+                ("dcim.consoleport", "con0"),
+                ("dcim.interface", "eth0"),
+                ("dcim.poweroutlet", "out0"),
+                ("dcim.interface", "p02"),
+                ("dcim.consoleport", "p02"),
+                ("dcim.powerport", "psu0"),
+                ("dcim.consoleserverport", "srv0"),
+            ],
+        )
+        self.assertEqual(result.total, 7)
+
+    def test_one_page_bound_and_one_count_cover_every_admitted_model(self):
+        """The page size bounds the whole set, never each model on its own."""
+        asked = self.add_console_and_power_ports()
+
+        result = eligible_terminations(asked, self.reader(), profile=self.profile, limit=3)
+
+        self.assertEqual(
+            self.offered(result),
+            [("dcim.consoleport", "con0"), ("dcim.interface", "eth0"), ("dcim.poweroutlet", "out0")],
+        )
+        self.assertEqual(result.total, 7)
+
+    def test_an_exact_name_search_reaches_its_candidate_whatever_the_other_models_hold(self):
+        """A full page of earlier names that contain the search text never hides its exact match."""
+        for number in range(ELIGIBLE_TERMINATION_LIMIT + 5):
+            Interface.objects.create(device=self.device_a, name=f"002-{number}", type="1000base-t")
+        target = PowerPort.objects.create(device=self.device_a, name="02")
+        asked = asked_termination(device="DEV-A", cards="", port="absent", kind="interface")
+
+        result = eligible_terminations(asked, self.reader(), profile=self.profile, search="02")
+
+        self.assertEqual(self.offered(result)[0], ("dcim.powerport", "02"))
+        self.assertEqual(result.candidates[0].pk, target.pk)
+        self.assertEqual(len(result.candidates), ELIGIBLE_TERMINATION_LIMIT)
+        self.assertEqual(result.total, ELIGIBLE_TERMINATION_LIMIT + 6)
+
+    def test_a_search_admits_and_ranks_first_a_name_that_differs_only_in_whitespace_or_case(self):
+        """`PSU  1` is the normalized exact match for `psu 1`, so the search keeps it and puts it first."""
+        Interface.objects.create(device=self.device_a, name="PSU 1a", type="1000base-t")
+        target = PowerPort.objects.create(device=self.device_a, name="PSU  1")
+        asked = asked_termination(device="DEV-A", cards="", port="absent", kind="interface")
+
+        result = eligible_terminations(asked, self.reader(), profile=self.profile, search="psu 1")
+
+        self.assertEqual(self.offered(result), [("dcim.powerport", "PSU  1"), ("dcim.interface", "PSU 1a")])
+        self.assertEqual(result.candidates[0].pk, target.pk)
+        self.assertEqual(result.total, 2)
+
+    def test_names_order_bytewise_in_the_database_and_in_the_merge(self):
+        """Each model's page is cut in the order the merge compares, so a capital letter sorts first."""
+        Interface.objects.create(device=self.device_a, name="a1", type="1000base-t")
+        Interface.objects.create(device=self.device_a, name="B1", type="1000base-t")
+        PowerPort.objects.create(device=self.device_a, name="Z9")
+        asked = asked_termination(device="DEV-A", cards="", port="absent", kind="interface")
+
+        result = eligible_terminations(asked, self.reader(), profile=self.profile, limit=2)
+
+        self.assertEqual(self.offered(result), [("dcim.interface", "B1"), ("dcim.powerport", "Z9")])
+        self.assertEqual(result.total, 4)
+
+    def test_a_page_materializes_at_most_its_bound_from_each_admitted_model(self):
+        """A dense Device is counted and cut in the database, never loaded whole and sliced."""
+        from django.db.models.signals import post_init
+
+        for number in range(30):
+            Interface.objects.create(device=self.device_a, name=f"if-{number:02}", type="1000base-t")
+            PowerPort.objects.create(device=self.device_a, name=f"pp-{number:02}")
+        asked = asked_termination(device="DEV-A", cards="", port="absent", kind="interface")
+        admitted = (Interface, ConsolePort, ConsoleServerPort, PowerPort, PowerOutlet)
+        materialized = []
+
+        def count(sender, instance, **kwargs):
+            materialized.append(sender)
+
+        for model in admitted:
+            post_init.connect(count, sender=model)
+        try:
+            result = eligible_terminations(asked, self.reader(), profile=self.profile, limit=3)
+        finally:
+            for model in admitted:
+                post_init.disconnect(count, sender=model)
+
+        self.assertEqual(
+            self.offered(result),
+            [("dcim.interface", "eth0"), ("dcim.interface", "if-00"), ("dcim.interface", "if-01")],
+        )
+        self.assertEqual(result.total, 61)
+        self.assertLessEqual(len(materialized), 3 * 2, materialized)
+
+    def test_pages_across_admitted_models_join_into_the_one_combined_order(self):
+        """An offset continues the merged order, and each page loads only the rows it returns."""
+        from django.db.models.signals import post_init
+
+        asked = self.add_console_and_power_ports()
+        whole = eligible_terminations(asked, self.reader(), profile=self.profile)
+        admitted = (Interface, ConsolePort, ConsoleServerPort, PowerPort, PowerOutlet)
+        materialized = []
+
+        def count(sender, instance, **kwargs):
+            materialized.append(sender)
+
+        pages = []
+        for model in admitted:
+            post_init.connect(count, sender=model)
+        try:
+            for offset in range(0, whole.total + 2, 2):
+                pages.append(eligible_terminations(asked, self.reader(), profile=self.profile, limit=2, offset=offset))
+        finally:
+            for model in admitted:
+                post_init.disconnect(count, sender=model)
+
+        self.assertGreater(whole.total, 4)
+        self.assertEqual(tuple(row for page in pages for row in page.candidates), whole.candidates)
+        self.assertEqual({page.total for page in pages}, {whole.total})
+        self.assertEqual(len(materialized), whole.total)
+
+    def test_a_page_past_the_last_candidate_is_empty_and_reads_no_row(self):
+        """An offset at or past the count answers an empty page from the count queries alone."""
+        asked = self.add_console_and_power_ports()
+
+        for offset in (7, 10**15):
+            with self.subTest(offset=offset), executed_sql() as statements:
+                result = eligible_terminations(asked, self.reader(), profile=self.profile, offset=offset)
+
+                self.assertEqual((result.candidates, result.total), ((), 7))
+                self.assertEqual([sql for sql in statements if "LIMIT" in sql], [])
+
+    def test_a_late_page_reads_no_more_rows_than_its_bound(self):
+        """A large offset inside the count does not read every earlier key of each model."""
+        from django.db import connection
+
+        for number in range(30):
+            Interface.objects.create(device=self.device_a, name=f"if-{number:02}", type="1000base-t")
+            PowerPort.objects.create(device=self.device_a, name=f"pp-{number:02}")
+        asked = asked_termination(device="DEV-A", cards="", port="absent", kind="interface")
+        returned = []
+
+        def count_rows(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            returned.append((context["cursor"].rowcount, sql))
+            return result
+
+        with connection.execute_wrapper(count_rows):
+            result = eligible_terminations(asked, self.reader(), profile=self.profile, limit=3, offset=58)
+
+        self.assertEqual(
+            self.offered(result),
+            [("dcim.powerport", "pp-27"), ("dcim.powerport", "pp-28"), ("dcim.powerport", "pp-29")],
+        )
+        self.assertEqual(result.total, 61)
+        self.assertEqual([sql for rows, sql in returned if rows > 3], [])
+
+    def test_a_candidate_that_leaves_the_page_after_ranking_is_left_out(self):
+        """A port deleted, moved, or renamed between the ranked page and its row load is not offered."""
+        from django.db import connection
+
+        changes = {
+            "deleted": lambda port: port.delete(),
+            "moved": lambda port: Interface.objects.filter(pk=port.pk).update(device=self.device_b),
+            "renamed": lambda port: Interface.objects.filter(pk=port.pk).update(name="elsewhere"),
+        }
+        asked = asked_termination(device="DEV-A", cards="", port="absent", kind="interface")
+        for change, apply in changes.items():
+            with self.subTest(change=change):
+                kept = Interface.objects.create(device=self.device_a, name=f"race-{change}-a", type="1000base-t")
+                leaving = Interface.objects.create(device=self.device_a, name=f"race-{change}-b", type="1000base-t")
+                ranked = []
+
+                def change_after_ranking(
+                    execute, sql, params, many, context, leaving=leaving, apply=apply, ranked=ranked
+                ):
+                    result = execute(sql, params, many, context)
+                    # Only the ranking query orders the raw name by the bytewise collation.
+                    if not ranked and '"name" COLLATE "C"' in sql:
+                        ranked.append(sql)
+                        apply(leaving)
+                    return result
+
+                with connection.execute_wrapper(change_after_ranking):
+                    result = eligible_terminations(asked, self.reader(), profile=self.profile, search=f"race-{change}")
+
+                self.assertTrue(ranked)
+                self.assertEqual(result.candidates, (kept,))
+
+    def test_each_admitted_model_stays_inside_the_actor_view_scope(self):
+        """The one set holds only the rows of each model the actor may view."""
+        asked = self.add_console_and_power_ports()
+        actor = user_with_object_permission(
+            "cable-power-candidates",
+            [(Device, ("view",), {}), (PowerPort, ("view",), {}), (Interface, ("view",), {"name": "eth0"})],
+        )
+
+        result = eligible_terminations(asked, self.reader(actor), profile=self.profile)
+
+        self.assertEqual(self.offered(result), [("dcim.interface", "eth0"), ("dcim.powerport", "psu0")])
+        self.assertEqual(result.total, 2)
+
+    def test_a_locking_read_locks_every_admitted_model_in_one_global_order(self):
+        """Two locking reads that take the models in one order cannot wait on each other in a cycle."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        asked = self.add_console_and_power_ports()
+
+        with transaction.atomic(), CaptureQueriesContext(connection) as captured:
+            eligible_terminations(asked, self.reader(), profile=self.profile, _lock_rows=True)
+
+        locked = [
+            table
+            for query in captured.captured_queries
+            for table in re.findall(r'FOR UPDATE OF "([a-z_]+)"', query["sql"])
+            if table.startswith(("dcim_console", "dcim_interface", "dcim_power"))
+        ]
+        self.assertEqual(
+            locked,
+            ["dcim_consoleport", "dcim_consoleserverport", "dcim_interface", "dcim_poweroutlet", "dcim_powerport"],
+        )
 
     def test_mapped_peer_candidates_follow_port_mappings_in_both_directions(self):
         """A mapped-peer question offers the opposite ports instead of the source port's kind."""
@@ -2065,7 +2701,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         for reference, kind, expected in cases:
             with self.subTest(kind=kind):
                 device, cards, port, _port_class = reference
-                field_key = termination_field_key(
+                asked = asked_termination(
                     device=device,
                     cards=cards,
                     port=port,
@@ -2073,7 +2709,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
                     role=MAPPED_PEER_ROLE,
                 )
 
-                result = eligible_terminations(field_key, reader, profile=self.profile)
+                result = eligible_terminations(asked, reader, profile=self.profile)
 
                 self.assertEqual(result.candidates, expected)
                 self.assertEqual(result.total, len(expected))
@@ -2096,7 +2732,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
             selected_object_id=rear.pk,
             selected_display_name=str(rear),
         )
-        field_key = termination_field_key(
+        asked = asked_termination(
             device=source[0],
             cards=source[1],
             port=source[2],
@@ -2114,7 +2750,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
 
         try:
-            result = eligible_terminations(field_key, reader, profile=self.profile)
+            result = eligible_terminations(asked, reader, profile=self.profile)
         except TypeError:
             self.fail("The eligible-termination interface has no Import Profile decision context.")
 
@@ -2124,13 +2760,63 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
     def test_candidates_stay_inside_the_actor_view_scope(self):
         """An actor who may not view the front ports is offered none of them."""
         actor = user_with_object_permission("cable-partial", [(Device, ("view",), {})])
-        field_key = termination_field_key(device="PANEL-1", cards="", port="F1", kind="front_port")
+        asked = asked_termination(device="PANEL-1", cards="", port="F1", kind="front_port")
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
 
-        result = eligible_terminations(field_key, reader, profile=self.profile)
+        result = eligible_terminations(asked, reader, profile=self.profile)
 
         self.assertEqual(result.candidates, ())
         self.assertEqual(result.total, 0)
+
+    def test_an_interface_claim_has_no_mapped_peer_to_offer(self):
+        """Console and power ports never pass a path through, and neither does an Interface."""
+        PowerPort.objects.create(device=self.device_a, name="eth0-power")
+        asked = asked_termination(device="DEV-A", cards="", port="eth0", kind="interface", role=MAPPED_PEER_ROLE)
+
+        result = eligible_terminations(asked, self.reader(), profile=self.profile)
+
+        self.assertEqual((result.candidates, result.total), ((), 0))
+
+    def test_a_mapped_peer_question_offers_nothing_while_its_base_port_is_open(self):
+        """A base selection of the wrong model, or no unique exact match, leaves no port to map from."""
+        _panel, _fronts, rear = self.rebuild_panel("PANEL-1", fronts=2)
+        source = trace_termination("PANEL-1", "", "R1", "Punch-Down")
+        peer = asked_termination(device="PANEL-1", cards="", port="R1", kind="rear_port", role=MAPPED_PEER_ROLE)
+        self.assertEqual(eligible_terminations(peer, self.reader(), profile=self.profile).total, 2)
+
+        self.save_resolution(source, self.panel_2_fronts[0])
+        stored = eligible_terminations(peer, self.reader(), profile=self.profile)
+        TerminationResolution.objects.filter(profile=self.profile).delete()
+        RearPort.objects.create(device=rear.device, name="r1", type="8p8c")
+        ambiguous = eligible_terminations(peer, self.reader(), profile=self.profile)
+
+        self.assertEqual((stored.candidates, stored.total), ((), 0))
+        self.assertEqual((ambiguous.candidates, ambiguous.total), ((), 0))
+
+    def test_a_mapped_peer_base_lookup_materializes_only_the_rows_it_compares(self):
+        """The automatic base of a dense panel is found by name identity in the database, never loaded whole."""
+        from django.db.models.signals import post_init
+
+        panel, fronts, _rear = self.rebuild_panel("PANEL-1", fronts=2)
+        RearPort.objects.bulk_create(
+            RearPort(device=panel, name=f"R-{number:04}", type="8p8c", positions=1) for number in range(2000)
+        )
+        peer = asked_termination(device="PANEL-1", cards="", port="R1", kind="rear_port", role=MAPPED_PEER_ROLE)
+        materialized = []
+
+        def count(sender, instance, **kwargs):
+            materialized.append(sender)
+
+        for model in (FrontPort, RearPort):
+            post_init.connect(count, sender=model)
+        try:
+            result = eligible_terminations(peer, self.reader(), profile=self.profile, limit=1)
+        finally:
+            for model in (FrontPort, RearPort):
+                post_init.disconnect(count, sender=model)
+
+        self.assertEqual((result.candidates, result.total), ((fronts[0],), 2))
+        self.assertLessEqual(len(materialized), 3, materialized)
 
     def test_mapped_peer_candidates_stay_inside_the_actor_view_scope(self):
         """A mapped-peer question offers only the opposite ports the actor may view."""
@@ -2143,7 +2829,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
                 (RearPort, ("view",), {}),
             ],
         )
-        field_key = termination_field_key(
+        asked = asked_termination(
             device="PANEL-1",
             cards="",
             port="R1",
@@ -2152,27 +2838,36 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         )
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
 
-        result = eligible_terminations(field_key, reader, profile=self.profile)
+        result = eligible_terminations(asked, reader, profile=self.profile)
 
         self.assertEqual(result.candidates, (fronts[1],))
         self.assertEqual(result.total, 1)
 
     def test_an_unresolved_device_offers_no_candidate(self):
         """With no single Device there is no scope to list candidates from."""
-        field_key = termination_field_key(device="DEV-GONE", cards="", port="F1", kind="front_port")
+        asked = asked_termination(device="DEV-GONE", cards="", port="F1", kind="front_port")
         reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
 
-        result = eligible_terminations(field_key, reader, profile=self.profile)
+        result = eligible_terminations(asked, reader, profile=self.profile)
 
         self.assertEqual(result.candidates, ())
         self.assertEqual(result.total, 0)
+
+    @staticmethod
+    def asked_for_key(key):
+        """Return a question that states *key*, which refuses a key that is not canonical."""
+        from netbox_data_import.cable_target import AskedTermination
+        from netbox_data_import.trace_device_resolution import DeviceEvidence
+
+        evidence = DeviceEvidence(key="panel-1", labels=("PANEL-1",), locations=(), racks=(), u_positions=())
+        return AskedTermination(field_key=key, device=evidence, port="F1")
 
     def test_a_key_that_is_not_a_termination_field_key_is_refused(self):
         """The seam validates its input rather than returning an empty list for a typo."""
         reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
 
         with self.assertRaises(ValueError):
-            eligible_terminations("device:source:7", reader, profile=self.profile)
+            eligible_terminations(self.asked_for_key("device:source:7"), reader, profile=self.profile)
 
     def test_a_noncanonical_json_key_is_refused(self):
         """A JSON object must contain every canonical termination field-key member."""
@@ -2180,7 +2875,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         key = json.dumps({"device": "PANEL-1", "kind": "front_port"}, sort_keys=True, separators=(",", ":"))
 
         with self.assertRaises(ValueError):
-            eligible_terminations(key, reader, profile=self.profile)
+            eligible_terminations(self.asked_for_key(key), reader, profile=self.profile)
 
     def test_the_canonical_parser_refuses_an_unknown_termination_kind(self):
         """A five-member key is noncanonical when no candidate query exists for its kind."""
@@ -2345,7 +3040,6 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
             unresolved[0]["field_key"],
             termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface"),
         )
-        self.assertEqual(unresolved[0]["kind"], "interface")
 
     def test_a_segment_two_traces_claim_with_different_policy_states_conflict(self):
         """A refused shared segment is a conflict the panel names, not an unplanned blank."""
@@ -2433,8 +3127,6 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
         peer = next(item for item in workspace["terminations"] if item["field_key"] == peer_key)
         self.assertEqual(peer["state"], "unresolved")
         self.assertTrue(peer["selectable"])
-        # The picker offers the ports on the far side of the panel, which are front ports.
-        self.assertEqual(peer["kind"], "front_port")
 
     def test_a_chosen_mapped_peer_states_that_an_operator_chose_it(self):
         """The badge separates a decision from a match here too."""
@@ -2633,6 +3325,22 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
         )
         self.assertEqual({cable.status for cable in Cable.objects.all()}, {"connected"})
         self.assertEqual({cable.type for cable in Cable.objects.all()}, {"cat6"})
+
+    def test_a_power_cord_trace_writes_a_real_cable_from_the_inlet_to_the_outlet(self):
+        """A power port and a power outlet are a pair NetBox cables, so the import writes the cord."""
+        self.build_power_topology()
+        plan = self.plan(power_path())
+
+        execution = self.execute(plan)
+
+        self.assertEqual(execution.outcome, "succeeded")
+        cable = Cable.objects.get()
+        self.assertEqual(cable.type, "power")
+        self.assertEqual(
+            sorted((row.termination_type.model, row.termination_id) for row in CableTermination.objects.all()),
+            sorted([("poweroutlet", self.outlet.pk), ("powerport", self.psu.pk)]),
+        )
+        self.assertEqual(CableImportSource.objects.get().cable, cable)
 
     def test_reverse_import_keeps_creation_and_provenance_positions_canonical(self):
         """Opposite workbook direction preserves each physical segment's plan and stored index."""

@@ -84,8 +84,8 @@ see that a duplicate existed.
 ## Blockers found in round 1, and their r2 revisions
 
 **Blocker 1 — the ceiling of 20 would make the feature unusable.** Verified in source: for the
-`termination` role, `eligible_terminations` returns every visible termination of the claimed kind on
-the resolved Device; the port-name narrowing at `cable_target.py:371` applies only to the
+`termination` role, `eligible_terminations` returns every visible termination of the models the
+claimed kind admits (spec 6.1) on the resolved Device; the port-name narrowing at `cable_target.py:371` applies only to the
 `mapped_peer` role. A 48-port switch therefore yields `total=48`, and an `r1` request would refuse
 every interface question on ordinary equipment. The 20 is the **picker's page size**, not an
 eligibility bound.
@@ -109,9 +109,9 @@ validated at startup even when inference is otherwise unconfigured:
 `True` is the trap worth naming: it is numerically 1 and would silently admit a one-candidate set.
 The repository already excludes booleans this way in its integer timeout validation
 (`inference_settings.py:205`), and this setting follows it. Zero and negatives admit no set at all;
-`10**100` must never reach a database slice, because `eligible_terminations` materializes the slice
-before computing `total`. The hard ceiling is 1,024. The four supported NetBox termination models
-limit names to 64 characters. A compact candidate array at the ceiling stays below 1 MiB even when
+`10**100` must never reach a page cut, because `eligible_terminations` cuts its page from the whole
+admitted set it has read. The hard ceiling is 1,024. The seven NetBox termination models a claimed
+kind can admit (spec 6.1) limit names to 64 characters. A compact candidate array at the ceiling stays below 1 MiB even when
 every name needs worst-case JSON escaping. The default remains 64 because a hard process and request
 size ceiling does not promise that every configured backend accepts the largest prompt.
 

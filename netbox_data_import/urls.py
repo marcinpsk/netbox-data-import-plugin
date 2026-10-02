@@ -202,6 +202,16 @@ urlpatterns = [
         views.TraceResolveDeviceView.as_view(),
         name="trace_resolve_device",
     ),
+    path(
+        "trace-workspace/location-mapping/",
+        views.TraceLocationMappingView.as_view(),
+        name="trace_location_mapping",
+    ),
+    path(
+        "trace-workspace/location-candidates/",
+        views.TraceLocationCandidatesView.as_view(),
+        name="trace_location_candidates",
+    ),
     path("trace-workspace/proposals/", views.TraceProposalView.as_view(), name="trace_proposal"),
     path("trace-workspace/proposals/request/", views.TraceRequestProposalView.as_view(), name="trace_request_proposal"),
     path("trace-workspace/proposals/cancel/", views.TraceCancelProposalView.as_view(), name="trace_cancel_proposal"),

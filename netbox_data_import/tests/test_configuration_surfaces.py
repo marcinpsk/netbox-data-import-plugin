@@ -1026,6 +1026,41 @@ class ProfileYamlSurfaceTest(TestCase):
         self.assertContains(response, "Unknown profile key(s): sheet_name")
         self.assertFalse(ImportProfile.objects.filter(name="Pre-cutover profile").exists())
 
+    def test_both_import_pages_refuse_a_key_that_is_not_a_string(self):
+        """YAML reads a number, a boolean or a date as a key, and each import page states which one."""
+        documents = {
+            "numeric section": ("profile: {name: Numeric section}\n7: []\n", "got 7"),
+            "mixed sections": ("profile: {name: Mixed sections}\n7: []\nstray_section: []\n", "got 7"),
+            "numeric profile key": ("profile: {name: Numeric profile key, 7: value}\n", "got 7"),
+            "mixed profile keys": ("profile: {name: Mixed profile keys, true: value, stray: value}\n", "got True"),
+            "numeric row key": (
+                "profile: {name: Numeric row key}\nclass_role_mappings:\n- {source_class: Server, 3: value}\n",
+                "got 3",
+            ),
+            "mixed row keys": (
+                ("profile: {name: Mixed row keys}\nclass_role_mappings:\n- {source_class: Server, 1.5: value, x: y}\n"),
+                "got 1.5",
+            ),
+        }
+        for case, (document, named_key) in documents.items():
+            for page in ("import_profile_yaml", "importprofile_bulk_import"):
+                with self.subTest(case=case, page=page):
+                    if page == "import_profile_yaml":
+                        upload = BytesIO(document.encode())
+                        upload.name = "non-string-key.yaml"
+                        response = self.client.post(
+                            reverse(f"plugins:netbox_data_import:{page}"), {"yaml_file": upload}
+                        )
+                    else:
+                        response = self.client.post(
+                            reverse(f"plugins:netbox_data_import:{page}"), {"data": document}, follow=True
+                        )
+
+                    self.assertEqual(response.status_code, 200)
+                    self.assertContains(response, "keys must be strings")
+                    self.assertContains(response, named_key)
+                    self.assertFalse(ImportProfile.objects.exists())
+
     @classmethod
     def _keys_ending_in_id(cls, value):
         """Return instance-local key paths found in one parsed YAML value."""

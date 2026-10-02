@@ -82,7 +82,85 @@ class NetBoxReaderScopeTest(TestCase):
         self.assertEqual(NetBoxReader.for_optional_actor(None).devices().count(), 2)
         self.assertIs(NetBoxReader.for_optional_actor(self.actor).actor, self.actor)
 
+    def test_terminations_are_scoped_per_cable_end_kind(self):
+        """One accessor serves every Cable End Kind, inside the actor's view scope."""
+        from dcim.models import Device, PowerPort
+
+        for device in Device.objects.all():
+            PowerPort.objects.create(device=device, name="PSU1")
+        actor = user_with_object_permission(
+            "reader-power", [(PowerPort, ["view"], {"device__site__name": "Reader Visible"})]
+        )
+
+        ports = NetBoxReader.for_actor(actor).terminations("dcim.powerport")
+
+        self.assertEqual(set(ports.values_list("device__name", flat=True)), {"reader-visible-device"})
+        self.assertEqual(NetBoxReader.for_actor(actor).terminations("dcim.interface").count(), 0)
+
+    def test_terminations_refuse_a_model_no_claimed_kind_admits(self):
+        """A model outside the Cable End Kinds is a caller error, not an empty answer."""
+        with self.assertRaisesRegex(ValueError, "not a Cable End Kind"):
+            NetBoxReader.for_actor(self.actor).terminations("dcim.powerfeed")
+
     def test_for_actor_refuses_a_missing_actor(self):
         """`for_actor(None)` would be an unscoped read that reads like a scoped one."""
         with self.assertRaises(ValueError):
             NetBoxReader.for_actor(None)
+
+
+class PlanningContextLocationTest(TestCase):
+    """The import Location is a target for placement writes and only evidence for everything else."""
+
+    def setUp(self):
+        from dcim.models import Location, Site
+
+        self.site = Site.objects.create(name="Context Site", slug="context-site")
+        self.other_site = Site.objects.create(name="Context Other", slug="context-other")
+        self.location = Location.objects.create(name="Context Room", slug="context-room", site=self.site)
+        self.elsewhere = Location.objects.create(
+            name="Context Elsewhere", slug="context-elsewhere", site=self.other_site
+        )
+        self.actor = user_with_object_permission(
+            "context-actor",
+            [(Site, ["view"], {}), (Location, ["view"], {"name__in": ["Context Room", "Context Elsewhere"]})],
+        )
+
+    def context(self, location_id):
+        return {"site_id": self.site.pk, "location_id": location_id, "tenant_id": None}
+
+    def test_a_trace_import_reads_an_unavailable_location_as_missing_evidence(self):
+        from dcim.models import Location
+
+        from netbox_data_import.catalog import OutputKind
+
+        hidden = Location.objects.create(name="Context Hidden", slug="context-hidden", site=self.site)
+        trace_only = frozenset({OutputKind.SOURCE_TRACE})
+        for location_id in (hidden.pk, self.elsewhere.pk, 987654321):
+            with self.subTest(location_id=location_id):
+                reader = NetBoxReader.for_actor(self.actor).for_planning_context(
+                    self.context(location_id), output_kinds=trace_only
+                )
+
+                self.assertIsNone(reader.location)
+                self.assertTrue(reader.location_unavailable)
+                self.assertEqual(reader.site, self.site)
+
+        reader = NetBoxReader.for_actor(self.actor).for_planning_context(
+            self.context(self.location.pk), output_kinds=trace_only
+        )
+        self.assertEqual((reader.location, reader.location_unavailable), (self.location, False))
+
+    def test_an_import_that_writes_placement_still_requires_its_location(self):
+        from dcim.models import Location
+
+        from netbox_data_import.catalog import OutputKind
+        from netbox_data_import.netbox_reader import PlanningTargetUnavailable
+
+        hidden = Location.objects.create(name="Context Hidden", slug="context-hidden", site=self.site)
+        device_rows = frozenset({OutputKind.DEVICE_SOURCE_ROW})
+        for location_id, message in ((hidden.pk, "cannot view it"), (self.elsewhere.pk, "does not belong")):
+            with self.subTest(location_id=location_id):
+                with self.assertRaisesMessage(PlanningTargetUnavailable, message):
+                    NetBoxReader.for_actor(self.actor).for_planning_context(
+                        self.context(location_id), output_kinds=device_rows
+                    )

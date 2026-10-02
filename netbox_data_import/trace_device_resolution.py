@@ -7,11 +7,20 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import reduce
+from operator import or_
 from typing import Any
 
-from django.db import connection
-from django.db.models import Case, CharField, F, Func, IntegerField, Q, Value, When
+from django.db.models import BigIntegerField, Case, F, IntegerField, Q, Value, When
 
+from .database_identity import (
+    CANONICAL_NAME,
+    database_identities,
+    matching_search,
+    search_identity,
+    with_database_identity,
+)
+from .trace_location_resolution import MAPPED, site_locations, source_location_key, trace_location_mappings
 from .values import identity_text, normalize_for_compare, source_position, source_text
 
 AUTOMATICALLY_RESOLVED = "automatically resolved"
@@ -21,7 +30,7 @@ STALE = "stale"
 
 _SERIALIZED_EVIDENCE_FIELDS = frozenset({"key", "labels", "locations", "racks", "u_positions"})
 _DEVICE_QUESTION_PRESENTATION_FIELDS = frozenset(
-    {"label", "state", "state_style", "selected", "selectable", "reason", "exact_match_count"}
+    {"label", "state", "state_style", "selected", "selectable", "reason", "exact_match_count", "disclosure_source"}
 )
 
 
@@ -102,12 +111,40 @@ class DeviceResolution:
 
 
 @dataclass(frozen=True)
+class CandidateFact:
+    """One source fact and the visible NetBox value it was compared with."""
+
+    fact: str
+    source: str
+    netbox: str
+    # Only a Location fact compares through a mapping, so only it names the mapped Location.
+    mapped: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        """Return the JSON-safe explanation the Device picker renders."""
+        return {"fact": self.fact, "source": self.source, "mapped": self.mapped, "netbox": self.netbox}
+
+
+@dataclass(frozen=True)
+class ImportLocationHint:
+    """The import-page Location that holds a candidate's placement Location."""
+
+    location: str
+    netbox: str
+
+    def to_dict(self) -> dict[str, str]:
+        """Return the JSON-safe hint the Device picker renders apart from source evidence."""
+        return {"location": self.location, "netbox": self.netbox}
+
+
+@dataclass(frozen=True)
 class DeviceCandidate:
     """One visible Device and the source evidence that supports or contradicts it."""
 
     device: Any
-    matched_hints: tuple[str, ...]
-    conflicting_hints: tuple[str, ...]
+    matched: tuple[CandidateFact, ...]
+    conflicting: tuple[CandidateFact, ...]
+    import_location: ImportLocationHint | None
 
 
 @dataclass(frozen=True)
@@ -187,44 +224,6 @@ def _target_devices(reader):
     return devices
 
 
-def _database_identity_sql(expression: str) -> tuple[str, tuple[str, str, str]]:
-    """Return the one SQL expression used for every target identity comparison."""
-    return f"UPPER(TRIM(REGEXP_REPLACE({expression}, %s, %s, %s)))", (r"\s+", " ", "g")
-
-
-class _DatabaseIdentity(Func):
-    """Apply the shared target identity expression to one ORM value."""
-
-    arity = 1
-
-    def __init__(self, expression):
-        super().__init__(expression, output_field=CharField())
-
-    def as_sql(self, compiler, connection, **extra_context):
-        expression_sql, expression_params = compiler.compile(self.source_expressions[0])
-        sql, identity_params = _database_identity_sql(expression_sql)
-        return sql, (*expression_params, *identity_params)
-
-
-def _with_database_identity(queryset):
-    """Add the shared target identity to rows that have a name field."""
-    return queryset.annotate(_ndi_canonical_name=_DatabaseIdentity(F("name")))
-
-
-def _database_identity_values(values: Iterable[Any]) -> dict[str, str]:
-    """Return PostgreSQL's whitespace-insensitive case key for each source value."""
-    unique_values = sorted({source_text(value) for value in values} - {""})
-    if not unique_values:
-        return {}
-    identity_sql, identity_params = _database_identity_sql("source_value")
-    with connection.cursor() as cursor:
-        cursor.execute(
-            f"SELECT source_value, {identity_sql} FROM unnest(%s::text[]) AS source_value",  # noqa: S608 - The SQL fragment is fixed; values use query parameters.
-            [*identity_params, unique_values],
-        )
-        return dict(cursor.fetchall())
-
-
 def resolve_trace_devices(
     *,
     profile,
@@ -253,17 +252,17 @@ def resolve_trace_devices(
         key: tuple(source_text(label) for label in facts.labels if source_text(label)) or (key,)
         for key, facts in evidence.items()
     }
-    database_values = _database_identity_values(label for labels in source_labels.values() for label in labels)
+    database_values = database_identities(label for labels in source_labels.values() for label in labels)
     source_keys_by_database_name: dict[str, set[str]] = {}
     for key, labels in source_labels.items():
         for label in labels:
             source_keys_by_database_name.setdefault(database_values[label], set()).add(key)
 
-    target_devices = _with_database_identity(_target_devices(reader))
+    target_devices = with_database_identity(_target_devices(reader))
     device_ids = {row.selected_device_id for row in stored.values()}
     lookup = Q(pk__in=device_ids)
     if source_keys_by_database_name:
-        lookup |= Q(_ndi_canonical_name__in=source_keys_by_database_name)
+        lookup |= Q(**{f"{CANONICAL_NAME}__in": source_keys_by_database_name})
     devices = target_devices.filter(lookup)
     if lock_rows:
         devices = devices.order_by("pk").select_for_update(of=("self",))
@@ -271,7 +270,7 @@ def resolve_trace_devices(
     by_name: dict[str, list[Any]] = {}
     for device in devices:
         by_id[device.pk] = device
-        for key in source_keys_by_database_name.get(device._ndi_canonical_name, ()):
+        for key in source_keys_by_database_name.get(getattr(device, CANONICAL_NAME), ()):
             by_name.setdefault(key, []).append(device)
 
     outcomes = {}
@@ -311,158 +310,188 @@ def resolve_trace_devices(
     return outcomes
 
 
-def resolved_trace_device(*, profile, reader, source_label: str, lock_rows: bool = False):
-    """Return the Device one source label resolves to, or None when its decision is open."""
-    key = source_device_key(source_label)
-    if not key:
-        return None
-    evidence = {
-        key: DeviceEvidence(key=key, labels=(source_text(source_label),), locations=(), racks=(), u_positions=())
-    }
-    return resolve_trace_devices(profile=profile, reader=reader, evidence=evidence, lock_rows=lock_rows)[key].device
-
-
-def _visible_placement(reader, devices):
-    """Return visible placement facts for only the bounded candidate page."""
-    rack_ids = {device.rack_id for device in devices if device.rack_id is not None}
-    direct_location_ids = {device.location_id for device in devices if device.location_id is not None}
-    racks = _with_database_identity(reader.racks().filter(pk__in=rack_ids))
-    if reader.site is not None:
-        racks = racks.filter(site=reader.site)
-    rack_rows = tuple(racks.values_list("pk", "_ndi_canonical_name", "location_id"))
-    location_ids = direct_location_ids | {location_id for _pk, _name, location_id in rack_rows if location_id}
-    locations = _with_database_identity(reader.locations().filter(pk__in=location_ids))
-    if reader.site is not None:
-        locations = locations.filter(site=reader.site)
-    location_names = dict(locations.values_list("pk", "_ndi_canonical_name"))
-    rack_facts = {pk: (name, location_names.get(location_id, "")) for pk, name, location_id in rack_rows}
-    return rack_facts, location_names
-
-
-def _matching_placement_ids(reader, wanted_racks: set[str], wanted_locations: set[str]):
-    """Return visible related-object IDs that match source placement evidence."""
+def _site_racks(reader):
+    """Return the Racks the actor may view inside the selected Site."""
     racks = reader.racks()
-    locations = reader.locations()
-    if reader.site is not None:
-        racks = racks.filter(site=reader.site)
-        locations = locations.filter(site=reader.site)
-    matching_racks = set(
-        _with_database_identity(racks).filter(_ndi_canonical_name__in=wanted_racks).values_list("pk", flat=True)
-    )
-    matching_locations = set(
-        _with_database_identity(locations).filter(_ndi_canonical_name__in=wanted_locations).values_list("pk", flat=True)
-    )
-    racks_in_matching_locations = set(racks.filter(location_id__in=matching_locations).values_list("pk", flat=True))
-    return matching_racks, matching_locations, racks_in_matching_locations
+    return racks.filter(site=reader.site) if reader.site is not None else racks
 
 
-def _candidate_hints(
-    device,
-    evidence,
-    rack_facts,
-    location_names,
-    *,
-    exact_names: set[str],
-    wanted_locations: set[str],
-    wanted_racks: set[str],
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Explain visible placement facts that match or conflict with the source."""
-    matched: list[str] = []
-    conflicting: list[str] = []
-    if device._ndi_canonical_name in exact_names:
-        matched.append("name")
-    if evidence.locations:
-        location = location_names.get(device.location_id, "")
-        if not location and device.rack_id in rack_facts:
-            location = rack_facts[device.rack_id][1]
-        if location:
-            (matched if location in wanted_locations else conflicting).append("location")
-    if evidence.racks and device.rack_id in rack_facts:
-        rack_name = rack_facts[device.rack_id][0]
-        (matched if rack_name in wanted_racks else conflicting).append("rack")
-    if evidence.u_positions and device.position is not None:
-        wanted = {normalize_for_compare(value) for value in evidence.u_positions}
-        (matched if normalize_for_compare(device.position) in wanted else conflicting).append("U position")
-    return tuple(matched), tuple(conflicting)
+def _flag(condition) -> Case:
+    """Return 1 for a Device row that meets *condition*, else 0."""
+    return Case(When(condition, then=Value(1)), default=Value(0), output_field=IntegerField())
+
+
+def _placement_location(reader) -> Case:
+    """Return a Device's visible placement Location: its own, else its visible Rack's when it has none."""
+    visible_locations = site_locations(reader).values("pk")
+    return Case(
+        When(location_id__in=visible_locations, then=F("location_id")),
+        When(
+            Q(location_id__isnull=True, rack_id__in=_site_racks(reader).values("pk"))
+            & Q(rack__location_id__in=visible_locations),
+            then=F("rack__location_id"),
+        ),
+        default=Value(None),
+        output_field=BigIntegerField(),
+    )
+
+
+def _in_subtree(location) -> Q:
+    """Match a visible placement inside *location*'s subtree, whatever lies between them."""
+    return Q(_ndi_placement_location__in=location.get_descendants(include_self=True).values("pk"))
+
+
+def _mapped_paths(profile, reader, evidence: DeviceEvidence) -> tuple[tuple[str, Any], ...]:
+    """Return each source Location path of *evidence* that maps to a visible Location, with that Location."""
+    paths = {source_location_key(path): path for path in evidence.locations}
+    mappings = trace_location_mappings(profile=profile, reader=reader, keys=paths)
+    return tuple((paths[key], mapping.location) for key, mapping in sorted(mappings.items()) if mapping.state == MAPPED)
+
+
+def _with_evidence(devices, reader, evidence, *, exact_names, matching_racks, mapped_paths):
+    """Annotate the per-fact match and conflict flags that rank and explain each candidate."""
+    positions = [source_position(value) for value in evidence.u_positions]
+    positions = [Decimal(str(value)) for value in positions if value is not None]
+    visible_racks = _site_racks(reader).values("pk")
+    path_names = tuple(f"_ndi_location_path_{index}" for index in range(len(mapped_paths)))
+    devices = with_database_identity(devices).annotate(_ndi_placement_location=_placement_location(reader))
+    devices = devices.annotate(
+        **{name: _flag(_in_subtree(location)) for name, (_path, location) in zip(path_names, mapped_paths, strict=True)}
+    )
+    zero = Value(0, output_field=IntegerField())
+    location_match = location_conflict = zero
+    if path_names:
+        # Location scores once when any mapped path matches (section 6.1), and conflicts once when any does not.
+        location_match = _flag(reduce(or_, (Q(**{name: 1}) for name in path_names)))
+        location_conflict = _flag(
+            Q(_ndi_placement_location__isnull=False) & reduce(or_, (Q(**{name: 0}) for name in path_names))
+        )
+    devices = devices.annotate(
+        _ndi_exact_name=_flag(Q(**{f"{CANONICAL_NAME}__in": exact_names})),
+        _ndi_rack_match=_flag(Q(rack_id__in=matching_racks)) if matching_racks else zero,
+        _ndi_rack_conflict=(
+            _flag(Q(rack_id__in=visible_racks) & ~Q(rack_id__in=matching_racks))
+            if matching_racks
+            else _flag(Q(rack_id__in=visible_racks))
+            if evidence.racks
+            else zero
+        ),
+        _ndi_position_match=_flag(Q(position__in=positions)) if positions else zero,
+        _ndi_position_conflict=(
+            _flag(Q(position__isnull=False) & ~Q(position__in=positions))
+            if positions
+            else _flag(Q(position__isnull=False))
+            if evidence.u_positions
+            else zero
+        ),
+        _ndi_location_match=location_match,
+        _ndi_location_conflict=location_conflict,
+        _ndi_import_location=_flag(_in_subtree(reader.location)) if reader.location is not None else zero,
+    )
+    return devices.annotate(
+        _ndi_hint_score=F("_ndi_rack_match") + F("_ndi_location_match") + F("_ndi_position_match"),
+        _ndi_conflict_score=F("_ndi_rack_conflict") + F("_ndi_location_conflict") + F("_ndi_position_conflict"),
+    )
+
+
+def _explain(device, evidence, *, mapped_paths, rack_names, location_names, import_location) -> DeviceCandidate:
+    """Explain one ranked candidate from the same flags that ranked it, naming both values of each fact."""
+    matched: list[CandidateFact] = []
+    conflicting: list[CandidateFact] = []
+    if device._ndi_exact_name:
+        matched.append(CandidateFact("name", source=", ".join(evidence.labels), netbox=device.name))
+    placement = location_names.get(device._ndi_placement_location, "")
+    for index, (path, location) in enumerate(mapped_paths):
+        fact = CandidateFact("location", source=path, mapped=location.name, netbox=placement)
+        if getattr(device, f"_ndi_location_path_{index}"):
+            matched.append(fact)
+        elif device._ndi_placement_location is not None:
+            conflicting.append(fact)
+    rack = CandidateFact("rack", source=", ".join(evidence.racks), netbox=rack_names.get(device.rack_id, ""))
+    if device._ndi_rack_match:
+        matched.append(rack)
+    if device._ndi_rack_conflict:
+        conflicting.append(rack)
+    position = CandidateFact(
+        "U position", source=", ".join(evidence.u_positions), netbox=normalize_for_compare(device.position)
+    )
+    if device._ndi_position_match:
+        matched.append(position)
+    if device._ndi_position_conflict:
+        conflicting.append(position)
+    return DeviceCandidate(
+        device=device,
+        matched=tuple(matched),
+        conflicting=tuple(conflicting),
+        import_location=(
+            ImportLocationHint(location=import_location.name, netbox=placement) if device._ndi_import_location else None
+        ),
+    )
 
 
 def eligible_trace_devices(
     *,
+    profile,
     reader,
     evidence: DeviceEvidence,
     search: str = "",
     limit: int,
+    offset: int = 0,
     lock_rows: bool = False,
 ) -> DeviceCandidatePage:
     """Return a deterministic bounded page of visible Device candidates."""
-    devices = _target_devices(reader)
-    if search:
-        devices = devices.filter(name__icontains=search)
-    eligible_devices = devices
+    devices = matching_search(_target_devices(reader), search_identity(search))
     exact_values = tuple(source_text(value) for value in evidence.labels if source_text(value)) or (evidence.key,)
     rack_values = tuple(source_text(value) for value in evidence.racks if source_text(value))
-    location_values = tuple(source_text(value) for value in evidence.locations if source_text(value))
-    database_values = _database_identity_values((*exact_values, *rack_values, *location_values))
-    exact_names = {database_values[value] for value in exact_values}
+    database_values = database_identities((*exact_values, *rack_values))
     wanted_racks = {database_values[value] for value in rack_values}
-    wanted_locations = {database_values[value] for value in location_values}
-    matching_racks, matching_locations, racks_in_matching_locations = _matching_placement_ids(
+    matching_racks = set(
+        with_database_identity(_site_racks(reader))
+        .filter(**{f"{CANONICAL_NAME}__in": wanted_racks})
+        .values_list("pk", flat=True)
+    )
+    mapped_paths = _mapped_paths(profile, reader, evidence)
+    devices = _with_evidence(
+        devices,
         reader,
-        wanted_racks,
-        wanted_locations,
-    )
-    devices = _with_database_identity(devices)
-    positions = [source_position(value) for value in evidence.u_positions]
-    positions = [Decimal(str(value)) for value in positions if value is not None]
-    exact = Case(
-        When(_ndi_canonical_name__in=exact_names, then=Value(1)),
-        default=Value(0),
-        output_field=IntegerField(),
-    )
-    rack_score = Case(When(rack_id__in=matching_racks, then=Value(1)), default=Value(0), output_field=IntegerField())
-    location_score = Case(
-        When(Q(location_id__in=matching_locations) | Q(rack_id__in=racks_in_matching_locations), then=Value(1)),
-        default=Value(0),
-        output_field=IntegerField(),
-    )
-    position_score = Case(When(position__in=positions, then=Value(1)), default=Value(0), output_field=IntegerField())
-    devices = devices.annotate(
-        _ndi_exact_name=exact,
-        _ndi_hint_score=rack_score + location_score + position_score,
-    ).order_by("-_ndi_exact_name", "-_ndi_hint_score", "name", "pk")
+        evidence,
+        exact_names={database_values[value] for value in exact_values},
+        matching_racks=matching_racks,
+        mapped_paths=mapped_paths,
+    ).order_by("-_ndi_exact_name", "-_ndi_hint_score", "_ndi_conflict_score", "-_ndi_import_location", "name", "pk")
     total = devices.count()
-    if lock_rows:
-        ranked_ids = tuple(devices.values_list("pk", flat=True)[:limit])
+    selected: tuple[Any, ...] = ()
+    if offset < total and lock_rows:
+        ranked_ids = tuple(devices.values_list("pk", flat=True)[offset : offset + limit])
         locked = {
             device.pk: device
-            for device in _with_database_identity(eligible_devices)
-            .filter(pk__in=ranked_ids)
-            .order_by("pk")
-            .select_for_update(of=("self",))
+            for device in devices.filter(pk__in=ranked_ids).order_by("pk").select_for_update(of=("self",))
         }
         selected = tuple(locked[pk] for pk in ranked_ids if pk in locked)
-    else:
-        selected = tuple(devices[:limit])
-    rack_facts, location_names = _visible_placement(reader, selected)
-    candidates = []
-    for device in selected:
-        matched, conflicting = _candidate_hints(
-            device,
-            evidence,
-            rack_facts,
-            location_names,
-            exact_names=exact_names,
-            wanted_locations=wanted_locations,
-            wanted_racks=wanted_racks,
-        )
-        candidates.append(
-            DeviceCandidate(
-                device=device,
-                matched_hints=matched,
-                conflicting_hints=conflicting,
+    elif offset < total:
+        selected = tuple(devices[offset : offset + limit])
+    rack_names = dict(
+        _site_racks(reader).filter(pk__in={device.rack_id for device in selected}).values_list("pk", "name")
+    )
+    location_names = dict(
+        site_locations(reader)
+        .filter(pk__in={device._ndi_placement_location for device in selected})
+        .values_list("pk", "name")
+    )
+    return DeviceCandidatePage(
+        candidates=tuple(
+            _explain(
+                device,
+                evidence,
+                mapped_paths=mapped_paths,
+                rack_names=rack_names,
+                location_names=location_names,
+                import_location=reader.location,
             )
-        )
-    return DeviceCandidatePage(candidates=tuple(candidates), total=total)
+            for device in selected
+        ),
+        total=total,
+    )
 
 
 __all__ = (
@@ -470,13 +499,14 @@ __all__ = (
     "MANUALLY_RESOLVED",
     "STALE",
     "UNRESOLVED",
+    "CandidateFact",
     "DeviceCandidate",
     "DeviceCandidatePage",
     "DeviceEvidence",
     "DeviceResolution",
+    "ImportLocationHint",
     "collect_trace_device_evidence",
     "eligible_trace_devices",
     "resolve_trace_devices",
-    "resolved_trace_device",
     "source_device_key",
 )

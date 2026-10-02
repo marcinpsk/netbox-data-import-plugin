@@ -663,3 +663,29 @@ language test stores one Source Document, forces the German catalog to load by c
 translation, and compares the complete fingerprint structures under English and German. No production
 fingerprint code changed. This defect predates the three implementation commits and existed only in
 the generated test workbook.
+
+## 18. Live termination disclosure
+
+Section 16.2 rechecked Cable rows and section 16.3 rechecked policy rows, but a cached plan also names
+the ports it resolved. The workspace showed each resolved termination's name and model, each planned
+segment's two ports, and port names and models in Cable diagnostics. Revoking view on a port, or
+deleting it, left those values on the next render.
+
+The planner now records a source of the concrete model and id beside each port value: one
+`disclosure_source` on a termination field, `left_source` and `right_source` on a planned segment,
+and a `termination_sources` list on each diagnostic that names a port. The diagnostic registry
+lists those port fields per code, and planning refuses a port field without well-formed sources.
+
+`ReviewWorkspace` builds its presentation on first use, with one restricted query per referenced
+model. A port that is hidden, deleted, or named by a malformed or missing source shows `a termination
+you cannot view` and no model. A diagnostic redacts all its port fields when any port it names is
+hidden, and its presented identities drop each hidden port. The accepted plan keeps every value, so
+its fingerprint does not change. A command that renders nothing, such as re-read or sync, reads no
+visibility at all.
+
+A resolved Device question and a planned segment end also name the resolved Device. The planner
+records a `dcim.device` source on each resolved Device question, and each planned end carries one
+list of two sources, its port and its Device, under `left_sources` and `right_sources`. A hidden,
+deleted, or unsourced Device shows `a Device you cannot view` in its question, and a planned end
+shows `a termination you cannot view` when its port or its Device is hidden. The same query per
+referenced model covers Devices, so this adds one query to a render.

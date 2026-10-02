@@ -845,6 +845,61 @@ class TraceDeviceResolution(DigestIndexedMixin, PolicySectionModel):
         return f"{self.source_device_key} → Device #{self.selected_device_id}"
 
 
+class TraceLocationResolution(DigestIndexedMixin, PolicySectionModel):
+    """Map one opaque source Location path to one NetBox Location."""
+
+    POLICY_SECTION = "trace_location_resolutions"
+    DIGEST_SOURCE_FIELD = "source_location_key"
+    DIGEST_FIELD = "source_location_key_digest"
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="trace_location_resolutions",
+    )
+    source_location_key = models.TextField(
+        help_text="Canonical source Location path, compared as one opaque value",
+    )
+    source_location_key_digest = models.CharField(
+        max_length=64,
+        blank=True,
+        editable=False,
+        help_text="Fixed-width digest of source_location_key, which the index and constraint carry",
+    )
+    selected_location_id = models.PositiveBigIntegerField(
+        help_text="Primary key of the mapped NetBox Location",
+    )
+    selected_display_name = models.CharField(
+        max_length=200,
+        help_text="Location display name at selection time; it can become stale",
+    )
+
+    class Meta:
+        ordering = ["profile", "source_location_key"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "source_location_key_digest"],
+                name="ndi_tracelocresolution_profile_key",
+            ),
+        ]
+        verbose_name = "Trace Location Resolution"
+        verbose_name_plural = "Trace Location Resolutions"
+
+    def clean(self):
+        """Require a nonempty exact canonical key on a trace-only profile."""
+        super().clean()
+        canonical = identity_text(self.source_location_key)
+        if not canonical or canonical != self.source_location_key:
+            raise ValidationError(
+                {"source_location_key": "Enter the canonical source Location key."},
+                code="invalid",
+            )
+        self._derive_digest()
+
+    def __str__(self):
+        return f"{self.source_location_key} → Location #{self.selected_location_id}"
+
+
 class SourceDocument(models.Model):
     """The stored uploaded workbook that a plan and its executions read.
 
