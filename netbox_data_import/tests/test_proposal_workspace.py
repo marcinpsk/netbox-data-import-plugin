@@ -39,7 +39,7 @@ from netbox_data_import.proposal_tasks import CandidateSnapshot
 from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, complete_proposal, fail_proposal
 from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes, user_with_object_permission
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
-from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
+from netbox_data_import.tests.test_cable_module import CableTopologyMixin, PANEL_1_FRONT, direct_path, patched_path
 from netbox_data_import.tests.plugins_config import override_plugins_config
 
 
@@ -1674,6 +1674,65 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(response.status_code, 200, response.content)
         proposal.refresh_from_db()
         self.assertEqual(proposal.decision, "rejected")
+
+    def test_conflicting_source_spellings_refuse_preview_resolutions(self):
+        """One canonical field cannot authorize a different spelling from the reviewed card."""
+        from netbox_data_import.review_workspace import ReviewWorkspace
+        from netbox_data_import.views import TERMINATION_UNRESOLVABLE
+
+        proposal = self.completed()
+        proposal.refresh_from_db()
+        upload = BytesIO(
+            trace_workbook_bytes(
+                path_blocks=[
+                    direct_path(
+                        from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
+                        to_end=PANEL_1_FRONT,
+                    ),
+                    patched_path(from_end=trace_termination("dev-a", "", "absent-port", "Port")),
+                ]
+            )
+        )
+        upload.name = "traces.xlsx"
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        workspace = ReviewWorkspace.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY], self.actor)
+        sources = [
+            item["source"]["device"]
+            for trace in workspace.traces
+            for item in trace.terminations
+            if item["field_key"] == self.field_key
+        ]
+        self.assertEqual(set(sources), {"DEV-A", "dev-a"})
+        self.assertIsNone(workspace.termination_sources[self.field_key])
+        for action, data in (
+            ("accept_proposal", {"proposal_id": proposal.pk}),
+            (
+                "resolve_termination",
+                {
+                    "field_key": self.field_key,
+                    "object_type": "dcim.interface",
+                    "object_id": proposal.selected_object_id,
+                },
+            ),
+            ("request_proposal", {"field_key": self.field_key}),
+        ):
+            with self.subTest(action=action):
+                result = self.call(action, **data)
+                self.assertEqual(result.status_code, 400, result.content)
+                if action != "resolve_termination":
+                    self.assertEqual(result.json()["error"], TERMINATION_UNRESOLVABLE)
+                self.assert_unwritten(proposal)
+        candidates = self.client.get(
+            reverse("plugins:netbox_data_import:trace_termination_candidates"),
+            {"field_key": self.field_key, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
+        )
+        self.assertEqual(candidates.status_code, 400, candidates.content)
+        self.assertEqual(candidates.json()["error"], TERMINATION_UNRESOLVABLE)
 
     def test_duplicate_field_assessments_use_each_source_spelling(self):
         """Identity-equivalent fields can have different permission constraints on their spellings."""

@@ -4233,7 +4233,14 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             has_locations=has_locations,
         )
         proposal_display = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
-        proposal_fields = proposal_display.fields(selected.terminations if selected else [])
+        proposal_fields = proposal_display.fields(
+            [
+                {**field, "offered": workspace.termination_sources.get(field["field_key"]) is not None}
+                for field in selected.terminations
+            ]
+            if selected
+            else []
+        )
         if selected is not None:
             selected = replace(
                 selected,
@@ -4461,6 +4468,8 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
             return JsonResponse(
                 {"ok": False, "error": "This preview asked no question about that termination."}, status=400
             )
+        if workspace.termination_sources[field_key] is None:
+            return JsonResponse({"ok": False, "error": TERMINATION_UNRESOLVABLE}, status=400)
         page = _candidate_page(request.GET)
         if page.error:
             return JsonResponse({"ok": False, "error": page.error}, status=400)
@@ -4915,6 +4924,8 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
             return _preview_action_error(
                 request, next_url, "This preview asked no question about that termination.", status=400
             )
+        if workspace.termination_sources[field_key] is None:
+            return _preview_action_error(request, next_url, TERMINATION_UNRESOLVABLE, status=400)
         page = _candidate_page(request.POST)
         if page.error:
             return _preview_action_error(request, next_url, page.error, status=400)
@@ -5078,6 +5089,8 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
         field_key = request.POST.get("field_key", "").strip()
         if field_key not in workspace.termination_sources:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
+        if workspace.termination_sources[field_key] is None:
+            raise InvalidProposalTarget(TERMINATION_UNRESOLVABLE)
         task = proposal_task(SELECT_TERMINATION_TASK)
         with locked_profile_policy(profile.pk):
             live = ImportEngine.plan(profile, document, request.user, planning_context)
@@ -5170,6 +5183,7 @@ class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
             reader = _trace_reader(request, profile, planning_context)
         except PlanningTargetUnavailable:
             reader = None
+        field = {**field, "offered": workspace.termination_sources.get(field_key) is not None}
         presentation = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
         return JsonResponse(presentation.fields([field])[field_key])
 
@@ -5201,6 +5215,8 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
         )
         if proposal.field_key not in workspace.termination_sources:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
+        if workspace.termination_sources[proposal.field_key] is None:
+            raise InvalidProposalTarget(TERMINATION_UNRESOLVABLE)
         if not self.apply(proposal, request, reader, workspace):
             raise PreviewActionInvalid("This proposal no longer permits that action. Re-read it before continuing.")
         proposal.refresh_from_db()

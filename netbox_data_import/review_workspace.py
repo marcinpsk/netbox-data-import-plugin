@@ -945,11 +945,15 @@ class ReviewWorkspace:
 
     @cached_property
     def termination_sources(self) -> MappingProxyType:
-        """Return the source spelling of each termination field key this preview asked about, the first it states."""
-        sources: dict[str, dict] = {}
+        """Return each field source, or None when its occurrences state different spellings."""
+        sources: dict[str, dict | None] = {}
         for trace in self.traces:
             for item in trace.terminations:
-                sources.setdefault(item["field_key"], item["source"])
+                key, source = item["field_key"], item["source"]
+                if key not in sources:
+                    sources[key] = source
+                elif sources[key] != source:
+                    sources[key] = None
         return MappingProxyType(sources)
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:

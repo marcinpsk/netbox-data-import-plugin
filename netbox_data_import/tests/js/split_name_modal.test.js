@@ -334,6 +334,21 @@ describe("two parts claiming one field", () => {
 describe("a part that overwrites a value the file already carries", () => {
   beforeEach(() => render());
 
+  it("requires new consent after the proposed replacement changes", () => {
+    setField(0, "serial");
+    const checkbox = document.getElementById("res_force_0");
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event("change"));
+    expect(saveButton().disabled).toBe(false);
+
+    setValue(0, "AT901");
+
+    expect(document.getElementById("res_force_0").checked).toBe(false);
+    expect(saveButton().disabled).toBe(true);
+    submitForm();
+    expect(resolvedFields()).toBeNull();
+  });
+
   it("blocks the save until the override is acknowledged", () => {
     setField(0, "serial");
     expect(saveButton().disabled).toBe(true);
