@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v2.8.0 (2026-10-02)
+
+### Testing
+
+- **trace**: Wait for Location requests and correct refusal wording
+  ([`a002c8f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a002c8f2df7996ca1dde63399dcb7b70d39d47c9))
+
+
 ## v2.7.0 (2026-09-30)
 
 ### Bug Fixes
