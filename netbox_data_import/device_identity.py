@@ -5,14 +5,26 @@
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
 from django.utils.text import slugify
+
+from .identity import identity_text
+
+
+def _decoded_escapes(value: str) -> str:
+    r"""Decode JavaScript-style \uXXXX escapes."""
+    return re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), value)
 
 
 def normalize_mapping_text(value: str) -> str:
     r"""Normalize whitespace and decode JavaScript-style \uXXXX escapes."""
-    value = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), value)
-    return " ".join(value.split())
+    return " ".join(_decoded_escapes(value).split())
+
+
+def mapping_identity(value: str) -> str:
+    """Return the name identity a make or model compares under, after its escapes are decoded."""
+    return identity_text(_decoded_escapes(value))
 
 
 def default_identity_slugs(make: str, model: str) -> tuple[str, str]:
@@ -22,22 +34,43 @@ def default_identity_slugs(make: str, model: str) -> tuple[str, str]:
     return slugify(normalized_make)[:50], slugify(f"{normalized_make}-{normalized_model}")[:50]
 
 
+DEVICE_TYPE_AMBIGUOUS = "device_type"
+MANUFACTURER_AMBIGUOUS = "manufacturer"
+
+
+class DeviceTypeIdentity(NamedTuple):
+    """The Device Type one source make and model name, or which mapping table names it two ways."""
+
+    manufacturer_slug: str
+    device_type_slug: str
+    explicit: bool
+    ambiguous: str = ""
+
+
+def _targets_by_identity(mappings, identity, target) -> dict:
+    """Return each identity's one target, or None when its mappings name more than one target."""
+    found: dict = {}
+    for mapping in mappings:
+        found.setdefault(identity(mapping), set()).add(target(mapping))
+    return {key: next(iter(targets)) if len(targets) == 1 else None for key, targets in found.items()}
+
+
 class DeviceTypeIdentityResolver:
     """Resolve all profile Device Type identities from two batch-loaded indexes."""
 
     def __init__(self, device_type_mappings, manufacturer_mappings):
         self.device_type_mappings = tuple(device_type_mappings)
         self.manufacturer_mappings = tuple(manufacturer_mappings)
-        self._device_types_exact = {}
-        self._device_types_by_make = {}
-        for mapping in self.device_type_mappings:
-            self._device_types_exact.setdefault((mapping.source_make, mapping.source_model), mapping)
-            normalized_make = normalize_mapping_text(mapping.source_make).casefold()
-            self._device_types_by_make.setdefault(normalized_make, []).append(mapping)
-        self._manufacturers_exact = {}
-        for mapping in self.manufacturer_mappings:
-            normalized_make = normalize_mapping_text(mapping.source_make).casefold()
-            self._manufacturers_exact.setdefault(normalized_make, mapping)
+        self._device_types = _targets_by_identity(
+            self.device_type_mappings,
+            lambda mapping: (mapping_identity(mapping.source_make), mapping_identity(mapping.source_model)),
+            lambda mapping: (mapping.netbox_manufacturer_slug, mapping.netbox_device_type_slug),
+        )
+        self._manufacturers = _targets_by_identity(
+            self.manufacturer_mappings,
+            lambda mapping: mapping_identity(mapping.source_make),
+            lambda mapping: mapping.netbox_manufacturer_slug,
+        )
 
     @classmethod
     def for_profile(cls, profile):
@@ -47,31 +80,27 @@ class DeviceTypeIdentityResolver:
             profile.manufacturer_mappings.all(),
         )
 
-    def resolve(self, make: str, model: str) -> tuple[str, str, bool]:
-        """Return manufacturer slug, Device Type slug, and explicit status."""
-        normalized_make = normalize_mapping_text(make)
-        normalized_model = normalize_mapping_text(model)
-        mapping = self._device_types_exact.get((make, model))
-        if mapping is None:
-            mapping = next(
-                (
-                    candidate
-                    for candidate in self._device_types_by_make.get(normalized_make.casefold(), ())
-                    if normalize_mapping_text(candidate.source_model).casefold() == normalized_model.casefold()
-                ),
-                None,
-            )
-        if mapping is not None:
-            return mapping.netbox_manufacturer_slug, mapping.netbox_device_type_slug, True
-
-        manufacturer_mapping = self._manufacturers_exact.get(normalized_make.casefold())
+    def resolve(self, make: str, model: str) -> DeviceTypeIdentity:
+        """Return the Device Type slugs a make and model resolve to, or the mapping table that names two."""
+        key = (mapping_identity(make), mapping_identity(model))
+        if key in self._device_types:
+            target = self._device_types[key]
+            if target is None:
+                return DeviceTypeIdentity("", "", explicit=False, ambiguous=DEVICE_TYPE_AMBIGUOUS)
+            manufacturer_slug, device_type_slug = target
+            return DeviceTypeIdentity(manufacturer_slug, device_type_slug, explicit=True)
         default_manufacturer_slug, default_device_type_slug = default_identity_slugs(make, model)
-        manufacturer_slug = (
-            manufacturer_mapping.netbox_manufacturer_slug
-            if manufacturer_mapping is not None
-            else default_manufacturer_slug
-        )
-        return manufacturer_slug, default_device_type_slug, False
+        manufacturer_slug = self._manufacturers.get(key[0], default_manufacturer_slug)
+        if manufacturer_slug is None:
+            return DeviceTypeIdentity("", "", explicit=False, ambiguous=MANUFACTURER_AMBIGUOUS)
+        return DeviceTypeIdentity(manufacturer_slug, default_device_type_slug, explicit=False)
 
 
-__all__ = ("DeviceTypeIdentityResolver", "default_identity_slugs", "normalize_mapping_text")
+__all__ = (
+    "DEVICE_TYPE_AMBIGUOUS",
+    "MANUFACTURER_AMBIGUOUS",
+    "DeviceTypeIdentity",
+    "DeviceTypeIdentityResolver",
+    "default_identity_slugs",
+    "normalize_mapping_text",
+)

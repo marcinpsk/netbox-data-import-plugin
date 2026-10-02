@@ -356,9 +356,12 @@ import.
 
 A trace import opens the **Trace Review Workspace** directly. If a source Device label does not
 match exactly one visible NetBox Device in the selected Site, select **Choose Device**. The Import
-Profile stores that choice. A later trace file reuses it when the source Device label has the same
-letters after case and whitespace normalization. The choice applies to all ports on that source
-Device.
+Profile stores that choice, with the label you chose it for. A later trace file reuses it when the
+source Device label has the same name identity. The plugin compares every name the same way: it reads
+each whitespace character as a space, collapses each run of spaces to one, trims the ends, and
+compares the uppercase form. So `core-sw  1`, `CORE-SW 1` and `Core-Sw 1` are one label, and
+`Straße` is the same label as `STRASSE` but not as `STRAẞE`, whose capital sharp s has no other
+uppercase. The choice applies to all ports on that source Device.
 
 Rack, Location, and U position are search hints. They can change the candidate order, but they never
 select a Device. A Rack or Location hint is used only when you can view that NetBox object. Each
@@ -369,10 +372,9 @@ The plugin does not split the path and does not compare it with a NetBox Locatio
 as a hint, map it to a NetBox Location of the Site under **Source Locations** in the workspace. A
 Device in the mapped Location, or in a Location below it, then matches the path. A Device in another
 Location of the Site conflicts with it. An unmapped path is not a hint. The Import Profile stores the
-mapping, and a later trace file reuses it after case and whitespace normalization. Matching ignores
-case, trims whitespace at both ends, and collapses each run of internal whitespace to one space. The
-separator spelling is part of the path, so `A>>B` and `A >> B` are two paths. Profile YAML does not
-include these mappings.
+mapping, and a later trace file reuses it when the source Location path has the same name identity,
+as defined above. The separator spelling is part of the path, so `A>>B` and `A >> B` are two paths.
+Profile YAML does not include these mappings.
 
 A Device's Location is its own Location. Only a Device with no Location of its own uses its Rack's
 Location.

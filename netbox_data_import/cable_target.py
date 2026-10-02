@@ -32,13 +32,6 @@ from .cable_disclosure import (
     termination_sources,
 )
 from .catalog import OutputKind, TargetModuleKey
-from .database_identity import (
-    CANONICAL_NAME,
-    database_identities,
-    matching_search,
-    search_identity,
-    with_database_identity,
-)
 from .field_keys import (
     ADMITTED_TERMINATION_MODELS,
     CABLE_END_KINDS,
@@ -52,6 +45,7 @@ from .field_keys import (
     same_device_and_cards,
     termination_field_key,
 )
+from .identity import CANONICAL_NAME, identity_text, matching_search, with_name_identity
 from .object_permissions import enforce_saved_object_permission
 from .plan import (
     Diagnostic,
@@ -65,12 +59,12 @@ from .plan import (
 from .target_runtime import DeletedObject, PreconditionFailed
 from .trace_device_resolution import (
     STALE as DEVICE_STALE,
-    DeviceEvidence,
     collect_trace_device_evidence,
     resolve_trace_devices,
+    resolved_trace_device,
     source_device_key,
 )
-from .values import identity_text, source_text
+from .values import source_text
 
 CABLE_STATUS = "connected"
 ELIGIBLE_TERMINATION_LIMIT = 20
@@ -94,24 +88,6 @@ _CONFLICT_CODES = frozenset(
 
 # A PortMapping joins a front port to a rear port; no other Cable End Kind passes a path through.
 _PASS_THROUGH_PEERS = {FRONT_PORT_MODEL: REAR_PORT_MODEL, REAR_PORT_MODEL: FRONT_PORT_MODEL}
-
-
-@dataclass(frozen=True)
-class AskedTermination:
-    """One termination question as the plan asked it: its field key and the source values the planner matched.
-
-    A field key holds casefolded text, and the database identity of casefolded text can name another row.
-    """
-
-    field_key: str
-    device: DeviceEvidence
-    port: str
-
-    def __post_init__(self):
-        """Refuse source values that do not fold to the field key they claim to state."""
-        parsed = parse_termination_field_key(self.field_key)
-        if self.device.key != parsed["device"] or identity_text(self.port) != parsed["port"]:
-            raise ValueError("The source values do not state this termination field key.")
 
 
 @dataclass(frozen=True)
@@ -386,17 +362,14 @@ def _source_record(trace, segment_index: int) -> dict:
     }
 
 
-def resolved_device_for(asked: AskedTermination, netbox_reader, *, profile, _lock_rows=False):
-    """Return the one visible Device a termination question names, or None when it names no single one.
+def resolved_device_for(field_key: str, netbox_reader, *, profile, _lock_rows=False):
+    """Return the one visible Device a termination field key names, or None when it names no single one.
 
-    It resolves the plan's own Device evidence, so it reads the Device the planner read. A proposal
-    freezes this reference and revalidates it, so the retrieval and the freshness check have to agree
-    on what "the resolved Device" means.
+    A proposal freezes this reference and revalidates it, so the retrieval and the freshness check
+    have to agree on what "the resolved Device" means.
     """
-    key = asked.device.key
-    return resolve_trace_devices(
-        profile=profile, reader=netbox_reader, evidence={key: asked.device}, lock_rows=_lock_rows
-    )[key].device
+    key = parse_termination_field_key(field_key)["device"]
+    return resolved_trace_device(profile=profile, reader=netbox_reader, key=key, lock_rows=_lock_rows)
 
 
 def _named_terminations(netbox_reader, label: str, device_id: int, identities) -> dict[str, list]:
@@ -408,7 +381,7 @@ def _named_terminations(netbox_reader, label: str, device_id: int, identities) -
     from django.db.models import Exists, OuterRef
 
     rows = (
-        with_database_identity(_model_for_label(label).objects.filter(device_id=device_id))
+        with_name_identity(_model_for_label(label).objects.filter(device_id=device_id))
         .filter(**{f"{CANONICAL_NAME}__in": sorted(identities)})
         .annotate(actor_may_view=Exists(netbox_reader.terminations(label).filter(pk=OuterRef("pk"))))
         .order_by("pk")
@@ -432,7 +405,7 @@ def _exact_name_match(kind: str, identity: str, named_for) -> Any | None:
     return None
 
 
-def _mapped_peer_sources(parsed: dict, port: str, device, netbox_reader, profile) -> tuple:
+def _mapped_peer_sources(parsed: dict, device, netbox_reader, profile) -> tuple:
     """Return the opposite ports one resolved pass-through port maps to, as (label, rows) sources."""
     from .models import TerminationResolution, index_digest
 
@@ -457,7 +430,7 @@ def _mapped_peer_sources(parsed: dict, port: str, device, netbox_reader, profile
         .first()
     )
     if stored is None:
-        identity = database_identities((port,))[port]
+        identity = parsed["port"]
         base = _exact_name_match(
             parsed["kind"],
             identity,
@@ -482,7 +455,7 @@ _RESOLVED_DEVICE_UNSET = object()
 
 
 def eligible_terminations(
-    asked: AskedTermination,
+    field_key: str,
     netbox_reader,
     *,
     profile,
@@ -492,7 +465,7 @@ def eligible_terminations(
     _resolved_device=_RESOLVED_DEVICE_UNSET,
     _lock_rows: bool = False,
 ) -> EligibleTerminations:
-    """Return one page of candidates for one termination question the plan asked.
+    """Return one page of candidates for a canonical termination field key.
 
     The termination role offers every model the claimed kind admits on the resolved Device, as one
     set with one count, one bound, and one order (section 6.1). The mapped-peer role starts from the
@@ -501,23 +474,23 @@ def eligible_terminations(
     query. The models count and page in the database as one set, so no read holds more than *limit*
     rows.
     """
-    parsed = parse_termination_field_key(asked.field_key)
+    parsed = parse_termination_field_key(field_key)
     device = (
-        resolved_device_for(asked, netbox_reader, profile=profile, _lock_rows=_lock_rows)
+        resolved_device_for(field_key, netbox_reader, profile=profile, _lock_rows=_lock_rows)
         if _resolved_device is _RESOLVED_DEVICE_UNSET
         else _resolved_device
     )
     if device is None:
         return EligibleTerminations(candidates=(), total=0)
     if parsed["role"] == MAPPED_PEER_ROLE:
-        sources = _mapped_peer_sources(parsed, asked.port, device, netbox_reader, profile)
+        sources = _mapped_peer_sources(parsed, device, netbox_reader, profile)
     else:
         sources = tuple(
             (label, netbox_reader.terminations(label).filter(device_id=device.pk))
             for label in ADMITTED_TERMINATION_MODELS[parsed["kind"]]
         )
-    wanted = search_identity(search)
-    sources = tuple((label, matching_search(rows, wanted)) for label, rows in sources)
+    wanted = identity_text(search)
+    sources = tuple((label, matching_search(rows, search)) for label, rows in sources)
     if _lock_rows:
         # One global order, object type then id, as the segment locks take it.
         for _label, rows in sorted(sources, key=lambda source: source[0]):
@@ -549,7 +522,7 @@ def _ranked_keys(rows, wanted: str, order: int):
 
     if wanted:
         exact = Case(When(**{CANONICAL_NAME: wanted}, then=Value(1)), default=Value(0), output_field=IntegerField())
-        rows = with_database_identity(rows)
+        rows = with_name_identity(rows)
     else:
         exact = Value(0, output_field=IntegerField())
     return (
@@ -577,7 +550,6 @@ class _CableBatch:
         self._objects: dict[tuple[str, int], Any] = {}
         self._visible: dict[tuple[str, int], bool] = {}
         self._named: dict[tuple[int, str], dict[str, list]] = {}
-        self._port_identities: dict[str, str] = {}
         self._asked_identities: dict[int, set[str]] = {}
         self._resolved: dict[str, dict[tuple, _Termination]] = {}
         self._mappings_by_front: dict[int, list] = {}
@@ -673,18 +645,14 @@ class _CableBatch:
         return {row.field_key: row for row in rows}
 
     def _collect_asked_ports(self) -> None:
-        """Compute in one query the name identity of every port the exact-name rule is asked about."""
-        asked = []
+        """Collect, per resolved Device, the name identity of every port the exact-name rule is asked about."""
         for analysis in self.analyses:
             if analysis.stopped:
                 continue
             for reference in self._references(analysis.trace):
                 device = self._device_resolutions[source_device_key(reference.device)].device
                 if device is not None and _field_key(reference) not in self._stored:
-                    asked.append((device.pk, source_text(reference.port)))
-        self._port_identities = database_identities(port for _device_id, port in asked)
-        for device_id, port in asked:
-            self._asked_identities.setdefault(device_id, set()).add(self._port_identities[port])
+                    self._asked_identities.setdefault(device.pk, set()).add(identity_text(reference.port))
 
     def _named_for(self, device_id: int, label: str) -> dict[str, list]:
         """Return one Device's asked rows of one model by name identity, read once per batch."""
@@ -740,7 +708,7 @@ class _CableBatch:
             return termination
         match = _exact_name_match(
             claimed_termination_kind(reference.port_class),
-            self._port_identities[source_text(reference.port)],
+            identity_text(reference.port),
             partial(self._named_for, device.pk),
         )
         if match is None:
@@ -770,8 +738,8 @@ class _CableBatch:
             "state": state,
             "selected": "" if termination is None else termination.display,
             "selected_type": "" if termination is None else termination.object_type,
-            # The picker reads NetBox from the source spelling, because the folded key can name another row.
-            "source_port": source_text(reference.port),
+            # A saved decision keeps this spelling beside its key, so a later identity change can rekey it.
+            "source": {"device": reference.device, "cards": reference.cards, "port": reference.port},
             "selectable": not reason,
             "reason": reason,
             # A segment NetBox cannot cable reopens both its ends, however they were resolved.
@@ -1900,7 +1868,6 @@ __all__ = (
     "MANUALLY_RESOLVED",
     "REUSE_SEGMENT",
     "UNRESOLVED",
-    "AskedTermination",
     "CableModule",
     "EligibleTerminations",
     "eligible_terminations",

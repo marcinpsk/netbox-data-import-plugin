@@ -401,6 +401,14 @@ class NativeContactResolverTest(TestCase):
         actor = get_user_model().objects.create_user(username="resolver-hidden-contact")
         self.assertIsNone(PrimaryContactResolver.suggest({"Email": by_email.email}, self.profile, actor))
 
+    def test_a_suggestion_compares_names_under_the_name_identity(self):
+        """Case and whitespace runs do not separate a source name from the stored Contact name."""
+        contact = Contact.objects.create(name="Identity Person", email="")
+
+        suggestion = PrimaryContactResolver.suggest({"Owner": "  identity\u00a0  PERSON "}, self.profile)
+
+        self.assertEqual(suggestion["id"], contact.pk)
+
     def test_selected_contact_must_still_exist_be_visible_and_keep_its_identity(self):
         """A stored Contact ID cannot bypass fresh identity and visibility checks."""
         contact = Contact.objects.create(name="Selected Person", email="selected@example.invalid")

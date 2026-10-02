@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from typing import NamedTuple
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+from core.signals import clear_events
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -18,20 +19,24 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
-from core.signals import clear_events
 from netbox.views import generic
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from utilities.permissions import get_permission_for_model
 from utilities.views import ConditionalLoginRequiredMixin
 
-from .filters import ImportProfileFilterSet, InferenceBackendFilterSet
+from . import __version__ as _plugin_version
+from . import adapters, ip_assignment
 from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, policy_row_is_disclosed
+from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
+from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS, OutputKind
+from .contact_resolution import PrimaryContactResolver, contact_identity, suggest_contact_roles
+from .device_field_review import DeviceFieldReviewer, sync_change_preview
+from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
+from .filters import ImportProfileFilterSet, InferenceBackendFilterSet
 from .forms import (
     CableClassMappingForm,
     CableSegmentOverrideForm,
-    InferenceBackendFilterForm,
-    InferenceBackendForm,
     ClassRoleMappingForm,
     ColumnMappingForm,
     ColumnTransformRuleForm,
@@ -41,25 +46,22 @@ from .forms import (
     ImportProfileForm,
     ImportProfileImportForm,
     ImportSetupForm,
+    InferenceBackendFilterForm,
+    InferenceBackendForm,
     cable_policy_form_initial,
 )
-from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS, OutputKind
-from .values import (
-    effective_device_name,
-    identity_text,
-    normalize_for_compare,
-    source_position,
-    source_text,
-    status_map,
-    translation_maps,
+from .identity import identity_in, identity_text
+from .import_engine import (
+    ImportEngine,
+    PreconditionFailed,
+    SelectionError,
+    StalePlan,
+    StaleSourceDocument,
+    operator_failure_message,
 )
-from . import __version__ as _plugin_version
 from .models import (
     CableClassMapping,
     CableSegmentOverride,
-    InferenceBackend,
-    locked_profile_policy,
-    locked_resolution_policy,
     ClassRoleMapping,
     ColumnMapping,
     ColumnTransformRule,
@@ -68,28 +70,19 @@ from .models import (
     IgnoredFieldDifference,
     ImportExecution,
     ImportProfile,
+    InferenceBackend,
     ManufacturerMapping,
     SourceDocument,
     SourceResolution,
+    locked_profile_policy,
+    locked_resolution_policy,
     stored_import_source,
-    validate_contact_candidate_resolution,
     validate_adapter_target_module,
+    validate_contact_candidate_resolution,
     validate_registered_adapter,
     validate_source_resolution_fields,
 )
-from .tables import (
-    CableClassMappingTable,
-    InferenceBackendTable,
-    ClassRoleMappingTable,
-    ColumnMappingTable,
-    ColumnTransformRuleTable,
-    DeviceTypeMappingTable,
-    ImportExecutionTable,
-    ImportProfileTable,
-)
-from . import adapters, ip_assignment
-from .contact_resolution import PrimaryContactResolver, contact_identity, suggest_contact_roles
-from .device_field_review import DeviceFieldReviewer, sync_change_preview
+from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .object_permissions import (
     POLICY_WRITE_REFUSED,
     ObjectPermissionDenied,
@@ -97,13 +90,7 @@ from .object_permissions import (
     delete_permission_scoped_objects,
     save_permission_scoped_object,
 )
-from .profile_yaml import (
-    DuplicateYamlKeyError,
-    ProfileDocumentInvalid,
-    apply_profile_document,
-    load_yaml_document,
-    serialize_profile,
-)
+from .plan import ImportPlan, PlanError, fingerprint_of, is_current_schema_version
 from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
@@ -121,22 +108,17 @@ from .preview_row_actions import (
     retire_preview_revision,
     start_new_preview,
 )
-from .import_engine import (
-    ImportEngine,
-    PreconditionFailed,
-    SelectionError,
-    StalePlan,
-    StaleSourceDocument,
-    operator_failure_message,
+from .profile_yaml import (
+    DuplicateYamlKeyError,
+    ProfileDocumentInvalid,
+    apply_profile_document,
+    load_yaml_document,
+    serialize_profile,
 )
-from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
-from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
-from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
-from .plan import ImportPlan, PlanError, fingerprint_of, is_current_schema_version
 from .review_workspace import (
+    PROFILE_POLICY_MOVED,
     IneligibleDeviceSelection,
     IneligibleLocationSelection,
-    PROFILE_POLICY_MOVED,
     ProfilePolicyMoved,
     ReviewWorkspace,
     UnacceptablePolicyDecision,
@@ -148,12 +130,30 @@ from .review_workspace import (
     save_trace_device_resolution_and_replan,
     save_trace_location_resolution_and_replan,
 )
+from .tables import (
+    CableClassMappingTable,
+    ClassRoleMappingTable,
+    ColumnMappingTable,
+    ColumnTransformRuleTable,
+    DeviceTypeMappingTable,
+    ImportExecutionTable,
+    ImportProfileTable,
+    InferenceBackendTable,
+)
 from .trace_device_resolution import DeviceEvidence, eligible_trace_devices, source_device_key
 from .trace_location_resolution import (
     eligible_trace_locations,
     present_location_mappings,
     site_locations,
     source_location_key,
+)
+from .values import (
+    effective_device_name,
+    normalize_for_compare,
+    source_position,
+    source_text,
+    status_map,
+    translation_maps,
 )
 
 
@@ -1372,17 +1372,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         sync_change_preview_by_row = _sync_change_preview_by_row(result.units, target_field_labels)
         rack_filter_options, no_rack_filter_value = _rack_filter_options(result.units)
         split_field_values_by_source_id = {
-            r.source_id: {
-                "device_name": r.name or "",
-                "asset_tag": r.extra_data.get("asset_tag", ""),
-                "serial": r.extra_data.get("source_serial", ""),
-                "make": r.extra_data.get("source_make", ""),
-                "model": r.extra_data.get("source_model", ""),
-                "rack_name": r.rack_name or "",
-                "source_id": r.source_id,
-            }
-            for r in result.units
-            if r.object_type == "device" and r.source_id
+            r.source_id: _split_field_values(r) for r in result.units if r.object_type == "device" and r.source_id
         }
         preview_rows = _preview_rows_with_conflict_comparisons(result, rows, profile)
 
@@ -2577,9 +2567,8 @@ class SyncDeviceFieldView(_AjaxPermissionView):
 
     def post(self, request):
         """Apply one previewed field value to its matched Device."""
-        from django.http import JsonResponse
-
         from dcim.models import Device
+        from django.http import JsonResponse
 
         field = request.POST.get("field", "")
 
@@ -2665,7 +2654,12 @@ class SyncDeviceFieldView(_AjaxPermissionView):
 
     def _apply_device_name(self, device, value):
         new_name = self._writer_safe_text(device, "device name", "name", value)
-        if type(device).objects.filter(site=device.site, name=new_name).exclude(pk=device.pk).exists():
+        if (
+            type(device)
+            .objects.filter(identity_in("name", [identity_text(new_name)]), site=device.site)
+            .exclude(pk=device.pk)
+            .exists()
+        ):
             raise PreviewActionInvalid(f"A device named '{new_name}' already exists in site '{device.site}'")
         device.name = new_name
         device.save(update_fields=["name"])
@@ -2787,7 +2781,9 @@ def _lookup_rack_for_device(request, device, value):
         return None, "Rack name is empty"
     if device.site_id is None:
         return None, "Device has no site; cannot resolve rack"
-    qs = Rack.objects.restrict(request.user, "view").filter(site=device.site, name=name)
+    qs = Rack.objects.restrict(request.user, "view").filter(
+        identity_in("name", [identity_text(name)]), site=device.site
+    )
     if device.location_id is not None:
         qs = qs.filter(location=device.location)
         loc_str = f" / location '{device.location}'"
@@ -2985,7 +2981,11 @@ def _device_name_already_claimed(effective_rows, row_number, new_name, target):
         return f"Device name '{new_name}' is already used by another source row."
     tenant = target["tenant"]
     tenant_filter = {"tenant": tenant} if tenant is not None else {"tenant__isnull": True}
-    if Device.objects.filter(site=target["site"], name__iexact=new_name, **tenant_filter).exists():
+    if (
+        Device.objects.filter(site=target["site"], **tenant_filter)
+        .filter(identity_in("name", [identity_text(new_name)]))
+        .exists()
+    ):
         return f"Device name '{new_name}' already exists at the active import site."
     return None
 
@@ -3221,6 +3221,77 @@ class IgnorePositionView(PermissionRequiredMixin, View):
         return _name_resolution_response(request, next_url)
 
 
+# The split modal sends each part to one of these Target Fields, and a part can replace the row's value.
+SPLIT_TARGET_FIELDS = ("device_name", "asset_tag", "serial", "make", "model", "rack_name")
+# A serial is compared exactly; every other split target compares by name identity.
+EXACT_SPLIT_FIELDS = frozenset({"serial"})
+ACKNOWLEDGEMENT_INVALID = "Acknowledged fields must be a JSON list of field names."
+
+
+def _split_field_values(unit) -> dict[str, str]:
+    """Return the value one preview row carries for each split target, which a split part can replace."""
+    return {
+        "device_name": unit.name or "",
+        "asset_tag": unit.extra_data.get("asset_tag", ""),
+        "serial": unit.extra_data.get("source_serial", ""),
+        "make": unit.extra_data.get("source_make", ""),
+        "model": unit.extra_data.get("source_model", ""),
+        "rack_name": unit.rack_name or "",
+        "source_id": unit.source_id,
+    }
+
+
+def _carried_split_values(request, profile_id, source_id) -> dict[str, str]:
+    """Return one active preview row's split values, or no values for a standalone policy save."""
+    if not _session_holds_a_preview(request):
+        return {}
+    if str((request.session.get("import_context") or {}).get("profile_id")) != str(profile_id):
+        raise ValidationError("The selected profile is not the active import profile.")
+    plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY)
+    if not plan_data:
+        raise ValidationError("The active Import Plan is no longer readable.")
+    try:
+        workspace = ReviewWorkspace.from_dict(plan_data, request.user)
+    except PlanError as exc:
+        raise ValidationError("The active Import Plan is no longer readable.") from exc
+    rows = [unit for unit in workspace.units if unit.object_type == "device" and str(unit.source_id) == str(source_id)]
+    if len(rows) != 1:
+        raise ValidationError("The source ID must identify one active import row.")
+    return _split_field_values(rows[0])
+
+
+def _unacknowledged_replacement(request, profile_id, source_id, source_column, resolved_fields) -> str:
+    """Return why a split replaces a value the preview row carries without the operator's acknowledgement."""
+    import json
+
+    if source_column not in SPLIT_TARGET_FIELDS:
+        return ""
+    try:
+        acknowledged = json.loads(request.POST.get("acknowledged_fields") or "[]")
+    except json.JSONDecodeError:
+        return ACKNOWLEDGEMENT_INVALID
+    if not isinstance(acknowledged, list) or not all(isinstance(field, str) for field in acknowledged):
+        return ACKNOWLEDGEMENT_INVALID
+    carried = _carried_split_values(request, profile_id, source_id)
+    for field, value in resolved_fields.items():
+        if field == source_column or field not in SPLIT_TARGET_FIELDS or field in acknowledged:
+            continue
+        existing, replacement = source_text(carried.get(field)), source_text(value)
+        if not existing:
+            continue
+        same = (
+            existing == replacement
+            if field in EXACT_SPLIT_FIELDS
+            else identity_text(existing) == identity_text(replacement)
+        )
+        if not same:
+            return (
+                f"The split replaces the {CATALOG.display(field)} '{existing}' with '{replacement}'. "
+                "Acknowledge the replacement to save it."
+            )
+    return ""
+
+
 class SaveResolutionView(_PermissionScopedWriteMixin, _AjaxPermissionView):
     """Save a manual field resolution for rerere replay."""
 
@@ -3260,6 +3331,12 @@ class SaveResolutionView(_PermissionScopedWriteMixin, _AjaxPermissionView):
             if stale_reason is not None:
                 return _preview_action_error(request, next_url, stale_reason, status=409)
 
+            try:
+                refusal = _unacknowledged_replacement(request, profile.pk, source_id, source_column, resolved_fields)
+            except ValidationError as exc:
+                return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
+            if refusal:
+                return _preview_action_error(request, next_url, refusal, status=400)
             contact_context = None
             candidates = {}
             if source_column == "candidate:contact":
@@ -3621,9 +3698,9 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
 
 
 class CheckDeviceNameView(PermissionRequiredMixin, View):
-    """AJAX endpoint: check if a device with the given name exists in NetBox.
+    """AJAX endpoint: check if a Device the user can view has the name identity of the given name.
 
-    Returns JSON: {"exists": bool, "url": str|null, "id": int|null}.
+    Returns JSON: {"exists": bool, "url": str|null, "id": int|null}, and "count" when several Devices match.
     """
 
     permission_required = "netbox_data_import.view_importprofile"
@@ -3638,32 +3715,22 @@ class CheckDeviceNameView(PermissionRequiredMixin, View):
 
             return HttpResponseForbidden()
 
-        name = request.GET.get("name", "").strip()
-        if not name:
+        key = identity_text(request.GET.get("name", ""))
+        if not key:
             return JsonResponse({"exists": False, "url": None, "id": None})
 
-        try:
-            device = Device.objects.get(name=name)
-            return JsonResponse(
-                {
-                    "exists": True,
-                    "url": request.build_absolute_uri(device.get_absolute_url()),
-                    "id": device.pk,
-                }
-            )
-        except Device.DoesNotExist:
+        devices = Device.objects.restrict(request.user, "view").filter(identity_in("name", [key])).order_by("pk")
+        found = list(devices[:2])
+        if not found:
             return JsonResponse({"exists": False, "url": None, "id": None})
-        except Device.MultipleObjectsReturned:
-            devices = Device.objects.filter(name=name)
-            first = devices.first()
-            return JsonResponse(
-                {
-                    "exists": True,
-                    "url": request.build_absolute_uri(first.get_absolute_url()),
-                    "id": first.pk,
-                    "count": devices.count(),
-                }
-            )
+        answer = {
+            "exists": True,
+            "url": request.build_absolute_uri(found[0].get_absolute_url()),
+            "id": found[0].pk,
+        }
+        if len(found) > 1:
+            answer["count"] = devices.count()
+        return JsonResponse(answer)
 
 
 # ---------------------------------------------------------------------------
@@ -3752,6 +3819,7 @@ def _with_device_resolution_permissions(profile, actor, questions):
                 "source_device_key_digest": index_digest(key),
             },
             {
+                "source_device_label": question["labels"][0] if question["labels"] else "",
                 "selected_device_id": 1,
                 "selected_display_name": "Pending Device selection",
             },
@@ -4164,9 +4232,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             paths=_workspace_location_paths(workspace),
             has_locations=has_locations,
         )
-        proposal_display = ProposalPresentation(
-            profile=profile, actor=request.user, reader=reader, asked=workspace.asked_terminations
-        )
+        proposal_display = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
         proposal_fields = proposal_display.fields(selected.terminations if selected else [])
         if selected is not None:
             selected = replace(
@@ -4222,7 +4288,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             summary["active_proposals"] = ResolutionProposal.objects.filter(
                 profile=profile,
                 task_type=SELECT_TERMINATION_TASK,
-                field_key__in=list(workspace.asked_terminations),
+                field_key__in=list(workspace.termination_sources),
                 status__in=ProposalStatus.ACTIVE,
             ).count()
         return render(
@@ -4391,7 +4457,7 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         profile, _document, workspace, planning_context = loaded
         field_key = request.GET.get("field_key", "").strip()
         # A review read answers a question this preview asked, never one the caller invented.
-        if field_key not in workspace.asked_terminations:
+        if field_key not in workspace.termination_sources:
             return JsonResponse(
                 {"ok": False, "error": "This preview asked no question about that termination."}, status=400
             )
@@ -4399,12 +4465,9 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         if page.error:
             return JsonResponse({"ok": False, "error": page.error}, status=400)
         limit, offset = page.limit, page.offset
-        asked = workspace.asked_terminations[field_key]
-        if asked is None:
-            return JsonResponse({"ok": False, "error": TERMINATION_UNRESOLVABLE}, status=400)
         try:
             found = self._eligible(
-                request, profile, planning_context, asked, request.GET.get("search", ""), limit, offset
+                request, profile, planning_context, field_key, request.GET.get("search", ""), limit, offset
             )
         except (PlanningTargetUnavailable, ValueError):
             return JsonResponse({"ok": False, "error": TERMINATION_UNRESOLVABLE}, status=400)
@@ -4430,10 +4493,10 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         )
 
     @staticmethod
-    def _eligible(request, profile, planning_context, asked, search, limit, offset):
+    def _eligible(request, profile, planning_context, field_key, search, limit, offset):
         """Return the eligible page, inside the caller's own read scope."""
         reader = _trace_reader(request, profile, planning_context)
-        return eligible_terminations(asked, reader, profile=profile, search=search, limit=limit, offset=offset)
+        return eligible_terminations(field_key, reader, profile=profile, search=search, limit=limit, offset=offset)
 
 
 class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
@@ -4677,7 +4740,7 @@ class TraceLocationMappingView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin
                         source_document=document,
                         actor=request.user,
                         planning_context=planning_context,
-                        source_location_key=key,
+                        source_location_path=paths[key],
                         selected_location_id=location_id,
                         reviewed_fingerprint=workspace.plan.profile_fingerprint,
                     )
@@ -4848,7 +4911,7 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
         except (TypeError, ValueError):
             return _preview_action_error(request, next_url, "A termination selection names one object.", status=400)
         # A review command answers a question this preview asked, never one the caller invented.
-        if field_key not in workspace.asked_terminations:
+        if field_key not in workspace.termination_sources:
             return _preview_action_error(
                 request, next_url, "This preview asked no question about that termination.", status=400
             )
@@ -4856,14 +4919,11 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
         if page.error:
             return _preview_action_error(request, next_url, page.error, status=400)
         limit, offset = page.limit, page.offset
-        asked = workspace.asked_terminations[field_key]
-        if asked is None:
-            return _preview_action_error(request, next_url, TERMINATION_UNRESOLVABLE, status=400)
         try:
             reader = _trace_reader(request, profile, planning_context)
             # The recheck repeats the query that made the offer, so a searched or paged candidate still counts.
             found = eligible_terminations(
-                asked,
+                field_key,
                 reader,
                 profile=profile,
                 search=request.POST.get("search", ""),
@@ -4897,6 +4957,7 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
                     planning_context=planning_context,
                     task_type=SELECT_TERMINATION_TASK,
                     field_key=field_key,
+                    source=workspace.termination_sources[field_key],
                     selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
                     selected_object_id=chosen.pk,
                     selected_display_name=str(chosen),
@@ -4978,7 +5039,7 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
             UnsupportedProposalRole,
         ) as exc:
             logger.warning("%s: termination refused: %s", type(self).__name__, exc)
-            return JsonResponse({"ok": False, "error": "That termination cannot be resolved here."}, status=400)
+            return JsonResponse({"ok": False, "error": TERMINATION_UNRESOLVABLE}, status=400)
         except ValidationError as exc:
             return JsonResponse({"ok": False, "error": "; ".join(exc.messages)}, status=400)
 
@@ -5015,16 +5076,15 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             _discard_import_preview(request)
             return JsonResponse({"ok": False, "error": reason}, status=409)
         field_key = request.POST.get("field_key", "").strip()
-        if field_key not in workspace.asked_terminations:
+        if field_key not in workspace.termination_sources:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
         task = proposal_task(SELECT_TERMINATION_TASK)
         with locked_profile_policy(profile.pk):
             live = ImportEngine.plan(profile, document, request.user, planning_context)
-            live_workspace = ReviewWorkspace(live, request.user)
             field = next(
                 (
                     item
-                    for trace in live_workspace.traces
+                    for trace in ReviewWorkspace(live, request.user).traces
                     for item in trace.terminations
                     if item["field_key"] == field_key
                 ),
@@ -5032,16 +5092,13 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             )
             if field is None:
                 raise InvalidProposalTarget("This field is no longer in the preview.")
-            asked = live_workspace.asked_terminations[field_key]
-            if asked is None:
-                raise PreviewActionInvalid(TERMINATION_UNRESOLVABLE)
             if field["state"] != UNRESOLVED:
                 raise PreviewActionInvalid("This termination is already resolved.")
             # Refuse on the observed predecessor, not on the index: see active_proposal_exists.
             if active_proposal_exists(profile=profile, task_type=SELECT_TERMINATION_TASK, field_key=field_key):
                 raise ActiveProposalExists("This field already has an active Resolution Proposal.")
             inventory = task.inventory(
-                profile=profile, asked=asked, netbox_reader=reader, limit=proposal_eligible_set_limit()
+                profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_eligible_set_limit()
             )
             device = inventory.resolved_device
             if device is None:
@@ -5113,18 +5170,8 @@ class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
             reader = _trace_reader(request, profile, planning_context)
         except PlanningTargetUnavailable:
             reader = None
-        presentation = ProposalPresentation(
-            profile=profile, actor=request.user, reader=reader, asked=workspace.asked_terminations
-        )
+        presentation = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
         return JsonResponse(presentation.fields([field])[field_key])
-
-
-def _asked_by_proposal(workspace, proposal):
-    """Return the question this preview asked for the proposal's field, or refuse when it cannot name one."""
-    asked = workspace.asked_terminations.get(proposal.field_key)
-    if asked is None:
-        raise PreviewActionInvalid(TERMINATION_UNRESOLVABLE)
-    return asked
 
 
 class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, View):
@@ -5152,7 +5199,7 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             profile=profile,
             task_type=SELECT_TERMINATION_TASK,
         )
-        if proposal.field_key not in workspace.asked_terminations:
+        if proposal.field_key not in workspace.termination_sources:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
         if not self.apply(proposal, request, reader, workspace):
             raise PreviewActionInvalid("This proposal no longer permits that action. Re-read it before continuing.")
@@ -5178,7 +5225,7 @@ class TraceCancelProposalView(_TraceProposalActionView):
         if (
             proposal_task(proposal.task_type).resolved_device(
                 profile=proposal.profile,
-                asked=_asked_by_proposal(workspace, proposal),
+                field_key=proposal.field_key,
                 netbox_reader=reader,
             )
             is None
@@ -5196,7 +5243,7 @@ class TraceAcceptProposalView(_TraceProposalActionView):
 
         accepted = accept_proposal(
             proposal.pk,
-            asked=_asked_by_proposal(workspace, proposal),
+            source=workspace.termination_sources[proposal.field_key],
             operator=request.user,
             netbox_reader=reader,
             reviewed_fingerprint=workspace.plan.profile_fingerprint,

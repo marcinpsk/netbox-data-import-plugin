@@ -354,7 +354,7 @@ class RackModuleEdgeTest(RackModuleRowMixin, TestCase):
 
         units = RackModule().plan(self._batch(self._row(2, "", "edge-cab-01")), self.profile, CATALOG, reader)
 
-        self.assertEqual(units[0].identity, "rack:name:edge-cab-01")
+        self.assertEqual(units[0].identity, "rack:name:EDGE-CAB-01")
 
     def test_an_unreadable_height_falls_back_to_the_default(self):
         """A rack height that is not a number must not fail the whole batch."""

@@ -46,9 +46,10 @@
     return select ? select.value : '';
   }
 
+  /* A part keeps its spelling: the server normalizes it as it normalizes every source value. */
   function partValue(idx) {
     var input = document.getElementById('res_part_val_' + idx);
-    return input ? input.value.trim() : '';
+    return input ? input.value : '';
   }
 
   /* One field takes one part, so a field two parts claim is a choice the operator has to make. */
@@ -72,7 +73,7 @@
     if (!fieldSelect || !valueInput) return;
 
     var field = fieldSelect.value;
-    var splitValue = valueInput.value.trim();
+    var splitValue = valueInput.value;
     var sourceColumn = document.getElementById('res_source_column').value;
 
     previewDiv.innerHTML = '';
@@ -90,7 +91,8 @@
       return;
     }
 
-    var existingValue = (fileValues[field] || '').trim();
+    // The browser does not fold names: any difference asks, and the server decides by its own identity.
+    var existingValue = fileValues[field] || '';
 
     if (!existingValue) {
       previewDiv.style.cssText = 'background:#d1e7dd;border:1px solid #badbcc;color:#0a3622;';
@@ -98,7 +100,7 @@
       return;
     }
 
-    if (existingValue.toLowerCase() === splitValue.toLowerCase()) {
+    if (existingValue === splitValue) {
       previewDiv.style.cssText = 'background:#d1e7dd;border:1px solid #badbcc;color:#0a3622;';
       previewDiv.innerHTML =
         '<i class="mdi mdi-check-circle-outline"></i> Matches file value: <code>' + escHtml(existingValue) + '</code>';
@@ -267,7 +269,7 @@
 
     parts.forEach(function (part, idx) {
       var field = entries[idx] ? entries[idx][0] : (defaultFields[idx] || '');
-      var value = entries[idx] ? entries[idx][1] : part.trim();
+      var value = entries[idx] ? entries[idx][1] : part;
       addPart(container, idx, value, field);
     });
     partIndexes().forEach(checkPartConflict);
@@ -284,12 +286,16 @@
     if (unresolved) return false;
 
     var fields = {};
+    var acknowledged = [];
     partIndexes().forEach(function (idx) {
       var value = partValue(idx);
       var field = partField(idx);
+      var cb = document.getElementById('res_force_' + idx);
       if (field && value) fields[field] = value;
+      if (field && cb && cb.checked) acknowledged.push(field);
     });
     document.getElementById('res_resolved_fields').value = JSON.stringify(fields);
+    document.getElementById('res_acknowledged_fields').value = JSON.stringify(acknowledged);
     return true;
   }
 

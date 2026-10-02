@@ -83,6 +83,10 @@ _Avoid_: LLDP cable
 The source-side naming of one port within a Source Trace: device, cards, and port labels. Port class and location values corroborate it but do not identify it.
 _Avoid_: Endpoint string
 
+**Name Identity**:
+The one comparison key of a human name: whitespace runs collapsed to one space, the ends trimmed, and the full Unicode uppercase form. Python keys and PostgreSQL comparisons use the same definition, and a saved decision keeps the source spelling beside its key.
+_Avoid_: Normalized name, folded name
+
 **Segment Evidence**:
 One source-claimed physical cable between two Termination References, carrying one CableClass label.
 _Avoid_: Hop row

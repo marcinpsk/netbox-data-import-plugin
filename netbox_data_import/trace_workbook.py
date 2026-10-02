@@ -32,7 +32,8 @@ from .source_trace import (
     TraceProvenance,
 )
 from .trace_schema import TRACE_EXPORT_TIMESTAMP_MAX_LENGTH
-from .values import identity_text, source_text
+from .identity import identity_text
+from .values import source_text
 
 TRACE_PATH_SHEET = "Trace From To"
 TRACE_LIST_SHEET = "Trace List"

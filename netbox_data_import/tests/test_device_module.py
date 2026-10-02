@@ -355,7 +355,7 @@ class DeviceModuleIdentityTest(DeviceModulePlanTestBase):
         """A profile can leave the source ID column unmapped, and the unit still needs an identity."""
         units = self._plan(self._row(2, "", "srv-01"))
 
-        self.assertEqual(units[0].identity, "device:name:srv-01")
+        self.assertEqual(units[0].identity, "device:name:SRV-01")
 
     def test_an_ignored_source_id_is_excluded(self):
         """`excluded` is the disposition reserved for operator-configured policy."""
@@ -486,6 +486,18 @@ class DeviceModuleDuplicateTest(DeviceModulePlanTestBase):
 
         self.assertEqual([unit.disposition for unit in units], [Disposition.INVALID] * 2)
         self.assertTrue(all(unit.diagnostics[0].code == "device.duplicate_name" for unit in units))
+
+    def test_a_capital_sharp_s_name_is_another_name_than_its_double_s_spelling(self):
+        """Uppercase keeps \u1e9e and makes \u00df "SS", so each row matches only its own Device."""
+        capital = self._device("STRA\u1e9eE-1")
+        expanded = self._device("STRASSE-1")
+        rows = [self._row(2, "D-1", "stra\u1e9ee-1"), self._row(3, "D-2", "Stra\u00dfe-1")]
+
+        batch = _DeviceBatch(self._batch(*rows), rows, self.profile, self.reader)
+        units = self._plan(*rows)
+
+        self.assertEqual([batch.match(row, row["device_name"]).device for row in rows], [capital, expanded])
+        self.assertEqual([item.code for unit in units for item in unit.diagnostics if "duplicate" in item.code], [])
 
     def test_the_diagnostic_names_every_row_the_conflict_involves(self):
         """The operator picks which row gives the value up, so both row numbers have to be there."""
@@ -665,7 +677,7 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
 
         self.assertEqual(
             resolver.resolve("Dell  EMC", "R660"),
-            ("mapped-make", "mapped-type", True),
+            ("mapped-make", "mapped-type", True, ""),
         )
 
     def test_a_rack_the_row_names_but_netbox_does_not_have_is_blocked(self):

@@ -30,6 +30,7 @@ const pageContent = `
         <input type="hidden" id="res_source_column">
         <input type="hidden" id="res_original_value">
         <input type="hidden" id="res_resolved_fields">
+        <input type="hidden" id="res_acknowledged_fields">
         <div id="res_original_display"></div>
         <input type="text" id="res_delimiter" value=" - ">
         <div id="res_existing_notice" class="d-none"><code id="res_existing_display"></code></div>

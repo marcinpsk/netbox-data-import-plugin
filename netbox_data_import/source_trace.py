@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .field_keys import PORT_CLASS_CLAIMED_KINDS, REAR_PORT_CLASSES
-from .values import identity_text
+from .identity import identity_text
 
 if TYPE_CHECKING:
     from .adapters import SourceDiagnostic

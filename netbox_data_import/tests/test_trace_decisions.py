@@ -129,7 +129,7 @@ class TraceFieldKeyTest(SimpleTestCase):
             for name in node.names
         )
 
-        self.assertEqual(roots, {"__future__", "json", "values"})
+        self.assertEqual(roots, {"__future__", "json", "identity"})
 
     def test_unknown_port_class_has_no_claimed_kind(self):
         """A value outside the fixed vocabulary fails instead of claiming a target kind."""
@@ -148,7 +148,7 @@ class TraceFieldKeyTest(SimpleTestCase):
 
         self.assertEqual(
             key,
-            '{"cards":"line card a","device":"tor 1","kind":"interface","port":"ethernet 1/1","role":"termination"}',
+            '{"cards":"LINE CARD A","device":"TOR 1","kind":"interface","port":"ETHERNET 1/1","role":"termination"}',
         )
 
     def test_mapped_peer_role_produces_a_distinct_canonical_key(self):
@@ -215,6 +215,9 @@ class TracePolicyModelTest(TestCase):
                 kind="interface",
                 role=role,
             ),
+            source_device=self.device.name,
+            source_cards="Line Card A",
+            source_port=self.interface.name,
             selected_object_type=self.interface_type,
             selected_object_id=self.interface.pk,
             selected_display_name=str(self.interface),
@@ -231,8 +234,8 @@ class TracePolicyModelTest(TestCase):
         self.assertEqual(stored.task_type, "select_termination")
         self.assertEqual(
             stored.field_key,
-            '{"cards":"line card a","device":"trace device","kind":"interface",'
-            '"port":"ethernet 1/1","role":"termination"}',
+            '{"cards":"LINE CARD A","device":"TRACE DEVICE","kind":"interface",'
+            '"port":"ETHERNET 1/1","role":"termination"}',
         )
         self.assertEqual(stored.selected_object_type, self.interface_type)
         self.assertEqual(stored.selected_object_id, self.interface.pk)
@@ -282,6 +285,7 @@ class TracePolicyModelTest(TestCase):
             kind="interface",
             role=TERMINATION_ROLE,
         )
+        resolution.source_port = port
         return resolution
 
     def test_a_long_field_key_still_stores_its_decision(self):
@@ -337,6 +341,43 @@ class TracePolicyModelTest(TestCase):
             resolution.full_clean()
 
         self.assertEqual(caught.exception.error_dict["field_key"][0].code, "invalid")
+
+    def test_a_legacy_termination_resolution_can_be_validated_and_updated(self):
+        """A saved decision can lack the source spellings introduced after it was stored."""
+        resolution = self._resolution(TERMINATION_ROLE)
+        resolution.source_device = resolution.source_cards = resolution.source_port = ""
+        resolution.save()
+        resolution = TerminationResolution.objects.get(pk=resolution.pk)
+        resolution.selected_display_name = "Updated termination display"
+
+        resolution.full_clean()
+        resolution.save()
+
+        stored = TerminationResolution.objects.get(pk=resolution.pk)
+        self.assertEqual(stored.selected_display_name, "Updated termination display")
+        self.assertEqual((stored.source_device, stored.source_cards, stored.source_port), ("", "", ""))
+
+    def test_a_saved_termination_resolution_rejects_a_nonempty_spelling_of_another_key(self):
+        resolution = self._resolution(TERMINATION_ROLE)
+        resolution.save()
+        resolution.source_port = "Other Port"
+
+        with self.assertRaises(ValidationError) as caught:
+            resolution.full_clean()
+
+        self.assertIn("source_port", caught.exception.message_dict)
+
+    def test_termination_resolution_rejects_the_spelling_of_another_key(self):
+        """The kept spelling has to state the key, so a later rekey cannot move the decision to another port."""
+        for part, spelling in (("device", "Other Device"), ("cards", ""), ("port", "Ethernet 1/2")):
+            with self.subTest(part=part):
+                resolution = self._resolution(TERMINATION_ROLE)
+                setattr(resolution, f"source_{part}", spelling)
+
+                with self.assertRaises(ValidationError) as caught:
+                    resolution.full_clean()
+
+                self.assertIn(f"source_{part}", caught.exception.message_dict)
 
     def test_termination_resolution_rejects_a_flat_profile(self):
         """Catalog applicability rejects trace decisions on a flat profile."""
@@ -585,6 +626,7 @@ class TerminationResolutionPersistenceTest(TestCase):
             kind="interface",
             role=TERMINATION_ROLE,
         )
+        cls.source = {"device": device.name, "cards": "", "port": cls.interface.name}
         cls.planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
 
     def _save(self, actor):
@@ -596,6 +638,7 @@ class TerminationResolutionPersistenceTest(TestCase):
             planning_context=self.planning_context,
             task_type=SELECT_TERMINATION_TASK,
             field_key=self.field_key,
+            source=self.source,
             selected_object_type=self.interface_type,
             selected_object_id=self.interface.pk,
             selected_display_name=str(self.interface),
@@ -615,6 +658,10 @@ class TerminationResolutionPersistenceTest(TestCase):
         self.assertEqual(resolution.selected_object_type, self.interface_type)
         self.assertEqual(resolution.selected_object_id, self.interface.pk)
         self.assertEqual(resolution.selected_display_name, str(self.interface))
+        self.assertEqual(
+            (resolution.source_device, resolution.source_cards, resolution.source_port),
+            ("Replan Device", "", "Ethernet 1/2"),
+        )
 
     def test_selection_write_enforces_the_policy_model_object_permission(self):
         """A caller without add permission cannot store a selection or reach replanning."""
@@ -639,6 +686,7 @@ class TerminationResolutionPersistenceTest(TestCase):
                 planning_context=self.planning_context,
                 task_type=SELECT_TERMINATION_TASK,
                 field_key=self.field_key,
+                source=self.source,
                 selected_object_type=self.interface_type,
                 selected_object_id=self.interface.pk,
                 selected_display_name=str(self.interface),
@@ -672,6 +720,7 @@ class TerminationResolutionLockOrderingTest(TransactionTestCase):
             kind="interface",
             role=TERMINATION_ROLE,
         )
+        self.source = {"device": device.name, "cards": "", "port": self.interface.name}
         self.planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
 
     def test_an_adapter_change_under_the_lock_refuses_the_trace_only_write(self):
@@ -697,6 +746,7 @@ class TerminationResolutionLockOrderingTest(TransactionTestCase):
                     planning_context=self.planning_context,
                     task_type=SELECT_TERMINATION_TASK,
                     field_key=self.field_key,
+                    source=self.source,
                     selected_object_type=self.interface_type,
                     selected_object_id=self.interface.pk,
                     selected_display_name=str(self.interface),
@@ -753,6 +803,7 @@ class ReplanUnderThePolicyLockTest(TransactionTestCase):
             kind="interface",
             role=TERMINATION_ROLE,
         )
+        self.source = {"device": device.name, "cards": "", "port": self.interface.name}
         self.planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
 
     def test_the_replan_still_holds_the_policy_lock(self):
@@ -790,6 +841,7 @@ class ReplanUnderThePolicyLockTest(TransactionTestCase):
                 planning_context=self.planning_context,
                 task_type=SELECT_TERMINATION_TASK,
                 field_key=self.field_key,
+                source=self.source,
                 selected_object_type=self.interface_type,
                 selected_object_id=self.interface.pk,
                 selected_display_name=str(self.interface),

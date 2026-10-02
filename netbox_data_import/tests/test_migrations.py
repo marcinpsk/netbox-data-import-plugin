@@ -21,7 +21,7 @@ from django.db.migrations.questioner import NonInteractiveMigrationQuestioner
 from django.db.migrations.state import ProjectState
 from django.test import SimpleTestCase, TransactionTestCase
 
-from netbox_data_import.tests.helpers import migrate_plugin_to_leaf
+from netbox_data_import.tests.helpers import migrate_plugin_to_leaf, unapply_plugin_migrations_to
 
 APP = "netbox_data_import"
 _DEPENDENCY_COMMENT_EXCEPTIONS = frozenset(
@@ -78,14 +78,6 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     available_apps = ["netbox_data_import"]
     migrate_from = ("netbox_data_import", "0014_alter_columnmapping_target_field_and_more")
     migrate_to = ("netbox_data_import", "0016_deviceexistingmatch_ndi_devicematch_profile_device")
-    # Django refuses to reverse these data migrations, so the walk back fakes each one, newest
-    # first. The generated schema migrations between them still run their real reverse operations.
-    irreversible_data_steps = (
-        ("0039_remove_job_plan_copies", "0038_cable_tag_integrity"),
-        ("0035_retire_superseded_proposals", "0034_tracedeviceresolution"),
-        ("0022_migrate_profile_adapter_config", "0021_importprofile_adapter_config"),
-        ("0020_migrate_import_source_custom_field", "0019_deviceimportsource"),
-    )
 
     @contextmanager
     def _migration_apps(self):
@@ -96,19 +88,6 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
         finally:
             apps.set_available_apps(self.available_apps)
 
-    def _unapply_the_irreversible_data_migrations(self):
-        """Step past each data operation without attempting to reconstruct its old values."""
-        for step, below in self.irreversible_data_steps:
-            MigrationExecutor(connection).migrate([("netbox_data_import", step)])
-            executor = MigrationExecutor(connection)
-            plan = executor.migration_plan([("netbox_data_import", below)])
-            self.assertEqual(
-                [migration.name for migration, _backwards in plan],
-                [step],
-                "Only the irreversible data migration may be faked. A later migration needs a real reverse.",
-            )
-            executor.migrate([("netbox_data_import", below)], fake=True)
-
     def setUp(self):
         super().setUp()
         self.profile_pk = None
@@ -116,9 +95,8 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
         # left below the leaf fails every later test that reads a current column.
         self.addCleanup(self._restore_the_leaf_migrations)
         with self._migration_apps():
-            self._unapply_the_irreversible_data_migrations()
+            unapply_plugin_migrations_to(self.migrate_from[1])
             executor = MigrationExecutor(connection)
-            executor.migrate([self.migrate_from])
             old_apps = executor.loader.project_state([self.migrate_from]).apps
             profile = old_apps.get_model("netbox_data_import", "ImportProfile").objects.create(
                 name="Legacy Duplicate Binding Profile"
@@ -319,13 +297,10 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
         tagged_item = TaggedItem.objects.get(tag=tag, object_id=cable.pk)
         previous = (APP, "0037_cablesegmentoverride")
         leaf = (APP, "0038_cable_tag_integrity")
-        final = (APP, "0039_remove_job_plan_copies")
         self.addCleanup(migrate_plugin_to_leaf)
 
-        # Reverse the later schema migrations for real, so the fake below skips only 0039's data step.
-        MigrationExecutor(connection).migrate([final])
-        MigrationExecutor(connection).migrate([leaf], fake=True)
-        MigrationExecutor(connection).migrate([previous])
+        # The walk fakes only the data steps with no reverse, 0039 among them, and reverses 0038 for real.
+        unapply_plugin_migrations_to(previous[1])
 
         self.assertTrue(TaggedItem.objects.filter(pk=tagged_item.pk).exists())
         with connection.cursor() as cursor:
@@ -362,7 +337,6 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
 
         previous = (APP, "0037_cablesegmentoverride")
         leaf = (APP, "0038_cable_tag_integrity")
-        final = (APP, "0039_remove_job_plan_copies")
         orphan_pk = None
 
         def restore_leaf():
@@ -373,10 +347,8 @@ class CableTagIntegrityMigrationTest(TransactionTestCase):
         self.addCleanup(restore_leaf)
         tag = Tag.objects.create(name="Orphan upgrade", slug="orphan-upgrade")
         cable_type = ObjectType.objects.get_for_model(Cable)
-        # Reverse the later schema migrations for real, so the fake below skips only 0039's data step.
-        MigrationExecutor(connection).migrate([final])
-        MigrationExecutor(connection).migrate([leaf], fake=True)
-        MigrationExecutor(connection).migrate([previous])
+        # The walk fakes only the data steps with no reverse, 0039 among them, and reverses 0038 for real.
+        unapply_plugin_migrations_to(previous[1])
         orphan_pk = TaggedItem.objects.create(tag=tag, content_type=cable_type, object_id=2_147_483_647).pk
 
         with self.assertRaises(IntegrityError) as raised:

@@ -33,14 +33,14 @@ from .contact_resolution import (
     PrimaryContactResolver,
 )
 from .device_field_review import DeviceFieldReviewer
-from .device_identity import DeviceTypeIdentityResolver
+from .device_identity import DEVICE_TYPE_AMBIGUOUS, MANUFACTURER_AMBIGUOUS, DeviceTypeIdentityResolver
+from .identity import identity_expression, identity_in, identity_text
 from .netbox_reader import PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied, ProspectiveRelation, assess_permission_scoped_save
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
 from .target_runtime import ExecutionContext, PreconditionFailed, TargetModuleRuntime
 from .values import (
     effective_device_name,
-    identity_text,
     normalize_for_compare,
     source_position,
     source_text,
@@ -48,6 +48,11 @@ from .values import (
 )
 
 DEFAULT_RACK_HEIGHT = 42
+# Two mappings that share one name identity and name different targets leave the row for the operator.
+_AMBIGUOUS_MAPPING_CODES = {
+    DEVICE_TYPE_AMBIGUOUS: "device.device_type_mapping_ambiguous",
+    MANUFACTURER_AMBIGUOUS: "device.manufacturer_mapping_ambiguous",
+}
 
 
 class _RackComparison(Protocol):
@@ -108,22 +113,6 @@ def _text(value) -> str:
 def _source_text(value) -> str:
     """Return source text, including an empty value for spreadsheet null markers."""
     return source_text(value)
-
-
-def _database_upper_values(values, *, collation: str | None = None) -> dict[str, str]:
-    """Return PostgreSQL's case-insensitive comparison key for each distinct value."""
-    from django.db import connection
-
-    unique_values = sorted(set(values))
-    if not unique_values:
-        return {}
-    collation_sql = f" COLLATE {connection.ops.quote_name(collation)}" if collation else ""
-    with connection.cursor() as cursor:
-        cursor.execute(
-            f"SELECT source_value, UPPER(source_value{collation_sql}) FROM unnest(%s::text[]) AS source_value",  # noqa: S608 - The interpolated identifier uses quote_name; values use a query parameter.
-            [unique_values],
-        )
-        return dict(cursor.fetchall())
 
 
 def _duplicate_value_detail(label: str, value: str, other_rows: list[int]) -> str:
@@ -480,11 +469,11 @@ class RackModule:
         payload = planned_change.payload
         rack_id = planned_change.preconditions.get("rack_id")
         if rack_id is None:
-            existing = Rack.objects.filter(
-                site_id=payload["site_id"],
-                location_id=payload["location_id"],
-                name__iexact=payload["name"],
-            ).first()
+            existing = (
+                Rack.objects.filter(site_id=payload["site_id"], location_id=payload["location_id"])
+                .filter(identity_in("name", [identity_text(payload["name"])]))
+                .first()
+            )
             if existing is not None:
                 raise PreconditionFailed(f"Rack '{payload['name']}' appeared after the plan was made.")
             rack = Rack(site_id=payload["site_id"], location_id=payload["location_id"])
@@ -945,6 +934,7 @@ class _DeviceBatch:
                 **({"tenant": netbox_reader.tenant} if netbox_reader.tenant is not None else {"tenant__isnull": True}),
             )
             .values_list("name", flat=True)
+            if name is not None
         }
         self._reserved_names.update(identity_text(effective_device_name(row)) for row in identity_rows)
         self._effective_identity = self._effective_identity_values(identity_rows)
@@ -1033,7 +1023,9 @@ class _DeviceBatch:
         for row in rows:
             make = " ".join((_source_text(row.get("make")) or "Unknown").split())
             model = " ".join((_source_text(row.get("model")) or "Unknown").split())
-            type_keys.add(self._identity.resolve(make, model)[:2])
+            resolved = self._identity.resolve(make, model)
+            if not resolved.ambiguous:
+                type_keys.add(resolved[:2])
 
         referenced_types = DeviceType.objects.select_related("manufacturer").filter(
             manufacturer__slug__in={mfg_slug for mfg_slug, _dt_slug in type_keys},
@@ -1049,22 +1041,12 @@ class _DeviceBatch:
     def _load_identity_objects(self, rows):
         """Load the global Device identity candidates and their visibility once."""
         from dcim.models import Device
-        from django.db.models.functions import Upper
+        from django.db.models import F
 
         source_ids = {_source_text(row.get("source_id")) for row in rows} - {""}
         serials = {_source_text(row.get("serial")) for row in rows} - {""}
-        raw_asset_tags = {_source_text(row.get("asset_tag"))[:50] for row in rows} - {""}
-        raw_names = {_source_text(effective_device_name(row)) for row in rows} - {""}
-        self._database_asset_tag_keys = _database_upper_values(
-            raw_asset_tags,
-            collation=Device._meta.get_field("asset_tag").db_collation,
-        )
-        self._database_name_keys = _database_upper_values(
-            raw_names,
-            collation=Device._meta.get_field("name").db_collation,
-        )
-        asset_tags = set(self._database_asset_tag_keys.values())
-        names = set(self._database_name_keys.values())
+        asset_tags = {identity_text(_source_text(row.get("asset_tag"))[:50]) for row in rows} - {""}
+        names = {identity_text(effective_device_name(row)) for row in rows} - {""}
         devices = Device.objects.select_related(
             "device_type__manufacturer",
             "rack__location",
@@ -1081,12 +1063,14 @@ class _DeviceBatch:
         )
         serial_devices = list(devices.filter(serial__in=serials))
         asset_tag_devices = list(
-            devices.annotate(_identity_asset_tag=Upper("asset_tag")).filter(_identity_asset_tag__in=asset_tags)
+            devices.annotate(_identity_asset_tag=identity_expression(F("asset_tag"))).filter(
+                _identity_asset_tag__in=asset_tags
+            )
         )
         tenant_filter = {"tenant": self.reader.tenant} if self.reader.tenant is not None else {"tenant__isnull": True}
         name_devices = (
             list(
-                devices.annotate(_identity_name=Upper("name")).filter(
+                devices.annotate(_identity_name=identity_expression(F("name"))).filter(
                     _identity_name__in=names,
                     site=self.reader.site,
                     **tenant_filter,
@@ -1242,7 +1226,11 @@ class _DeviceBatch:
         """Return existing relation objects and planned roles, or the first unmet dependency."""
         make = " ".join((_source_text(row.get("make")) or "Unknown").split())
         model = " ".join((_source_text(row.get("model")) or "Unknown").split())
-        mfg_slug, dt_slug, explicit = self._identity.resolve(make, model)
+        mfg_slug, dt_slug, explicit, ambiguous = self._identity.resolve(make, model)
+        if ambiguous:
+            return _Dependencies(
+                missing=(_AMBIGUOUS_MAPPING_CODES[ambiguous], {"source_make": make, "source_model": model})
+            )
         changes = []
         actor = self.reader.actor
         device_type = self._device_types.get((mfg_slug, dt_slug))
@@ -1418,7 +1406,7 @@ class _DeviceBatch:
             value = _source_text(row.get(field))[:50] if field == "asset_tag" else _source_text(row.get(field))
             if not value:
                 continue
-            key = self._database_asset_tag_keys[value] if field == "asset_tag" else value
+            key = identity_text(value) if field == "asset_tag" else value
             found = matches.get(key, ())
             if len(found) > 1:
                 return _Match(ambiguous=code, value=value)
@@ -1428,7 +1416,7 @@ class _DeviceBatch:
         if identity_text(name) in self._duplicate_names or self.reader.site is None:
             return _Match()
         name_value = _source_text(name)
-        by_name = self._devices_by_name.get(self._database_name_keys[name_value], ()) if name_value else ()
+        by_name = self._devices_by_name.get(identity_text(name_value), ()) if name_value else ()
         if len(by_name) > 1:
             return _Match(ambiguous="device.ambiguous_name", value=name)
         return self._visible_match(by_name[0], "name") if by_name else _Match()
@@ -2136,11 +2124,8 @@ class DeviceModule:
         rack_name = payload["rack_name"]
         if rack_id is None and rack_name:
             rack = (
-                Rack.objects.filter(
-                    site_id=payload["site_id"],
-                    location_id=payload["location_id"],
-                    name__iexact=rack_name,
-                )
+                Rack.objects.filter(site_id=payload["site_id"], location_id=payload["location_id"])
+                .filter(identity_in("name", [identity_text(rack_name)]))
                 .select_for_update(of=("self",))
                 .first()
             )
@@ -2363,16 +2348,16 @@ class DeviceModule:
         if serial and Device.objects.filter(serial=serial).exists():
             return f"A Device with serial '{serial}'"
         asset_tag = payload.get("asset_tag") or ""
-        if asset_tag and Device.objects.filter(asset_tag__iexact=asset_tag).exists():
+        if asset_tag and Device.objects.filter(identity_in("asset_tag", [identity_text(asset_tag)])).exists():
             return f"A Device with asset tag '{asset_tag}'"
         tenant_filter = (
             {"tenant_id": payload["tenant_id"]} if payload.get("tenant_id") is not None else {"tenant__isnull": True}
         )
-        if Device.objects.filter(
-            site_id=payload["site_id"],
-            name__iexact=payload["name"],
-            **tenant_filter,
-        ).exists():
+        if (
+            Device.objects.filter(site_id=payload["site_id"], **tenant_filter)
+            .filter(identity_in("name", [identity_text(payload["name"])]))
+            .exists()
+        ):
             return f"A Device named '{payload['name']}' at the target site and tenant"
         return ""
 

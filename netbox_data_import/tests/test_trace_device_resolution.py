@@ -54,7 +54,7 @@ from netbox_data_import.views import CANDIDATE_OFFSET_INVALID, CANDIDATE_OFFSET_
 
 class DeviceEvidenceSerializationTest(TestCase):
     evidence = {
-        "key": "source device",
+        "key": "SOURCE DEVICE",
         "labels": ["Source Device"],
         "locations": [],
         "racks": [],
@@ -63,7 +63,7 @@ class DeviceEvidenceSerializationTest(TestCase):
 
     def test_serialized_evidence_rejects_a_non_mapping(self):
         with self.assertRaisesMessage(TypeError, "Device evidence must be an object"):
-            DeviceEvidence.from_dict(["source device"])
+            DeviceEvidence.from_dict(["SOURCE DEVICE"])
 
     def test_serialized_evidence_rejects_a_non_string_key(self):
         with self.assertRaisesMessage(TypeError, "Device evidence key must be a string"):
@@ -129,7 +129,8 @@ class TraceDeviceResolutionModelTest(CableTopologyMixin, TestCase):
     def test_a_trace_profile_accepts_one_canonical_source_device_key(self):
         resolution = TraceDeviceResolution(
             profile=self.profile,
-            source_device_key="source device",
+            source_device_key="SOURCE DEVICE",
+            source_device_label="Source  Device",
             selected_device_id=self.device_a.pk,
             selected_display_name=str(self.device_a),
         )
@@ -137,8 +138,55 @@ class TraceDeviceResolutionModelTest(CableTopologyMixin, TestCase):
         resolution.full_clean()
         resolution.save()
 
-        self.assertEqual(resolution.source_device_key, "source device")
+        self.assertEqual(resolution.source_device_key, "SOURCE DEVICE")
         self.assertEqual(len(resolution.source_device_key_digest), 64)
+
+    def test_a_legacy_device_resolution_can_be_validated_and_updated(self):
+        """A saved mapping can lack the source spelling introduced after it was stored."""
+        resolution = TraceDeviceResolution.objects.create(
+            profile=self.profile,
+            source_device_key="SOURCE DEVICE",
+            selected_device_id=self.device_a.pk,
+            selected_display_name=str(self.device_a),
+        )
+        resolution = TraceDeviceResolution.objects.get(pk=resolution.pk)
+        resolution.selected_display_name = "Updated device display"
+
+        resolution.full_clean()
+        resolution.save()
+
+        stored = TraceDeviceResolution.objects.get(pk=resolution.pk)
+        self.assertEqual(stored.selected_display_name, "Updated device display")
+        self.assertEqual(stored.source_device_label, "")
+
+    def test_a_saved_device_resolution_rejects_a_nonempty_spelling_of_another_key(self):
+        resolution = TraceDeviceResolution.objects.create(
+            profile=self.profile,
+            source_device_key="SOURCE DEVICE",
+            selected_device_id=self.device_a.pk,
+            selected_display_name=str(self.device_a),
+        )
+        resolution.source_device_label = "Another source"
+
+        with self.assertRaises(ValidationError) as caught:
+            resolution.full_clean()
+
+        self.assertIn("source_device_label", caught.exception.message_dict)
+
+    def test_the_kept_source_label_has_to_state_the_key(self):
+        """A label of another key would move the decision to that key at the next rekey."""
+        for label in ("", "Other Device"):
+            with self.subTest(label=label):
+                resolution = TraceDeviceResolution(
+                    profile=self.profile,
+                    source_device_key="SOURCE DEVICE",
+                    source_device_label=label,
+                    selected_device_id=self.device_a.pk,
+                    selected_display_name=str(self.device_a),
+                )
+
+                with self.assertRaisesMessage(ValidationError, "source label of this Device key"):
+                    resolution.full_clean()
 
     def test_a_noncanonical_source_device_key_is_rejected(self):
         resolution = TraceDeviceResolution(
@@ -155,7 +203,7 @@ class TraceDeviceResolutionModelTest(CableTopologyMixin, TestCase):
         flat_profile = ImportProfile.objects.create(name="Flat Device Resolution", adapter_config={})
         resolution = TraceDeviceResolution(
             profile=flat_profile,
-            source_device_key="source device",
+            source_device_key="SOURCE DEVICE",
             selected_device_id=self.device_a.pk,
             selected_display_name=str(self.device_a),
         )
@@ -168,7 +216,7 @@ class TraceDeviceResolutionModelTest(CableTopologyMixin, TestCase):
 
         TraceDeviceResolution.objects.create(
             profile=self.profile,
-            source_device_key="source device",
+            source_device_key="SOURCE DEVICE",
             selected_device_id=self.device_a.pk,
             selected_display_name=str(self.device_a),
         )
@@ -187,7 +235,7 @@ class TraceDeviceResolutionPlanningTest(CableTopologyMixin, TestCase):
             type="1000base-t",
         )
 
-    def save_alias(self, source_label="source alias"):
+    def save_alias(self, source_label="SOURCE ALIAS"):
         return TraceDeviceResolution.objects.create(
             profile=self.profile,
             source_device_key=source_label,
@@ -261,7 +309,7 @@ class TraceDeviceResolutionPlanningTest(CableTopologyMixin, TestCase):
         plan = self.plan(first, second)
 
         questions = [question for unit in plan.units for question in unit.display["trace"]["devices"]]
-        alias_questions = [question for question in questions if question["key"] == "source alias"]
+        alias_questions = [question for question in questions if question["key"] == "SOURCE ALIAS"]
         self.assertEqual(len(alias_questions), 2)
         self.assertTrue(all(question["state"] == UNRESOLVED for question in alias_questions))
 
@@ -284,7 +332,7 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
         )
         cls.other = cls.make_device("Candidate A")
         cls.evidence = DeviceEvidence(
-            key="source alias",
+            key="SOURCE ALIAS",
             labels=("Source Alias",),
             locations=("Trace Room",),
             racks=("Trace Rack",),
@@ -294,7 +342,7 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
     def setUp(self):
         TraceLocationResolution.objects.create(
             profile=self.profile,
-            source_location_key="trace room",
+            source_location_key="TRACE ROOM",
             selected_location_id=self.location.pk,
             selected_display_name=str(self.location),
         )
@@ -350,7 +398,7 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
         self.rack.name = "Trace  Rack"
         self.rack.save(update_fields=("name",))
         evidence = DeviceEvidence(
-            key="source alias",
+            key="SOURCE ALIAS",
             labels=("Source Alias",),
             locations=(),
             racks=("Trace Rack",),
@@ -366,7 +414,7 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
 
     def test_a_source_rack_no_netbox_rack_matches_conflicts_with_every_visible_rack(self):
         evidence = DeviceEvidence(
-            key="source alias", labels=("Source Alias",), locations=(), racks=("Absent Rack",), u_positions=()
+            key="SOURCE ALIAS", labels=("Source Alias",), locations=(), racks=("Absent Rack",), u_positions=()
         )
 
         candidate = next(
@@ -377,7 +425,7 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
 
     def test_a_source_position_that_is_not_a_number_conflicts_with_every_placed_position(self):
         evidence = DeviceEvidence(
-            key="source alias", labels=("Source Alias",), locations=(), racks=(), u_positions=("U12",)
+            key="SOURCE ALIAS", labels=("Source Alias",), locations=(), racks=(), u_positions=("U12",)
         )
 
         page = self.eligible(self.reader(), evidence)
@@ -482,7 +530,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
 
         candidates = self.client.get(
             reverse("plugins:netbox_data_import:trace_device_candidates"),
-            {"device_key": "source alias", "search": "DEV-A", "preview_revision": revision},
+            {"device_key": "SOURCE ALIAS", "search": "DEV-A", "preview_revision": revision},
         )
         self.assertEqual(candidates.status_code, 200)
         self.assertEqual([item["id"] for item in candidates.json()["candidates"]], [self.device_a.pk])
@@ -490,7 +538,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         saved = self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
-                "device_key": "source alias",
+                "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
                 "preview_revision": revision,
@@ -517,14 +565,14 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         wanted = next(
             trace
             for trace in response.context["traces"]
-            if any(item["key"] == "source alias" for item in trace.devices)
+            if any(item["key"] == "SOURCE ALIAS" for item in trace.devices)
         )
         self.assertNotEqual(response.context["selected_trace"].identity, wanted.identity)
 
         saved = self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
-                "device_key": "source alias",
+                "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
                 "preview_revision": response.context["preview_revision"],
@@ -549,7 +597,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
-                "device_key": "source alias",
+                "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
                 "preview_revision": response.context["preview_revision"],
@@ -557,8 +605,9 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         )
 
         later = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
-        selected = next(device for device in later.context["selected_trace"].devices if device["key"] == "source alias")
+        selected = next(device for device in later.context["selected_trace"].devices if device["key"] == "SOURCE ALIAS")
         self.assertEqual(selected["state"], "manually resolved")
+        self.assertEqual(TraceDeviceResolution.objects.get(profile=self.profile).source_device_label, "Source Alias")
         assert_saved_choice_is_rendered(later)
 
         reread = self.client.post(
@@ -567,7 +616,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
             follow=True,
         )
         selected = next(
-            device for device in reread.context["selected_trace"].devices if device["key"] == "source alias"
+            device for device in reread.context["selected_trace"].devices if device["key"] == "SOURCE ALIAS"
         )
         self.assertEqual(selected["state"], "manually resolved")
         assert_saved_choice_is_rendered(reread)
@@ -582,7 +631,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         Interface.objects.create(device=unnamed, name="eth7", type="1000base-t")
         TraceDeviceResolution.objects.create(
             profile=self.profile,
-            source_device_key="source alias",
+            source_device_key="SOURCE ALIAS",
             selected_device_id=unnamed.pk,
             selected_display_name=str(unnamed),
         )
@@ -600,7 +649,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
-                "device_key": "source alias",
+                "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
                 "preview_revision": response.context["preview_revision"],
@@ -620,7 +669,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
-                "device_key": "source alias",
+                "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
                 "preview_revision": response.context["preview_revision"],
@@ -642,7 +691,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         response = self.start_alias_preview()
         revision = response.context["preview_revision"]
         url = reverse("plugins:netbox_data_import:trace_device_candidates")
-        question = {"device_key": "source alias", "search": "Spare", "preview_revision": revision}
+        question = {"device_key": "SOURCE ALIAS", "search": "Spare", "preview_revision": revision}
 
         second = self.client.get(url, {**question, "offset": 20}).json()
         refused = self.client.post(
@@ -674,7 +723,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
     def test_the_device_picker_bounds_the_offset_of_a_read_and_a_write(self):
         """An offset past the database page range is refused, and the largest one reads an empty page."""
         response = self.start_alias_preview()
-        question = {"device_key": "source alias", "preview_revision": response.context["preview_revision"]}
+        question = {"device_key": "SOURCE ALIAS", "preview_revision": response.context["preview_revision"]}
         url = reverse("plugins:netbox_data_import:trace_device_candidates")
 
         with executed_sql() as statements:
@@ -703,7 +752,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         saved = self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
-                "device_key": "source alias",
+                "device_key": "SOURCE ALIAS",
                 "device_id": self.device_b.pk,
                 "search": "DEV-A",
                 "preview_revision": response.context["preview_revision"],
@@ -730,7 +779,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                 self.client.post(
                     reverse("plugins:netbox_data_import:trace_resolve_device"),
                     {
-                        "device_key": "source alias",
+                        "device_key": "SOURCE ALIAS",
                         "device_id": self.device_a.pk,
                         "search": "DEV-A",
                         "preview_revision": response.context["preview_revision"],
@@ -781,7 +830,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
             saved = self.client.post(
                 reverse("plugins:netbox_data_import:trace_resolve_device"),
                 {
-                    "device_key": "source alias",
+                    "device_key": "SOURCE ALIAS",
                     "device_id": self.device_a.pk,
                     "search": "DEV-A",
                     "preview_revision": revision,
@@ -802,7 +851,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                 candidates = self.client.get(
                     reverse("plugins:netbox_data_import:trace_device_candidates"),
                     {
-                        "device_key": "source alias",
+                        "device_key": "SOURCE ALIAS",
                         "limit": limit,
                         "preview_revision": response.context["preview_revision"],
                     },
@@ -823,7 +872,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
             device
             for unit in plan["units"]
             for device in ((unit.get("display") or {}).get("trace") or {}).get("devices", ())
-            if device.get("key") == "source alias"
+            if device.get("key") == "SOURCE ALIAS"
         )
         question["labels"] = "Source Alias"
         session[PREVIEW_PLAN_SESSION_KEY] = plan
@@ -832,7 +881,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         candidates = self.client.get(
             reverse("plugins:netbox_data_import:trace_device_candidates"),
             {
-                "device_key": "source alias",
+                "device_key": "SOURCE ALIAS",
                 "preview_revision": response.context["preview_revision"],
             },
         )
@@ -855,7 +904,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                 self.client.get(
                     reverse("plugins:netbox_data_import:trace_device_candidates"),
                     {
-                        "device_key": "source alias",
+                        "device_key": "SOURCE ALIAS",
                         "preview_revision": response.context["preview_revision"],
                     },
                 )
@@ -917,7 +966,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         saved = self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
-                "device_key": "source alias",
+                "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
                 "preview_revision": revision,
@@ -937,7 +986,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
-                "device_key": "source alias",
+                "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
                 "preview_revision": response.context["preview_revision"],
@@ -948,7 +997,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         later = self.start_alias_preview("  SOURCE   ALIAS  ", "eth10")
 
         self.assertContains(later, "manually resolved")
-        selected = next(device for device in later.context["selected_trace"].devices if device["key"] == "source alias")
+        selected = next(device for device in later.context["selected_trace"].devices if device["key"] == "SOURCE ALIAS")
         self.assertEqual(selected["selected"], str(self.device_a))
 
     def test_the_candidate_endpoint_rejects_a_device_key_the_plan_did_not_author(self):
@@ -970,7 +1019,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
 
         candidates = self.client.get(
             reverse("plugins:netbox_data_import:trace_device_candidates"),
-            {"device_key": "source alias", "preview_revision": "old-preview"},
+            {"device_key": "SOURCE ALIAS", "preview_revision": "old-preview"},
         )
 
         self.assertEqual(candidates.status_code, 409)
@@ -978,7 +1027,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
     def test_a_stale_selection_does_not_disclose_its_saved_display_snapshot(self):
         TraceDeviceResolution.objects.create(
             profile=self.profile,
-            source_device_key="source alias",
+            source_device_key="SOURCE ALIAS",
             selected_device_id=self.device_a.pk,
             selected_display_name="Hidden Device Snapshot",
         )
@@ -1018,7 +1067,7 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
             uploaded_by=actor,
         )
         evidence = DeviceEvidence(
-            key="source alias",
+            key="SOURCE ALIAS",
             labels=("Source Alias",),
             locations=(),
             racks=(),
@@ -1046,7 +1095,7 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
 
         existing = TraceDeviceResolution.objects.create(
             profile=self.profile,
-            source_device_key="source alias",
+            source_device_key="SOURCE ALIAS",
             selected_device_id=self.device_a.pk,
             selected_display_name=str(self.device_a),
         )
@@ -1072,7 +1121,7 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
             uploaded_by=actor,
         )
         evidence = DeviceEvidence(
-            key="source alias",
+            key="SOURCE ALIAS",
             labels=("Source Alias",),
             locations=(),
             racks=(),
@@ -1102,7 +1151,7 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
 
         TraceDeviceResolution.objects.create(
             profile=self.profile,
-            source_device_key="dev-b",
+            source_device_key="DEV-B",
             selected_device_id=self.device_b.pk,
             selected_display_name=str(self.device_b),
         )
@@ -1132,8 +1181,8 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "You do not have permission to save a Device resolution.")
-        self.assertContains(response, 'data-trace-device-picker="source alias" disabled')
-        self.assertContains(response, 'data-trace-device-picker="dev-b" disabled')
+        self.assertContains(response, 'data-trace-device-picker="SOURCE ALIAS" disabled')
+        self.assertContains(response, 'data-trace-device-picker="DEV-B" disabled')
 
         scoped_permission = ObjectPermission.objects.create(
             name="Another source Device resolution only",
@@ -1147,4 +1196,4 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'data-trace-device-picker="source alias" disabled')
+        self.assertContains(response, 'data-trace-device-picker="SOURCE ALIAS" disabled')

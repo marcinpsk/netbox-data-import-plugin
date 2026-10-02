@@ -16,7 +16,7 @@ from extras.models import Tag
 
 from netbox_data_import.cable_disclosure import TERMINATION_HIDDEN, TERMINATION_SOURCES
 from netbox_data_import.cable_policy import cable_type_label
-from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
+from netbox_data_import.cable_target import AUTOMATICALLY_RESOLVED, ELIGIBLE_TERMINATION_LIMIT
 from netbox_data_import import adapters as adapter_registry
 from netbox_data_import.adapters import TraceWorkbookAdapter
 from netbox_data_import.catalog import OutputKind
@@ -53,7 +53,6 @@ from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.views import (
     CANDIDATE_OFFSET_INVALID,
     CANDIDATE_OFFSET_MAX,
-    TERMINATION_UNRESOLVABLE,
     _review_workspace_url,
     _trace_workspace_url,
 )
@@ -1604,7 +1603,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         return ports
 
     def test_a_mapped_peer_question_offers_the_peers_of_the_rear_port_the_plan_matched(self):
-        """A capital sharp s folds to "ss" in the field key, but the picker starts from the source spelling."""
+        """`STRA\u1e9eE` and `Stra\u00dfe` are two identities, so each question offers the peers of its own rear port."""
         Device.objects.filter(name="PANEL-1", site=self.site).delete()
         panel = self.make_device("PANEL-1")
         own = {
@@ -1637,7 +1636,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
                 )
 
     def test_a_device_named_with_a_capital_sharp_s_offers_its_ports(self):
-        """The resolved Device comes from the source label the plan matched, not from the folded key."""
+        """The field key keeps the capital sharp s, so the Device it names resolves from the key alone."""
         device = self.make_device("STRAẞE-SW")
         port = Interface.objects.create(device=device, name="uplink", type="1000base-t")
         self.open_workspace(
@@ -1649,23 +1648,47 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(([item["id"] for item in payload["candidates"]], payload["total"]), ([port.pk], 1))
 
-    def test_a_cached_question_without_its_source_spelling_is_refused_rather_than_guessed(self):
-        """A plan cached before the record kept its source spelling names no port, so the read and the write refuse."""
-        field_key = self.open_blocked_workspace()
-        session = self.client.session
-        plan = session[PREVIEW_PLAN_SESSION_KEY]
-        for unit in plan["units"]:
-            for record in unit["display"].get("trace", {}).get("terminations", ()):
-                record.pop("source_port")
-        session[PREVIEW_PLAN_SESSION_KEY] = plan
-        session.save()
+    def test_each_sharp_s_spelling_resolves_its_own_device(self):
+        """\u1e9e keeps its own identity and \u00df becomes "SS", so two source Devices resolve to two Devices."""
+        capital = self.make_device("STRA\u1e9eE-SW")
+        expanded = self.make_device("STRASSE-SW")
+        capital_port = Interface.objects.create(device=capital, name="eth0", type="1000base-t")
+        expanded_port = Interface.objects.create(device=expanded, name="eth0", type="1000base-t")
 
-        read = self.candidates(field_key)
-        write = self.resolve(field_key, self.eth0)
+        self.open_workspace(
+            direct_path(
+                from_end=trace_termination("STRA\u1e9eE-SW", "", "eth0", "Port"),
+                to_end=trace_termination("Stra\u00dfe-SW", "", "eth0", "Port"),
+            )
+        )
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        trace = response.context["selected_trace"]
 
-        self.assertEqual((read.status_code, read.json()["error"]), (400, TERMINATION_UNRESOLVABLE))
-        self.assertContains(write, TERMINATION_UNRESOLVABLE, status_code=400)
-        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+        self.assertEqual(
+            {item["key"]: (item["state"], item["selected"]) for item in trace.devices},
+            {
+                "STRA\u1e9eE-SW": (AUTOMATICALLY_RESOLVED, str(capital)),
+                "STRASSE-SW": (AUTOMATICALLY_RESOLVED, str(expanded)),
+            },
+        )
+        self.assertEqual(
+            {(item["selected_type"], item["state"]) for item in trace.terminations},
+            {("dcim.interface", AUTOMATICALLY_RESOLVED)},
+        )
+        # Equal port names need object IDs to distinguish the source-to-port assignments.
+        self.assertEqual(
+            {item["field_key"]: (item["selected"], item["disclosure_source"]["pk"]) for item in trace.terminations},
+            {
+                termination_field_key(device="STRA\u1e9eE-SW", cards="", port="eth0", kind="interface"): (
+                    str(capital_port),
+                    capital_port.pk,
+                ),
+                termination_field_key(device="STRASSE-SW", cards="", port="eth0", kind="interface"): (
+                    str(expanded_port),
+                    expanded_port.pk,
+                ),
+            },
+        )
 
     def test_a_candidate_deleted_after_ranking_drops_out_of_the_read_and_the_write(self):
         """A port deleted between the ranked page and its row load is not offered, and nothing fails."""
@@ -1860,6 +1883,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         self.assertEqual(response.status_code, 302)
         stored = TerminationResolution.objects.get(profile=self.profile, field_key=field_key)
         self.assertEqual(stored.selected_object_id, self.eth0.pk)
+        self.assertEqual((stored.source_device, stored.source_cards, stored.source_port), ("DEV-A", "", "absent-port"))
         workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         trace = workspace.context["traces"][0]
         self.assertEqual(trace.disposition, "actionable")
@@ -2872,8 +2896,8 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
 
         self.assertNotContains(cached, "Dev-A")
         devices = {item["key"]: item["selected"] for item in cached.context["selected_trace"].devices}
-        self.assertEqual(devices["dev-a"], DEVICE_HIDDEN)
-        self.assertEqual(devices["dev-b"], "DEV-B")
+        self.assertEqual(devices["DEV-A"], DEVICE_HIDDEN)
+        self.assertEqual(devices["DEV-B"], "DEV-B")
         ends = [(segment["left"], segment["right"]) for segment in cached.context["segment_policy_forms"]]
         self.assertEqual(ends[0][0], TERMINATION_HIDDEN)
         self.assertNotIn(TERMINATION_HIDDEN, [end for pair in ends for end in pair][1:])
@@ -3015,7 +3039,7 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
             with self.subTest(source=source):
                 data = copy.deepcopy(original)
                 trace = data["units"][0]["display"]["trace"]
-                question = next(item for item in trace["devices"] if item["key"] == "dev-a")
+                question = next(item for item in trace["devices"] if item["key"] == "DEV-A")
                 ends = trace["segments"][0]["left_sources"]
                 if source == "missing":
                     question.pop("disclosure_source")
@@ -3029,7 +3053,7 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
                 response = self.reload()
 
                 devices = {item["key"]: item["selected"] for item in response.context["selected_trace"].devices}
-                self.assertEqual((devices["dev-a"], devices["pdu-1"]), (DEVICE_HIDDEN, "PDU-1"))
+                self.assertEqual((devices["DEV-A"], devices["PDU-1"]), (DEVICE_HIDDEN, "PDU-1"))
                 segment = response.context["segment_policy_forms"][0]
                 self.assertEqual(segment["left"], TERMINATION_HIDDEN)
                 self.assertEqual(segment["right"], f"PDU-1 {self.outlet.name}")

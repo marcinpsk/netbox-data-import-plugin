@@ -35,15 +35,9 @@ from netbox_data_import.preview_row_actions import (
     PREVIEW_REVISION_SESSION_KEY,
     retained_sync_block_reason,
 )
-from netbox_data_import.proposal_presentation import PROPOSAL_FRESHNESS_UNCHECKED
 from netbox_data_import.proposal_tasks import CandidateSnapshot
 from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, complete_proposal, fail_proposal
-from netbox_data_import.tests.helpers import (
-    asked_termination,
-    trace_termination,
-    trace_workbook_bytes,
-    user_with_object_permission,
-)
+from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes, user_with_object_permission
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
 from netbox_data_import.tests.plugins_config import override_plugins_config
@@ -239,7 +233,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(proposal.status, ProposalStatus.QUEUED)
         self.assertEqual(proposal.field_key, self.field_key)
         self.assertEqual(proposal.resolved_device_id, self.device_a.pk)
-        self.assertEqual(proposal.source_evidence["port"], "absent-port")
+        self.assertEqual(proposal.source_evidence["port"], "ABSENT-PORT")
         self.assertEqual(proposal.candidate_snapshot["candidates"][0]["object_id"], self.eth0.pk)
         job = Job.objects.get(name=ResolutionProposalJob.Meta.name)
         queued = get_queue().fetch_job(str(job.job_id))
@@ -464,14 +458,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
             self.no_match(self.request_proposal())
             reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
-            presentation = CountingPresentation(
-                profile=self.profile,
-                actor=self.actor,
-                reader=reader,
-                asked={
-                    self.field_key: asked_termination(device="DEV-A", cards="", port="absent-port", kind="interface")
-                },
-            )
+            presentation = CountingPresentation(profile=self.profile, actor=self.actor, reader=reader)
             payload = presentation.fields(({"field_key": self.field_key, "state": UNRESOLVED},))
 
         self.assertEqual(payload[self.field_key]["presentation"]["page_status"], "Searched candidates 1-2 of 3.")
@@ -881,6 +868,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(response.json()["preview_state"], "recalculation_required")
         row = TerminationResolution.objects.get(profile=self.profile)
         self.assertEqual(row.selected_object_id, self.eth0.pk)
+        self.assertEqual((row.source_device, row.source_cards, row.source_port), ("DEV-A", "", "absent-port"))
         self.assertEqual(proposal.written_resolution_id, row.pk)
         self.assertEqual(proposal.decision, "accepted")
         self.assertEqual(proposal.decided_by_id, actor.pk)
@@ -1340,7 +1328,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(TerminationResolution.objects.filter(profile=self.profile).count(), 2)
 
     def test_proposal_survives_replanning_after_its_field_leaves_the_preview(self):
-        """The attempt still reads, but its freshness needs a question this preview no longer asks."""
+        """The attempt still reads, and its freshness reads NetBox from the field key alone."""
         proposal = self.completed()
         before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
         self.client.force_login(self.actor)
@@ -1364,8 +1352,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertNotEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], before)
         response = self.call("proposal", field_key=self.field_key)
         self.assertEqual(response.json()["proposal"]["id"], proposal.pk)
-        self.assertIsNone(response.json()["staleness"])
-        self.assertEqual(response.json()["staleness_error"], PROPOSAL_FRESHNESS_UNCHECKED)
+        self.assertFalse(response.json()["staleness"]["is_stale"])
 
     def test_profile_view_alone_can_read_when_planning_target_is_not_visible(self):
         proposal = self.completed()
@@ -1688,6 +1675,39 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         proposal.refresh_from_db()
         self.assertEqual(proposal.decision, "rejected")
 
+    def test_duplicate_field_assessments_use_each_source_spelling(self):
+        """Identity-equivalent fields can have different permission constraints on their spellings."""
+        from netbox_data_import.cable_target import UNRESOLVED
+        from netbox_data_import.netbox_reader import NetBoxReader
+        from netbox_data_import.proposal_presentation import ProposalPresentation
+
+        self.completed()
+        source = {"device": "DEV-A", "cards": "", "port": "absent-port"}
+        for part, other in (("device", "dev-a"), ("cards", " "), ("port", "ABSENT-PORT")):
+            actor = user_with_object_permission(
+                f"spelling-{part}",
+                [
+                    (ImportProfile, ["view", "change"], {"pk": self.profile.pk}),
+                    (Device, ["view"], {"site_id": self.site.pk}),
+                    (Interface, ["view"], {}),
+                    (TerminationResolution, ["add"], {f"source_{part}": source[part]}),
+                ],
+            )
+            allowed = {"field_key": self.field_key, "state": UNRESOLVED, "source": source}
+            denied = {**allowed, "source": {**source, part: other}}
+            reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
+            for fields, final_allowed in (((allowed, denied), False), ((denied, allowed), True)):
+                with self.subTest(part=part, final_allowed=final_allowed):
+                    presentation = ProposalPresentation(profile=self.profile, actor=actor, reader=reader)
+                    payload = presentation.fields(fields)[self.field_key]
+                    self.assertFalse(payload["staleness"]["is_stale"])
+                    accept = next(row for row in payload["presentation"]["actions"] if row["key"] == "accept")
+                    self.assertEqual(
+                        accept["reason"],
+                        "" if final_allowed else "You do not have permission to save a termination resolution.",
+                    )
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+
     def test_fields_reuse_inventory_for_the_same_device_kind_and_role(self):
         """Two proposal fields with one eligibility key must not repeat its inventory reads."""
         from django.db import connection
@@ -1723,11 +1743,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             {"field_key": second_key, "state": UNRESOLVED},
         )
         reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
-        asked = {
-            key: asked_termination(device="DEV-A", cards="", port=port, kind="interface")
-            for key, port in ((self.field_key, "absent-port"), (second_key, "another-port"))
-        }
-        presentation = ProposalPresentation(profile=self.profile, actor=self.actor, reader=reader, asked=asked)
+        presentation = ProposalPresentation(profile=self.profile, actor=self.actor, reader=reader)
 
         with CaptureQueriesContext(connection) as queries:
             payloads = presentation.fields(fields)

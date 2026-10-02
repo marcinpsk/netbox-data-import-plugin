@@ -14,6 +14,7 @@ from django.core.validators import validate_email
 from django.db import connection, transaction
 from django.db.models import Q
 
+from .identity import identity_in, identity_text
 from .models import CONTACT_RESOLUTION_FIELDS, stored_import_source, validate_contact_candidate_resolution
 from .object_permissions import ObjectPermissionDenied, enforce_saved_object_permission
 
@@ -257,10 +258,10 @@ class PrimaryContactResolver:
         """Return the one visible Contact that an exact match on *fields* identifies."""
         from tenancy.models import Contact
 
+        keys = [identity_text(value) for value in values]
         query = Q()
         for field in fields:
-            for value in values:
-                query |= Q(**{f"{field}__iexact": value})
+            query |= Q(identity_in(field, keys))
         contacts = Contact.objects.filter(query)
         if user is not None:
             contacts = contacts.restrict(user, "view")
@@ -342,7 +343,7 @@ class PrimaryContactResolver:
             validate_email(value)
         proposed_contact = Contact(**contact_values)
         proposed_contact.full_clean()
-        contacts = list(contact_queryset.filter(**{f"{lookup_field}__iexact": value})[:2])
+        contacts = list(contact_queryset.filter(identity_in(lookup_field, [identity_text(value)]))[:2])
         if len(contacts) > 1:
             raise ValidationError({"primary_contact": f"More than one contact has the {lookup_field} value '{value}'."})
         if contacts:
@@ -358,7 +359,7 @@ class PrimaryContactResolver:
     def _reject_moved_lookup(contact, selection: ContactSelection, lookup_field) -> None:
         """Refuse a selected Contact whose lookup value no longer matches the saved decision."""
         selected = _text(selection.values.get(lookup_field))
-        if selected and selected.casefold() != _text(getattr(contact, lookup_field)).casefold():
+        if selected and identity_text(selected) != identity_text(_text(getattr(contact, lookup_field))):
             raise ValidationError(
                 {"primary_contact": f"The selected Contact no longer has the chosen {lookup_field} value."}
             )

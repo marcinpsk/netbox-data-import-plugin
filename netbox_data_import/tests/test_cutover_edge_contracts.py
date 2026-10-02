@@ -10,7 +10,7 @@ from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase, TransactionTestCase
 
 from netbox_data_import.device_field_review import DeviceFieldReviewer
-from netbox_data_import.device_identity import DeviceTypeIdentityResolver
+from netbox_data_import.device_identity import DEVICE_TYPE_AMBIGUOUS, DeviceTypeIdentity, DeviceTypeIdentityResolver
 from netbox_data_import.import_engine import EngineConfigurationError, ImportEngine
 from netbox_data_import.ip_assignment import IPAssignmentError, IPTarget, already_assigned, parse_address
 from netbox_data_import.models import (
@@ -115,8 +115,8 @@ class ValueAndReviewBoundaryTest(SimpleTestCase):
 class IdentityAndResolutionBoundaryTest(TestCase):
     """Identity mappings and saved source resolutions have deterministic precedence."""
 
-    def test_duplicate_mapping_rows_keep_the_first_exact_identity(self):
-        """Batch indexes do not let a later duplicate policy row replace the first one."""
+    def test_duplicate_mapping_rows_with_two_targets_name_no_device_type(self):
+        """Two policy rows for one make and model that disagree leave the choice to the operator."""
         first = SimpleNamespace(
             source_make="Make",
             source_model="Model",
@@ -124,14 +124,21 @@ class IdentityAndResolutionBoundaryTest(TestCase):
             netbox_device_type_slug="first-model",
         )
         second = SimpleNamespace(
-            source_make="Make",
-            source_model="Model",
+            source_make="MAKE",
+            source_model="model",
             netbox_manufacturer_slug="second-make",
             netbox_device_type_slug="second-model",
         )
-        resolver = DeviceTypeIdentityResolver([first, second], [])
+        same = SimpleNamespace(**{**vars(first), "source_make": "make"})
 
-        self.assertEqual(resolver.resolve("Make", "Model"), ("first-make", "first-model", True))
+        self.assertEqual(
+            DeviceTypeIdentityResolver([first, second], []).resolve("Make", "Model"),
+            DeviceTypeIdentity("", "", explicit=False, ambiguous=DEVICE_TYPE_AMBIGUOUS),
+        )
+        self.assertEqual(
+            DeviceTypeIdentityResolver([first, same], []).resolve("MAKE", "MODEL"),
+            DeviceTypeIdentity("first-make", "first-model", explicit=True),
+        )
 
     def test_mapping_identity_is_case_insensitive_on_both_sides(self):
         """Source casing cannot bypass an explicit Device Type or manufacturer mapping."""
@@ -150,10 +157,10 @@ class IdentityAndResolutionBoundaryTest(TestCase):
         )
         resolver = DeviceTypeIdentityResolver.for_profile(profile)
 
-        self.assertEqual(resolver.resolve("dell", "r660"), ("mapped-make", "mapped-type", True))
+        self.assertEqual(resolver.resolve("dell", "r660"), ("mapped-make", "mapped-type", True, ""))
         self.assertEqual(
             resolver.resolve("acme", "widget"),
-            ("mapped-manufacturer", "acme-widget", False),
+            ("mapped-manufacturer", "acme-widget", False, ""),
         )
 
     def test_resolution_copies_conflicts_and_clears_an_omitted_mapped_value(self):

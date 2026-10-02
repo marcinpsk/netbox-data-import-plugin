@@ -3,8 +3,7 @@
 """The `select_termination` proposal task (specification 7.1).
 
 The only module that knows termination kinds and the `TerminationResolution` row. The lifecycle sees
-a task type, a field key and a generic Candidate Snapshot, and nothing else. Each read of NetBox starts
-from the question the plan asked, never from the field key alone.
+a task type, a field key and a generic Candidate Snapshot, and nothing else.
 """
 
 from dataclasses import dataclass
@@ -53,29 +52,29 @@ class SelectTerminationTask:
 
     task_type = SELECT_TERMINATION_TASK
 
-    def _require_termination_role(self, asked) -> dict:
-        parsed = parse_termination_field_key(asked.field_key)
+    def _require_termination_role(self, field_key) -> dict:
+        parsed = parse_termination_field_key(field_key)
         if parsed["role"] != TERMINATION_ROLE:
             raise UnsupportedProposalRole(f"A proposal is not requested for the '{parsed['role']}' role.")
         return parsed
 
-    def current(self, *, profile, asked, netbox_reader, limit):
+    def current(self, *, profile, field_key, netbox_reader, limit):
         """Return the Candidate Snapshot as the world stands now, for a request or a freshness read."""
-        self._require_termination_role(asked)
-        device = resolved_device_for(asked, netbox_reader, profile=profile)
+        self._require_termination_role(field_key)
+        device = resolved_device_for(field_key, netbox_reader, profile=profile)
         return self._current_for_device(
             profile=profile,
-            asked=asked,
+            field_key=field_key,
             netbox_reader=netbox_reader,
             limit=limit,
             device=device,
         )
 
-    def _current_for_device(self, *, profile, asked, netbox_reader, limit, device, lock_rows=False):
+    def _current_for_device(self, *, profile, field_key, netbox_reader, limit, device, lock_rows=False):
         """Build the snapshot without resolving a Device the caller already read."""
         # The picker and a proposal request share this query, so both see one eligibility rule.
         eligible = eligible_terminations(
-            asked,
+            field_key,
             netbox_reader,
             profile=profile,
             limit=limit,
@@ -88,25 +87,25 @@ class SelectTerminationTask:
             limit=limit,
         )
 
-    def inventory(self, *, profile, asked, netbox_reader, limit) -> ProposalInventory:
+    def inventory(self, *, profile, field_key, netbox_reader, limit) -> ProposalInventory:
         """Read the resolved Device and its candidate snapshot once for display and freshness."""
         return self._inventory(
             profile=profile,
-            asked=asked,
+            field_key=field_key,
             netbox_reader=netbox_reader,
             limit=limit,
             lock_rows=False,
         )
 
-    def _inventory(self, *, profile, asked, netbox_reader, limit, lock_rows) -> ProposalInventory:
+    def _inventory(self, *, profile, field_key, netbox_reader, limit, lock_rows) -> ProposalInventory:
         """Read one inventory, locking its target rows when a resolution write follows."""
-        self._require_termination_role(asked)
-        device = resolved_device_for(asked, netbox_reader, profile=profile, _lock_rows=lock_rows)
+        self._require_termination_role(field_key)
+        device = resolved_device_for(field_key, netbox_reader, profile=profile, _lock_rows=lock_rows)
         candidate_error: UnusableCandidateSet | None
         try:
             candidate_snapshot = self._current_for_device(
                 profile=profile,
-                asked=asked,
+                field_key=field_key,
                 netbox_reader=netbox_reader,
                 limit=limit,
                 device=device,
@@ -123,12 +122,12 @@ class SelectTerminationTask:
             candidate_error=candidate_error,
         )
 
-    def resolved_device(self, *, profile, asked, netbox_reader):
-        """Return the one Device this question resolves to now, or None when it does not resolve to one."""
-        self._require_termination_role(asked)
-        return resolved_device_for(asked, netbox_reader, profile=profile)
+    def resolved_device(self, *, profile, field_key, netbox_reader):
+        """Return the one Device this key resolves to now, or None when it does not resolve to one."""
+        self._require_termination_role(field_key)
+        return resolved_device_for(field_key, netbox_reader, profile=profile)
 
-    def _resolution_write(self, *, profile, field_key, entry):
+    def _resolution_write(self, *, profile, field_key, entry, source):
         """Return the validated lookup and values shared by assessment and execution."""
         from core.models import ObjectType
 
@@ -139,10 +138,12 @@ class SelectTerminationTask:
             object_type = ObjectType.objects.get(app_label=app_label, model=model)
         except (AttributeError, TypeError, ValueError, ObjectType.DoesNotExist) as exc:
             raise InvalidProposalCandidate("The stored proposal candidate has an invalid object type.") from exc
+        spelling = {f"source_{part}": source[part] for part in ("device", "cards", "port")}
         candidate = TerminationResolution(
             profile=profile,
             task_type=self.task_type,
             field_key=field_key,
+            **spelling,
             selected_object_type=object_type,
             selected_object_id=entry.object_id,
             selected_display_name=entry.display_name,
@@ -155,37 +156,37 @@ class SelectTerminationTask:
             "field_key_digest": candidate.field_key_digest,
         }
         values = {
+            **spelling,
             "selected_object_type": object_type,
             "selected_object_id": entry.object_id,
             "selected_display_name": entry.display_name,
         }
         return lookup, values
 
-    def assess_resolution_write(self, *, profile, field_key, entry, actor):
+    def assess_resolution_write(self, *, profile, field_key, entry, source, actor):
         """Return whether the exact resolution write stays inside the actor's current scope."""
         from .models import TerminationResolution
         from .object_permissions import assess_permission_scoped_save
 
-        lookup, values = self._resolution_write(profile=profile, field_key=field_key, entry=entry)
+        lookup, values = self._resolution_write(profile=profile, field_key=field_key, entry=entry, source=source)
         return assess_permission_scoped_save(actor, TerminationResolution, lookup, values)
 
-    def write_resolution(self, *, profile, field_key, entry, actor) -> DecisionReceipt:
+    def write_resolution(self, *, profile, field_key, entry, source, actor) -> DecisionReceipt:
         """Upsert the Row Resolution the accepted candidate names, and return only its id."""
         from .models import TerminationResolution
         from .object_permissions import save_permission_scoped_object
 
-        lookup, values = self._resolution_write(profile=profile, field_key=field_key, entry=entry)
+        lookup, values = self._resolution_write(profile=profile, field_key=field_key, entry=entry, source=source)
         saved = save_permission_scoped_object(actor, TerminationResolution, lookup, values)
         return DecisionReceipt(written_resolution_id=saved.instance.pk)
 
-    def write_resolution_if_fresh(self, *, proposal, asked, entry, actor, netbox_reader, limit):
+    def write_resolution_if_fresh(self, *, proposal, entry, source, actor, netbox_reader, limit):
         """Lock and recheck the target inventory, then write one still-fresh resolution."""
-        if asked.field_key != proposal.field_key:
-            raise ValueError("The question does not belong to this proposal's field.")
         assessment = self.assess_resolution_write(
             profile=proposal.profile,
             field_key=proposal.field_key,
             entry=entry,
+            source=source,
             actor=actor,
         )
         if not assessment.allowed:
@@ -194,7 +195,7 @@ class SelectTerminationTask:
             raise ObjectPermissionDenied(assessment.permission)
         inventory = self._inventory(
             profile=proposal.profile,
-            asked=asked,
+            field_key=proposal.field_key,
             netbox_reader=netbox_reader,
             limit=limit,
             lock_rows=True,
@@ -205,6 +206,7 @@ class SelectTerminationTask:
             profile=proposal.profile,
             field_key=proposal.field_key,
             entry=entry,
+            source=source,
             actor=actor,
         )
 
