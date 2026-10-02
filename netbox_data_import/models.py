@@ -801,7 +801,8 @@ class TerminationResolution(DigestIndexedMixin, PolicySectionModel):
             raise ValidationError({"field_key": exc}) from exc
         parsed = parse_termination_field_key(self.field_key)
         for part in ("device", "cards", "port"):
-            if identity_text(getattr(self, f"source_{part}")) != parsed[part]:
+            spelling = getattr(self, f"source_{part}")
+            if (self._state.adding or spelling) and identity_text(spelling) != parsed[part]:
                 raise ValidationError({f"source_{part}": "Enter the source spelling of this field key."})
         self._derive_digest()
 
@@ -863,7 +864,7 @@ class TraceDeviceResolution(DigestIndexedMixin, PolicySectionModel):
                 {"source_device_key": "Enter the canonical source Device key."},
                 code="invalid",
             )
-        if identity_text(self.source_device_label) != canonical:
+        if (self._state.adding or self.source_device_label) and identity_text(self.source_device_label) != canonical:
             raise ValidationError({"source_device_label": "Enter the source label of this Device key."})
         self._derive_digest()
 
@@ -925,7 +926,7 @@ class TraceLocationResolution(DigestIndexedMixin, PolicySectionModel):
                 {"source_location_key": "Enter the canonical source Location key."},
                 code="invalid",
             )
-        if identity_text(self.source_location_path) != canonical:
+        if (self._state.adding or self.source_location_path) and identity_text(self.source_location_path) != canonical:
             raise ValidationError({"source_location_path": "Enter the source path of this Location key."})
         self._derive_digest()
 

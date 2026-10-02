@@ -141,6 +141,38 @@ class TraceDeviceResolutionModelTest(CableTopologyMixin, TestCase):
         self.assertEqual(resolution.source_device_key, "SOURCE DEVICE")
         self.assertEqual(len(resolution.source_device_key_digest), 64)
 
+    def test_a_legacy_device_resolution_can_be_validated_and_updated(self):
+        """A saved mapping can lack the source spelling introduced after it was stored."""
+        resolution = TraceDeviceResolution.objects.create(
+            profile=self.profile,
+            source_device_key="SOURCE DEVICE",
+            selected_device_id=self.device_a.pk,
+            selected_display_name=str(self.device_a),
+        )
+        resolution = TraceDeviceResolution.objects.get(pk=resolution.pk)
+        resolution.selected_display_name = "Updated device display"
+
+        resolution.full_clean()
+        resolution.save()
+
+        stored = TraceDeviceResolution.objects.get(pk=resolution.pk)
+        self.assertEqual(stored.selected_display_name, "Updated device display")
+        self.assertEqual(stored.source_device_label, "")
+
+    def test_a_saved_device_resolution_rejects_a_nonempty_spelling_of_another_key(self):
+        resolution = TraceDeviceResolution.objects.create(
+            profile=self.profile,
+            source_device_key="SOURCE DEVICE",
+            selected_device_id=self.device_a.pk,
+            selected_display_name=str(self.device_a),
+        )
+        resolution.source_device_label = "Another source"
+
+        with self.assertRaises(ValidationError) as caught:
+            resolution.full_clean()
+
+        self.assertIn("source_device_label", caught.exception.message_dict)
+
     def test_the_kept_source_label_has_to_state_the_key(self):
         """A label of another key would move the decision to that key at the next rekey."""
         for label in ("", "Other Device"):

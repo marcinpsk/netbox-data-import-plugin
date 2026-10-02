@@ -342,6 +342,31 @@ class TracePolicyModelTest(TestCase):
 
         self.assertEqual(caught.exception.error_dict["field_key"][0].code, "invalid")
 
+    def test_a_legacy_termination_resolution_can_be_validated_and_updated(self):
+        """A saved decision can lack the source spellings introduced after it was stored."""
+        resolution = self._resolution(TERMINATION_ROLE)
+        resolution.source_device = resolution.source_cards = resolution.source_port = ""
+        resolution.save()
+        resolution = TerminationResolution.objects.get(pk=resolution.pk)
+        resolution.selected_display_name = "Updated termination display"
+
+        resolution.full_clean()
+        resolution.save()
+
+        stored = TerminationResolution.objects.get(pk=resolution.pk)
+        self.assertEqual(stored.selected_display_name, "Updated termination display")
+        self.assertEqual((stored.source_device, stored.source_cards, stored.source_port), ("", "", ""))
+
+    def test_a_saved_termination_resolution_rejects_a_nonempty_spelling_of_another_key(self):
+        resolution = self._resolution(TERMINATION_ROLE)
+        resolution.save()
+        resolution.source_port = "Other Port"
+
+        with self.assertRaises(ValidationError) as caught:
+            resolution.full_clean()
+
+        self.assertIn("source_port", caught.exception.message_dict)
+
     def test_termination_resolution_rejects_the_spelling_of_another_key(self):
         """The kept spelling has to state the key, so a later rekey cannot move the decision to another port."""
         for part, spelling in (("device", "Other Device"), ("cards", ""), ("port", "Ethernet 1/2")):

@@ -141,6 +141,38 @@ class TraceLocationResolutionModelTest(LocationTreeMixin, TestCase):
 
         self.assertEqual(len(resolution.source_location_key_digest), 64)
 
+    def test_a_legacy_location_resolution_can_be_validated_and_updated(self):
+        """A saved mapping can lack the source spelling introduced after it was stored."""
+        resolution = TraceLocationResolution.objects.create(
+            profile=self.profile,
+            source_location_key="SOURCE LOCATION",
+            selected_location_id=self.hall.pk,
+            selected_display_name=str(self.hall),
+        )
+        resolution = TraceLocationResolution.objects.get(pk=resolution.pk)
+        resolution.selected_display_name = "Updated location display"
+
+        resolution.full_clean()
+        resolution.save()
+
+        stored = TraceLocationResolution.objects.get(pk=resolution.pk)
+        self.assertEqual(stored.selected_display_name, "Updated location display")
+        self.assertEqual(stored.source_location_path, "")
+
+    def test_a_saved_location_resolution_rejects_a_nonempty_spelling_of_another_key(self):
+        resolution = TraceLocationResolution.objects.create(
+            profile=self.profile,
+            source_location_key="SOURCE LOCATION",
+            selected_location_id=self.hall.pk,
+            selected_display_name=str(self.hall),
+        )
+        resolution.source_location_path = "Another source"
+
+        with self.assertRaises(ValidationError) as caught:
+            resolution.full_clean()
+
+        self.assertIn("source_location_path", caught.exception.message_dict)
+
     def test_the_kept_source_path_has_to_state_the_key(self):
         """A path of another key would move the mapping to that key at the next rekey."""
         for path in ("", "Region >> Building (X)"):
