@@ -50,13 +50,25 @@ test("creating a role refreshes the page before another mapping uses its claim",
     <input id="cm_role_slug"><div id="cm_create_role_error" style="display:none"></div>
     <div id="cm_create_role_form"></div><div id="cm_role_search_results"></div>
     <button id="create" onclick="cmCreateRole()">Create role</button>
-    ${script("preview_claim.js")}<script>${createRole}</script>`);
+    <input id="previewRowFilter"><button id="previewRowFilterClear"></button>
+    <select id="previewActionFilter"><option value="">All</option></select>
+    <table><tbody id="previewRowsBody"><tr data-action="update"><td>server-a</td></tr></tbody></table>
+    ${script("preview_claim.js")}${script("preview_row_actions.js")}${script("preview_row_controls.js")}
+    <script>
+      window.addEventListener('beforeunload', function () {
+        sessionStorage.setItem('role-reload-latch', document.getElementById('ndi-preview-claim').dataset.ndiReloading || '');
+      });
+      ${createRole}
+    </script>`);
+  await page.locator("#previewRowFilter").fill("server-a");
 
   await page.locator("#create").click();
 
   await expect(page.locator("#revision")).toHaveText("5");
   expect(loads()).toBe(2);
   expect(posted).toEqual([{ name: "New role", slug: "new-role", ...claim() }]);
+  await expect(page.locator("#previewRowFilter")).toHaveValue("server-a");
+  expect(await page.evaluate(() => sessionStorage.getItem("role-reload-latch"))).toBe("true");
 });
 
 /* Only the elements the class-mapping handler touches. */

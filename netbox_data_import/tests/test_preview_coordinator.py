@@ -27,7 +27,7 @@ from netbox_data_import.models import (
     ImportProfile,
     SourceDocument,
 )
-from netbox_data_import.tests.helpers import trace_workbook_bytes, workbook_bytes
+from netbox_data_import.tests.helpers import preview_coordinator as _coordinator, trace_workbook_bytes, workbook_bytes
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path, patched_path
 
@@ -487,16 +487,6 @@ def _session_request(client, user, method="post"):
     return request
 
 
-def _coordinator(client):
-    """Return the one coordinator row the client's session owns."""
-    import hashlib
-
-    from netbox_data_import.models import PreviewCoordinator
-
-    binding = hashlib.sha256(client.session.session_key.encode()).hexdigest()
-    return PreviewCoordinator.objects.get(session_binding=binding)
-
-
 class CoordinatorContractTest(IsolatedRQQueueTestMixin, _FlatPreviewMixin, TransactionTestCase):
     """The claim rules, the bootstrap, the session binding and the payload lifetime."""
 
@@ -688,15 +678,13 @@ class CoordinatorContractTest(IsolatedRQQueueTestMixin, _FlatPreviewMixin, Trans
             expire_previews(now=now.replace(tzinfo=None))
 
     def test_a_plan_too_large_to_store_rolls_the_decision_back(self):
-        from unittest.mock import patch
-
-        from netbox_data_import import preview_coordinator
+        from netbox_data_import.tests.plugins_config import override_plugins_config
 
         self.upload_flat(self.client, "first.xlsx", "server-a")
         claim = self.preview_claim()
         before = _coordinator(self.client)
 
-        with patch.object(preview_coordinator, "MAX_PLAN_BYTES", new=16):
+        with override_plugins_config(netbox_data_import={"preview_max_plan_bytes": 16}):
             response = self.ignore(claim, HTTP_ACCEPT="application/json")
 
         self.assertEqual(response.status_code, 413)

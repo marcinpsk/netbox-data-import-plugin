@@ -329,6 +329,13 @@ class PluginConfigStartupGateTest(SimpleTestCase):
     def test_a_valid_configuration_starts(self):
         self.validate(settings_with())
 
+    def test_an_invalid_preview_byte_limit_stops_startup(self):
+        from django.core.exceptions import ImproperlyConfigured
+
+        for limit in (0, -1, True, "16", 16.5, 64 * 1024 * 1024 + 1):
+            with self.subTest(limit=limit), self.assertRaises(ImproperlyConfigured):
+                self.validate({"preview_max_plan_bytes": limit})
+
     def test_a_malformed_allowlist_entry_stops_startup(self):
         from django.core.exceptions import ImproperlyConfigured
 

@@ -239,9 +239,9 @@ changed the revision that setup B posted. It can never replace a newer generatio
 started from one generation have one winner. Every other command needs the exact claim.
 
 The database coordinator stores the authoritative active-preview identity, revision, context, and
-materialized plan. Session data is only a pointer or cache. Every preview read validates it against
-the coordinator row and refreshes or refuses a stale cache. No response middleware session save can
-restore an older preview after the coordinator has advanced.
+materialized plan. The session holds no preview state. A preview read loads that row through the
+coordinator interface. A claimed read validates the posted claim before it returns data. No response
+middleware session save can restore an older preview after the coordinator has advanced.
 
 Device and termination decisions, proposal decisions, the re-read command, new import setup, and
 preview discard use this same coordinator rather than implementing separate checks. A plain page

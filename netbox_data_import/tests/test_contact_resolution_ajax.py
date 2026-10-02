@@ -19,6 +19,7 @@ from netbox_data_import.models import (
     SourceResolution,
 )
 from netbox_data_import.tests.helpers import (
+    retired_claim,
     make_dcim_objects,
     preview_claim,
     preview_coordinator,
@@ -40,10 +41,8 @@ class ContactResolutionSessionMixin:
         self.assertEqual(response.status_code, 302, response.content[:300])
 
     def _stale_claim(self):
-        """Return the claim the page held before a re-read retired it."""
-        claim = preview_claim(self.client)
-        self._reread()
-        return claim
+        """Return the claim a successful re-read retired."""
+        return retired_claim(self.client)
 
     def _submit(self, status="pending"):
         """Leave the preview submitted on a final import Job, as Run Import does, and return the Job."""

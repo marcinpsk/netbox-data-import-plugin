@@ -23,6 +23,7 @@ from types import MappingProxyType
 from typing import Any, ClassVar
 
 from core.signals import clear_events
+from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -39,6 +40,7 @@ from .models import (
     validate_registered_adapter,
 )
 from .plan import ImportPlan, PlanError, canonical_json
+from .preview_limits import MAX_PLAN_BYTES, preview_plan_byte_limit
 from .object_permissions import clear_user_permission_caches
 from .review_workspace import ReviewWorkspace, refuse_moved_policy
 
@@ -59,8 +61,6 @@ def _refresh_actor(user) -> None:
 CLAIM_FIELDS = ("preview_token", "preview_revision", "preview_document", "preview_profile")
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 PLANNING_KEYS = ("site_id", "location_id", "tenant_id")
-# A plan larger than this is refused before it commits, with every write the command made.
-MAX_PLAN_BYTES = 64 * 1024 * 1024
 
 NO_PREVIEW = "No import preview is in progress. Start a new import."
 CLAIM_INVALID = "This request does not name a preview. Reload the page and try again."
@@ -514,7 +514,10 @@ def _stored_plan(row: PreviewCoordinator, actor, document) -> ImportPlan:
 def validate_preview_plan(plan: ImportPlan) -> dict:
     """Return a storable preview, or refuse it before the command's writes commit."""
     data = plan.to_dict()
-    if len(canonical_json(data).encode()) > MAX_PLAN_BYTES:
+    limit = preview_plan_byte_limit(
+        settings.PLUGINS_CONFIG["netbox_data_import"].get("preview_max_plan_bytes", MAX_PLAN_BYTES)
+    )
+    if len(canonical_json(data).encode()) > limit:
         raise PreviewCommandRefused(PREVIEW_TOO_LARGE, status=413)
     return data
 

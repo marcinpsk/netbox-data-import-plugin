@@ -43,6 +43,7 @@ from netbox_data_import.trace_device_resolution import (
 )
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
 from netbox_data_import.tests.helpers import (
+    retired_claim,
     executed_sql,
     preview_claim,
     preview_coordinator,
@@ -509,10 +510,14 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         )
 
     def stale_claim(self):
-        """Return the claim the page held before a re-read retired it."""
-        claim = preview_claim(self.client)
-        self.client.post(reverse("plugins:netbox_data_import:preview_reread"), claim)
-        return claim
+        """Return the claim a successful re-read retired."""
+        return retired_claim(self.client)
+
+    def test_a_retired_claim_requires_a_successful_reread(self):
+        self.start_alias_preview()
+        self.profile.delete()
+        with self.assertRaises(AssertionError):
+            self.stale_claim()
 
     def test_an_unresolved_source_device_offers_the_device_picker(self):
         response = self.start_alias_preview()
