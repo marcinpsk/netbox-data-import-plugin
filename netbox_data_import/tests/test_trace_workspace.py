@@ -1083,6 +1083,45 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             )
         return Job.objects.get(data__job_type="netbox_data_import.import")
 
+    def test_failed_sync_progress_does_not_report_a_replaced_preview(self):
+        """A failed or lost trace task still owns its pending preview on both progress routes."""
+        from core.choices import JobStatusChoices
+        from core.models import Job
+        from django_rq import get_queue
+        from netbox_data_import.jobs import IMPORT_TASK_LOST
+
+        job = self.queue_one_sync()
+        before = preview_coordinator(self.client)
+        queue = get_queue(job.queue_name)
+        rq_job = queue.fetch_job(str(job.job_id))
+
+        for status in (
+            JobStatusChoices.STATUS_FAILED,
+            JobStatusChoices.STATUS_ERRORED,
+            JobStatusChoices.STATUS_PENDING,
+        ):
+            Job.objects.filter(pk=job.pk).update(status=status)
+            if status == JobStatusChoices.STATUS_PENDING:
+                queue.connection.delete(rq_job.key)
+            for route in ("import_progress", "import_progress_status"):
+                with self.subTest(status=status, route=route):
+                    progress = self.client.get(reverse(f"plugins:netbox_data_import:{route}", kwargs={"pk": job.pk}))
+
+                    self.assertContains(
+                        progress,
+                        IMPORT_TASK_LOST if status == JobStatusChoices.STATUS_PENDING else "The import failed.",
+                    )
+                    self.assertContains(progress, "Start a new import")
+                    self.assertNotContains(progress, "A newer preview replaced this import's preview.")
+                    self.assertNotContains(progress, "Review preview")
+                    self.assertFalse(progress.context["preview_replaced"])
+                    self.assertIsNone(progress.context["restore_claim"])
+                    job.refresh_from_db()
+                    self.assertEqual(job.status, status)
+                    after = preview_coordinator(self.client)
+                    self.assertEqual((after.state, after.job_id), (PreviewState.SYNC_PENDING, job.pk))
+                    self.assertEqual(after.revision, before.revision)
+
     def test_every_command_refuses_while_the_retained_sync_runs(self):
         """The hold lives in the coordinator, so a command that never checks the Job still cannot clear it."""
         from core.models import Job

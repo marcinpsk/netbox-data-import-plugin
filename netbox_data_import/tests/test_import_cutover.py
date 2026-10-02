@@ -589,6 +589,44 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             (newer.preview_token, newer.revision, PreviewState.READY),
         )
 
+    def test_failed_job_with_a_deleted_source_does_not_report_a_replaced_preview(self):
+        """A missing source prevents restoration without changing which Job owns the preview."""
+        job = self._failed_final_import()
+        SourceDocument.objects.filter(pk=job.data["source_document_id"]).delete()
+        before = preview_coordinator(self.client)
+
+        for route in ("import_progress", "import_progress_status"):
+            with self.subTest(route=route):
+                progress = self.client.get(reverse(f"plugins:netbox_data_import:{route}", kwargs={"pk": job.pk}))
+
+                self.assertContains(progress, "The import failed.")
+                self.assertContains(progress, "Start a new import")
+                self.assertNotContains(progress, "A newer preview replaced this import's preview.")
+                self.assertNotContains(progress, "Review preview")
+                self.assertFalse(progress.context["preview_replaced"])
+                self.assertIsNone(progress.context["restore_claim"])
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.state, after.job_id), (PreviewState.SUBMITTED, job.pk))
+        self.assertEqual(after.revision, before.revision)
+
+    def test_restore_refuses_its_own_job_while_it_is_still_queued(self):
+        """Matching ownership cannot restore a Job whose real queue task is still pending."""
+        self._upload()
+        self._run()
+        job = Job.objects.get(data__job_type=ImportJobRunner.job_type)
+        before = preview_coordinator(self.client)
+
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:import_restore", kwargs={"pk": job.pk}), preview_claim(self.client)
+        )
+
+        self.assertContains(refused, "This preview does not belong to that failed import.", status_code=409)
+        job.refresh_from_db()
+        self.assertEqual(job.status, "pending")
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.state, after.job_id), (PreviewState.SUBMITTED, job.pk))
+        self.assertEqual(after.revision, before.revision)
+
     def test_progress_links_an_execution_beside_a_newer_preview(self):
         """An older result stays reachable from its Job without touching an unsubmitted preview."""
         self._upload()
