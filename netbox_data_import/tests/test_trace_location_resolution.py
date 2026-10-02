@@ -191,7 +191,7 @@ class SourceLocationEvidenceTest(LocationTreeMixin, TestCase):
         cls.build_location_tree()
 
     def test_an_unmapped_source_path_is_neither_a_match_nor_a_conflict(self):
-        """The reported defect: every candidate in a Location showed "Differs: location"."""
+        """An unmapped path gives no Location evidence, so no candidate reports a Location difference."""
         page = self.candidates(self.evidence(SOURCE_PATH))
 
         for device in (self.in_hall, self.in_row, self.in_other_hall):

@@ -3,8 +3,7 @@
 """Every workspace writer that takes the profile policy lock compares the reviewed fingerprint inside it.
 
 Specification section 10.2: a preview revision is per session, so only the profile fingerprint
-under the lock shows that another operator moved the policy. Two writers once took the lock and
-skipped the comparison, so a second session silently replaced the first session's decision.
+under the lock shows that another operator moved the policy.
 
 The refusal must be a statement of the lock block itself, before any statement that writes, so no
 branch can skip it. The scan reads only WRITER_MODULES and does not follow a lock taken inside a helper.
