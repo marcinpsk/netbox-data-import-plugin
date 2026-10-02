@@ -799,8 +799,8 @@ ground that revalidation is not serialization.</p>
 see that a duplicate existed.</p>
 <h2 id="blockers-found-in-round-1-and-their-r2-revisions">Blockers found in round 1, and their r2 revisions</h2>
 <p><strong>Blocker 1 — the ceiling of 20 would make the feature unusable.</strong> Verified in source: for the
-<code>termination</code> role, <code>eligible_terminations</code> returns every visible termination of the claimed kind on
-the resolved Device; the port-name narrowing at <code>cable_target.py:371</code> applies only to the
+<code>termination</code> role, <code>eligible_terminations</code> returns every visible termination of the models the
+claimed kind admits (spec 6.1) on the resolved Device; the port-name narrowing at <code>cable_target.py:371</code> applies only to the
 <code>mapped_peer</code> role. A 48-port switch therefore yields <code>total=48</code>, and an <code>r1</code> request would refuse
 every interface question on ordinary equipment. The 20 is the <strong>picker's page size</strong>, not an
 eligibility bound.</p>
@@ -821,9 +821,9 @@ validated at startup even when inference is otherwise unconfigured:</p>
 <p><code>True</code> is the trap worth naming: it is numerically 1 and would silently admit a one-candidate set.
 The repository already excludes booleans this way in its integer timeout validation
 (<code>inference_settings.py:205</code>), and this setting follows it. Zero and negatives admit no set at all;
-<code>10**100</code> must never reach a database slice, because <code>eligible_terminations</code> materializes the slice
-before computing <code>total</code>. The hard ceiling is 1,024. The four supported NetBox termination models
-limit names to 64 characters. A compact candidate array at the ceiling stays below 1 MiB even when
+<code>10**100</code> must never reach a page cut, because <code>eligible_terminations</code> cuts its page from the whole
+admitted set it has read. The hard ceiling is 1,024. The seven NetBox termination models a claimed
+kind can admit (spec 6.1) limit names to 64 characters. A compact candidate array at the ceiling stays below 1 MiB even when
 every name needs worst-case JSON escaping. The default remains 64 because a hard process and request
 size ceiling does not promise that every configured backend accepts the largest prompt.</p>
 <p><strong>Blocker 2: T7's adapter cannot supply the response diagnostic T8 requires.</strong> Neither design saw this.

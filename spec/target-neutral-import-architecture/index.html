@@ -1720,6 +1720,10 @@ already exists, and do not use any term listed under <code>_Avoid_</code>.</p>
 <td>The source label for one cable's kind.</td>
 </tr>
 <tr>
+<td>Cable End Kind</td>
+<td>A NetBox termination model the Cable Target Module may resolve a Termination Reference to (section 6.1).</td>
+</tr>
+<tr>
 <td>Cable Type, Cable Profile</td>
 <td>The fixed NetBox Cable choices a CableClass maps to.</td>
 </tr>
@@ -1806,6 +1810,9 @@ A Target Module raises a precondition failure inside the transaction when a rech
 Import Engine. A Target Module never imports a Source Adapter implementation; it consumes typed
 source items by output kind. A backend adapter never imports NetBox models, Candidate Snapshot
 models, Resolution Proposal models, or job models.</p>
+<p>The plan model imports no other module of the plugin. A Target Module that owns a diagnostic display
+vocabulary registers its validator with the plan model at application start, under its diagnostic
+code namespace.</p>
 <h3 id="23-responsibilities">2.3 Responsibilities</h3>
 <p><strong>Source Adapter.</strong> Deterministic source interpretation only. It returns typed source items and
 source diagnostics. It never queries NetBox, enforces target permissions, matches target objects, or
@@ -2135,9 +2142,11 @@ native NetBox Job links one-to-one to its <code>ImportExecution</code> row.</p>
 source rows or Target Module ORM operations.</p>
 <h3 id="48-schema-versioning-and-storage">4.8 Schema versioning and storage</h3>
 <p>A serialized Import Plan carries an explicit schema version. The first version is <code>1</code> (spec default).
-An incompatible active preview or queued job fails before writes and requires replanning. Historical
-Import Executions remain audit records. The runtime never migrates an old executable plan and never
-keeps a compatibility executor.</p>
+An incompatible active preview or queued job fails before writes and requires replanning. A plan whose
+diagnostic display holds a field its namespace's registered display vocabulary does not permit is
+incompatible too, because that field can hold a value no render rechecks. A namespace with no
+registered vocabulary is not checked. Historical Import Executions remain audit records. The runtime
+never migrates an old executable plan and never keeps a compatibility executor.</p>
 <p>The Import Plan contract is storage-neutral. This delivery stores the active preview plan in the
 session and passes the accepted serialized plan to the background job (spec default, permitted by ADR
 0001). No durable review-session model is added, because the review-workspace prototype (#83) did not
@@ -2279,7 +2288,7 @@ existing Cables, PortMapping rows) and cannot be detected during source interpre
 <td>Source Adapter</td>
 </tr>
 <tr>
-<td>The resolved object is not an Interface, FrontPort, or RearPort</td>
+<td>The resolved object is not a Cable End Kind (section 6.1)</td>
 <td><code>cable.unsupported_termination_kind</code></td>
 <td><code>invalid</code></td>
 <td>Cable Target Module</td>
@@ -2372,44 +2381,133 @@ source documents that use the same normalized label. A saved choice takes preced
 matching.</p>
 <p>Without a saved choice, one exact Device-name match inside the actor's view scope and selected Site
 resolves automatically. Zero or several matches leave one Device question open in the Trace Review
-Workspace. Rack, Location, and U position can rank candidates and explain the order. The operator
-must select the Device. Each placement hint is used only when the actor can also view its related
-Rack or Location.</p>
+Workspace. Rack, Location, and U position can rank candidates and explain the order. They never
+select a Device: the operator must select it. Each placement hint is used only when the actor can
+also view its related Rack or Location.</p>
+<p>The source Location is an opaque path, for example <code>Region &gt;&gt; Building &gt;&gt; 1st Floor &gt;&gt; DH4 &gt;&gt; T</code>. The
+plugin never splits or interprets it, so it never compares it with a NetBox Location name. Its key is
+<code>identity_text</code> of the source value, used for evidence collection, lookup, the digest, and
+uniqueness; the source text is kept separately for display. An empty key is not a path. Separator
+spelling is part of the key, so <code>A&gt;&gt;B</code> and <code>A &gt;&gt; B</code> are two paths.</p>
+<p>The operator can map one source Location path to one NetBox Location in the selected Site. A
+<code>TraceLocationResolution</code> row holds that mapping for the Import Profile, and later source documents
+reuse it for the same key. The mapping is optional and never blocks a unit.</p>
+<p>A Device's placement Location is its own Location when <code>location_id</code> is set, and its Rack's Location
+only when the Device has no Location of its own. An own Location the actor cannot view contributes no
+evidence and does not enable the Rack fallback. The Rack fallback needs both the Rack and its
+Location to be visible.</p>
+<p>Location evidence compares only through a mapping whose Location the actor can view:</p>
+<ul>
+<li>A mapped path matches a Device whose placement Location is the mapped Location or one of its
+  descendants. Containment is structural between the two visible Locations, so a hidden
+  intermediate Location does not break it, and it is never shown or counted.</li>
+<li>A mapped path conflicts with a Device whose placement Location is outside that subtree. The
+  conflict shows the source path, the mapped Location, and the Device's placement Location.</li>
+<li>An unmapped path, and a Device with no visible placement Location, contribute neither a match nor
+  a conflict.</li>
+</ul>
+<p>One Device label can carry several distinct source Location paths. Each mapped path is evaluated and
+explained. Location adds one score when any mapped path matches; repeated occurrences and unmapped
+paths add nothing.</p>
+<p>A mapping whose Location is deleted, hidden from the actor, or outside the selected Site is stale.
+A stale mapping acts as unmapped, the workspace marks it stale, and its display snapshot is never
+shown. It is not removed automatically.</p>
+<p>The Location the operator selects on the import page is a ranking hint for trace imports, shown as
+an "import Location" hint separate from source evidence. A Device whose placement Location is that
+Location or one of its descendants gets the hint. Candidate order is: exact name, then source
+placement evidence (more matches, then fewer conflicts), then the import Location hint, then name,
+then ID. The hint never filters candidates and never makes a conflict, because one trace can cross
+Locations. For a trace-only import, an import-page Location that is deleted, hidden, or moved out of
+the Site is unavailable evidence: the workspace shows a neutral notice and keeps the preview.</p>
 <p>A saved Device that is deleted, hidden, or outside the selected Site becomes stale. Planning does not
 fall back to another exact-name match and does not show the saved display snapshot. A placement
 change inside the selected Site does not invalidate the choice.</p>
-<p>The adapter's fixed PortClass vocabulary claims the termination kind:</p>
+<p>The adapter's fixed PortClass vocabulary claims the termination kind. Each claimed kind admits a
+fixed, ordered list of NetBox termination models:</p>
 <table>
 <thead>
 <tr>
 <th>PortClass</th>
-<th>Claimed NetBox termination</th>
+<th>Claimed kind</th>
+<th>Admitted NetBox terminations, in match order</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td>NIC, Switch Port, Port</td>
-<td>Interface</td>
+<td><code>interface</code></td>
+<td>Interface, then ConsolePort, ConsoleServerPort, PowerPort, PowerOutlet</td>
 </tr>
 <tr>
 <td>Position Front, Fiber Pair Front</td>
+<td><code>front_port</code></td>
 <td>FrontPort</td>
 </tr>
 <tr>
 <td>Punch-Down, Fiber Pair Back</td>
+<td><code>rear_port</code></td>
 <td>RearPort</td>
 </tr>
 </tbody>
 </table>
+<p>The source vocabulary has no console or power class: a source system records a server's console or
+power inlet, and a console server or PDU port, as NIC, Switch Port, or Port. The <code>interface</code> claim
+therefore admits the console and power component models. The admitted models of all three claims
+together are the Cable End Kinds.</p>
 <p>A PortClass value outside this vocabulary is a source-structure error the Source Adapter reports as
-<code>trace.unknown_port_class</code>, so it never reaches planning. A resolved object whose real type is not an
-Interface, FrontPort, or RearPort is a target-state error the Cable Target Module reports as
+<code>trace.unknown_port_class</code>, so it never reaches planning. A resolved object whose real type is not a
+Cable End Kind is a target-state error the Cable Target Module reports as
 <code>cable.unsupported_termination_kind</code>.</p>
-<p>Candidates are all terminations of the claimed kind on the resolved Device. Deterministic matching
-requires a unique normalized exact port-name match. Anything else leaves the Target Field unresolved:
-the unit is blocked, and manual searchable selection resolves it. The optional Resolution Proposal
-flow (section 7) assists the same selection. The cards label is identity, display, and context for the
-operator and the Inference Backend. Deterministic matching never uses it.</p>
+<p>Candidates are all terminations of the admitted models on the resolved Device. A candidate's identity
+is its concrete model and its id together, because two models can share one numeric id. The picker,
+the proposal snapshot, and every selection write carry that pair unchanged, and none of them derives
+the model from the claimed kind.</p>
+<p>Deterministic matching takes the admitted models in match order and stops at the first model with any
+normalized exact port-name match. The database computes that normalized form for both the source port
+and each stored name, with the same expression and one fixed collation that the picker search uses,
+and it reads only the rows whose form matches. A source port and a candidate that the search ranks as
+an exact match are therefore the same match here. Exactly one match in that model resolves the Termination Reference.
+Several matches in that model, or no match in any admitted model, leave the Target Field unresolved:
+the unit is blocked, and manual searchable selection resolves it. An Interface name match therefore
+always wins over a console or power port of the same name, and a device with no matching Interface
+still resolves to its one matching console or power port.</p>
+<p>Precedence does not depend on the actor's view scope. The stopping model is chosen from all
+terminations on the resolved Device. The actor must then be able to view the unique match in that
+model. A hidden match, or several matches, leaves the field unresolved with the same diagnostic as a
+missing name, and never falls through to a later model. The diagnostic carries no hidden identity,
+label, or count. Without this rule two actors would resolve one source port to two different objects.
+A saved selection that no longer answers its question, because it left the Device, is hidden, or names
+a model the claimed kind does not admit, reports its diagnostic without the saved display name: that
+name can belong to a port the actor cannot view, and no later render can recheck it.
+A candidate read, a proposal inventory and the write recheck start from the question the plan asked:
+the plan's Device evidence and the source port spelling the planner matched, never the field key
+alone. The field key holds casefolded text, and the database identity of casefolded text can name
+another row (<code>STRAẞE</code> folds to <code>strasse</code>, whose database identity matches <code>Straße</code>). A preview that
+does not state the spelling for a field key refuses the read instead of guessing.</p>
+<p>The optional Resolution Proposal flow (section 7) assists the same selection. The cards label is
+identity, display, and context for the operator and the Inference Backend. Deterministic matching
+never uses it.</p>
+<p>Eligible-candidate retrieval treats the admitted models as one set. It has one combined count and one
+combined bound: the picker's page size and the proposal's complete-set ceiling each apply to the
+whole set, never per model. The order is stable and total: an exact normalized match of the search
+text first, then name, then match order of the model, then id. An exact-name search therefore always
+reaches its candidate, whatever the other models hold. A search admits each candidate whose
+normalized name contains the normalized search text, and the database computes both forms, so a
+name that differs only in whitespace or case is never filtered out. Names compare bytewise. Each
+model is counted in the database. A page has an offset into the combined order: the database orders
+the keys of every model as one set and returns only the page, and only the rows of that page load.
+A page at or past the count is empty and reads no row. A row that leaves the set between the page
+query and its load is not offered. A locking read locks the concrete models in one fixed global order.</p>
+<p>Two resolved ends of one segment must be a pair NetBox can cable. The Cable Target Module reads that
+rule from NetBox's own compatible-termination table and never keeps a copy. It checks each segment
+after mapped-peer substitution. A pair outside the table, such as a PowerPort and an Interface, blocks
+the unit with <code>cable.incompatible_terminations</code>. The diagnostic names the segment index, both ends'
+models, and the field keys of both ends, inside the same disclosure rules as every Cable diagnostic.
+Both ends stay open to manual selection even when the exact-name rule resolved them, so the operator
+can correct a wrong automatic match before any write. The check is per segment only: it does not
+prove that a passive path carries one signal end to end (a ConsolePort through a panel to an
+Interface passes it). Port and media compatibility stay out of scope, as the Cable policy design
+records (<code>docs/design/trace-cable-policy.md</code>, accepted limitation 1).</p>
 <p>A termination resolved by the exact-name rule shows the <code>automatically resolved</code> badge state. A
 termination resolved by an operator or by an accepted proposal shows <code>manually resolved</code> or
 <code>accepted</code>.</p>
@@ -2541,7 +2639,7 @@ inside the transaction as the accepted plan's operator.</p>
 <td><code>blocked</code></td>
 </tr>
 <tr>
-<td>The resolved object is not an Interface, FrontPort, or RearPort</td>
+<td>The resolved object is not a Cable End Kind (section 6.1)</td>
 <td><code>cable.unsupported_termination_kind</code></td>
 <td><code>invalid</code></td>
 </tr>
@@ -2576,8 +2674,13 @@ inside the transaction as the accepted plan's operator.</p>
 <td><code>blocked</code></td>
 </tr>
 <tr>
-<td>A stored termination selection whose kind contradicts the stated PortClass</td>
+<td>A stored termination selection whose model the stated PortClass does not admit</td>
 <td><code>cable.termination_kind_mismatch</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A segment whose two resolved ends NetBox cannot cable together</td>
+<td><code>cable.incompatible_terminations</code></td>
 <td><code>blocked</code></td>
 </tr>
 <tr>
@@ -2652,7 +2755,8 @@ triple plus the claimed kind plus the role marker. Its canonical form is the JSO
 those values, matching the trace identity rule in section 5.2:
 <code>{"cards":&lt;cards&gt;,"device":&lt;device&gt;,"kind":&lt;kind&gt;,"port":&lt;port&gt;,"role":"termination"}</code>, with members
 sorted by name (spec default for the member order). The stored key is this canonical JSON form. A
-pipe-separated string is a display form only and is never a key.</p>
+pipe-separated string is a display form only and is never a key. The <code>kind</code> member is the claimed
+kind, not the selected model: an <code>interface</code> key can resolve to any model that claim admits.</p>
 <table>
 <thead>
 <tr>
@@ -2806,7 +2910,10 @@ inside the acceptance transaction: the Candidate Snapshot still equals the curre
 current resolved Device equals the frozen resolved Device reference, and the selected candidate still
 exists.</p>
 <p>Acceptance upserts the <code>TerminationResolution</code> row for the bound key and links it from the proposal.
-The last explicit operator action wins across proposals for that key. A <code>no_match</code> outcome is
+The last explicit operator action wins across proposals for that key. Acceptance is a workspace
+command that writes profile policy, so it also compares the reviewed plan's profile fingerprint under
+the profile lock (section 10.2). After one acceptance the operator re-reads before the next policy
+decision, because acceptance does not replan the preview. A <code>no_match</code> outcome is
 informational and cannot be accepted. A proposal never changes NetBox and never applies itself.</p>
 <p>Rejection sets the same one-shot decision fields, records the operator and time, and does not block
 re-requesting a fresh proposal for the same key. It writes no Row Resolution, so it takes the preview
@@ -3124,6 +3231,12 @@ index, and projection column.</p>
 <td>T6</td>
 </tr>
 <tr>
+<td><code>TraceLocationResolution</code></td>
+<td>A trace source Location path mapped to one NetBox Location</td>
+<td>(Import Profile, source Location key) unique</td>
+<td>Location evidence</td>
+</tr>
+<tr>
 <td><code>TerminationResolution</code></td>
 <td>The trace-side Row Resolution written by manual selection or proposal acceptance</td>
 <td>(Import Profile, task type, field key) unique</td>
@@ -3180,6 +3293,13 @@ selection for both the <code>termination</code> and <code>mapped_peer</code> rol
 Device ID, and a display snapshot. The plain Device ID preserves a stale decision after Device
 deletion so the operator can replace it. The snapshot is never shown unless the Device is still in
 the actor's view scope. Installation-local Device IDs are not part of portable profile YAML.</p>
+<p><code>TraceLocationResolution</code> stores the canonical source Location key, its fixed-width digest, the
+selected Location ID, and a display snapshot. Like <code>TraceDeviceResolution</code>, the plain ID keeps a
+stale decision after Location deletion so the operator can replace it, the snapshot is shown only
+while the Location is in the actor's view scope, and the row is not part of portable profile YAML
+(the YAML omits the whole section). It is a registered policy section, so a mapping change changes
+the profile fingerprint. It has no REST or GraphQL surface in this delivery, the same as
+<code>TraceDeviceResolution</code>.</p>
 <p><code>CableSegmentOverride</code> stores the Import Profile, the resolved termination pair key, the forced Cable
 Type and Cable Profile, and the Source Trace identity and segment position the decision was made from.
 The pair key and the values it holds are installation-local, so overrides are not part of portable
@@ -3324,8 +3444,28 @@ option.</p>
 resolved</code>, <code>proposed</code>, <code>accepted</code>, <code>stale</code>, <code>failed</code>. The <code>automatically resolved</code> state is distinct
 from <code>manually resolved</code>, so the operator can see which terminations the exact-name rule matched
 without help.</p>
-<p>The searchable picker is scoped to eligible candidates of the claimed kind on the resolved Device and
-shows a visible "N of M eligible" count.</p>
+<p>The searchable picker is scoped to eligible candidates of the admitted models on the resolved Device,
+shows each candidate's model, and shows a visible "N of M eligible" count. The Device, termination,
+and Location pickers share one dialog: each pages through its whole candidate set with Previous and
+Next, and a later page states its range, such as "21–40 of 57 eligible". A write rechecks the offer
+on the page, search, and offset that made it. A resolved termination
+shows its selected object's own model, not the claimed kind. Each render rechecks view permission on
+every port and every resolved Device a cached plan names: a hidden or deleted port shows neither its
+name nor its model, and a hidden or deleted Device shows no name.</p>
+<p>The workspace lists, at batch level and independent of the selected trace, each distinct source
+Location path of the batch with its state: unmapped, mapped (with the Location), or stale. With no
+paths it says "No source Location paths"; with paths but no visible Location in the Site it says so
+separately. One picker serves every path: it searches the visible Locations of the selected Site by
+normalized name and shows a bounded page with an "N of M" count, so the page renders no per-path
+list of Locations.</p>
+<p>A mapping row's state, target, snapshot, and every explanation derived from it need view permission
+on that row. Add, change, and delete are checked separately with object constraints, on the server,
+and a hidden row is never overwritten blind. An unavailable action renders disabled with its reason.
+Save and clear run in the same coordinated transaction as other policy writes: active-preview claim,
+profile lock, reviewed-profile fingerprint check, source-key membership, scoped target recheck,
+write, replan, and revision advance. Any failure rolls back all of it.</p>
+<p>A Device candidate's explanation names each matched and each conflicting fact with both values,
+never only the fact name.</p>
 <p>Proposal card contract:</p>
 <table>
 <thead>
@@ -3542,8 +3682,8 @@ path survives it.</p>
    real response. Cover upload, preview, review commands, selective synchronization, final
    synchronization, and the results page. Assert real database outcomes, not intermediate structures.</li>
 <li><strong>Integration second.</strong> Exercise the Import Engine and Target Modules against the real NetBox ORM,
-   real forms, and real serializers. Use real Cable, Interface, FrontPort, RearPort, and PortMapping
-   objects.</li>
+   real forms, and real serializers. Use real Cable, Interface, ConsolePort, ConsoleServerPort,
+   PowerPort, PowerOutlet, FrontPort, RearPort, and PortMapping objects.</li>
 <li><strong>Narrow unit last.</strong> Reserve unit tests for pure functions such as normalization, canonical
    orientation, and fingerprinting.</li>
 </ol>
@@ -3963,7 +4103,7 @@ Until T10 lands, a trace profile is configurable through the UI only.</p>
 <li>A unique mapped peer substitutes automatically and the substitution appears in the plan; several
   mapped peers block the unit and offer exactly the mapped peers for manual selection.</li>
 <li>A stored <code>TerminationResolution</code> row for either role is reused on a replan.</li>
-<li>A resolved object that is not an Interface, FrontPort, or RearPort makes the unit <code>invalid</code> with
+<li>A resolved object that is not a Cable End Kind makes the unit <code>invalid</code> with
   <code>cable.unsupported_termination_kind</code>.</li>
 <li>A contradicted Pass-Through Claim makes the unit <code>invalid</code> and names both ports and the actual
   mappings.</li>
@@ -3971,8 +4111,8 @@ Until T10 lands, a trace profile is configurable through the UI only.</p>
   edited.</li>
 <li>An unresolved CableClass dimension, a stale mapping, and an incompatible Cable Profile each block
   the unit with their own diagnostic.</li>
-<li>Eligible-candidate retrieval returns only terminations of the claimed kind on the resolved Device,
-  scoped to the actor's view permission.</li>
+<li>Eligible-candidate retrieval returns only terminations of the models the claimed kind admits on the
+  resolved Device, scoped to the actor's view permission.</li>
 <li>A precondition mismatch inside the transaction rolls back the complete selected transaction.</li>
 <li>Every created Cable gets one provenance row per contributing Source Trace; two traces sharing one
   identical segment create one Cable and two rows. The deleted Logical Cable appears only in the
@@ -3994,13 +4134,15 @@ variables.</p>
 <li>Every action is always visible; an illegal action renders disabled with its reason.</li>
 <li>The proposed panel shows a per-segment status of create, reuse existing, delete Logical Cable, or
   conflict.</li>
-<li>The picker lists only eligible candidates of the claimed kind on the resolved Device and shows the
-  "N of M eligible" count.</li>
+<li>The picker lists only eligible candidates of the models the claimed kind admits on the resolved
+  Device and shows the "N of M eligible" count.</li>
 <li>A trace-only profile opens this workspace directly. An open source Device label offers a Device
   picker before its termination picker.</li>
 <li>Selecting a Device writes one profile-owned <code>TraceDeviceResolution</code> and replans. A later source
   document reuses it for the same normalized label and for every port under that label.</li>
-<li>Rack, Location, and U position only rank visible Device candidates. They never select one.</li>
+<li>Rack, Location, and U position only rank visible Device candidates. They never select one. Source
+  Location evidence compares only through a <code>TraceLocationResolution</code> mapping, and the import-page
+  Location ranks candidates after source evidence without filtering them.</li>
 <li>Selecting a candidate writes a <code>TerminationResolution</code> row through its owning model and triggers a
   replan; no review command edits an Import Plan.</li>
 <li>A termination matched by the exact-name rule shows <code>automatically resolved</code>; one selected by an
@@ -4217,7 +4359,7 @@ Confirm that no dual code path, commented-out code, or untracked "remove later" 
 <li>Whole-preview batch inference processing.</li>
 <li>Contact-field assistance through the Resolution Proposal lifecycle.</li>
 <li>Creating missing Devices or ports.</li>
-<li>Termination types other than Interface, FrontPort, and RearPort.</li>
+<li>Termination types outside the Cable End Kinds (section 6.1), such as PowerFeed and CircuitTermination.</li>
 <li>Any Inference Backend applying a change without explicit operator acceptance.</li>
 <li>Creating or mutating CablePath state.</li>
 <li>Creating a NetBox Cable Profile at run time.</li>
