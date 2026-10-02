@@ -3,13 +3,15 @@
 """Every policy write renders a deleted profile as a refusal, never as a server error.
 
 `save_permission_scoped_object()` and `locked_profile_policy()` both raise
-`ImportProfile.DoesNotExist` when the profile row is gone by the time the lock is taken. The preview
-gate reads the profile earlier in the request, so a delete that lands between the two reaches the
-lock and leaves the view. A view that does not answer it returns HTTP 500.
+`ImportProfile.DoesNotExist` when the profile row is gone by the time the lock is taken. A preview
+command takes that lock inside `apply_preview_command()`, which raises the same exception, so a
+delete that lands before the lock leaves the view. A view that does not answer it returns HTTP 500.
 
-`_PermissionScopedWriteMixin` answers it once for every view that inherits it. A view that does not
-inherit it has to catch the exception itself. One view lost its handler to a cleanup that assumed
-removing an outer lock removed the exception, which it did not, so this scanner exists.
+`_PreviewCommandMixin` answers it once for every view that inherits it, directly or through another
+mixin. A view that does not inherit it has to catch the exception itself. A write inside a Preview
+Command runs under `apply_preview_command()`, so the view that applies the command answers for it.
+One view lost its handler to a cleanup that assumed removing an outer lock removed the exception,
+which it did not, so this scanner exists.
 """
 
 import ast
@@ -20,13 +22,33 @@ from django.test import Client, SimpleTestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import ColumnMapping, ImportProfile, SourceResolution
-from netbox_data_import.tests.helpers import profile_deleted_at_the_policy_lock
+from netbox_data_import.tests.helpers import (
+    preview_claim,
+    profile_deleted_at_the_policy_lock,
+    upload_preview,
+    workbook_bytes,
+)
 
 VIEWS = pathlib.Path(__file__).resolve().parents[1] / "views.py"
 #: A mixin whose `dispatch()` answers the exception for every view that inherits it.
-ANSWERING_MIXINS = frozenset({"_PermissionScopedWriteMixin", "_TraceProposalMixin"})
-RAISING_CALLS = frozenset({"save_permission_scoped_object", "locked_profile_policy"})
+ANSWERING_MIXINS = frozenset({"_PreviewCommandMixin"})
+#: A command's writes raise through the `apply_preview_command()` call that runs it.
+COMMAND_BASES = frozenset({"PreviewCommand", "QueueImport"})
+RAISING_CALLS = frozenset({"save_permission_scoped_object", "locked_profile_policy", "apply_preview_command"})
 HANDLED = "ImportProfile.DoesNotExist"
+
+
+def _inheriting(tree, roots):
+    """Return *roots* and every class in *tree* that inherits one of them, directly or not."""
+    bases = {
+        node.name: {ast.unparse(base) for base in node.bases}
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+    }
+    found = set(roots)
+    while more := {name for name, parents in bases.items() if parents & found} - found:
+        found |= more
+    return found
 
 
 def _caught_by(node):
@@ -48,6 +70,8 @@ def _scan(tree, raising):
     treats a call to it as a write too. That is how a view stays accountable for a helper it calls.
     """
     unanswered, carriers = [], set()
+    answering = _inheriting(tree, ANSWERING_MIXINS)
+    commands = _inheriting(tree, COMMAND_BASES)
 
     def walk(node, tries, owner, function):
         if isinstance(node, ast.ClassDef):
@@ -61,9 +85,9 @@ def _scan(tree, raising):
                 walk(child, tries, owner, function)
             return
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in raising:
-            inherits = owner is not None and any(ast.unparse(base) in ANSWERING_MIXINS for base in owner.bases)
+            answered = owner is not None and (owner.name in answering or owner.name in commands)
             caught = {name for block in tries for name in _caught_by(block)}
-            if not inherits and HANDLED not in caught and "<bare>" not in caught:
+            if not answered and HANDLED not in caught and "<bare>" not in caught:
                 if owner is not None:
                     unanswered.append(f"{owner.name}:{node.lineno}")
                 elif function is not None:
@@ -121,10 +145,10 @@ class DeletedProfileIsNotFoundTest(TransactionTestCase):
         self.client = Client()
         self.client.force_login(self.user)
 
-    def _post_while_the_profile_vanishes(self, url, data):
+    def _post_while_the_profile_vanishes(self, url, data, **extra):
         """POST to *url*, deleting the profile the moment the policy lock statement runs."""
         with profile_deleted_at_the_policy_lock(self.profile.pk) as deleted:
-            response = self.client.post(url, data)
+            response = self.client.post(url, data, **extra)
         self.assertEqual(deleted, [True], "the policy lock statement never ran, so no race was exercised")
         return response
 
@@ -150,6 +174,40 @@ class DeletedProfileIsNotFoundTest(TransactionTestCase):
         response = self._post_while_the_profile_vanishes(
             reverse("plugins:netbox_data_import:source_resolution_delete", kwargs={"pk": self.resolution.pk}),
             {"confirm": "true"},
+        )
+
+        self.assertEqual(response.status_code, 404, response.content[:300])
+
+    def _setup_data(self):
+        """Return a setup form for one small workbook this profile can plan."""
+        from dcim.models import Site
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        site = Site.objects.create(name="Vanishing Site", slug="vanishing-site")
+        upload = SimpleUploadedFile("vanishing.xlsx", workbook_bytes(["Hostname"], [["vanish-01"]]))
+        return {"profile": self.profile.pk, "site": site.pk, "excel_file": upload}
+
+    def test_a_preview_command_reports_the_deleted_profile_as_not_found(self):
+        """A command takes the profile lock inside the coordinator, so the claim path answers it too."""
+        upload = upload_preview(self.client, self._setup_data())
+        self.assertEqual(upload.status_code, 302, upload.content[:300])
+
+        response = self._post_while_the_profile_vanishes(
+            reverse("plugins:netbox_data_import:preview_reread"),
+            preview_claim(self.client),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 404, response.content[:300])
+        self.assertEqual(response.json(), {"ok": False, "error": "The import profile is no longer available."})
+
+    def test_a_setup_reports_the_deleted_profile_as_not_found(self):
+        """The setup command takes the same lock after its form validated the profile."""
+        setup_url = reverse("plugins:netbox_data_import:import_setup")
+        self.client.get(setup_url)
+
+        response = self._post_while_the_profile_vanishes(
+            setup_url, {**preview_claim(self.client), **self._setup_data()}
         )
 
         self.assertEqual(response.status_code, 404, response.content[:300])

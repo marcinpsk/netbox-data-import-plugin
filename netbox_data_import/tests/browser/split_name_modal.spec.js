@@ -6,6 +6,7 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { claim, claimForm, postedFields, script, servePage } from "./preview_page.js";
 
 const splitModal = readFileSync(
   resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/split_name_modal.js"),
@@ -26,11 +27,11 @@ const pageContent = `
   <div class="modal" id="splitNameModal" tabindex="-1">
     <div class="modal-dialog"><div class="modal-content">
       <form id="splitForm" data-check-device-url="http://ndi.test/check-device/">
-        <input type="hidden" id="res_source_id">
-        <input type="hidden" id="res_source_column">
-        <input type="hidden" id="res_original_value">
-        <input type="hidden" id="res_resolved_fields">
-        <input type="hidden" id="res_acknowledged_fields">
+        <input type="hidden" name="source_id" id="res_source_id">
+        <input type="hidden" name="source_column" id="res_source_column">
+        <input type="hidden" name="original_value" id="res_original_value">
+        <input type="hidden" name="resolved_fields" id="res_resolved_fields">
+        <input type="hidden" name="acknowledged_fields" id="res_acknowledged_fields">
         <div id="res_original_display"></div>
         <input type="text" id="res_delimiter" value=" - ">
         <div id="res_existing_notice" class="d-none"><code id="res_existing_display"></code></div>
@@ -38,6 +39,7 @@ const pageContent = `
         <div id="res_conflict_alert" class="d-none"></div>
         <div id="res_duplicate_alert" class="d-none"></div>
         <div id="res_device_check" class="d-none"><small id="res_device_check_msg"></small></div>
+        <div id="res_save_error" class="d-none" role="alert"></div>
         <button type="submit">Save</button>
       </form>
     </div></div>
@@ -95,4 +97,39 @@ test("two parts on one field block the save and say why", async ({ page }) => {
   await page.locator("#res_part_field_0").selectOption("asset_tag");
   await expect(page.locator("#res_duplicate_alert")).toHaveClass(/d-none/);
   await expect(page.locator('#splitNameModal button[type="submit"]')).toBeEnabled();
+});
+
+test("a save posts the page claim and reloads the replanned preview", async ({ page }) => {
+  const posted = [];
+  await page.route("**/save-resolution/", async (route) => {
+    posted.push(await postedFields(route.request()));
+    await route.fulfill({ json: { ok: true, preview_state: "replanned", message: "Saved.", detail: "" } });
+  });
+  await page.route("**/check-device/**", (route) =>
+    route.fulfill({
+      json: { exists: false, count: 0, url: "" },
+      headers: { "access-control-allow-origin": "*" },
+    }),
+  );
+  const loads = await servePage(page, (revision) => `
+    <head><script>${bootstrapSource}</script></head>
+    <input name="csrfmiddlewaretoken" value="token">
+    ${claimForm(revision)}
+    <output id="ndi-revision">${revision}</output>
+    <div id="page-content">${pageContent.replace('<form id="splitForm"', '<form id="splitForm" action="/save-resolution/"')}</div>
+    ${script("preview_claim.js")}
+    ${script("preview_row_controls.js")}
+    ${script("preview_row_actions.js")}
+    ${script("split_name_modal.js")}
+  `);
+  await page.locator("#trigger").click();
+  await expect(page.locator("#splitNameModal")).toBeVisible();
+
+  await page.locator('#splitNameModal button[type="submit"]').click();
+
+  await expect(page.locator("#ndi-revision")).toHaveText("5");
+  expect(loads()).toBe(2);
+  expect(posted).toHaveLength(1);
+  expect(posted[0]).toMatchObject(claim());
+  expect(JSON.parse(posted[0].resolved_fields)).toEqual({ asset_tag: "AT900", device_name: "host-900" });
 });

@@ -15,11 +15,42 @@ from django.urls import reverse
 
 from netbox_data_import import device_field_review
 from netbox_data_import.catalog import CATALOG
+from netbox_data_import.tests.helpers import (
+    preview_claim,
+    preview_coordinator,
+    seed_preview,
+    set_import_source,
+    store_plan,
+    store_workbook_document,
+    stored_plan,
+    upload_preview,
+)
 from netbox_data_import.tests.test_views import BaseViewTestCase, PreviewSessionMixin
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "templates" / "netbox_data_import"
 STATIC_JS_DIR = Path(__file__).resolve().parents[1] / "static" / "netbox_data_import" / "js"
 HEAD_BLOCK = re.compile(r"{%\s*block head\s*%}(.*?){%\s*endblock\s*%}", re.DOTALL)
+
+
+def _reread_preview(test):
+    """Replan the active preview against live NetBox, as the page's Re-read control does."""
+    response = test.client.post(reverse("plugins:netbox_data_import:preview_reread"), preview_claim(test.client))
+    test.assertEqual(response.status_code, 302, response.content[:300])
+
+
+def _preview_source_rows(test):
+    """Return the canonical source rows of the client's stored preview."""
+    from netbox_data_import.plan import ImportPlan
+    from netbox_data_import.review_workspace import ReviewWorkspace
+
+    return ReviewWorkspace(ImportPlan.from_dict(stored_plan(test.client)), test.user).source_rows
+
+
+def _preview_site(test):
+    """Return the Site the client's stored preview plans against."""
+    from dcim.models import Site
+
+    return Site.objects.get(pk=preview_coordinator(test.client).context["site_id"])
 
 
 class HeadBlockCarriesNoPageAssetsTest(SimpleTestCase):
@@ -56,10 +87,10 @@ class DeferredFormsReadTheirActionAttributeTest(SimpleTestCase):
 
 
 class PreviewFilterStateIsRememberedTest(SimpleTestCase):
-    """Every filter that changes row visibility must survive preview recalculation."""
+    """Every filter that changes row visibility must survive the reload after a preview command."""
 
     def test_every_applied_filter_is_stored_in_the_view_payload(self):
-        """A new filter must extend the recalculation payload in the same change."""
+        """A new filter must extend the stored view payload in the same change."""
         source = (STATIC_JS_DIR / "preview_row_controls.js").read_text(encoding="utf-8")
 
         def function_body(name):
@@ -94,7 +125,7 @@ class PreviewFilterStateIsRememberedTest(SimpleTestCase):
         stored_state = set(re.findall(r"^\s+(\w+):", payload.group(1), re.MULTILINE))
 
         self.assertTrue(applied_state, "applyFilters must read at least one filter control")
-        self.assertEqual(applied_state - stored_state, set(), "store every applied filter before recalculation")
+        self.assertEqual(applied_state - stored_state, set(), "store every applied filter before the reload")
 
 
 class SyncStateLabelsMatchTheServerTest(SimpleTestCase):
@@ -159,8 +190,6 @@ class PendingContactWritePreviewTest(BaseViewTestCase):
         from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.models import ColumnMapping, DeviceExistingMatch
         from netbox_data_import.plan import Disposition
-        from netbox_data_import.preview_row_actions import start_new_preview
-        from netbox_data_import.tests.helpers import set_import_source, store_workbook_document
         from netbox_data_import.tests.test_views import _make_profile
 
         site = Site.objects.create(name="Pending Contact Site", slug="pending-contact-site")
@@ -256,19 +285,13 @@ class PendingContactWritePreviewTest(BaseViewTestCase):
             device_name=device.name,
         )
 
-        plan = ImportEngine.plan(profile, document, self.user, planning_context)
-        session = self.client.session
-        start_new_preview(session, plan)
-        session["import_context"] = {
-            "profile_id": profile.pk,
-            "site_id": site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": document.filename,
-            "source_document_id": document.pk,
-        }
-        session["import_preview_pending"] = True
-        session.save()
+        seed_preview(
+            self.client,
+            profile=profile,
+            document=document,
+            plan=ImportEngine.plan(profile, document, self.user, planning_context),
+            context={**planning_context, "filename": document.filename},
+        )
 
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
@@ -299,8 +322,6 @@ class CreatedDevicePendingWritePreviewTest(BaseViewTestCase):
         from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.models import ColumnMapping
         from netbox_data_import.plan import Disposition
-        from netbox_data_import.preview_row_actions import start_new_preview
-        from netbox_data_import.tests.helpers import store_workbook_document
         from netbox_data_import.tests.test_views import _make_profile
 
         site = Site.objects.create(name="Created Pending Site", slug="created-pending-site")
@@ -364,20 +385,13 @@ class CreatedDevicePendingWritePreviewTest(BaseViewTestCase):
             "created-pending.xlsx",
         )
         planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
-
-        plan = ImportEngine.plan(profile, document, self.user, planning_context)
-        session = self.client.session
-        start_new_preview(session, plan)
-        session["import_context"] = {
-            "profile_id": profile.pk,
-            "site_id": site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": document.filename,
-            "source_document_id": document.pk,
-        }
-        session["import_preview_pending"] = True
-        session.save()
+        seed_preview(
+            self.client,
+            profile=profile,
+            document=document,
+            plan=ImportEngine.plan(profile, document, self.user, planning_context),
+            context={**planning_context, "filename": document.filename},
+        )
 
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
@@ -548,19 +562,13 @@ class PreviewMapsNameTheirObjectTypeTest(PreviewSessionMixin, BaseViewTestCase):
     ROW_NUMBER = 12
 
     def _preview_with_repeated_row_number(self):
-        """Render a materialized preview with one Device and one Rack on the same source row."""
+        """Render a stored preview with one Device and one Rack on the same source row."""
         from dataclasses import replace
 
         from netbox_data_import.plan import Disposition, ImportPlan, SynchronizationUnit
-        from netbox_data_import.preview_row_actions import (
-            PREVIEW_PLAN_SESSION_KEY,
-            PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
-            start_new_preview,
-        )
 
         self._setup_session()
-        session = self.client.session
-        stored_plan = ImportPlan.from_dict(session[PREVIEW_PLAN_SESSION_KEY])
+        planned = ImportPlan.from_dict(stored_plan(self.client))
 
         def unit(object_type, marker, suggestion_id):
             email = f"{marker}@example.invalid"
@@ -589,15 +597,14 @@ class PreviewMapsNameTheirObjectTypeTest(PreviewSessionMixin, BaseViewTestCase):
             )
 
         plan = replace(
-            stored_plan,
+            planned,
             units=(
                 unit("device", "device-row", 41),
                 unit("rack", "rack-row", 52),
             ),
         )
-        start_new_preview(session, plan)
-        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
-        session.save()
+        # A page load renders the stored plan as it is, so these units reach the page unchanged.
+        store_plan(self.client, plan.to_dict())
 
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         self.assertEqual(response.status_code, 200)
@@ -743,10 +750,7 @@ class ResolvedContactRowIsMarkedTest(BaseViewTestCase):
 
         workbook = self._workbook()
         workbook.name = "contacts.xlsx"
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": profile.pk, "site": site.pk, "excel_file": workbook},
-        )
+        response = upload_preview(self.client, {"profile": profile.pk, "site": site.pk, "excel_file": workbook})
         self.assertEqual(response.status_code, 302)
         return profile
 
@@ -928,13 +932,13 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
 
         The default height differs from the workbook's, so the row still writes something.
         """
-        from dcim.models import Rack, Site
+        from dcim.models import Rack
 
         self._setup_session()
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         rack_row = next(row for row in response.context["result"].units if row.object_type == "rack")
-        site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
-        Rack.objects.create(name=rack_row.name, site=site, u_height=u_height)
+        Rack.objects.create(name=rack_row.name, site=_preview_site(self), u_height=u_height)
+        _reread_preview(self)
 
     def test_a_rack_row_that_creates_says_so(self):
         """The create message is the baseline the existing-rack case has to differ from."""
@@ -1073,13 +1077,13 @@ class SplitNameReachesAMatchedRowTest(PreviewSessionMixin, BaseViewTestCase):
 
     def _match_a_workbook_device(self):
         """Create the NetBox device one workbook row names, so that row stops being a create."""
-        from dcim.models import Device, DeviceRole, Site
+        from dcim.models import Device, DeviceRole
 
-        row = next(r for r in self.client.session["import_rows"] if r.get("device_name") and r.get("u_position"))
-        site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
+        row = next(r for r in _preview_source_rows(self) if r.get("device_name") and r.get("u_position"))
         _manufacturer, device_type = _device_type_for_row(row)
         role = DeviceRole.objects.create(name="SplitRole", slug="split-role")
-        Device.objects.create(name=row["device_name"], site=site, device_type=device_type, role=role)
+        Device.objects.create(name=row["device_name"], site=_preview_site(self), device_type=device_type, role=role)
+        _reread_preview(self)
         return row
 
     def test_every_device_row_the_import_writes_offers_the_split(self):
@@ -1149,15 +1153,16 @@ class MatchedDeviceBadgeTest(PreviewSessionMixin, BaseViewTestCase):
 
     def _match_a_workbook_device(self):
         """Create the NetBox device one workbook row names, so that row matches it."""
-        from dcim.models import Device, DeviceRole, Site
+        from dcim.models import Device, DeviceRole
 
         self._setup_session()
-        rows = self.client.session["import_rows"]
-        row = next(r for r in rows if r.get("device_name") and r.get("u_position"))
-        site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
+        row = next(r for r in _preview_source_rows(self) if r.get("device_name") and r.get("u_position"))
         _manufacturer, device_type = _device_type_for_row(row)
         role = DeviceRole.objects.create(name="MatchRole", slug="match-role")
-        device = Device.objects.create(name=row["device_name"], site=site, device_type=device_type, role=role)
+        device = Device.objects.create(
+            name=row["device_name"], site=_preview_site(self), device_type=device_type, role=role
+        )
+        _reread_preview(self)
         return row, device
 
     def _badge_tag(self, html):
@@ -1197,13 +1202,12 @@ class PlacementBadgeTest(PreviewSessionMixin, BaseViewTestCase):
 
         `same_rack=True` leaves the row nothing to write, which is the case the badge must skip.
         """
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack
 
         self._setup_session()
-        rows = self.client.session["import_rows"]
         # The Cabinet row also carries a rack name, so the position is what marks a real device.
-        row = next(r for r in rows if r.get("rack_name") and r.get("u_position"))
-        site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
+        row = next(r for r in _preview_source_rows(self) if r.get("rack_name") and r.get("u_position"))
+        site = _preview_site(self)
         rack = Rack.objects.create(name=row["rack_name"], site=site, u_height=42)
         manufacturer = Manufacturer.objects.create(name="BadgeMfg", slug="badge-mfg")
         device_type = DeviceType.objects.create(manufacturer=manufacturer, model="BadgeModel", slug="badge-model")
@@ -1217,6 +1221,7 @@ class PlacementBadgeTest(PreviewSessionMixin, BaseViewTestCase):
             position=int(row["u_position"]) if same_rack else None,
             face=(row.get("face") or "").lower() if same_rack else "",
         )
+        _reread_preview(self)
         return row
 
     def test_a_row_that_can_apply_a_placement_carries_the_badge(self):
@@ -1236,7 +1241,7 @@ class PlacementBadgeTest(PreviewSessionMixin, BaseViewTestCase):
 
 
 class RowNamesEveryProblemItHasTest(PreviewSessionMixin, BaseViewTestCase):
-    """A row that stated one reason sent the operator round the recalculation loop once per problem."""
+    """A row that stated one reason sent the operator round the decide-and-replan loop once per problem."""
 
     def _preview_html_with_two_problems(self):
         """Give two workbook rows one serial and one name, so each row has two problems."""
@@ -1296,7 +1301,7 @@ class RowNamesEveryProblemItHasTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertIn("+1 more", cells)
 
     def test_the_row_offers_the_action_for_the_problem_reported_second(self):
-        """A list the operator cannot act on would still cost one recalculation per problem."""
+        """A list the operator cannot act on would still cost one replan per problem."""
         (first, _second), response = self._preview_html_with_two_problems()
 
         cells = self._device_row_cells(response.content.decode(), first)

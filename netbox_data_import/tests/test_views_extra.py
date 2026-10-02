@@ -2,14 +2,23 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Tests for unused-columns feature: fuzzy matching helper + QuickAddColumnMappingView."""
 
+from dcim.models import Site
 from django.contrib.auth import get_user_model
 from django.test import Client, TestCase
 from django.urls import reverse
 
 from netbox_data_import.models import ColumnMapping, DeviceTypeMapping, ImportProfile
+from netbox_data_import.tests.helpers import preview_claim, seed_workbook_preview
 from netbox_data_import.views import _fuzzy_match_netbox_field
 
 User = get_user_model()
+
+
+def _post_to_preview(client, profile, url, data):
+    """Make a one-row upload of the profile the active preview, then post the quick action with its claim."""
+    site, _ = Site.objects.get_or_create(name="Quick Map Site", slug="quick-map-site")
+    seed_workbook_preview(client, profile, site, ["Id"], [["SRC-1"]])
+    return client.post(url, {**preview_claim(client), **data})
 
 
 def _make_profile(name="QMapTest") -> ImportProfile:
@@ -59,11 +68,12 @@ class QuickAddColumnMappingViewTest(TestCase):
         self.profile = _make_profile()
         self.url = reverse("plugins:netbox_data_import:quick_add_column_mapping")
 
+    def _post(self, data):
+        return _post_to_preview(self.client, self.profile, self.url, data)
+
     def test_creates_new_column_mapping(self):
-        resp = self.client.post(
-            self.url,
+        resp = self._post(
             {
-                "profile_id": self.profile.pk,
                 "source_column": "JiraID",
                 "target_field": "serial",
             },
@@ -75,10 +85,8 @@ class QuickAddColumnMappingViewTest(TestCase):
 
     def test_an_overlength_target_field_is_refused(self):
         """CATALOG.is_valid accepts any name after a family prefix, but the column is 100 chars."""
-        resp = self.client.post(
-            self.url,
+        resp = self._post(
             {
-                "profile_id": self.profile.pk,
                 "source_column": "JiraID",
                 "target_field": "extra_json:" + ("x" * 200),
             },
@@ -88,10 +96,8 @@ class QuickAddColumnMappingViewTest(TestCase):
 
     def test_an_overlength_source_column_is_refused(self):
         """The source column is read straight from the request and the column is 200 chars."""
-        resp = self.client.post(
-            self.url,
+        resp = self._post(
             {
-                "profile_id": self.profile.pk,
                 "source_column": "J" * 300,
                 "target_field": "serial",
             },
@@ -102,10 +108,8 @@ class QuickAddColumnMappingViewTest(TestCase):
     def test_a_refused_mapping_does_not_delete_the_displaced_row(self):
         """The delete runs before the create, so an invalid write must not strand the profile."""
         ColumnMapping.objects.create(profile=self.profile, source_column="OldCol", target_field="asset_tag")
-        self.client.post(
-            self.url,
+        self._post(
             {
-                "profile_id": self.profile.pk,
                 "source_column": "N" * 300,
                 "target_field": "asset_tag",
             },
@@ -118,10 +122,8 @@ class QuickAddColumnMappingViewTest(TestCase):
     def test_keeps_existing_direct_mapping_for_another_target(self):
         """One source column can provide more than one direct target."""
         ColumnMapping.objects.create(profile=self.profile, source_column="JiraID", target_field="asset_tag")
-        self.client.post(
-            self.url,
+        self._post(
             {
-                "profile_id": self.profile.pk,
                 "source_column": "JiraID",
                 "target_field": "serial",
             },
@@ -136,10 +138,8 @@ class QuickAddColumnMappingViewTest(TestCase):
         )
 
     def test_invalid_target_field_rejected(self):
-        resp = self.client.post(
-            self.url,
+        resp = self._post(
             {
-                "profile_id": self.profile.pk,
                 "source_column": "JiraID",
                 "target_field": "not_a_real_field",
             },
@@ -148,10 +148,8 @@ class QuickAddColumnMappingViewTest(TestCase):
         self.assertFalse(ColumnMapping.objects.filter(profile=self.profile, source_column="JiraID").exists())
 
     def test_empty_source_column_rejected(self):
-        resp = self.client.post(
-            self.url,
+        resp = self._post(
             {
-                "profile_id": self.profile.pk,
                 "source_column": "",
                 "target_field": "serial",
             },
@@ -163,7 +161,6 @@ class QuickAddColumnMappingViewTest(TestCase):
         resp = self.client.post(
             self.url,
             {
-                "profile_id": self.profile.pk,
                 "source_column": "JiraID",
                 "target_field": "serial",
             },
@@ -173,10 +170,8 @@ class QuickAddColumnMappingViewTest(TestCase):
 
     def test_valid_extra_json_key_accepted(self):
         """extra_json:<valid_key> is accepted and stored."""
-        resp = self.client.post(
-            self.url,
+        resp = self._post(
             {
-                "profile_id": self.profile.pk,
                 "source_column": "JiraID",
                 "target_field": "extra_json:jira_id",
             },
@@ -190,10 +185,8 @@ class QuickAddColumnMappingViewTest(TestCase):
 
     def test_invalid_extra_json_key_rejected(self):
         """An extra_json: key with no name after the prefix is rejected by the catalog validator."""
-        resp = self.client.post(
-            self.url,
+        resp = self._post(
             {
-                "profile_id": self.profile.pk,
                 "source_column": "JiraID",
                 "target_field": "extra_json:   ",
             },
@@ -204,10 +197,8 @@ class QuickAddColumnMappingViewTest(TestCase):
     def test_displaced_mapping_gets_reassigned_message(self):
         """When a different source already maps to the same target, it is displaced with a message."""
         ColumnMapping.objects.create(profile=self.profile, source_column="OldSerial", target_field="serial")
-        resp = self.client.post(
-            self.url,
+        resp = self._post(
             {
-                "profile_id": self.profile.pk,
                 "source_column": "NewSerial",
                 "target_field": "serial",
             },
@@ -228,10 +219,8 @@ class QuickAddColumnMappingViewTest(TestCase):
             target_field="candidate:contact",
         )
 
-        response = self.client.post(
-            self.url,
+        response = self._post(
             {
-                "profile_id": self.profile.pk,
                 "source_column": "Owner",
                 "target_field": "candidate:contact",
             },
@@ -269,10 +258,8 @@ class QuickAddColumnMappingViewTest(TestCase):
             ]
         )
 
-        response = self.client.post(
-            self.url,
+        response = self._post(
             {
-                "profile_id": self.profile.pk,
                 "source_column": "Primary Contact",
                 "target_field": "serial",
             },
@@ -307,7 +294,6 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
 
     def _payload(self, **overrides):
         payload = {
-            "profile_id": self.profile.pk,
             "source_make": "Acme",
             "source_model": "Widget",
             "netbox_mfg_slug": "acme",
@@ -317,7 +303,7 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
         return payload
 
     def _post(self, **overrides):
-        return self.client.post(self.url, self._payload(**overrides))
+        return _post_to_preview(self.client, self.profile, self.url, self._payload(**overrides))
 
     def test_an_omitted_slug_defaults_to_the_slug_the_importer_derives(self):
         """The mapping this action saves must name the Device Type the importer looks for."""

@@ -21,9 +21,13 @@ from netbox_data_import.models import (
     SourceDocument,
     SourceResolution,
 )
-from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY, start_new_preview
-from netbox_data_import.review_workspace import ReviewWorkspace
-from netbox_data_import.tests.helpers import user_with_object_permission
+from netbox_data_import.tests.helpers import (
+    preview_claim,
+    seed_preview,
+    store_plan,
+    stored_plan,
+    user_with_object_permission,
+)
 
 
 class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
@@ -104,29 +108,34 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         book.save(buffer)
         return buffer.getvalue()
 
-    def _materialize(self, *, duplicate, first_source_id="RESOLUTION-A"):
-        """Plan a real stored workbook and put that plan in the browser session."""
+    def _materialize(self, *, duplicate, first_source_id="RESOLUTION-A", tenant=None):
+        """Plan a real stored workbook as the logged-in operator and make it the client's preview."""
+        actor = get_user_model().objects.get(pk=self.client.session["_auth_user_id"])
         content = self._workbook(duplicate, first_source_id=first_source_id)
         document = SourceDocument.store(
             profile=self.profile,
             content=content,
             filename=f"duplicate-{duplicate}.xlsx",
-            uploaded_by=self.actor,
+            uploaded_by=actor,
         )
-        planning_context = {"site_id": self.site.pk, "location_id": None, "tenant_id": None}
-        plan = ImportEngine.plan(self.profile, document, self.actor, planning_context)
-        workspace = ReviewWorkspace(plan, self.actor)
-        session = self.client.session
-        start_new_preview(session, plan)
-        session["import_rows"] = workspace.source_rows
-        session["import_context"] = {
-            "profile_id": self.profile.pk,
-            **planning_context,
-            "source_document_id": document.pk,
-        }
-        session["import_preview_pending"] = True
-        session.save()
+        planning_context = {"site_id": self.site.pk, "location_id": None, "tenant_id": tenant.pk if tenant else None}
+        plan = ImportEngine.plan(self.profile, document, actor, planning_context)
+        seed_preview(self.client, profile=self.profile, document=document, plan=plan, context=planning_context)
         return document
+
+    def _materialize_with_a_lost_target(self, *, duplicate):
+        """Plan against a tenant, then delete that tenant so the import target is gone."""
+        from tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(name="Resolution Gone Tenant", slug="resolution-gone-tenant")
+        self._materialize(duplicate=duplicate, tenant=tenant)
+        tenant.delete()
+
+    def _discarded_claim(self):
+        """Discard the preview and return the claim the page held before."""
+        claim = preview_claim(self.client)
+        self.client.post(reverse("plugins:netbox_data_import:preview_discard"), claim)
+        return claim
 
     def _restricted_actor(self, username):
         """Return a preview-capable actor without policy-row write grants."""
@@ -148,11 +157,10 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
     def _post_name(self, **values):
         """Resolve the first duplicate name with valid request identity defaults."""
         data = {
-            "profile_id": self.profile.pk,
+            **preview_claim(self.client),
             "row_number": 2,
             "source_id": "RESOLUTION-A",
             "new_name": "resolved-device-a",
-            "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             **values,
         }
         return self.client.post(reverse("plugins:netbox_data_import:resolve_duplicate_name"), data)
@@ -160,10 +168,9 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
     def _post_serial(self, **values):
         """Give up the first duplicate serial with valid request identity defaults."""
         data = {
-            "profile_id": self.profile.pk,
+            **preview_claim(self.client),
             "row_number": 2,
             "source_id": "RESOLUTION-A",
-            "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             **values,
         }
         return self.client.post(reverse("plugins:netbox_data_import:ignore_duplicate_serial"), data)
@@ -173,11 +180,10 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         response = self.client.post(
             reverse("plugins:netbox_data_import:resolve_duplicate_name"),
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "row_number": 2,
                 "source_id": "RESOLUTION-A",
                 "new_name": "resolved-device-a",
-                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             },
             HTTP_HX_REQUEST="true",
         )
@@ -187,19 +193,13 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         self.assertEqual(resolution.resolved_fields, {"device_name": "resolved-device-a"})
 
     def test_duplicate_name_decision_rejects_invalid_request_identity(self):
-        """The command rejects an invalid profile, stale preview, row, and source identity."""
-        self.assertEqual(self._post_name(profile_id="invalid").status_code, 302)
-
-        other = ImportProfile.objects.create(name="Other Duplicate Profile")
-        self.assertEqual(self._post_name(profile_id=other.pk).status_code, 302)
-
-        session = self.client.session
-        session["import_preview_pending"] = False
-        session.save()
-        self.assertEqual(self._post_name().status_code, 302)
+        """The command rejects a stale or missing claim, an ended preview, and an unknown row or source."""
+        self.assertEqual(self._post_name(preview_revision="stale").status_code, 409)
+        self.assertEqual(self._post_name(preview_revision="99").status_code, 409)
+        ended = self._discarded_claim()
+        self.assertEqual(self._post_name(**ended).status_code, 409)
 
         self._materialize(duplicate="name")
-        self.assertEqual(self._post_name(preview_revision="stale").status_code, 302)
         self.assertEqual(self._post_name(row_number="invalid").status_code, 302)
         self.assertEqual(self._post_name(source_id="OTHER").status_code, 302)
         self.assertFalse(SourceResolution.objects.filter(profile=self.profile).exists())
@@ -222,11 +222,8 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
 
     def test_duplicate_name_rejects_a_stale_target(self):
         """Target loss does not leave a resolution."""
-        context = self.client.session["import_context"]
-        context["site_id"] = 999999
-        session = self.client.session
-        session["import_context"] = context
-        session.save()
+        self._materialize_with_a_lost_target(duplicate="name")
+
         self.assertEqual(self._post_name().status_code, 302)
         self.assertFalse(SourceResolution.objects.filter(profile=self.profile).exists())
 
@@ -269,9 +266,12 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         self.assertEqual(self._post_serial().status_code, 302)
 
         self._materialize(duplicate="serial")
-        session = self.client.session
-        session["import_rows"][0]["serial"] = ""
-        session.save()
+        plan = stored_plan(self.client)
+        for unit in plan["units"]:
+            source_row = unit["display"].get("source_row") or {}
+            if source_row.get("_row_number") == 2:
+                source_row["serial"] = ""
+        store_plan(self.client, plan)
         self.assertEqual(self._post_serial().status_code, 302)
 
         document = self._materialize(duplicate="serial")
@@ -286,7 +286,8 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
             original_value="DUPLICATE-SERIAL",
             resolved_fields={"serial": ""},
         )
-        self.assertEqual(self._post_serial().status_code, 302)
+        # The new policy row moves the profile fingerprint, so the stored plan no longer stands.
+        self.assertEqual(self._post_serial().status_code, 409)
         self.assertFalse(SourceResolution.objects.filter(profile=self.profile, source_id="RESOLUTION-A").exists())
 
     def test_duplicate_serial_sanitizes_a_real_permission_failure(self):
@@ -328,13 +329,13 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         )
         response = self.client.post(
             endpoint,
-            {"profile_id": self.profile.pk, "source_id": "UNKNOWN", "netbox_device_id": target.pk},
+            {**preview_claim(self.client), "source_id": "UNKNOWN", "netbox_device_id": target.pk},
         )
         self.assertEqual(response.status_code, 302)
 
         response = self.client.post(
             endpoint,
-            {"profile_id": self.profile.pk, "source_id": "RESOLUTION-A", "netbox_device_id": "invalid"},
+            {**preview_claim(self.client), "source_id": "RESOLUTION-A", "netbox_device_id": "invalid"},
         )
         self.assertEqual(response.status_code, 302)
 
@@ -347,7 +348,7 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         )
         response = self.client.post(
             endpoint,
-            {"profile_id": self.profile.pk, "source_id": "RESOLUTION-A", "netbox_device_id": outside.pk},
+            {**preview_claim(self.client), "source_id": "RESOLUTION-A", "netbox_device_id": outside.pk},
         )
         self.assertEqual(response.status_code, 302)
 
@@ -357,11 +358,13 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
             netbox_device_id=target.pk,
             device_name=target.name,
         )
+        self.client.post(reverse("plugins:netbox_data_import:preview_reread"), preview_claim(self.client))
         response = self.client.post(
             endpoint,
-            {"profile_id": self.profile.pk, "source_id": "RESOLUTION-A", "netbox_device_id": target.pk},
+            {**preview_claim(self.client), "source_id": "RESOLUTION-A", "netbox_device_id": target.pk},
         )
         self.assertEqual(response.status_code, 302)
+        self.assertIn("already linked to source 'OTHER-SOURCE'", str(list(response.wsgi_request._messages)))
         self.assertFalse(DeviceExistingMatch.objects.filter(source_id="RESOLUTION-A").exists())
 
     def test_manual_device_match_sanitizes_a_real_permission_failure(self):
@@ -376,11 +379,12 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         )
         endpoint = reverse("plugins:netbox_data_import:match_existing_device")
         self.client.force_login(self._restricted_actor("manual-match-denied"))
+        self._materialize(duplicate="name")
 
         response = self.client.post(
             endpoint,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "RESOLUTION-A",
                 "netbox_device_id": target.pk,
             },
@@ -404,7 +408,7 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         response = self.client.post(
             reverse("plugins:netbox_data_import:match_existing_device"),
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": source_id,
                 "netbox_device_id": target.pk,
             },
@@ -430,7 +434,7 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
             response = self.client.post(
                 endpoint,
                 {
-                    "profile_id": self.profile.pk,
+                    **preview_claim(self.client),
                     "source_id": "RESOLUTION-A",
                     "netbox_device_id": target.pk,
                 },
@@ -442,15 +446,12 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
     def test_auto_match_rejects_an_inactive_preview_and_a_stale_target(self):
         """Auto-match uses only the active plan and its still-visible target."""
         endpoint = reverse("plugins:netbox_data_import:auto_match_devices")
-        other = ImportProfile.objects.create(name="Auto Match Other Profile")
-        response = self.client.post(endpoint, {"profile_id": other.pk})
-        self.assertEqual(response.status_code, 302)
-        self.assertFalse(DeviceExistingMatch.objects.filter(profile=other).exists())
+        response = self.client.post(endpoint, self._discarded_claim())
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
 
-        session = self.client.session
-        session["import_context"]["site_id"] = 999999
-        session.save()
-        response = self.client.post(endpoint, {"profile_id": self.profile.pk})
+        self._materialize_with_a_lost_target(duplicate="name")
+        response = self.client.post(endpoint, preview_claim(self.client))
         self.assertEqual(response.status_code, 302)
         self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
 
@@ -483,34 +484,39 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
 
     def test_contact_suggestion_rejects_a_missing_profile(self):
         """A stale picker cannot resolve candidates against a deleted profile."""
+        claim = preview_claim(self.client)
+        self.profile.delete()
+
         response = self.client.get(
-            reverse("plugins:netbox_data_import:contact_suggestion"),
-            {"profile_id": 999999, "source_id": "RESOLUTION-A"},
+            reverse("plugins:netbox_data_import:contact_suggestion"), {**claim, "source_id": "RESOLUTION-A"}
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("valid import profile", response.json()["error"])
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"], "No current import preview matches this request.")
 
     def test_quick_class_mapping_rejects_unknown_actions_and_empty_roles(self):
         """The preview shortcut accepts only one complete class-policy action."""
         endpoint = reverse("plugins:netbox_data_import:quick_add_class_mapping")
         response = self.client.post(
             endpoint,
-            {"profile_id": self.profile.pk, "source_class": "Switch", "mapping_action": "unknown"},
+            {**preview_claim(self.client), "source_class": "Switch", "mapping_action": "unknown"},
         )
         self.assertEqual(response.status_code, 302)
         response = self.client.post(
             endpoint,
-            {"profile_id": self.profile.pk, "source_class": "Switch", "mapping_action": "role"},
+            {**preview_claim(self.client), "source_class": "Switch", "mapping_action": "role"},
         )
         self.assertEqual(response.status_code, 302)
         self.assertFalse(self.profile.class_role_mappings.filter(source_class="Switch").exists())
 
-    def test_quick_role_creation_rejects_an_invalid_profile_identity(self):
-        """The JSON shortcut requires a valid integer profile identity."""
+    def test_quick_role_creation_rejects_a_missing_claim(self):
+        """The JSON shortcut requires the claim of the active preview."""
+        from dcim.models import DeviceRole
+
         response = self.client.post(
-            reverse("plugins:netbox_data_import:quick_create_role"),
-            {"profile_id": "invalid", "name": "Switch", "slug": "switch"},
+            reverse("plugins:netbox_data_import:quick_create_role"), {"name": "Switch", "slug": "switch"}
         )
 
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "preview_stale")
+        self.assertFalse(DeviceRole.objects.filter(slug="switch").exists())

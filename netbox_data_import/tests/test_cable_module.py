@@ -76,6 +76,7 @@ from netbox_data_import.tests.helpers import (
     trace_segment,
     trace_termination,
     trace_workbook_bytes,
+    upload_preview,
     user_with_object_permission,
 )
 
@@ -3259,8 +3260,8 @@ class TraceWizardRenderTest(CableTopologyMixin, TestCase):
         self.client.force_login(self.actor)
         upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(),)))
         upload.name = "traces.xlsx"
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
+        response = upload_preview(
+            self.client,
             {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
             follow=True,
         )

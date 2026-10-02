@@ -7,7 +7,7 @@ from django.test import TestCase
 
 from netbox_data_import.models import ClassRoleMapping, DeviceExistingMatch, ImportProfile
 from netbox_data_import.plan import Diagnostic, Disposition, ImportPlan, PlannedChange, Severity, SynchronizationUnit
-from netbox_data_import.review_workspace import AutoMatchSummary, ReviewWorkspace
+from netbox_data_import.review_workspace import AutoMatchSummary, ReviewWorkspace, auto_match_devices
 from netbox_data_import.tests.helpers import make_dcim_objects, user_with_object_permission
 
 
@@ -272,8 +272,8 @@ class ReviewWorkspaceAutoMatchTest(TestCase):
         )
         workspace = self._workspace(self._row("SOURCE-1", "source-name", serial=device.serial))
 
-        first = workspace.auto_match_devices(self.profile, self.actor, self.target)
-        second = workspace.auto_match_devices(self.profile, self.actor, self.target)
+        first = auto_match_devices(workspace, self.profile, self.actor, self.target)
+        second = auto_match_devices(workspace, self.profile, self.actor, self.target)
 
         self.assertEqual(first.matched, 1)
         self.assertEqual(second.already, 1)
@@ -312,7 +312,7 @@ class ReviewWorkspaceAutoMatchTest(TestCase):
             self._row("OTHER", "other", serial="SERIAL-OTHER"),
         )
 
-        summary = workspace.auto_match_devices(self.profile, self.actor, self.target)
+        summary = auto_match_devices(workspace, self.profile, self.actor, self.target)
 
         self.assertEqual(summary.ambiguous, 4)
         self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
@@ -354,7 +354,7 @@ class ReviewWorkspaceAutoMatchTest(TestCase):
             [(Device, ("view",), {})],
         )
 
-        summary = workspace.auto_match_devices(self.profile, limited, self.target)
+        summary = auto_match_devices(workspace, self.profile, limited, self.target)
 
         self.assertEqual(summary.placement_conflicts, 1)
         self.assertEqual(summary.probable, 1)

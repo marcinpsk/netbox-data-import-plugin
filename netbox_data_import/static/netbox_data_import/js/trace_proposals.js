@@ -9,6 +9,19 @@
 
   var cards = new Map();
 
+  // The claim this page holds is spent once a reload starts, so the latch lives on the claim.
+  function reloadStarted() {
+    var claim = document.getElementById('ndi-preview-claim');
+    return Boolean(claim && claim.dataset.ndiReloading === 'true');
+  }
+
+  /* A successful action advanced the preview revision, so no card may poll or render again. */
+  function reloadWorkspace() {
+    document.getElementById('ndi-preview-claim').dataset.ndiReloading = 'true';
+    cards.forEach(function (_, card) { stop(card); });
+    window.location.reload();
+  }
+
   function node(card, name) {
     return card.querySelector('[data-proposal-' + name + ']');
   }
@@ -30,7 +43,7 @@
   function schedule(card) {
     var state = cards.get(card);
     clearTimeout(state.timer);
-    if (!card.isConnected || !state.payload.presentation.pending) return;
+    if (!card.isConnected || state.halted || !state.payload.presentation.pending) return;
     state.timer = setTimeout(function () {
       if (!card.isConnected) { stop(card); return; }
       refresh(card);
@@ -98,46 +111,48 @@
     var payload;
     try { payload = await response.json(); }
     catch (_) { throw new Error('The proposal response could not be read. Reload the workspace.'); }
-    if (!response.ok || !payload.ok) throw new Error(payload.error || 'The proposal request was refused.');
+    if (!response.ok || !payload.ok) {
+      var refusal = new Error(payload.error || 'The proposal request was refused.');
+      refusal.status = response.status;
+      throw refusal;
+    }
     return payload;
   }
 
   async function refresh(card) {
     var state = cards.get(card);
-    if (!state || !card.isConnected) return;
+    if (!state || !card.isConnected || state.halted || reloadStarted()) return;
     var generation = ++state.generation;
     if (state.controller) state.controller.abort();
     state.controller = new AbortController();
     var url = new URL(card.dataset.proposalUrl, document.baseURI);
     url.searchParams.set('field_key', card.dataset.proposalField);
-    url.searchParams.set('preview_revision', card.dataset.previewRevision);
     try {
+      window.ndiPreviewClaim(url.searchParams);
       var payload = await fetch(url, {
         headers: {Accept: 'application/json'}, credentials: 'same-origin', signal: state.controller.signal,
       }).then(readResponse);
-      if (!card.isConnected || generation !== state.generation) return;
+      if (!card.isConnected || generation !== state.generation || reloadStarted()) return;
       error(card, "");
       render(card, payload);
     } catch (failure) {
       if (!card.isConnected || generation !== state.generation || failure.name === 'AbortError') return;
+      if (reloadStarted()) return;
       error(card, failure.message);
+      // A refused claim stays refused, so asking again every interval would only repeat the refusal.
+      if (failure.status === 409) {
+        state.halted = true;
+        clearTimeout(state.timer);
+        return;
+      }
       schedule(card);
     }
-  }
-
-  function replan(card) {
-    var reread = document.getElementById('traceWorkspaceReread');
-    if (!reread || reread.disabled) {
-      error(card, 'The resolution was saved. Re-read the workspace when the active sync finishes.');
-      return;
-    }
-    reread.form.requestSubmit(reread);
   }
 
   async function act(card, key) {
     var state = cards.get(card);
     var action = state.payload.presentation.actions.find(function (item) { return item.key === key; });
-    if (state.busy || !action || action.reason) return;
+    if (state.busy || !action || action.reason || reloadStarted()) return;
     state.busy = true;
     state.generation += 1;
     clearTimeout(state.timer);
@@ -148,27 +163,23 @@
     var form = document.getElementById('traceTerminationForm');
     var data = new FormData();
     data.set('csrfmiddlewaretoken', form.elements.namedItem('csrfmiddlewaretoken').value);
-    data.set('preview_revision', card.dataset.previewRevision);
-    data.set('field_key', card.dataset.proposalField);
-    if (state.payload.proposal) data.set('proposal_id', state.payload.proposal.id);
     try {
-      var payload = await fetch(action.url, {
+      window.ndiPreviewClaim(data);
+      data.set('field_key', card.dataset.proposalField);
+      if (state.payload.proposal) data.set('proposal_id', state.payload.proposal.id);
+      await fetch(action.url, {
         method: 'POST', body: data, headers: {Accept: 'application/json'},
         credentials: 'same-origin', signal: state.controller.signal,
       }).then(readResponse);
-      if (!card.isConnected) return;
-      await refresh(card);
-      if (!card.isConnected) return;
-      state.busy = false;
-      render(card, state.payload);
-      if (card.isConnected && payload.preview_state) replan(card);
+      if (!card.isConnected || reloadStarted()) return;
+      reloadWorkspace();
     } catch (failure) {
-      if (!card.isConnected || failure.name === 'AbortError') return;
+      if (!card.isConnected || failure.name === 'AbortError' || reloadStarted()) return;
       await refresh(card);
-      if (!card.isConnected) return;
+      if (!card.isConnected || reloadStarted()) return;
       state.busy = false;
       render(card, state.payload);
-      if (card.isConnected) error(card, failure.message);
+      error(card, failure.message);
     }
   }
 
@@ -179,7 +190,7 @@
     var fields = JSON.parse(source.textContent);
     document.querySelectorAll('[data-proposal-field]').forEach(function (card) {
       if (cards.has(card)) return;
-      cards.set(card, {generation: 0, busy: false, timer: null, controller: null});
+      cards.set(card, {generation: 0, busy: false, halted: false, timer: null, controller: null});
       render(card, fields[card.dataset.proposalField]);
     });
   }

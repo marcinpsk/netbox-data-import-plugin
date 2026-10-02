@@ -233,13 +233,21 @@ it writes. The policy write, candidate recheck, and replan occur in that transac
 advances the revision. A second request carrying the old identity or revision receives 409 and
 cannot commit a policy row or replace the newer preview.
 
+New import setup is the one exception to exact revision equality (amended 2026-10-01, ADR 0004). It
+may replace any revision of the same preview generation, because a decision that committed first
+changed the revision that setup B posted. It can never replace a newer generation, so two setups
+started from one generation have one winner. Every other command needs the exact claim.
+
 The database coordinator stores the authoritative active-preview identity, revision, context, and
 materialized plan. Session data is only a pointer or cache. Every preview read validates it against
 the coordinator row and refreshes or refuses a stale cache. No response middleware session save can
 restore an older preview after the coordinator has advanced.
 
 Device and termination decisions, proposal decisions, the re-read command, new import setup, and
-preview discard use this same coordinator rather than implementing separate checks. A concurrent
+preview discard use this same coordinator rather than implementing separate checks. A plain page
+load is read-only: re-read, discard, schema recovery, and the return to a failed import's preview
+are POST commands that post the claim. Proposal acceptance replans in its own transaction, so no
+re-read is required after it. A concurrent
 new setup for document B therefore has one linear order with an older Device decision for document
 A. If A locks first, A can commit and B then replaces it. If B locks first, A receives 409. In both
 orders B is the final active preview, and a stale session save cannot restore A.

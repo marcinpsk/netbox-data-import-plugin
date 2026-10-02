@@ -268,7 +268,8 @@ The override changes what the import writes. It cannot change a Cable the import
 3. Plan schema bump. The trace workspace must be able to recover its own stale cached plan. Re-read
    currently needs a successful deserialization first (`views.py:3895`), so a bumped schema sends
    the operator to setup. r2 routes a schema rejection to a rebuild from the stored Source Document,
-   the route the preview already uses (`views.py:1212`). No compatibility reader.
+   the route the preview already uses (`views.py:1212`). No compatibility reader. Since ADR 0004 the
+   page load only reports the rejection, and the coordinated re-read command performs the rebuild.
 4. Override loss covers every resolved-pair change, not only an operator re-pick: a PortMapping edit
    that changes the unique mapped peer does it too (`cable_target.py:771`, `:802`). The workspace
    notice and the regression tests cover all of them.

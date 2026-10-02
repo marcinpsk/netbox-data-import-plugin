@@ -377,13 +377,14 @@ describe("keyboard activation", () => {
   });
 });
 
-describe("a recalculation that reloads the page", () => {
+describe("a re-read that reloads the page", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
     addFilterRows();
     document.body.insertAdjacentHTML(
       "beforeend",
-      '<a href="/preview/" class="ndi-recalculate-preview">Recalculate</a>',
+      '<form id="reread-form" action="/preview/reread/" method="post">'
+        + '<button type="submit" id="ndi-reread-preview">Re-read from NetBox</button></form>',
     );
     Element.prototype.scrollIntoView = function () {
       this.dataset.scrolledIntoView = "true";
@@ -507,12 +508,13 @@ describe("a recalculation that reloads the page", () => {
     expect(document.getElementById("previewActionFilter").value).toBe("");
   });
 
-  it("remembers the view when the operator presses Recalculate", () => {
+  it("remembers the view when the operator submits the re-read", () => {
     filterBy("", "error");
+    const form = document.getElementById("reread-form");
+    // jsdom cannot navigate, so the test stops the post the browser would send.
+    form.addEventListener("submit", (event) => event.preventDefault());
 
-    document
-      .querySelector(".ndi-recalculate-preview")
-      .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     addFilterRows();
     window.ndiRestorePreviewView();
 

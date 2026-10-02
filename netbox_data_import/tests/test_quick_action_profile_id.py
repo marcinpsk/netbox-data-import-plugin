@@ -1,15 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""A quick action must reject an unusable profile ID instead of raising."""
+"""A quick action takes its profile from the Preview Claim, never from a posted profile ID."""
 
+from dcim.models import Site
 from django.contrib.auth import get_user_model
-from django.contrib.messages import get_messages
 from django.test import Client, TestCase
 from django.urls import reverse
 
-from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile
+from netbox_data_import.models import (
+    ClassRoleMapping,
+    ColumnMapping,
+    DeviceTypeMapping,
+    IgnoredDevice,
+    ImportProfile,
+    ManufacturerMapping,
+)
+from netbox_data_import.tests.helpers import preview_claim, preview_coordinator, seed_workbook_preview
 
-# The preview posts these form actions with the active profile ID.
 QUICK_ACTIONS = {
     "quick_add_class_mapping": {"source_class": "Controller", "mapping_action": "ignore"},
     "quick_add_column_mapping": {"source_column": "Depth", "target_field": "serial"},
@@ -18,10 +25,15 @@ QUICK_ACTIONS = {
     "ignore_device": {"source_id": "SRC-1", "device_name": "widget-1"},
     "unignore_device": {"source_id": "SRC-1"},
 }
+POLICY_MODELS = (ClassRoleMapping, ColumnMapping, DeviceTypeMapping, IgnoredDevice, ManufacturerMapping)
+
+
+def _policy_state():
+    return {model.__name__: sorted(model.objects.values_list("pk", flat=True)) for model in POLICY_MODELS}
 
 
 class QuickActionProfileIdTest(TestCase):
-    """An empty or malformed profile ID reaches these views whenever the modal script is stale."""
+    """The profile a quick action writes to is the one the preview claim names."""
 
     @classmethod
     def setUpTestData(cls):
@@ -31,57 +43,73 @@ class QuickActionProfileIdTest(TestCase):
         cls.profile = ImportProfile.objects.create(
             name="Quick Action Profile", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
         )
+        cls.other_profile = ImportProfile.objects.create(
+            name="Other Quick Action Profile", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
+        )
+        cls.site = Site.objects.create(name="Quick Action Site", slug="quick-action-site")
 
     def setUp(self):
         self.client = Client()
         self.client.force_login(self.user)
+        IgnoredDevice.objects.create(profile=self.profile, source_id="SRC-1", device_name="widget-1")
+        seed_workbook_preview(self.client, self.profile, self.site, ["Id"], [["SRC-1"]])
 
-    def _post(self, url_name, profile_id):
+    def _post(self, url_name, **claim):
         return self.client.post(
             reverse(f"plugins:netbox_data_import:{url_name}"),
-            {"profile_id": profile_id, **QUICK_ACTIONS[url_name]},
+            {**preview_claim(self.client), **claim, **QUICK_ACTIONS[url_name]},
         )
 
-    def test_every_quick_action_rejects_an_empty_profile_id(self):
-        """The modal posts an empty field when its script did not run; that is not a crash."""
+    def test_every_quick_action_refuses_a_claim_for_another_profile(self):
+        """A page that shows another profile's preview is stale: 409 and no write."""
         for url_name in QUICK_ACTIONS:
             with self.subTest(url_name=url_name):
-                response = self._post(url_name, "")
+                before, revision = _policy_state(), preview_coordinator(self.client).revision
 
-                self.assertEqual(response.status_code, 302)
-                self.assertEqual(response["Location"], reverse("plugins:netbox_data_import:import_preview"))
-                messages = [str(message) for message in get_messages(response.wsgi_request)]
-                self.assertTrue(
-                    any("import profile" in message for message in messages),
-                    f"{url_name} reported {messages}",
-                )
+                response = self._post(url_name, preview_profile=str(self.other_profile.pk))
 
-    def test_every_quick_action_rejects_a_non_numeric_profile_id(self):
-        """A forged profile ID is refused the same way."""
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(_policy_state(), before)
+                self.assertEqual(preview_coordinator(self.client).revision, revision)
+
+    def test_every_quick_action_refuses_a_malformed_claim_profile(self):
+        """A forged profile value in the claim is refused the same way."""
         for url_name in QUICK_ACTIONS:
             with self.subTest(url_name=url_name):
-                response = self._post(url_name, "not-a-number")
+                before = _policy_state()
 
-                self.assertEqual(response.status_code, 302)
+                response = self._post(url_name, preview_profile="not-a-number")
 
-    def test_an_unknown_profile_id_is_not_found(self):
-        """A well-formed ID for a profile that does not exist stays a 404."""
-        response = self._post("quick_add_class_mapping", self.profile.pk + 1000)
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(_policy_state(), before)
 
-        self.assertEqual(response.status_code, 404)
+    def test_a_posted_profile_id_does_not_redirect_the_write(self):
+        """The view ignores a posted profile_id and writes to the claimed profile."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:quick_add_class_mapping"),
+            {
+                **preview_claim(self.client),
+                "profile_id": self.other_profile.pk,
+                **QUICK_ACTIONS["quick_add_class_mapping"],
+            },
+        )
 
-    def test_a_valid_profile_id_still_saves_the_mapping(self):
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(ClassRoleMapping.objects.filter(profile=self.profile, source_class="Controller").exists())
+        self.assertFalse(ClassRoleMapping.objects.filter(profile=self.other_profile).exists())
+
+    def test_a_valid_claim_still_saves_the_mapping(self):
         """The guard does not block the working path."""
-        response = self._post("quick_add_class_mapping", self.profile.pk)
+        response = self._post("quick_add_class_mapping")
 
         self.assertEqual(response.status_code, 302)
         self.assertTrue(
             ClassRoleMapping.objects.filter(profile=self.profile, source_class="Controller", ignore=True).exists()
         )
 
-    def test_a_valid_profile_id_still_saves_a_column_mapping(self):
+    def test_a_valid_claim_still_saves_a_column_mapping(self):
         """The second most used quick action keeps working too."""
-        response = self._post("quick_add_column_mapping", self.profile.pk)
+        response = self._post("quick_add_column_mapping")
 
         self.assertEqual(response.status_code, 302)
         self.assertTrue(

@@ -10,10 +10,22 @@ const pickerSource = readFileSync(resolve(
   process.cwd(),
   "netbox_data_import/static/netbox_data_import/js/trace_picker.js",
 ), "utf8");
+const claimSource = readFileSync(resolve(
+  process.cwd(),
+  "netbox_data_import/static/netbox_data_import/js/preview_claim.js",
+), "utf8");
 const templateSource = readFileSync(resolve(
   process.cwd(),
   "netbox_data_import/templates/netbox_data_import/trace_workspace.html",
 ), "utf8");
+
+const CLAIM = [
+  ["preview_token", "token-1"],
+  ["preview_revision", "4"],
+  ["preview_document", "11"],
+  ["preview_profile", "3"],
+];
+const claimInputs = CLAIM.map(([name, value]) => `<input type="hidden" name="${name}" value="${value}">`).join("");
 
 function node(id) {
   return document.getElementById(id);
@@ -29,7 +41,7 @@ function dialog(prefix, url, hiddenIds) {
     <div id="${prefix}Picker" class="modal" tabindex="-1">
       <div class="modal-dialog"><div class="modal-content">
         <form id="${prefix}Form" data-candidates-url="${url}">
-          <input name="preview_revision" value="rev-1">
+          ${claimInputs}
           ${hiddenIds.map(id => `<input id="${prefix}${id}">`).join("")}
           <span id="${prefix}Label"></span>
           <input type="search" id="${prefix}Search">
@@ -77,6 +89,7 @@ beforeEach(() => {
   vi.stubGlobal("Modal", Modal);
   serve({ candidates: [], shown: 0, total: 0 });
   document.body.innerHTML = `
+    <form id="ndi-preview-claim" hidden>${claimInputs}</form>
     <button id="openTermination" data-trace-picker="termination" data-trace-label="DEV-A port">Choose</button>
     <button id="openDevice" data-trace-device-picker="source alias" data-trace-device-label="Source Alias">Choose</button>
     <button id="openFirst" data-trace-location-picker="region >> dh4" data-trace-location-label="Region >> DH4">Choose</button>
@@ -86,6 +99,7 @@ beforeEach(() => {
     ${dialog("traceLocation", "/location-candidates/", ["Key", "Id"])}
   `;
   // The script guards against a second evaluation, as an htmx boost would cause.
+  window.eval(claimSource);
   window.eval(pickerSource);
 });
 
@@ -114,8 +128,22 @@ describe("one picker behavior for every trace question", () => {
     expect(asked().pathname).toBe(path);
     expect(asked().searchParams.get(key)).toBe(value);
     expect(asked().searchParams.get("offset")).toBe("0");
-    expect(asked().searchParams.get("preview_revision")).toBe("rev-1");
+    expect(CLAIM.map(([name]) => [name, asked().searchParams.get(name)])).toEqual(CLAIM);
     expect(node(`${prefix}Key`).value).toBe(value);
+  });
+
+  it.each([
+    ["openTermination", "traceTermination"],
+    ["openDevice", "traceDevice"],
+    ["openFirst", "traceLocation"],
+  ])("%s asks nothing on a page that holds no preview claim", async (trigger, prefix) => {
+    node("ndi-preview-claim").remove();
+
+    await open(trigger, prefix);
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(node(`${prefix}Error`).hidden).toBe(false);
+    expect(node(`${prefix}Error`).textContent).toBe("The page holds no preview claim. Reload the page.");
   });
 
   it.each([

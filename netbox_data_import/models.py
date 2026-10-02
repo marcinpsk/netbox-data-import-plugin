@@ -996,6 +996,90 @@ class SourceDocument(models.Model):
         return stale.delete()[0]
 
 
+class PreviewState:
+    """The states of one Preview Coordinator (ADR 0004)."""
+
+    EMPTY = "empty"
+    READY = "ready"
+    SYNC_PENDING = "sync_pending"
+    SUBMITTED = "submitted"
+    EXPIRED = "expired"
+
+    CHOICES = (
+        (EMPTY, "Empty"),
+        (READY, "Ready"),
+        (SYNC_PENDING, "Trace sync pending"),
+        (SUBMITTED, "Import submitted"),
+        (EXPIRED, "Expired"),
+    )
+    # A state in this set names a profile, a Source Document and a plan.
+    ACTIVE = frozenset({READY, SYNC_PENDING, SUBMITTED})
+    HOLDS_JOB = frozenset({SYNC_PENDING, SUBMITTED})
+
+
+class PreviewCoordinator(models.Model):
+    """One browser session's active preview: the compare-and-set row every preview command locks (ADR 0004).
+
+    Only `preview_coordinator` reads or writes it. The profile and the document are scalar ids, so a
+    delete never cascades the record away; the coordinator validates both on every access.
+    """
+
+    # A preview lives no longer than the Source Document it plans, which retention may delete.
+    PAYLOAD_LIFETIME = SourceDocument.RETENTION
+
+    session_binding = models.CharField(max_length=64, unique=True)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+")
+    preview_token = models.CharField(max_length=64)
+    revision = models.PositiveBigIntegerField(default=1)
+    state = models.CharField(max_length=16, choices=PreviewState.CHOICES, default=PreviewState.EMPTY)
+    profile_id = models.PositiveBigIntegerField(null=True, blank=True)
+    source_document_id = models.PositiveBigIntegerField(null=True, blank=True)
+    context = models.JSONField(default=dict, blank=True)
+    plan = models.JSONField(null=True, blank=True)
+    job_id = models.PositiveBigIntegerField(null=True, blank=True)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(revision__gte=1), name="ndi_previewcoordinator_revision"),
+            models.CheckConstraint(
+                condition=models.Q(state__in=[value for value, _label in PreviewState.CHOICES]),
+                name="ndi_previewcoordinator_state",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(state__in=sorted(PreviewState.ACTIVE))
+                | (
+                    models.Q(profile_id__isnull=False)
+                    & models.Q(source_document_id__isnull=False)
+                    & models.Q(plan__isnull=False)
+                ),
+                name="ndi_previewcoordinator_active_payload",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(state__in=sorted(PreviewState.ACTIVE))
+                | (
+                    models.Q(profile_id__isnull=True)
+                    & models.Q(source_document_id__isnull=True)
+                    & models.Q(plan__isnull=True)
+                    & models.Q(job_id__isnull=True)
+                ),
+                name="ndi_previewcoordinator_inactive_payload",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(state__in=sorted(PreviewState.HOLDS_JOB), job_id__isnull=False)
+                | (~models.Q(state__in=sorted(PreviewState.HOLDS_JOB)) & models.Q(job_id__isnull=True)),
+                name="ndi_previewcoordinator_job",
+            ),
+        ]
+        verbose_name = "Preview Coordinator"
+        verbose_name_plural = "Preview Coordinators"
+
+    def __str__(self):
+        return f"Preview {self.preview_token[:8]} revision {self.revision} ({self.state})"
+
+
 class ExecutionOutcome:
     """The outcome vocabulary of an Import Execution (section 9.2)."""
 
@@ -1088,13 +1172,15 @@ class ImportExecution(models.Model):
         return reverse("plugins:netbox_data_import:importprofile", args=[self.profile_id])
 
     @classmethod
-    def reserve(cls, **fields):
+    def reserve(cls, *, committed_by_caller=False, **fields):
         """Insert and commit the pending row, or return the row already holding this key.
 
         The insert reserves the unique (Import Profile, idempotency key), so a duplicate submission
         or job delivery loses the race and returns the existing row in any outcome.
+        `committed_by_caller` is for a caller whose transaction commits the failed row, with the
+        target writes in a savepoint below it.
         """
-        if transaction.get_connection().in_atomic_block:
+        if transaction.get_connection().in_atomic_block != committed_by_caller:
             raise RuntimeError("The Import Execution reservation must commit before the target transaction opens.")
         if not fields.get("idempotency_key"):
             raise ValueError("An Import Execution reservation requires an idempotency key.")
@@ -1115,7 +1201,10 @@ class ImportExecution(models.Model):
         if existing is not None:
             return existing, False
         try:
-            return cls.objects.create(outcome=ExecutionOutcome.PENDING, **fields), True
+            # A savepoint, so a lost race leaves a caller's transaction usable.
+            with transaction.atomic():
+                # atomic-exit-safe: reservation-inserted
+                return cls.objects.create(outcome=ExecutionOutcome.PENDING, **fields), True
         except IntegrityError:
             # Only a lost race for this key is recoverable; any other constraint failure must surface.
             winner = cls.for_idempotency(fields["profile"], fields["idempotency_key"])

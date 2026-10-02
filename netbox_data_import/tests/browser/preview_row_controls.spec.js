@@ -76,7 +76,7 @@ async function setUpRackFilter(page) {
   await initNetBoxSelects(page);
 }
 
-async function recalculateWithRackFilter(page, rack) {
+async function reloadWithRackFilter(page, rack) {
   await page.evaluate(
     ({ markup, value }) => {
       document.getElementById("previewRackFilter").tomselect.setValue([value]);
@@ -141,20 +141,20 @@ test("a row button opens its modal and reports itself as the related target", as
   await expect(page.getByRole("button", { name: "2 conflicts" })).toBeFocused();
 });
 
-test("a named rack filter survives recalculation with NetBox select enhancement", async ({ page }) => {
+test("a named rack filter survives a reload with NetBox select enhancement", async ({ page }) => {
   await setUpRackFilter(page);
 
-  await recalculateWithRackFilter(page, "V1");
+  await reloadWithRackFilter(page, "V1");
 
   await expect(page.locator("#rack-v1")).toBeVisible();
   await expect(page.locator("#rack-v3")).toBeHidden();
   await expect(page.locator("#no-rack")).toBeHidden();
 });
 
-test("the no-rack filter survives recalculation with NetBox select enhancement", async ({ page }) => {
+test("the no-rack filter survives a reload with NetBox select enhancement", async ({ page }) => {
   await setUpRackFilter(page);
 
-  await recalculateWithRackFilter(page, "__no_rack__");
+  await reloadWithRackFilter(page, "__no_rack__");
 
   await expect(page.locator("#no-rack")).toBeVisible();
   await expect(page.locator("#rack-v1")).toBeHidden();

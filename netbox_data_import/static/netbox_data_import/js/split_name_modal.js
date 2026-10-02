@@ -328,9 +328,6 @@
       document.getElementById('res_existing_display').textContent = JSON.stringify(existing.resolved_fields);
     }
     renderParts(btn.dataset.originalValue, existing ? existing.resolved_fields : null);
-    var saveBtn = document.querySelector('#splitForm button[type="submit"]');
-    saveBtn.textContent = 'Save resolution';
-    saveBtn.removeAttribute('title');
     clearSaveError();
   });
 
@@ -351,19 +348,17 @@
     var form = event.target;
     var saveBtn = form.querySelector('button[type="submit"]');
     clearSaveError();
+    var original = saveBtn.innerHTML;
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
     window.ndiPostPreviewAction(form.getAttribute('action'), new FormData(form))
-      .then(function (payload) {
+      .then(function () {
         saveBtn.textContent = 'Saved';
-        saveBtn.title = payload.message || 'Resolution saved.';
-        if (typeof window.ndiMarkPreviewStale === 'function') {
-          window.ndiMarkPreviewStale();
-        }
+        window.ndiReloadPreview();
       })
       .catch(function (error) {
         saveBtn.disabled = false;
-        saveBtn.textContent = 'Save resolution';
+        saveBtn.innerHTML = original;
         var saveError = document.getElementById('res_save_error');
         saveError.textContent = error.message || 'Could not save the resolution.';
         saveError.classList.remove('d-none');

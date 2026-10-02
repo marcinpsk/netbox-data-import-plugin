@@ -10,28 +10,71 @@ from django.core.exceptions import ValidationError
 from django.test import TestCase
 from django.urls import reverse
 
-from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceResolution
-from netbox_data_import.preview_row_actions import (
-    PREVIEW_DIRTY_SESSION_KEY,
-    PREVIEW_REVISION_SESSION_KEY,
-    record_recalculated_preview,
-    start_new_preview,
+from netbox_data_import.models import (
+    ClassRoleMapping,
+    ColumnMapping,
+    ImportProfile,
+    PreviewCoordinator,
+    PreviewState,
+    SourceResolution,
 )
-from netbox_data_import.tests.helpers import make_dcim_objects, store_workbook_document
+from netbox_data_import.tests.helpers import (
+    make_dcim_objects,
+    preview_claim,
+    preview_coordinator,
+    seed_preview,
+    store_plan,
+    store_workbook_document,
+    stored_plan,
+)
 
 JSON = "application/json"
 
 
 class ContactResolutionSessionMixin:
-    """Seed the preview session with one device row that still needs a Contact decision."""
+    """Seed the preview with one device row that still needs a Contact decision."""
+
+    def _reread(self):
+        """Re-read the preview from NetBox, as the page's button does after a change made elsewhere."""
+        response = self.client.post(reverse("plugins:netbox_data_import:preview_reread"), preview_claim(self.client))
+        self.assertEqual(response.status_code, 302, response.content[:300])
+
+    def _stale_claim(self):
+        """Return the claim the page held before a re-read retired it."""
+        claim = preview_claim(self.client)
+        self._reread()
+        return claim
+
+    def _submit(self, status="pending"):
+        """Leave the preview submitted on a final import Job, as Run Import does, and return the Job."""
+        import uuid
+
+        from core.models import Job
+
+        job = Job.objects.create(
+            name="Data Import",
+            user=self.user,
+            status=status,
+            job_id=uuid.uuid4(),
+            data={"job_type": "netbox_data_import.import"},
+        )
+        PreviewCoordinator.objects.filter(pk=preview_coordinator(self.client).pk).update(
+            state=PreviewState.SUBMITTED, job_id=job.pk
+        )
+        return job
+
+    def _stored_device_row(self):
+        """Return the Device row of the plan the preview now stores."""
+        from netbox_data_import.plan import ImportPlan
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
+        workspace = ReviewWorkspace(ImportPlan.from_dict(stored_plan(self.client)), self.user)
+        return next(unit for unit in workspace.units if unit.object_type == "device")
 
     def _matched_device(self):
-        """Give the row a matched Device and a profile role, then replan onto it."""
+        """Give the row a matched Device and a profile role, then let the first decision replan onto it."""
         from dcim.models import Device
         from tenancy.models import ContactRole
-
-        from netbox_data_import.import_engine import ImportEngine
-        from netbox_data_import.review_workspace import ReviewWorkspace
 
         role = ContactRole.objects.create(name="CtcAjax Primary", slug="ctcajax-primary")
         self.profile.adapter_config["primary_contact_role"] = role.name
@@ -42,23 +85,18 @@ class ContactResolutionSessionMixin:
             device_type=self.device_type,
             role=self.role,
         )
+        self._reread()
         # The first decision unblocks the row, so the second one meets a matched device.
-        self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-one")
-        plan = ImportEngine.plan(self.profile, self.document, self.user, self.planning_context)
-        result = ReviewWorkspace(plan, self.user)
-        session = self.client.session
-        record_recalculated_preview(session, plan, user=self.user)
-        session["import_rows"] = result.source_rows
-        session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
-        session.save()
+        self.assertEqual(self._post_decision({"name": "Contact", "email": "Contact"}).status_code, 200)
+        self.assertEqual(self._stored_device_row().extra_data.get("netbox_device_id"), device.pk)
         return device
 
-    def _post_decision(self, sources, *, revision, values=None):
+    def _post_decision(self, sources, *, values=None):
         """Save one Contact decision for the row through the deferred endpoint."""
         return self.client.post(
             reverse("plugins:netbox_data_import:save_resolution"),
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "AJAX-001",
                 "source_column": "candidate:contact",
                 "resolved_fields": json.dumps(
@@ -69,14 +107,13 @@ class ContactResolutionSessionMixin:
                         "contact_id": None,
                     }
                 ),
-                "preview_revision": revision,
                 "next": reverse("plugins:netbox_data_import:import_preview"),
             },
             HTTP_ACCEPT=JSON,
         )
 
     def setUp(self):
-        """Put one device row that needs a Contact decision into the preview session."""
+        """Put one device row that needs a Contact decision into the preview."""
         self.site, self.manufacturer, self.device_type, self.role = make_dcim_objects("CtcAjax")
         self.profile = ImportProfile.objects.create(
             name="ContactAjaxProfile",
@@ -119,7 +156,6 @@ class ContactResolutionSessionMixin:
         self.client.force_login(user)
 
         from netbox_data_import.import_engine import ImportEngine
-        from netbox_data_import.review_workspace import ReviewWorkspace
 
         self.document = store_workbook_document(
             self.profile,
@@ -139,23 +175,13 @@ class ContactResolutionSessionMixin:
             "contact-ajax.xlsx",
         )
         self.planning_context = {"site_id": self.site.pk, "location_id": None, "tenant_id": None}
-        plan = ImportEngine.plan(self.profile, self.document, user, self.planning_context)
-        workspace = ReviewWorkspace(plan, user)
-        session = self.client.session
-        start_new_preview(session, plan)
-        session["import_rows"] = workspace.source_rows
-        session["import_context"] = {
-            "profile_id": self.profile.pk,
-            "site_id": self.site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "contact-ajax.xlsx",
-            "source_document_id": self.document.pk,
-        }
-        session["import_preview_pending"] = True
-        session[PREVIEW_REVISION_SESSION_KEY] = "revision-one"
-        session[PREVIEW_DIRTY_SESSION_KEY] = False
-        session.save()
+        seed_preview(
+            self.client,
+            profile=self.profile,
+            document=self.document,
+            plan=ImportEngine.plan(self.profile, self.document, user, self.planning_context),
+            context={**self.planning_context, "filename": "contact-ajax.xlsx"},
+        )
 
 
 class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
@@ -163,7 +189,7 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
 
     def _payload(self, **overrides):
         payload = {
-            "profile_id": self.profile.pk,
+            **preview_claim(self.client),
             "source_id": "AJAX-001",
             "source_column": "candidate:contact",
             "resolved_fields": json.dumps(
@@ -174,7 +200,6 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
                     "contact_id": None,
                 }
             ),
-            "preview_revision": "revision-one",
             "next": reverse("plugins:netbox_data_import:import_preview"),
         }
         payload.update(overrides)
@@ -195,7 +220,7 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         self.assertEqual(response["Content-Type"].split(";")[0], JSON)
         body = json.loads(response.content)
         self.assertEqual(body["ok"], True)
-        self.assertEqual(body["preview_state"], "recalculation_required")
+        self.assertEqual(body["preview_state"], "replanned")
         self.assertIn("message", body)
 
     def test_the_decision_is_stored(self):
@@ -209,33 +234,35 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         )
         self.assertEqual(resolution.resolved_fields["contact_field_sources"]["email"], "Contact")
 
-    def test_the_preview_is_marked_stale(self):
-        """The row still shows the old action, so the page must ask for a recalculation."""
-        self.assertIs(self.client.session.get(PREVIEW_DIRTY_SESSION_KEY), False)
+    def test_the_decision_replans_the_preview(self):
+        """The command replays the decision into the stored plan and moves the claim forward."""
+        before = preview_coordinator(self.client).revision
+        self.assertNotIn("source_contact_resolution_applied", self._stored_device_row().extra_data, "fixture")
 
         self._post()
 
-        self.assertIs(self.client.session.get(PREVIEW_DIRTY_SESSION_KEY), True)
+        self.assertEqual(preview_coordinator(self.client).revision, before + 1)
+        self.assertIs(self._stored_device_row().extra_data["source_contact_resolution_applied"], True)
 
-    def test_a_stale_preview_revision_is_refused(self):
-        """A second tab can recalculate between opening the modal and saving it."""
-        response = self._post(preview_revision="revision-zero")
+    def test_a_stale_preview_claim_is_refused(self):
+        """A second tab can re-read the preview between opening the modal and saving it."""
+        response = self._post(**self._stale_claim())
 
         self.assertEqual(response.status_code, 409, response.content)
         body = json.loads(response.content)
         self.assertIs(body["ok"], False)
-        self.assertIn("reload the preview", body["error"].lower())
+        self.assertEqual(body["code"], "preview_stale")
+        self.assertIn("reload it", body["error"].lower())
         self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
 
     def test_a_queued_import_refuses_a_later_decision(self):
         """Run Import consumes the rows it queued, so a decision saved after it never applies."""
-        session = self.client.session
-        session["import_preview_pending"] = False
-        session.save()
+        self._submit()
 
         response = self._post()
 
         self.assertEqual(response.status_code, 409, response.content)
+        self.assertIn("import already started", response.json()["error"])
         self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
 
     def test_an_invalid_decision_answers_json_not_a_redirect(self):
@@ -293,12 +320,10 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
 
     def test_malformed_candidate_values_answer_json_not_an_internal_error(self):
         """A serialized plan can be stale or corrupt, so its display data is untrusted input."""
-        session = self.client.session
-        device_unit = next(
-            unit for unit in session["import_plan"]["units"] if unit["display"].get("source_id") == "AJAX-001"
-        )
+        plan = stored_plan(self.client)
+        device_unit = next(unit for unit in plan["units"] if unit["display"].get("source_id") == "AJAX-001")
         device_unit["display"].setdefault("extra_data", {})["candidate_values"] = ["invalid"]
-        session.save()
+        store_plan(self.client, plan)
 
         response = self._post()
 
@@ -321,80 +346,60 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         self.assertEqual(response["Content-Type"].split(";")[0], JSON)
         self.assertIs(json.loads(response.content)["ok"], False)
 
-    def test_a_form_post_also_marks_the_preview_stale(self):
-        """The rendered rows go stale whichever path saved the decision."""
-        self.client.post(reverse("plugins:netbox_data_import:save_resolution"), self._payload())
-
-        self.assertIs(self.client.session.get(PREVIEW_DIRTY_SESSION_KEY), True)
-
-    def test_a_queued_import_refuses_a_decision_from_the_form_path_too(self):
-        """Without scripts the same decision would still never reach the queued run."""
-        session = self.client.session
-        session["import_preview_pending"] = False
-        session.save()
+    def test_a_form_post_also_replans_the_preview(self):
+        """The rendered rows go stale whichever path saved the decision, so the form path replans too."""
+        before = preview_coordinator(self.client).revision
 
         response = self.client.post(reverse("plugins:netbox_data_import:save_resolution"), self._payload())
 
         self.assertEqual(response.status_code, 302)
+        self.assertEqual(preview_coordinator(self.client).revision, before + 1)
+        self.assertIs(self._stored_device_row().extra_data["source_contact_resolution_applied"], True)
+
+    def test_a_queued_import_refuses_a_decision_from_the_form_path_too(self):
+        """Without scripts the same decision would still never reach the queued run."""
+        self._submit()
+
+        response = self.client.post(reverse("plugins:netbox_data_import:save_resolution"), self._payload())
+
+        self.assertContains(response, "The import already started", status_code=409)
         self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
 
-    def test_restoring_a_replacement_preview_retires_the_open_tab(self):
-        """A worker preview can match a Device the open tab never saw, so its token must expire."""
-        import uuid
+    def test_restoring_a_failed_import_retires_the_open_tab(self):
+        """A restored preview can match a Device the open tab never saw, so its claim must expire."""
+        job = self._submit(status="errored")
+        before = preview_claim(self.client)
 
-        from core.models import Job
+        restored = self.client.post(reverse("plugins:netbox_data_import:import_restore", kwargs={"pk": job.pk}), before)
 
-        from netbox_data_import.views import _restore_import_session
-
-        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
-        session = self.client.session
-        session["import_preview_pending"] = False
-        session.save()
-        job = Job.objects.create(
-            name="Data Import",
-            status="errored",
-            job_id=uuid.uuid4(),
-            queue_name="default",
-            data={
-                "job_type": "netbox_data_import.import",
-                "context_data": session["import_context"],
-                "source_document_id": self.document.pk,
-            },
-        )
-        session.save()
-
-        request = self.client.request().wsgi_request
-        request.session = self.client.session
-        _restore_import_session(request, job)
-
-        self.assertIs(request.session.get("import_preview_pending"), True)
-        self.assertNotEqual(request.session[PREVIEW_REVISION_SESSION_KEY], before)
+        self.assertEqual(restored.status_code, 302, restored.content[:300])
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.READY)
+        response = self._post(**before)
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
 
     def test_a_queued_import_refuses_a_conflict_merge_too(self):
         """`_merge_*` is replayed onto the rows as well, so it is preview-coupled the same way."""
-        session = self.client.session
-        session["import_preview_pending"] = False
-        session.save()
+        self._submit()
 
-        self.client.post(
+        response = self.client.post(
             reverse("plugins:netbox_data_import:save_resolution"),
             self._payload(source_column="_merge_serial", resolved_fields=json.dumps({"serial": "ABC"})),
         )
 
+        self.assertEqual(response.status_code, 409)
         self.assertFalse(SourceResolution.objects.filter(source_column="_merge_serial").exists())
 
     def test_a_queued_import_refuses_a_duplicate_name_resolution(self):
         """The endpoint refuses a replacement name once Run Import has queued the rows."""
-        session = self.client.session
-        session["import_preview_pending"] = False
-        session.save()
+        self._submit()
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:resolve_duplicate_name"),
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "AJAX-001",
-                "row_number": 1,
+                "row_number": 2,
                 "new_name": "queued-name-resolution",
                 "next": reverse("plugins:netbox_data_import:import_preview"),
             },
@@ -402,51 +407,28 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         )
 
         self.assertFalse(SourceResolution.objects.filter(source_column="device_name").exists())
-        self.assertContains(response, "The import already started")
+        self.assertContains(response, "The import already started", status_code=409)
 
     def test_a_queued_duplicate_name_refusal_redirects_htmx(self):
         """A refused decision must navigate, not swap a preview the queued import has frozen."""
-        session = self.client.session
-        session["import_preview_pending"] = False
-        session.save()
+        self._submit()
         next_url = reverse("plugins:netbox_data_import:import_preview")
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:resolve_duplicate_name"),
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "AJAX-001",
-                "row_number": 1,
+                "row_number": 2,
                 "new_name": "queued-htmx-name-resolution",
                 "next": next_url,
             },
             HTTP_HX_REQUEST="true",
         )
 
-        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.status_code, 409)
         self.assertEqual(response.headers["HX-Redirect"], next_url)
         self.assertFalse(SourceResolution.objects.filter(source_column="device_name").exists())
-
-    def test_a_resolution_with_no_preview_in_the_session_is_still_saved(self):
-        """A decision saved outside a preview is standalone and must not need one."""
-        session = self.client.session
-        for key in ("import_rows", "import_context", "import_plan", "import_preview_pending"):
-            session.pop(key, None)
-        session.save()
-
-        self.client.post(
-            reverse("plugins:netbox_data_import:save_resolution"),
-            {
-                "profile_id": self.profile.pk,
-                "source_id": "STANDALONE-1",
-                "source_column": "device_name",
-                "original_value": "old",
-                "resolved_fields": json.dumps({"device_name": "new"}),
-                "next": "/",
-            },
-        )
-
-        self.assertTrue(SourceResolution.objects.filter(source_id="STANDALONE-1").exists())
 
     def test_an_ordinary_resolution_cannot_replace_the_source_identity(self):
         """The resolution endpoint rejects a target-neutral planning key."""
@@ -459,27 +441,28 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         self.assertIn("reserved", response.json()["error"])
         self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
 
-    def test_the_native_contact_form_carries_the_preview_revision(self):
-        """Without scripts the form is the only thing that can present a token to check."""
+    def test_the_native_contact_form_carries_the_preview_claim(self):
+        """Without scripts the form is the only thing that can present a claim to check."""
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         html = response.content.decode()
         form_start = html.index('id="contactCandidateForm"')
-        form_end = html.index("</form>", form_start)
-        self.assertIn('name="preview_revision"', html[form_start:form_end])
+        form = html[form_start : html.index("</form>", form_start)]
+        claim = preview_claim(self.client)
+        self.assertIn(f'name="preview_token" value="{claim["preview_token"]}"', form)
+        self.assertIn('name="preview_revision"', form)
 
-    def test_a_stale_revision_is_refused_on_the_form_path_when_it_supplies_one(self):
-        """The rendered page carries its own token, so a retired one must not be honoured."""
+    def test_a_stale_claim_is_refused_on_the_form_path(self):
+        """The rendered page carries its own claim, so a retired one must not be honoured."""
         response = self.client.post(
-            reverse("plugins:netbox_data_import:save_resolution"),
-            self._payload(preview_revision="revision-zero"),
+            reverse("plugins:netbox_data_import:save_resolution"), self._payload(**self._stale_claim())
         )
 
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 409)
         self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
 
-    def test_an_active_preview_refuses_a_form_post_without_a_revision(self):
-        """An incomplete active-preview form cannot bypass the revision check."""
+    def test_an_active_preview_refuses_a_form_post_without_a_claim(self):
+        """An incomplete active-preview form cannot bypass the claim check."""
         payload = self._payload()
         payload.pop("preview_revision")
 
@@ -488,7 +471,7 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
             payload,
         )
 
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 409)
         self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
 
     def test_a_plain_form_post_still_redirects(self):
@@ -508,53 +491,24 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
     def test_a_decision_on_a_matched_device_reports_the_contact_write(self):
         """When the row already points at a Device the save applies the Contact at once."""
         from dcim.models import Device
-        from tenancy.models import ContactRole
+        from tenancy.models import ContactAssignment, ContactRole
 
-        from netbox_data_import.import_engine import ImportEngine
-        from netbox_data_import.review_workspace import ReviewWorkspace
+        device = self._matched_device()
+        ContactAssignment.objects.all().delete()
 
-        role = ContactRole.objects.create(name="CtcAjax Primary", slug="ctcajax-primary")
-        self.profile.adapter_config["primary_contact_role"] = role.name
-        self.profile.save()
-        device = Device.objects.create(
-            name="ajax-contact-device",
-            site=self.site,
-            device_type=self.device_type,
-            role=self.role,
-        )
-        # The first decision unblocks the row, so the second one meets a matched device.
-        self._post()
-        plan = ImportEngine.plan(
-            self.profile,
-            self.document,
-            self.user,
-            self.planning_context,
-        )
-        result = ReviewWorkspace(plan, self.user)
-        device_row = next(row for row in result.units if row.object_type == "device")
-        self.assertEqual(device_row.extra_data.get("netbox_device_id"), device.pk)
-
-        session = self.client.session
-        record_recalculated_preview(session, plan, user=self.user)
-        session["import_rows"] = result.source_rows
-        session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
-        session.save()
-
-        response = self._post(preview_revision="revision-two")
+        response = self._post()
 
         self.assertEqual(response.status_code, 200, response.content)
         body = json.loads(response.content)
         self.assertIn("Device Contact", body["message"])
-        self.assertEqual(body["preview_state"], "recalculation_required")
+        self.assertEqual(body["preview_state"], "replanned")
         # The message names a Contact write, so the assignment has to exist.
-        from tenancy.models import ContactAssignment
-
         assignment = ContactAssignment.objects.get(
             object_id=device.pk,
             object_type=ContentType.objects.get_for_model(Device),
         )
         self.assertEqual(assignment.contact.email, "ajax.person@example.invalid")
-        self.assertEqual(assignment.role, role)
+        self.assertEqual(assignment.role, ContactRole.objects.get(slug="ctcajax-primary"))
 
 
 class MatchedDeviceContactReportTest(ContactResolutionSessionMixin, TestCase):
@@ -567,7 +521,7 @@ class MatchedDeviceContactReportTest(ContactResolutionSessionMixin, TestCase):
         device = self._matched_device()
         ContactAssignment.objects.all().delete()
 
-        response = self._post_decision({}, revision="revision-two")
+        response = self._post_decision({})
 
         self.assertEqual(response.status_code, 200, response.content)
         self.assertNotIn("Device Contact", json.loads(response.content)["message"])
@@ -582,7 +536,7 @@ class MatchedDeviceContactReportTest(ContactResolutionSessionMixin, TestCase):
         """The report must stay for the case it was written for."""
         self._matched_device()
 
-        response = self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-two")
+        response = self._post_decision({"name": "Contact", "email": "Contact"})
 
         self.assertEqual(response.status_code, 200, response.content)
         self.assertIn("Device Contact", json.loads(response.content)["message"])
@@ -597,7 +551,6 @@ class MatchedDeviceContactDetailTest(ContactResolutionSessionMixin, TestCase):
 
         response = self._post_decision(
             {},
-            revision="revision-two",
             values={"name": "Second Person", "email": "second.person@example.invalid"},
         )
 
@@ -614,7 +567,6 @@ class MatchedDeviceContactDetailTest(ContactResolutionSessionMixin, TestCase):
 
         self._post_decision(
             {},
-            revision="revision-two",
             values={"name": "Second Person", "email": "second.person@example.invalid"},
         )
 
@@ -632,7 +584,6 @@ class MatchedDeviceContactDetailTest(ContactResolutionSessionMixin, TestCase):
 
         response = self._post_decision(
             {},
-            revision="revision-two",
             values={"name": "Second Person", "email": "second.person@example.invalid"},
         )
 
@@ -653,10 +604,10 @@ class MatchedDeviceContactDetailTest(ContactResolutionSessionMixin, TestCase):
     def test_an_unmoved_assignment_does_not_claim_a_contact_update(self):
         """`apply` returns a plan for an unchanged assignment, which is not a Device Contact write."""
         self._matched_device()
-        first = self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-two")
+        first = self._post_decision({"name": "Contact", "email": "Contact"})
         self.assertIn("was updated", json.loads(first.content)["message"])
 
-        response = self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-two")
+        response = self._post_decision({"name": "Contact", "email": "Contact"})
 
         self.assertEqual(response.status_code, 200, response.content)
         message = json.loads(response.content)["message"]
@@ -668,13 +619,11 @@ class RefusedRowContactAssignmentTest(ContactResolutionSessionMixin, TestCase):
     """A refused row still names the Device it matched, but its Contact must not reach it."""
 
     def _refused_row_device(self):
-        """Match the row to a Device another source row already owns, then replan onto it."""
+        """Match the row to a Device another source row already owns, then let the first decision replan onto it."""
         from dcim.models import Device
         from tenancy.models import ContactRole
 
-        from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.models import DeviceExistingMatch
-        from netbox_data_import.review_workspace import ReviewWorkspace
 
         role = ContactRole.objects.create(name="CtcAjax Primary", slug="ctcajax-primary")
         self.profile.adapter_config["primary_contact_role"] = role.name
@@ -691,28 +640,21 @@ class RefusedRowContactAssignmentTest(ContactResolutionSessionMixin, TestCase):
             netbox_device_id=device.pk,
             device_name=device.name,
         )
+        self._reread()
         # The first decision settles the Contact question, so the replan reaches the binding check.
-        self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-one")
-        plan = ImportEngine.plan(self.profile, self.document, self.user, self.planning_context)
-        result = ReviewWorkspace(plan, self.user)
-        session = self.client.session
-        record_recalculated_preview(session, plan, user=self.user)
-        session["import_rows"] = result.source_rows
-        session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
-        session.save()
-        return device, result
+        self.assertEqual(self._post_decision({"name": "Contact", "email": "Contact"}).status_code, 200)
+        return device, self._stored_device_row()
 
     def test_a_refused_row_writes_no_contact_onto_the_device_it_named(self):
         """`device.already_bound` still carries `netbox_device_id`, and the row plans no update."""
         from tenancy.models import ContactAssignment
 
-        device, result = self._refused_row_device()
-        row = next(unit for unit in result.units if unit.source_id == "AJAX-001")
+        device, row = self._refused_row_device()
         self.assertEqual(row.action, "error", "the row must be refused for this test to mean anything")
         self.assertEqual(row.extra_data.get("netbox_device_id"), device.pk)
         ContactAssignment.objects.all().delete()
 
-        response = self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-two")
+        response = self._post_decision({"name": "Contact", "email": "Contact"})
 
         self.assertEqual(response.status_code, 200, response.content)
         self.assertFalse(
@@ -729,7 +671,7 @@ class ContactSuggestionEndpointTest(ContactResolutionSessionMixin, TestCase):
 
     def _suggest(self, **overrides):
         """Ask the endpoint for one row's current Contact suggestion."""
-        params = {"profile_id": self.profile.pk, "source_id": "AJAX-001"}
+        params = {**preview_claim(self.client), "source_id": "AJAX-001"}
         params.update(overrides)
         return self.client.get(
             reverse("plugins:netbox_data_import:contact_suggestion"),
@@ -781,7 +723,7 @@ class ContactSuggestionEndpointTest(ContactResolutionSessionMixin, TestCase):
         self.assertIsNone(json.loads(response.content)["suggestion"])
 
     def test_a_row_outside_the_active_preview_is_refused(self):
-        """The suggestion reads session state, so it must name one active row."""
+        """The suggestion reads the stored preview, so it must name one active row."""
         response = self._suggest(source_id="NOT-A-ROW")
 
         self.assertEqual(response.status_code, 400, response.content)
@@ -796,11 +738,24 @@ class ContactSuggestionEndpointTest(ContactResolutionSessionMixin, TestCase):
         self.assertEqual(response.status_code, 400, response.content)
         self.assertIn("retired_adapter", json.loads(response.content)["error"])
 
-    def test_a_missing_profile_is_refused(self):
-        """A request that names no profile cannot be tied to a preview."""
-        response = self._suggest(profile_id="")
+    def test_a_request_without_a_claim_is_refused(self):
+        """A request that names no preview cannot be tied to one."""
+        response = self.client.get(
+            reverse("plugins:netbox_data_import:contact_suggestion"), {"source_id": "AJAX-001"}, HTTP_ACCEPT=JSON
+        )
 
-        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.status_code, 409, response.content)
+
+    def test_a_stale_claim_is_refused(self):
+        """The picker of a page another tab re-read must not read the newer preview."""
+        from tenancy.models import Contact
+
+        Contact.objects.create(name="Ajax Person", email="ajax.person@example.invalid")
+
+        response = self._suggest(**self._stale_claim())
+
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertNotIn("suggestion", response.json())
 
 
 class ContactCreatedOnSaveTest(ContactResolutionSessionMixin, TestCase):
@@ -812,7 +767,7 @@ class ContactCreatedOnSaveTest(ContactResolutionSessionMixin, TestCase):
 
     def _payload(self, **overrides):
         payload = {
-            "profile_id": self.profile.pk,
+            **preview_claim(self.client),
             "source_id": "AJAX-001",
             "source_column": "candidate:contact",
             "resolved_fields": json.dumps(
@@ -823,7 +778,6 @@ class ContactCreatedOnSaveTest(ContactResolutionSessionMixin, TestCase):
                     "contact_id": None,
                 }
             ),
-            "preview_revision": "revision-one",
             "next": reverse("plugins:netbox_data_import:import_preview"),
         }
         payload.update(overrides)
@@ -860,7 +814,7 @@ class ContactCreatedOnSaveTest(ContactResolutionSessionMixin, TestCase):
 
         self.assertIn("Ajax Person", body["message"])
         self.assertIn("created", body["message"].lower())
-        self.assertEqual(body["preview_state"], "recalculation_required")
+        self.assertEqual(body["preview_state"], "replanned")
 
     def test_the_resolution_records_the_contact_it_created(self):
         """The stored decision names the Contact, so planning reuses it instead of proposing one."""
@@ -875,12 +829,9 @@ class ContactCreatedOnSaveTest(ContactResolutionSessionMixin, TestCase):
         """The second save meets the Contact the first one made, so it must reuse it."""
         from tenancy.models import Contact
 
-        self._post()
-        session = self.client.session
-        session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
-        session.save()
+        self.assertEqual(self._post().status_code, 200)
 
-        response = self._post(preview_revision="revision-two")
+        response = self._post()
 
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(Contact.objects.filter(email="ajax.person@example.invalid").count(), 1)
@@ -988,7 +939,7 @@ class ContactCreatedOnSaveTest(ContactResolutionSessionMixin, TestCase):
         """A rejected save must leave NetBox exactly as it was."""
         from tenancy.models import Contact
 
-        response = self._post(preview_revision="revision-zero")
+        response = self._post(**self._stale_claim())
 
         self.assertEqual(response.status_code, 409, response.content)
         self.assertEqual(Contact.objects.count(), 0)

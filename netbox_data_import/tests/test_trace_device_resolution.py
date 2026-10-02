@@ -31,7 +31,6 @@ from netbox_data_import.models import (
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.object_permissions import ObjectPermissionDenied, clear_user_permission_caches
 from netbox_data_import.plan import Disposition
-from netbox_data_import.preview_row_actions import PREVIEW_PLAN_SESSION_KEY
 from netbox_data_import.profile_yaml import serialize_profile
 from netbox_data_import.review_workspace import save_trace_device_resolution_and_replan
 from netbox_data_import.trace_device_resolution import (
@@ -45,8 +44,14 @@ from netbox_data_import.trace_device_resolution import (
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
 from netbox_data_import.tests.helpers import (
     executed_sql,
+    preview_claim,
+    preview_coordinator,
+    seed_preview,
+    store_plan,
+    stored_plan,
     trace_termination,
     trace_workbook_bytes,
+    upload_preview,
     user_with_object_permission,
 )
 from netbox_data_import.views import CANDIDATE_OFFSET_INVALID, CANDIDATE_OFFSET_MAX
@@ -499,11 +504,15 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         )
         upload = BytesIO(trace_workbook_bytes(path_blocks=(*leading_blocks, block)))
         upload.name = "trace-alias.xlsx"
-        return self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-            follow=True,
+        return upload_preview(
+            self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload}, follow=True
         )
+
+    def stale_claim(self):
+        """Return the claim the page held before a re-read retired it."""
+        claim = preview_claim(self.client)
+        self.client.post(reverse("plugins:netbox_data_import:preview_reread"), claim)
+        return claim
 
     def test_an_unresolved_source_device_offers_the_device_picker(self):
         response = self.start_alias_preview()
@@ -525,12 +534,11 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertRegex(terminations.group(), card_classes)
 
     def test_saving_a_device_choice_replans_and_persists_the_mapping(self):
-        response = self.start_alias_preview()
-        revision = response.context["preview_revision"]
+        self.start_alias_preview()
 
         candidates = self.client.get(
             reverse("plugins:netbox_data_import:trace_device_candidates"),
-            {"device_key": "SOURCE ALIAS", "search": "DEV-A", "preview_revision": revision},
+            {"device_key": "SOURCE ALIAS", "search": "DEV-A", **preview_claim(self.client)},
         )
         self.assertEqual(candidates.status_code, 200)
         self.assertEqual([item["id"] for item in candidates.json()["candidates"]], [self.device_a.pk])
@@ -541,7 +549,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                 "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
-                "preview_revision": revision,
+                **preview_claim(self.client),
             },
             follow=True,
         )
@@ -575,7 +583,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                 "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
-                "preview_revision": response.context["preview_revision"],
+                **preview_claim(self.client),
                 "trace": wanted.identity,
             },
             follow=True,
@@ -593,14 +601,14 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
             self.assertIn(str(self.device_a), manual.group())
             self.assertIn("manually resolved", manual.group())
 
-        response = self.start_alias_preview()
+        self.start_alias_preview()
         self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
                 "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
-                "preview_revision": response.context["preview_revision"],
+                **preview_claim(self.client),
             },
         )
 
@@ -611,8 +619,8 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         assert_saved_choice_is_rendered(later)
 
         reread = self.client.post(
-            reverse("plugins:netbox_data_import:trace_workspace_reread"),
-            {"preview_revision": later.context["preview_revision"]},
+            reverse("plugins:netbox_data_import:preview_reread"),
+            {**preview_claim(self.client), "next": reverse("plugins:netbox_data_import:trace_workspace")},
             follow=True,
         )
         selected = next(
@@ -645,14 +653,14 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertNotIn("None eth7", proposed)
 
     def test_a_saved_device_choice_stays_visible_outside_the_collapsed_disclosure(self):
-        response = self.start_alias_preview()
+        self.start_alias_preview()
         self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
                 "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
-                "preview_revision": response.context["preview_revision"],
+                **preview_claim(self.client),
             },
         )
 
@@ -665,14 +673,14 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertIn("manually resolved", visible)
 
     def test_an_attention_termination_names_its_resolved_device(self):
-        response = self.start_alias_preview(port_name="absent-port")
+        self.start_alias_preview(port_name="absent-port")
         self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
                 "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
-                "preview_revision": response.context["preview_revision"],
+                **preview_claim(self.client),
             },
         )
 
@@ -688,10 +696,9 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
     def test_a_device_on_a_later_page_is_offered_and_saved_from_that_page(self):
         """The picker pages past the first twenty candidates, and the write rechecks the page it offered."""
         spares = [self.make_device(f"Spare {number:02}") for number in range(1, 22)]
-        response = self.start_alias_preview()
-        revision = response.context["preview_revision"]
+        self.start_alias_preview()
         url = reverse("plugins:netbox_data_import:trace_device_candidates")
-        question = {"device_key": "SOURCE ALIAS", "search": "Spare", "preview_revision": revision}
+        question = {"device_key": "SOURCE ALIAS", "search": "Spare", **preview_claim(self.client)}
 
         second = self.client.get(url, {**question, "offset": 20}).json()
         refused = self.client.post(
@@ -717,13 +724,14 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(refused.status_code, 400)
         self.assertContains(malformed, CANDIDATE_OFFSET_INVALID, status_code=400)
-        self.assertEqual(saved.status_code, 302, saved.content)
+        self.assertEqual(saved.status_code, 200, saved.content)
+        self.assertEqual(saved.json()["preview_state"], "replanned")
         self.assertEqual(TraceDeviceResolution.objects.get(profile=self.profile).selected_device_id, spares[-1].pk)
 
     def test_the_device_picker_bounds_the_offset_of_a_read_and_a_write(self):
         """An offset past the database page range is refused, and the largest one reads an empty page."""
         response = self.start_alias_preview()
-        question = {"device_key": "SOURCE ALIAS", "preview_revision": response.context["preview_revision"]}
+        question = {"device_key": "SOURCE ALIAS", **preview_claim(self.client)}
         url = reverse("plugins:netbox_data_import:trace_device_candidates")
 
         with executed_sql() as statements:
@@ -747,7 +755,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
 
     def test_an_unoffered_device_choice_is_rejected_as_request_input(self):
-        response = self.start_alias_preview()
+        self.start_alias_preview()
 
         saved = self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
@@ -755,7 +763,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                 "device_key": "SOURCE ALIAS",
                 "device_id": self.device_b.pk,
                 "search": "DEV-A",
-                "preview_revision": response.context["preview_revision"],
+                **preview_claim(self.client),
             },
             headers={"accept": "application/json"},
         )
@@ -765,7 +773,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
 
     def test_an_internal_device_resolution_value_error_is_not_request_input(self):
-        response = self.start_alias_preview()
+        self.start_alias_preview()
         failed_writes = []
 
         def fail_resolution_insert(execute, sql, params, many, context):
@@ -782,7 +790,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                         "device_key": "SOURCE ALIAS",
                         "device_id": self.device_a.pk,
                         "search": "DEV-A",
-                        "preview_revision": response.context["preview_revision"],
+                        **preview_claim(self.client),
                     },
                     headers={"accept": "application/json"},
                 )
@@ -790,61 +798,49 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertTrue(failed_writes)
         self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
 
-    def test_a_preview_lock_rolls_back_the_device_resolution(self):
+    def test_a_pending_trace_sync_refuses_the_device_resolution(self):
         import uuid
 
         from core.choices import JobStatusChoices
         from core.models import Job
 
         from netbox_data_import.jobs import ImportJobRunner
+        from netbox_data_import.models import PreviewCoordinator, PreviewState
+        from netbox_data_import.preview_coordinator import RETAINED_SYNC_BLOCK_REASON
 
-        response = self.start_alias_preview()
-        revision = response.context["preview_revision"]
-        import_context = self.client.session["import_context"]
-        retained = []
-        decision_writes = []
+        self.start_alias_preview()
+        coordinator = preview_coordinator(self.client)
+        job = Job.objects.create(
+            name=ImportJobRunner.name,
+            user=self.actor,
+            job_id=uuid.uuid4(),
+            status=JobStatusChoices.STATUS_PENDING,
+            data={
+                "job_type": ImportJobRunner.job_type,
+                "keeps_preview": True,
+                "profile_id": self.profile.pk,
+                "source_document_id": coordinator.source_document_id,
+            },
+        )
+        PreviewCoordinator.objects.filter(pk=coordinator.pk).update(state=PreviewState.SYNC_PENDING, job_id=job.pk)
 
-        def retain_preview_after_initial_guard(execute, sql, params, many, context):
-            result = execute(sql, params, many, context)
-            if "netbox_data_import_tracedeviceresolution" in sql.lower() and sql.lstrip().upper().startswith(
-                ("INSERT", "UPDATE")
-            ):
-                decision_writes.append(sql)
-            if not retained and 'FROM "core_job"' in sql:
-                retained.append(sql)
-                Job.objects.create(
-                    name=ImportJobRunner.name,
-                    user=self.actor,
-                    job_id=uuid.uuid4(),
-                    status=JobStatusChoices.STATUS_PENDING,
-                    data={
-                        "job_type": ImportJobRunner.job_type,
-                        "keeps_preview": True,
-                        "profile_id": self.profile.pk,
-                        "source_document_id": import_context["source_document_id"],
-                    },
-                )
-            return result
+        saved = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {
+                "device_key": "SOURCE ALIAS",
+                "device_id": self.device_a.pk,
+                "search": "DEV-A",
+                **preview_claim(self.client),
+            },
+            headers={"accept": "application/json"},
+        )
 
-        with connection.execute_wrapper(retain_preview_after_initial_guard):
-            saved = self.client.post(
-                reverse("plugins:netbox_data_import:trace_resolve_device"),
-                {
-                    "device_key": "SOURCE ALIAS",
-                    "device_id": self.device_a.pk,
-                    "search": "DEV-A",
-                    "preview_revision": revision,
-                },
-                headers={"accept": "application/json"},
-            )
-
-        self.assertTrue(retained)
-        self.assertTrue(decision_writes)
         self.assertEqual(saved.status_code, 409)
+        self.assertEqual(saved.json()["error"], RETAINED_SYNC_BLOCK_REASON)
         self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
 
     def test_the_candidate_endpoint_rejects_invalid_limits(self):
-        response = self.start_alias_preview()
+        self.start_alias_preview()
 
         for limit in ("not-an-integer", "-1", "0", str(ELIGIBLE_TERMINATION_LIMIT + 1)):
             with self.subTest(limit=limit):
@@ -853,7 +849,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                     {
                         "device_key": "SOURCE ALIAS",
                         "limit": limit,
-                        "preview_revision": response.context["preview_revision"],
+                        **preview_claim(self.client),
                     },
                 )
 
@@ -865,9 +861,8 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                 )
 
     def test_the_candidate_endpoint_rejects_malformed_device_evidence(self):
-        response = self.start_alias_preview()
-        session = self.client.session
-        plan = session[PREVIEW_PLAN_SESSION_KEY]
+        self.start_alias_preview()
+        plan = stored_plan(self.client)
         question = next(
             device
             for unit in plan["units"]
@@ -875,14 +870,13 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
             if device.get("key") == "SOURCE ALIAS"
         )
         question["labels"] = "Source Alias"
-        session[PREVIEW_PLAN_SESSION_KEY] = plan
-        session.save()
+        store_plan(self.client, plan)
 
         candidates = self.client.get(
             reverse("plugins:netbox_data_import:trace_device_candidates"),
             {
                 "device_key": "SOURCE ALIAS",
-                "preview_revision": response.context["preview_revision"],
+                **preview_claim(self.client),
             },
         )
 
@@ -890,7 +884,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertEqual(candidates.json()["error"], "That Device cannot be resolved here.")
 
     def test_an_internal_candidate_type_error_is_not_request_input(self):
-        response = self.start_alias_preview()
+        self.start_alias_preview()
         failed_reads = []
 
         def fail_candidate_read(execute, sql, params, many, context):
@@ -905,7 +899,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                     reverse("plugins:netbox_data_import:trace_device_candidates"),
                     {
                         "device_key": "SOURCE ALIAS",
-                        "preview_revision": response.context["preview_revision"],
+                        **preview_claim(self.client),
                     },
                 )
 
@@ -915,8 +909,12 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         from core.models import ObjectType
         from dcim.models import Site
 
+        from netbox_data_import.import_engine import ImportEngine
+
         self.start_alias_preview()
-        preview_session = {key: value for key, value in self.client.session.items() if key.startswith("import_")}
+        coordinator = preview_coordinator(self.client)
+        document = SourceDocument.objects.get(pk=coordinator.source_document_id)
+        context = dict(coordinator.context)
         object_type = ObjectType.objects.get_for_model(Interface)
         visible_field_key = termination_field_key(device="DEV-A", cards="", port="eth0", kind="interface")
         hidden_field_key = termination_field_key(device="DEV-B", cards="", port="eth1", kind="interface")
@@ -948,9 +946,14 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
             ],
         )
         self.client.force_login(actor)
-        session = self.client.session
-        session.update(preview_session)
-        session.save()
+        planning_context = {key: context[key] for key in ("site_id", "location_id", "tenant_id")}
+        seed_preview(
+            self.client,
+            profile=self.profile,
+            document=document,
+            plan=ImportEngine.plan(self.profile, document, actor, planning_context),
+            context=context,
+        )
 
         workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
@@ -958,9 +961,8 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertEqual(workspace.context["summary"]["saved_decisions"], 2)
 
     def test_saving_a_device_choice_refuses_an_adapter_this_release_dropped(self):
-        """The POST discards an unusable preview before it writes the Device decision."""
-        response = self.start_alias_preview()
-        revision = response.context["preview_revision"]
+        """The command refuses a profile it cannot replan before it writes the Device decision."""
+        self.start_alias_preview()
         ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired-adapter")
 
         saved = self.client.post(
@@ -969,27 +971,24 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                 "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
-                "preview_revision": revision,
+                **preview_claim(self.client),
             },
+            headers={"accept": "application/json"},
         )
 
-        self.assertRedirects(
-            saved,
-            reverse("plugins:netbox_data_import:import_setup"),
-            fetch_redirect_response=False,
-        )
+        self.assertEqual(saved.status_code, 409)
+        self.assertIn("retired-adapter", saved.json()["error"])
         self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
-        self.assertFalse(self.client.session["import_preview_pending"])
 
     def test_a_later_file_reuses_the_choice_for_another_port_and_label_spacing(self):
-        response = self.start_alias_preview()
+        self.start_alias_preview()
         self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
                 "device_key": "SOURCE ALIAS",
                 "device_id": self.device_a.pk,
                 "search": "DEV-A",
-                "preview_revision": response.context["preview_revision"],
+                **preview_claim(self.client),
             },
         )
         Interface.objects.create(device=self.device_a, name="eth10", type="1000base-t")
@@ -1001,28 +1000,30 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertEqual(selected["selected"], str(self.device_a))
 
     def test_the_candidate_endpoint_rejects_a_device_key_the_plan_did_not_author(self):
-        response = self.start_alias_preview()
+        self.start_alias_preview()
 
         candidates = self.client.get(
             reverse("plugins:netbox_data_import:trace_device_candidates"),
             {
                 "device_key": "invented device",
-                "preview_revision": response.context["preview_revision"],
+                **preview_claim(self.client),
             },
         )
 
         self.assertEqual(candidates.status_code, 400)
         self.assertIn("asked no question", candidates.json()["error"])
 
-    def test_the_candidate_endpoint_rejects_an_old_preview_revision(self):
+    def test_the_candidate_endpoint_rejects_a_stale_claim(self):
         self.start_alias_preview()
 
         candidates = self.client.get(
             reverse("plugins:netbox_data_import:trace_device_candidates"),
-            {"device_key": "SOURCE ALIAS", "preview_revision": "old-preview"},
+            {"device_key": "SOURCE ALIAS", **self.stale_claim()},
         )
 
         self.assertEqual(candidates.status_code, 409)
+        self.assertEqual(candidates.json()["code"], "preview_stale")
+        self.assertNotIn("candidates", candidates.json())
 
     def test_a_stale_selection_does_not_disclose_its_saved_display_snapshot(self):
         TraceDeviceResolution.objects.create(
@@ -1162,10 +1163,7 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
         )
         upload = BytesIO(trace_workbook_bytes(path_blocks=(block,)))
         upload.name = "trace-permissions.xlsx"
-        self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-        )
+        upload_preview(self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload})
         self.actor.is_superuser = False
         self.actor.save(update_fields=("is_superuser",))
         broad_permission = ObjectPermission.objects.create(

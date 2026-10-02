@@ -28,6 +28,7 @@ from netbox_data_import.forms import ColumnMappingForm, ColumnTransformRuleForm,
 from netbox_data_import.models import ColumnMapping, ColumnTransformRule, ImportProfile
 from netbox_data_import.plan import Disposition
 from netbox_data_import.profile_yaml import ProfileDocumentInvalid
+from netbox_data_import.tests.helpers import preview_claim, preview_coordinator, stored_plan, upload_preview
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_workbook.xlsx")
 
@@ -560,6 +561,13 @@ class CatalogKeyDriftTest(TestCase):
         for key in SyncDeviceFieldView._ALLOWED_FIELDS:
             self.assertTrue(CATALOG.is_valid(key), key)
 
+    def test_every_syncable_field_is_one_the_preview_can_offer(self):
+        """A row sync writes only a field difference, so a field the review never offers is dead code."""
+        from netbox_data_import.device_field_review import DeviceFieldReviewer
+        from netbox_data_import.views import SyncDeviceFieldView
+
+        self.assertEqual(SyncDeviceFieldView._ALLOWED_FIELDS & DeviceFieldReviewer.non_writable_fields(), set())
+
     def test_the_writable_review_fields_a_source_can_supply_are_catalog_keys(self):
         """Device field review also compares Device attributes no source column supplies.
 
@@ -940,9 +948,8 @@ class AdapterRuntimeSupportTest(TestCase):
         """A profile the engine cannot consume must fail as a parse error, not an AttributeError."""
         self.client.force_login(_superuser())
         with open(FIXTURE_PATH, "rb") as handle:
-            response = self.client.post(
-                reverse("plugins:netbox_data_import:import_setup"),
-                {"profile": self.trace.pk, "site": self.site.pk, "excel_file": handle},
+            response = upload_preview(
+                self.client, {"profile": self.trace.pk, "site": self.site.pk, "excel_file": handle}
             )
         self.assertEqual(response.status_code, 200)
         self.assertIn("trace_workbook", response.content.decode())
@@ -1017,11 +1024,10 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         self.client.force_login(self.user)
 
     def _start_a_preview(self):
-        """Post the setup form so the session carries a parsed preview."""
+        """Post the setup form so the session's coordinator holds a parsed preview."""
         with open(FIXTURE_PATH, "rb") as handle:
-            response = self.client.post(
-                reverse("plugins:netbox_data_import:import_setup"),
-                {"profile": self.profile.pk, "site": self.site.pk, "excel_file": handle},
+            response = upload_preview(
+                self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": handle}
             )
         self.assertIn(response.status_code, (200, 302), response.content[:400])
 
@@ -1030,7 +1036,7 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired_adapter")
 
     def test_the_preview_reports_the_stale_adapter_instead_of_raising(self):
-        """The session outlives a restart, so the preview can load a profile the release dropped."""
+        """The preview outlives a restart, so the preview can load a profile the release dropped."""
         self._start_a_preview()
         self._retire_the_adapter()
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"), follow=True)
@@ -1041,7 +1047,9 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         """A queued run would otherwise fail inside the worker with no operator feedback."""
         self._start_a_preview()
         self._retire_the_adapter()
-        response = self.client.post(reverse("plugins:netbox_data_import:import_run"), follow=True)
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_run"), preview_claim(self.client), follow=True
+        )
         self.assertEqual(response.status_code, 200)
         self.assertIn("retired_adapter", response.content.decode())
 
@@ -1049,7 +1057,7 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         """Return a preview row number `SyncSingleRowView` accepts."""
         from netbox_data_import.review_workspace import ReviewWorkspace
 
-        workspace = ReviewWorkspace.from_dict(self.client.session["import_plan"], self.user)
+        workspace = ReviewWorkspace.from_dict(stored_plan(self.client), self.user)
         for unit in workspace.units:
             if unit.row_number is None:
                 continue
@@ -1058,18 +1066,16 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         self.fail("the sample workbook must offer one syncable create row")
 
     def test_the_single_row_sync_refuses_a_stale_adapter(self):
-        """It runs the engine straight from the session, so it meets the retired adapter too."""
+        """It runs the engine against the stored preview, so it meets the retired adapter too."""
         self._start_a_preview()
         row_number = self._syncable_row_number()
         self._retire_the_adapter()
         response = self.client.post(
             reverse("plugins:netbox_data_import:sync_single_row"),
-            {
-                "row_number": str(row_number),
-                "preview_revision": self.client.session["import_preview_revision"],
-            },
+            {**preview_claim(self.client), "row_number": str(row_number)},
+            HTTP_ACCEPT="application/json",
         )
-        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.status_code, 409, response.content)
         self.assertIn("retired_adapter", response.json()["error"])
 
     def test_the_engine_refuses_a_stale_adapter_at_its_own_boundary(self):
@@ -1079,10 +1085,9 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         from netbox_data_import.models import SourceDocument
 
         self._start_a_preview()
-        session = self.client.session
         self._retire_the_adapter()
         profile = ImportProfile.objects.get(pk=self.profile.pk)
-        document = SourceDocument.objects.get(pk=session["import_context"]["source_document_id"])
+        document = SourceDocument.objects.get(pk=preview_coordinator(self.client).source_document_id)
         with self.assertRaisesMessage(UnknownSourceAdapter, "retired_adapter"):
             ImportEngine.plan(
                 profile,
@@ -1102,8 +1107,7 @@ class StaleAdapterRuntimeGuardTest(TestCase):
 
         self._start_a_preview()
         self._retire_the_adapter()
-        session = self.client.session
-        plan = session["import_plan"]
+        plan = stored_plan(self.client)
         selection = [unit["identity"] for unit in plan["units"] if unit["disposition"] == Disposition.ACTIONABLE]
         job = Job.objects.create(
             name="Data Import",
@@ -1116,7 +1120,7 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         with self.assertRaises(JobFailed):
             ImportJobRunner(job).run(
                 self.profile.pk,
-                session["import_context"]["source_document_id"],
+                preview_coordinator(self.client).source_document_id,
                 plan,
                 selection,
                 "stale-adapter-test",
@@ -1191,9 +1195,8 @@ class StaleAdapterContactResolutionTest(TestCase):
 
         workbook = self._workbook()
         workbook.name = "stale-contact.xlsx"
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": workbook},
+        response = upload_preview(
+            self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": workbook}
         )
         self.assertEqual(response.status_code, 302)
 
@@ -1203,12 +1206,11 @@ class StaleAdapterContactResolutionTest(TestCase):
         response = self.client.post(
             reverse("plugins:netbox_data_import:save_resolution"),
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "s-2",
                 "source_column": "candidate:contact",
                 "resolved_fields": "{}",
             },
-            follow=True,
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("retired_adapter", response.content.decode())
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertIn("retired_adapter", response.json()["error"])

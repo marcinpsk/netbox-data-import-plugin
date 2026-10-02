@@ -69,35 +69,20 @@ AUDITED_EXITS = {
     ("delete_permission_scoped_objects", "scoped-delete-committed"): (
         "Every row cleared its delete check before any row was deleted."
     ),
-    ("IgnoreFieldDifferenceView.post", "binding-refused-before-write"): (
-        "The binding helper either wrote nothing or rolled back its own savepoint."
+    ("ImportExecution.reserve", "reservation-inserted"): (
+        "The insert is the reservation itself; a lost race raises out of the savepoint instead."
     ),
-    ("UnignoreFieldDifferenceView.post", "record-absent-before-write"): (
-        "The review row is gone, so nothing has been written yet."
+    ("PreviewCommand.run", "durable-refusal-committed"): (
+        "The command chose to keep what it wrote, an audit row of a failed execution, and publishes nothing."
     ),
-    ("UnignoreFieldDifferenceView.post", "delete-denied-before-write"): (
-        "The delete permission is refused before record.delete() runs."
+    ("PreviewCommand.run", "command-published"): (
+        "The success path: the command's writes, the replan and the revision commit together."
     ),
-    ("UnignoreFieldDifferenceView.post", "binding-refused-before-delete"): (
-        "The binding helper either wrote nothing or rolled back, and the delete has not run."
+    ("StartPreview.run", "new-generation-published"): (
+        "The success path: the stored upload, its plan and the new generation commit together."
     ),
-    ("SyncDeviceFieldView.post", "device-gone-before-write"): (
-        "The locked re-read found no Device, so the block has written nothing."
-    ),
-    ("SyncDeviceFieldView.post", "baseline-moved-before-write"): (
-        "The locked baseline recheck refuses the sync before the field writer runs."
-    ),
-    ("SyncPlacementView.post", "device-gone-before-write"): (
-        "The locked re-read found no Device, so the block has written nothing."
-    ),
-    ("SyncPlacementView.post", "baseline-moved-before-write"): (
-        "The locked baseline recheck refuses the sync before any placement field is applied."
-    ),
-    ("SyncPlacementView.post", "rack-unresolved-before-write"): (
-        "The rack lookup only reads, and the placement fields are not set yet."
-    ),
-    ("SyncPlacementView.post", "placement-value-refused-before-write"): (
-        "_set_rack_placement changes the in-memory Device alone; device.save() has not run."
+    ("_release_job", "release-not-needed"): (
+        "The preview moved on from the Job, so the block read one row and wrote nothing."
     ),
     ("ImportProfile.delete", "locked-cascade-committed"): (
         "The success path: the lock only orders the cascade, so committing the delete is the point."
