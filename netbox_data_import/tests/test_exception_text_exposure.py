@@ -388,9 +388,7 @@ class ExceptionTextScannerTest(SimpleTestCase):
         self.assertEqual(self.scan(view, engine), [("post", "SelectionError")])
 
     def test_a_plan_error_text_carried_through_a_variable_or_a_helper_is_reported(self):
-        view = (
-            "def post():\n    try:\n        run()\n    except SelectionError as exc:\n        return Json(str(exc))\n"
-        )
+        view = "def post():\n    try:\n        run()\n    except SelectionError as exc:\n        return Json(exc.operator_message)\n"
         engines = (
             (
                 "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n"
@@ -434,6 +432,7 @@ class ExceptionTextScannerTest(SimpleTestCase):
                 "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n        _wrap(error=exc)\n"
             ),
         )
+        self.assertEqual(self.scan(view), [])
         for engine in engines:
             with self.subTest(engine=engine):
                 self.assertEqual(self.scan(view, engine), [("post", "SelectionError")])
