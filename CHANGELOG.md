@@ -2,6 +2,198 @@
 
 <!-- version list -->
 
+## v2.7.0 (2026-09-30)
+
+### Bug Fixes
+
+- **branching**: Accept a 1.2 pre-release and drop the dead resolver-hook path
+  ([`d5c3244`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d5c32448f56e941ad0349925e31c104ea53b15c8))
+
+- **branching**: Answer the plugin's own JSON requests with a JSON refusal
+  ([`e3bd307`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e3bd307a1a27e08efdc7ef6e3163050fcc3db47c))
+
+- **branching**: Keep netbox-branching's queued messages off the anonymous refusal
+  ([`d3261f3`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d3261f38efd0c65761ed85c6535d389f125bac69))
+
+- **branching**: Pass a view with no module name through the refusal middleware
+  ([`4f7c053`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4f7c0539eab29b5df079f9225db626488de1ca23))
+
+- **branching**: Quote the branch name in the refusal message
+  ([`1883c97`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1883c97ed88e5b156cd936a73373095057c05028))
+
+- **branching**: Read the branch header on API requests only, as upstream
+  ([`23d0b6c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/23d0b6c1070a9a59e699f67b6a96fd890d5978f5))
+
+- **branching**: Refuse an anonymous caller without naming the branch
+  ([`da1b870`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/da1b8708bd6e8db75a4936266dde7b438c6ff1e1))
+
+- **branching**: Refuse in every policy entry helper before its first plugin read
+  ([`45e86b5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/45e86b546c2922cff3053832205a3eda1d35157a))
+
+- **branching**: Show the Device card notice without reading plugin data
+  ([`5cc9fb3`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/5cc9fb38d41082775e223f05a57323f71dca8d4c))
+
+- **changelog**: Snapshot NetBox objects before the plugin updates them
+  ([`20f7cc0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/20f7cc09ef0a565390dc626cc8623bc0f14738a5))
+
+- **compat**: Require NetBox 4.6.9
+  ([`3e36997`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/3e369970c282dde7faed94ba5f7261e0e3671d97))
+
+- **graphql**: Refuse a stale branch selector like the REST and UI views
+  ([`a18e452`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a18e452cfe7c62c92e4e7b9d48ea1aaa34eb9e7f))
+
+- **jobs**: Record import job changes in the NetBox change log
+  ([`fd3fd1a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/fd3fd1a9d0879044911f0c7ff705262def155115))
+
+- **migrations**: Drop orphan tag assignments when the tags move is rolled back
+  ([`f71d52b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f71d52b67fec2601322a4056803a9f850258b2b1))
+
+- **migrations**: Move, not copy, the tag rows in the data migration
+  ([`8f7408d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/8f7408d48f77a0f4af0fb95e00af756fef62a553))
+
+- **plan**: Keep Python error text out of the unreadable-plan message
+  ([`f255b0c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f255b0c9ce6ea5b519842a65923e8eb0ba2b1fce))
+
+- **proposals**: Fail a proposal whose job is refused inside a branch
+  ([`cd91369`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/cd91369a67b8f54a431646e822538b5dd42a2337))
+
+- **release**: Keep a released version's range in the compatibility matrix
+  ([`9a2ed8c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9a2ed8c4448f33405f44fddda8bacedb3899ed23))
+
+- **tags**: Filter profiles and backends by tag and show their tags
+  ([`1aada6a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1aada6a49666a1c76e7ea4cf7a50ee81b46cc681))
+
+- **views**: Lock the Device the field sync writes, and snapshot it there
+  ([`63b73da`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/63b73da328df8f546aadf5f60b38adce9d85780b))
+
+- **views**: Send no events for writes a sync view rolls back
+  ([`e373804`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e37380405cccc9d585161a61056e2363eb03f635))
+
+### Chores
+
+- **deps**: Bump the github-actions group with 3 updates
+  ([`a630ed1`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a630ed1208be408d5d65d1b1bf07c80ac670e48b))
+
+- **deps-dev**: Bump jsdom from 30.0.1 to 30.1.1
+  ([`e528e19`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e528e19f2b7807d5b26e39d35d9b8dab81b97e01))
+
+- **deps-dev**: Bump python-semantic-release from 10.6.2 to 10.7.0
+  ([`3869b71`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/3869b711344fea0ff8f8c01f72ec888955ec05bc))
+
+- **deps-dev**: Bump ruff from 0.16.7 to 0.16.8
+  ([`f182c25`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f182c25530c5d00e80ff7e194172061799dd5a12))
+
+### Code Style
+
+- **branching**: Give the anonymous refusal card the in-layout card styles
+  ([`1787730`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/178773067f1e76b46c77d393b03e2bb95fdb4b23))
+
+### Continuous Integration
+
+- Require full coverage of branching.py in the branching job
+  ([`e91d2af`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e91d2af8e26cc197125067a6b4120dbe5b98224e))
+
+- Run the branching tests beside netbox-branching 1.2.1
+  ([`4225ddc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4225ddc96afd10f7ebe264d4be7e7d273ad0ea0e))
+
+- **branching**: Run the full suite with netbox-branching installed
+  ([`29840f0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/29840f049f072fca2db18cb81c90e27ee16a072c))
+
+### Documentation
+
+- **configuration**: Limit the job change log note to NetBox objects
+  ([`3e77263`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/3e77263e011c8cfc30511d9510403eaa03afb11b))
+
+- **design**: Ratify netbox-branching compatibility
+  ([`c3b824e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c3b824eba2c63d3464438db2b5f35d850d7fe4de))
+
+- **design**: Record the snapshot fix in the netbox-branching design
+  ([`d71f718`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d71f718439607c69ee55abb0429dfdf3cf81ac5b))
+
+- **design**: State the netbox-branching versions the contract covers
+  ([`27b7b20`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/27b7b20af4aea5fe28a8da582278c1b1475aff87))
+
+- **readme**: State the NetBox 4.6.9 floor in the trace sentence
+  ([`28a5ff6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/28a5ff68352f4acf11ab2f15ae75a57a580a60e7))
+
+### Features
+
+- **branching**: Fake the data migrations on a branch migrate
+  ([`2285945`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/22859456f9248276ac6f8ecd168e25aae752af8a))
+
+- **branching**: Keep a core delete in a branch out of main's plugin rows
+  ([`c726dcf`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c726dcf6e5dd7b101c07dd86021ddf5e38733288))
+
+- **branching**: Refuse every plugin entry point inside a branch
+  ([`eb78475`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/eb78475a87d74b70c78725ea19d26988fd3b3bce))
+
+- **branching**: Refuse reverts that cannot restore plugin data
+  ([`5a263e6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/5a263e652c2251cbf1e95c679d2d768da5db34c8))
+
+- **branching**: Refuse to start beside netbox-branching older than 1.2
+  ([`d777a45`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d777a45b9eb4bb8621f5fc0bb9d98bf01148c3ae))
+
+- **tags**: Store profile and backend tags as NetBox tag assignments
+  ([`ea0e517`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ea0e51761f08cc1524247234789728f62acbedde))
+
+- **ui**: Add a Filters tab to the profile and AI backend lists
+  ([`1ea35ce`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1ea35ce3e14f36d178795601dab447ec052edcbc))
+
+### Performance Improvements
+
+- **import**: Snapshot a saved Device only when a save follows
+  ([`72dbaf0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/72dbaf0aaf160b8c3031741bb5831f72c062b666))
+
+### Refactoring
+
+- **branching**: Choose the refusal format with NetBox's is_api_request
+  ([`98c5f4c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/98c5f4c2380daeb15e73ff93c8930c82d93f5eca))
+
+- **migrations**: Split the tags move into a data and a schema migration
+  ([`ebee623`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ebee623822bedd028a6a1460f7997d6729da4ae0))
+
+### Testing
+
+- Keep the other plugins' settings in a PLUGINS_CONFIG override
+  ([`47c6891`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/47c6891498e1eac4245b3644c0d1a81db96298a5))
+
+- Refuse a PLUGINS_CONFIG override that can drop a plugin entry
+  ([`3f1301f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/3f1301fb5910c401c379ce8da04783aba4442842))
+
+- **branching**: Keep the base netbox-branching settings in the test settings
+  ([`a22cc1a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a22cc1a1af77a8ab24f034137bb3ac955def9ae3))
+
+- **branching**: Make the base-settings check fail when it has nothing to compare
+  ([`e2b2050`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e2b2050bfeae97a74e0f9c523f023b974b455430))
+
+- **branching**: Refuse a plugin foreign key to a branchable plugin model
+  ([`7c9b2b8`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7c9b2b8df5450ed932a0d0634d946e019be88e36))
+
+- **branching**: Skip the branching modules on one installed-app fact
+  ([`6215d59`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6215d590f77c270374d6ba4296577743bbd779b4))
+
+- **changelog**: Check many-to-many changes in the snapshot guard
+  ([`6f857f9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6f857f913a6cb173c89fc51497f89f547370f558))
+
+- **changelog**: Share the webhook event rule fixture
+  ([`be76a56`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/be76a5673ea5b4940888304f1f0e97c26f381c32))
+
+- **filters**: Search import profiles by name through the inherited q filter
+  ([`325fbab`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/325fbaba814ac70acd480abb96104981175983a1))
+
+- **migrations**: Refuse a faked migration that holds schema operations
+  ([`289c2bf`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/289c2bf92edc08395641d051de3e8f22eadd3389))
+
+- **migrations**: Restore the leaf through the shared helper
+  ([`f8bbf2f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f8bbf2f94479063b16db5f56aa3098ff61a803c0))
+
+- **release**: Pass the bumped version to the generator instead of patching its reader
+  ([`2679b9f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2679b9f50199f1c561b3ad736a0b4cbbc7843b36))
+
+- **tags**: Check only the model checks for a tags clash
+  ([`d89ef2b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d89ef2b25023d657def28b6ea73124a43930003f))
+
+
 ## v2.6.0 (2026-09-23)
 
 ### Bug Fixes
