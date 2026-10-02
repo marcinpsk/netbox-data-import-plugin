@@ -26,7 +26,7 @@ from .models import (
     locked_profile_policy,
 )
 from .object_permissions import POLICY_WRITE_REFUSED, delete_permission_scoped_objects, save_permission_scoped_object
-from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
+from .plan import Diagnostic, Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
     effective_device_name,
     has_below_rack_position,
@@ -114,7 +114,7 @@ def _refuse_blind_overwrite(actor, row) -> None:
 def refuse_moved_policy(locked_profile, reviewed_fingerprint) -> None:
     """Refuse a decision made against a policy that has already moved under this preview.
 
-    A preview revision is per session, so it cannot see another operator's profile edit.
+    A preview revision is per browser session, so it cannot see another operator's profile edit.
     """
     if locked_profile.planning_fingerprint != reviewed_fingerprint:
         raise ProfilePolicyMoved(PROFILE_POLICY_MOVED)
@@ -484,6 +484,7 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     "profile.dangling_reference": "The import profile names something NetBox no longer offers.",
     "rack.add_permission": "Permission denied: dcim.add_rack",
     "rack.change_permission": "Permission denied: dcim.change_rack",
+    "rack.inaccessible_match": "Permission denied: dcim.view_rack",
     "rack.duplicate_name": "The rack name appears more than once in this import.",
     "rack.duplicate_source_id": "The source ID appears more than once in this import.",
     "rack.ignored": "Ignored rack",
@@ -884,6 +885,58 @@ class TraceWorkspaceUnit:
         return (sync,)
 
 
+def _present_object_reviews(units, viewer) -> tuple:
+    """Hide cached object facts when the viewer can no longer read their Device or Rack."""
+    from dcim.models import Device, Rack
+
+    # Use the same projection as rendering, including changes and secondary diagnostics.
+    references = [WorkspaceUnit.from_unit(unit).extra_data for unit in units]
+    visible_ids = {}
+    for object_type, model in (("device", Device), ("rack", Rack)):
+        key = f"netbox_{object_type}_id"
+        reviewed_ids = {data[key] for data in references if data.get(key) is not None}
+        visible_ids[object_type] = set(
+            model.objects.restrict(viewer, "view").filter(pk__in=reviewed_ids).values_list("pk", flat=True)
+        )
+    presented = []
+    for unit, references_for_unit in zip(units, references, strict=True):
+        hidden_type = next(
+            (
+                object_type
+                for object_type, ids in visible_ids.items()
+                if (object_id := references_for_unit.get(f"netbox_{object_type}_id")) is not None
+                and object_id not in ids
+            ),
+            None,
+        )
+        if hidden_type is None:
+            presented.append(unit)
+            continue
+        # Only source evidence survives: details and field snapshots can name the hidden object.
+        display = {
+            key: value
+            for key, value in unit.display.items()
+            if key in {"object_type", "row_number", "source_id", "name", "rack_name", "source_row"}
+        }
+        presented.append(
+            replace(
+                unit,
+                disposition=Disposition.INVALID,
+                changes=(),
+                display=display,
+                diagnostics=(
+                    Diagnostic(
+                        code=f"{hidden_type}.inaccessible_match",
+                        severity=Severity.ERROR,
+                        identities=(unit.identity,),
+                        display=display,
+                    ),
+                ),
+            )
+        )
+    return tuple(presented)
+
+
 class ReviewWorkspace:
     """Read-only presentation of the accepted Import Plan."""
 
@@ -898,7 +951,7 @@ class ReviewWorkspace:
         """Return the viewer's redacted copy, built on first use so a command that renders nothing reads nothing."""
         from .cable_disclosure import present_units
 
-        return present_units(self.plan.units, self._viewer)
+        return _present_object_reviews(present_units(self.plan.units, self._viewer), self._viewer)
 
     @cached_property
     def units(self) -> tuple[WorkspaceUnit, ...]:
@@ -907,7 +960,7 @@ class ReviewWorkspace:
 
     @classmethod
     def from_dict(cls, data: dict, viewer) -> ReviewWorkspace:
-        """Restore a workspace from the session's serialized Import Plan."""
+        """Restore a workspace from a serialized Import Plan."""
         return cls(ImportPlan.from_dict(data), viewer)
 
     @property
@@ -1048,128 +1101,6 @@ class ReviewWorkspace:
         columns.sort(key=lambda column: -int(column.get("count") or 0))
         return columns
 
-    def auto_match_devices(self, profile, actor, target) -> AutoMatchSummary:  # noqa: C901
-        """Save safe exact device matches for every eligible plan source row."""
-        from dcim.models import Device
-        from django.core.exceptions import ValidationError
-        from django.db import IntegrityError
-
-        from .models import DeviceExistingMatch
-        from .object_permissions import ObjectPermissionDenied, save_permission_scoped_object
-
-        site = target["site"]
-        tenant_id = target["tenant"].pk if target["tenant"] else None
-        visible_devices = Device.objects.restrict(actor, "view")
-        ignored_source_ids = set(profile.ignored_devices.values_list("source_id", flat=True))
-        class_mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
-        eligible_rows = []
-        for row in self.source_rows:
-            source_id = source_text(row.get("source_id"))
-            mapping = class_mappings.get(source_text(row.get("device_class")))
-            if (
-                mapping is None
-                or mapping.creates_rack
-                or mapping.ignore
-                or source_id in ignored_source_ids
-                or has_below_rack_position(row)
-            ):
-                continue
-            eligible_rows.append(row)
-
-        bound_device_by_source = dict(profile.device_matches.values_list("source_id", "netbox_device_id"))
-        bound_source_by_device = {device_id: source for source, device_id in bound_device_by_source.items()}
-        source_counts: dict[str, int] = {}
-        name_counts: dict[str, int] = {}
-        serial_counts: dict[str, int] = {}
-        asset_tag_counts: dict[str, int] = {}
-        for row in eligible_rows:
-            values = (
-                (source_text(row.get("source_id")), source_counts),
-                (identity_text(effective_device_name(row)), name_counts),
-                (source_text(row.get("serial")), serial_counts),
-                (identity_text(source_text(row.get("asset_tag"))[:50]), asset_tag_counts),
-            )
-            for value, counts in values:
-                if value:
-                    counts[value] = counts.get(value, 0) + 1
-
-        counts = {
-            "matched": 0,
-            "probable": 0,
-            "ambiguous": 0,
-            "placement_conflicts": 0,
-            "already": 0,
-            "skipped": 0,
-        }
-        side_map, _, _ = translation_maps()
-        for row in eligible_rows:
-            source_id = source_text(row.get("source_id"))
-            name = effective_device_name(row)
-            serial = source_text(row.get("serial"))
-            asset_tag = source_text(row.get("asset_tag"))[:50]
-            if not source_id:
-                continue
-            if source_counts.get(source_id, 0) > 1:
-                counts["ambiguous"] += 1
-                continue
-            if source_id in bound_device_by_source:
-                counts["already"] += 1
-                continue
-
-            device, method, ambiguous = _match_existing_device(
-                Device,
-                visible_devices,
-                name if name_counts.get(identity_text(name), 0) == 1 else "",
-                serial if serial_counts.get(serial, 0) == 1 else "",
-                asset_tag if asset_tag_counts.get(identity_text(asset_tag), 0) == 1 else "",
-                site,
-                tenant_id,
-            )
-            if ambiguous:
-                counts["ambiguous"] += 1
-                continue
-            if device is not None and method == "name":
-                face = side_map.get(source_text(row.get("face")).lower())
-                if _device_placement_differs(
-                    device,
-                    target["location"].pk if target["location"] else None,
-                    source_text(row.get("rack_name")),
-                    source_position(row.get("u_position")),
-                    face,
-                ):
-                    counts["placement_conflicts"] += 1
-                    continue
-            if device is not None:
-                bound_source = bound_source_by_device.get(device.pk)
-                if bound_source is not None and bound_source != source_id:
-                    counts["ambiguous"] += 1
-                    continue
-                try:
-                    save_permission_scoped_object(
-                        actor,
-                        DeviceExistingMatch,
-                        {"profile": profile, "source_id": source_id},
-                        {
-                            "netbox_device_id": device.pk,
-                            "device_name": device.name,
-                            "source_asset_tag": asset_tag,
-                        },
-                        on_existing="reject",
-                    )
-                except (ValidationError, IntegrityError, ObjectPermissionDenied):
-                    counts["skipped"] += 1
-                    continue
-                bound_device_by_source[source_id] = device.pk
-                bound_source_by_device[device.pk] = source_id
-                counts["matched"] += 1
-                continue
-            if name:
-                short_name = name.split(" - ")[-1].strip() if " - " in name else name
-                tenant_filter = {"tenant_id": tenant_id} if tenant_id is not None else {"tenant__isnull": True}
-                if visible_devices.filter(site=site, name__icontains=short_name, **tenant_filter).exists():
-                    counts["probable"] += 1
-        return AutoMatchSummary(**counts)
-
     def with_units(self, units) -> ReviewWorkspace:
         """Return a presentation-only copy with replaced units."""
         workspace = object.__new__(type(self))
@@ -1184,4 +1115,130 @@ class ReviewWorkspace:
         return replace(unit, **values)
 
 
-__all__ = ("AutoMatchSummary", "ReviewWorkspace", "WorkspaceUnit", "refuse_moved_policy")
+def auto_match_devices(workspace, profile, actor, target) -> AutoMatchSummary:  # noqa: C901
+    """Save safe exact device matches for every eligible source row of one reviewed plan.
+
+    A preview command runs this under the Preview Coordinator, which replans afterwards.
+    """
+    from dcim.models import Device
+    from django.core.exceptions import ValidationError
+    from django.db import IntegrityError
+
+    from .models import DeviceExistingMatch
+    from .object_permissions import ObjectPermissionDenied, save_permission_scoped_object
+
+    site = target["site"]
+    tenant_id = target["tenant"].pk if target["tenant"] else None
+    visible_devices = Device.objects.restrict(actor, "view")
+    ignored_source_ids = set(profile.ignored_devices.values_list("source_id", flat=True))
+    class_mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
+    eligible_rows = []
+    for row in workspace.source_rows:
+        source_id = source_text(row.get("source_id"))
+        mapping = class_mappings.get(source_text(row.get("device_class")))
+        if (
+            mapping is None
+            or mapping.creates_rack
+            or mapping.ignore
+            or source_id in ignored_source_ids
+            or has_below_rack_position(row)
+        ):
+            continue
+        eligible_rows.append(row)
+
+    bound_device_by_source = dict(profile.device_matches.values_list("source_id", "netbox_device_id"))
+    bound_source_by_device = {device_id: source for source, device_id in bound_device_by_source.items()}
+    source_counts: dict[str, int] = {}
+    name_counts: dict[str, int] = {}
+    serial_counts: dict[str, int] = {}
+    asset_tag_counts: dict[str, int] = {}
+    for row in eligible_rows:
+        values = (
+            (source_text(row.get("source_id")), source_counts),
+            (identity_text(effective_device_name(row)), name_counts),
+            (source_text(row.get("serial")), serial_counts),
+            (identity_text(source_text(row.get("asset_tag"))[:50]), asset_tag_counts),
+        )
+        for value, counts in values:
+            if value:
+                counts[value] = counts.get(value, 0) + 1
+
+    counts = {
+        "matched": 0,
+        "probable": 0,
+        "ambiguous": 0,
+        "placement_conflicts": 0,
+        "already": 0,
+        "skipped": 0,
+    }
+    side_map, _, _ = translation_maps()
+    for row in eligible_rows:
+        source_id = source_text(row.get("source_id"))
+        name = effective_device_name(row)
+        serial = source_text(row.get("serial"))
+        asset_tag = source_text(row.get("asset_tag"))[:50]
+        if not source_id:
+            continue
+        if source_counts.get(source_id, 0) > 1:
+            counts["ambiguous"] += 1
+            continue
+        if source_id in bound_device_by_source:
+            counts["already"] += 1
+            continue
+
+        device, method, ambiguous = _match_existing_device(
+            Device,
+            visible_devices,
+            name if name_counts.get(identity_text(name), 0) == 1 else "",
+            serial if serial_counts.get(serial, 0) == 1 else "",
+            asset_tag if asset_tag_counts.get(identity_text(asset_tag), 0) == 1 else "",
+            site,
+            tenant_id,
+        )
+        if ambiguous:
+            counts["ambiguous"] += 1
+            continue
+        if device is not None and method == "name":
+            face = side_map.get(source_text(row.get("face")).lower())
+            if _device_placement_differs(
+                device,
+                target["location"].pk if target["location"] else None,
+                source_text(row.get("rack_name")),
+                source_position(row.get("u_position")),
+                face,
+            ):
+                counts["placement_conflicts"] += 1
+                continue
+        if device is not None:
+            bound_source = bound_source_by_device.get(device.pk)
+            if bound_source is not None and bound_source != source_id:
+                counts["ambiguous"] += 1
+                continue
+            try:
+                save_permission_scoped_object(
+                    actor,
+                    DeviceExistingMatch,
+                    {"profile": profile, "source_id": source_id},
+                    {
+                        "netbox_device_id": device.pk,
+                        "device_name": device.name,
+                        "source_asset_tag": asset_tag,
+                    },
+                    on_existing="reject",
+                )
+            except (ValidationError, IntegrityError, ObjectPermissionDenied):
+                counts["skipped"] += 1
+                continue
+            bound_device_by_source[source_id] = device.pk
+            bound_source_by_device[device.pk] = source_id
+            counts["matched"] += 1
+            continue
+        if name:
+            short_name = name.split(" - ")[-1].strip() if " - " in name else name
+            tenant_filter = {"tenant_id": tenant_id} if tenant_id is not None else {"tenant__isnull": True}
+            if visible_devices.filter(site=site, name__icontains=short_name, **tenant_filter).exists():
+                counts["probable"] += 1
+    return AutoMatchSummary(**counts)
+
+
+__all__ = ("AutoMatchSummary", "ReviewWorkspace", "WorkspaceUnit", "auto_match_devices", "refuse_moved_policy")

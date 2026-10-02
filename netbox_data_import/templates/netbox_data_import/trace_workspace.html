@@ -47,9 +47,11 @@
 
 <div hx-history="false">
 <h1 class="page-title mb-3">Trace Review Workspace</h1>
+{# The page-level claim the proposal cards and pickers post; every form below renders the same one. #}
+<form id="ndi-preview-claim" hidden>{% include "netbox_data_import/inc/preview_claim.html" %}</form>
 
 <div class="{% if drift %}alert alert-warning{% else %}card mb-3 p-2{% endif %}
-            d-flex align-items-center justify-content-between" {% if drift %}role="alert"{% endif %}>
+            d-flex flex-row align-items-center justify-content-between" {% if drift %}role="alert"{% endif %}>
   <div>
     {% if drift %}
       <strong>NetBox has changed since this preview was read.</strong>
@@ -62,15 +64,15 @@
     {% endif %}
   </div>
   <form id="traceWorkspaceRereadForm" method="post"
-        action="{% url 'plugins:netbox_data_import:trace_workspace_reread' %}" class="ms-3"
-        hx-post="{% url 'plugins:netbox_data_import:trace_workspace_reread' %}"
+        action="{% url 'plugins:netbox_data_import:preview_reread' %}" class="ms-3"
+        hx-post="{% url 'plugins:netbox_data_import:preview_reread' %}"
         hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
     {% csrf_token %}
-    <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
-    <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
+    {% include "netbox_data_import/inc/preview_claim.html" %}
+    <input type="hidden" name="next" value="{{ reread_next }}">
     <button type="submit" id="traceWorkspaceReread"
-            class="btn {% if drift %}btn-warning{% else %}btn-outline-secondary{% endif %}"
-            {% if retained_sync_reason %}disabled title="{{ retained_sync_reason }}"{% endif %}>
+            class="btn {% if drift or retained_sync_reason %}btn-warning{% else %}btn-outline-secondary{% endif %}"
+            {% if sync_running %}disabled title="{{ retained_sync_reason }}"{% endif %}>
       Re-read from NetBox
     </button>
   </form>
@@ -172,7 +174,7 @@
                             hx-post="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
                             hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
                         {% csrf_token %}
-                        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+                        {% include "netbox_data_import/inc/preview_claim.html" %}
                         <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
                         <input type="hidden" name="location_key" value="{{ mapping.key }}">
                         <button type="submit" name="clear" value="1" class="btn btn-sm btn-outline-secondary"
@@ -229,7 +231,7 @@
           <form method="post" action="{% url action.url_name %}" class="d-inline">
             {% csrf_token %}
             <input type="hidden" name="identity" value="{{ trace.identity }}">
-            <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+            {% include "netbox_data_import/inc/preview_claim.html" %}
             <button type="submit" class="btn btn-primary" data-trace-action="{{ action.key }}"
                     {% if not action.enabled %}disabled{% endif %}>{{ action.label }}</button>
           </form>
@@ -334,7 +336,7 @@
                           hx-post="{% url 'plugins:netbox_data_import:trace_segment_policy' %}"
                           hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
                       {% csrf_token %}
-                      <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+                      {% include "netbox_data_import/inc/preview_claim.html" %}
                       <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
                       <input type="hidden" name="segment" value="{{ segment.index }}">
                       <label class="visually-hidden" for="{{ segment.form.cable_type.id_for_label }}">
@@ -471,8 +473,7 @@
         <ul class="list-unstyled mb-0">
           {% for termination in attention_terminations %}
             <li class="card ndi-proposal-card mb-3" data-proposal-field="{{ termination.field_key }}"
-                data-proposal-url="{% url 'plugins:netbox_data_import:trace_proposal' %}"
-                data-preview-revision="{{ preview_revision }}">
+                data-proposal-url="{% url 'plugins:netbox_data_import:trace_proposal' %}">
               <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
                 <strong>{{ termination.label }}</strong>
                 <span class="badge ndi-trace-state-{{ termination.proposal.state_style }}"
@@ -562,7 +563,7 @@
                           hx-post="{% url 'plugins:netbox_data_import:trace_cable_policy' %}"
                           hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
                       {% csrf_token %}
-                      <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+                      {% include "netbox_data_import/inc/preview_claim.html" %}
                       <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
                       <input type="hidden" name="cable_class" value="{{ policy.cable_class }}">
                       <label class="visually-hidden" for="{{ policy.form.cable_type.id_for_label }}">
@@ -618,7 +619,7 @@
             hx-post="{% url 'plugins:netbox_data_import:trace_resolve_device' %}"
             hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
         {% csrf_token %}
-        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+        {% include "netbox_data_import/inc/preview_claim.html" %}
         <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
         <input type="hidden" name="search" id="traceDeviceOfferedSearch">
         <input type="hidden" name="offset" id="traceDeviceOfferedOffset">
@@ -659,7 +660,7 @@
             hx-post="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
             hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
         {% csrf_token %}
-        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+        {% include "netbox_data_import/inc/preview_claim.html" %}
         <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
         <input type="hidden" name="location_key" id="traceLocationKey">
         <input type="hidden" name="location_id" id="traceLocationId">
@@ -698,7 +699,7 @@
             hx-post="{% url 'plugins:netbox_data_import:trace_resolve_termination' %}"
             hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
         {% csrf_token %}
-        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+        {% include "netbox_data_import/inc/preview_claim.html" %}
         <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
         <input type="hidden" name="search" id="traceTerminationOfferedSearch">
         <input type="hidden" name="offset" id="traceTerminationOfferedOffset">
@@ -731,6 +732,7 @@
 </div>
 
 {{ proposal_fields|json_script:"traceProposalFields" }}
+<script src="{% static 'netbox_data_import/js/preview_claim.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_proposals.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_picker.js' %}?v={{ plugin_version }}"></script>
 </div>

@@ -3,21 +3,30 @@
 
 import {readFileSync} from 'node:fs';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
-import {completed, fixture, payload} from './trace_proposal_fixture.js';
+import {CLAIM, completed, fixture, payload} from './trace_proposal_fixture.js';
 
 const source = readFileSync('netbox_data_import/static/netbox_data_import/js/trace_proposals.js', 'utf8');
+const claimSource = readFileSync('netbox_data_import/static/netbox_data_import/js/preview_claim.js', 'utf8');
 const node = name => document.querySelector('[data-proposal-' + name + ']');
 const button = key => document.querySelector('[data-proposal-action="' + key + '"]');
 const response = body => ({ok: true, json: async () => body});
+const refused = (status, error) => ({ok: false, status, json: async () => ({ok: false, error})});
+const cardOf = key => document.querySelector('[data-proposal-field="' + key + '"]');
+const inCard = (key, selector) => cardOf(key).querySelector(selector);
+const reads = () => fetch.mock.calls.filter(([, options = {}]) => !options.method);
+let reload;
 
-function mount(initial = payload()) {
-  document.body.innerHTML = fixture(initial);
+function mount(initial = payload(), others = {}) {
+  document.body.innerHTML = fixture(initial, others);
+  window.eval(claimSource);
   window.eval(source);
 }
 
 beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal('fetch', vi.fn(async () => response(completed())));
+  reload = vi.fn();
+  vi.stubGlobal('location', {reload});
 });
 afterEach(async () => {
   document.body.replaceChildren();
@@ -35,7 +44,7 @@ it('polls at three seconds and stops at a terminal response', async () => {
   await vi.advanceTimersByTimeAsync(1);
   expect(fetch).toHaveBeenCalledTimes(1);
   const asked = new URL(fetch.mock.calls[0][0]);
-  expect([...asked.searchParams]).toEqual([['field_key', 'field'], ['preview_revision', 'revision-1']]);
+  expect([...asked.searchParams]).toEqual([['field_key', 'field'], ...CLAIM]);
   expect(node('badge').textContent).toBe('Proposal - not applied');
   expect(node('progress').hidden).toBe(true);
   await vi.advanceTimersByTimeAsync(12000);
@@ -107,53 +116,132 @@ it('renders a failed attempt and offers Ask AI again', () => {
   expect([button('request').textContent, button('request').disabled]).toEqual(['Ask AI again', false]);
 });
 
-it('sends cancel with the field, attempt, revision and CSRF token once after repeated script evaluation', async () => {
+it('sends cancel with the field, attempt, claim and CSRF token once after repeated script evaluation', async () => {
   mount();
   window.eval(source);
   button('cancel').click();
   button('cancel').click();
   await vi.advanceTimersByTimeAsync(0);
-  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(fetch).toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(12000);
-  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(fetch).toHaveBeenCalledTimes(1);
   const [url, options] = fetch.mock.calls[0];
   expect([url, options.method, options.credentials, options.headers.Accept]).toEqual([
     '/cancel/', 'POST', 'same-origin', 'application/json',
   ]);
   expect([...options.body]).toEqual([
-    ['csrfmiddlewaretoken', 'fixture-token'], ['preview_revision', 'revision-1'],
-    ['field_key', 'field'], ['proposal_id', '7'],
+    ['csrfmiddlewaretoken', 'fixture-token'], ...CLAIM, ['field_key', 'field'], ['proposal_id', '7'],
   ]);
+  expect(reload).toHaveBeenCalledOnce();
 });
 
-it('keeps actions busy until the post-action refresh completes', async () => {
-  let finishRefresh;
-  fetch.mockImplementation((_url, options = {}) => options.method === 'POST'
-    ? response({ok: true})
-    : new Promise(done => { finishRefresh = done; }));
+it('stops every card polling before a successful action reloads the workspace', async () => {
+  const fieldOf = url => new URL(url).searchParams.get('field_key');
+  let otherAbortedAtReload;
+  reload.mockImplementation(() => {
+    otherAbortedAtReload = reads().find(([url]) => fieldOf(url) === 'other')[1].signal.aborted;
+  });
+  // `other` has a read in flight when the action lands, and `third` has its next read scheduled.
+  fetch.mockImplementation(async (url, options = {}) => {
+    if (options.method === 'POST') return response({ok: true, proposal_id: 7, status: 'cancelled', decision: ''});
+    return fieldOf(url) === 'other' ? new Promise(() => {}) : response(payload());
+  });
+  mount(completed(), {other: payload(), third: payload()});
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(reads().map(([url]) => fieldOf(url)).sort()).toEqual(['other', 'third']);
+  inCard('field', '[data-proposal-action="reject"]').click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(reload).toHaveBeenCalledOnce();
+  expect(otherAbortedAtReload).toBe(true);
+  await vi.advanceTimersByTimeAsync(12000);
+  expect(reads()).toHaveLength(2);
+});
+
+it('keeps the action busy while it posts and reloads without a post-action read', async () => {
+  let finishAction;
+  fetch.mockImplementation(() => new Promise(done => { finishAction = done; }));
   mount(completed());
   button('accept').click();
   await vi.advanceTimersByTimeAsync(0);
-  expect(fetch).toHaveBeenCalledTimes(2);
   expect(button('accept').disabled).toBe(true);
   button('accept').click();
   await vi.advanceTimersByTimeAsync(0);
-  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(fetch).toHaveBeenCalledTimes(1);
 
-  finishRefresh(response(completed()));
+  finishAction(response({ok: true, proposal_id: 7, status: 'completed', decision: 'accepted'}));
   await vi.advanceTimersByTimeAsync(0);
-  expect(button('accept').disabled).toBe(false);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(reload).toHaveBeenCalledOnce();
+  expect(button('accept').disabled).toBe(true);
+});
+
+it('ignores a poll answer that arrives after the reload started', async () => {
+  let finishPoll;
+  fetch.mockImplementation(async (_url, options = {}) => options.method === 'POST'
+    ? response({ok: true, proposal_id: 7, status: 'cancelled', decision: ''})
+    : new Promise(done => { finishPoll = done; }));
+  mount(completed(), {other: payload()});
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(reads()).toHaveLength(1);
+  const pollSignal = reads()[0][1].signal;
+  inCard('field', '[data-proposal-action="reject"]').click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(reload).toHaveBeenCalledOnce();
+  expect(pollSignal.aborted).toBe(true);
+
+  // The stub ignores the abort, so only the reload latch keeps the late answer off the card.
+  finishPoll(response(completed({candidate: 'late (Rear port)'})));
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(inCard('other', '[data-proposal-candidate]').textContent).toBe('');
+  expect(inCard('other', '[data-proposal-error]').textContent).toBe('');
+  expect(reads()).toHaveLength(1);
+});
+
+it('lets one reload win when actions on two cards both succeed', async () => {
+  const finish = {};
+  fetch.mockImplementation(async (url, options = {}) => options.method === 'POST'
+    ? new Promise(done => { finish[options.body.get('field_key')] = done; })
+    : response(completed()));
+  mount(completed(), {other: completed()});
+  inCard('field', '[data-proposal-action="accept"]').click();
+  inCard('other', '[data-proposal-action="reject"]').click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(Object.keys(finish).sort()).toEqual(['field', 'other']);
+
+  finish.field(response({ok: true, proposal_id: 7, status: 'completed', decision: 'accepted'}));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(reload).toHaveBeenCalledOnce();
+
+  finish.other(response({ok: false, error: 'The preview is stale.'}));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(reload).toHaveBeenCalledOnce();
+  expect(inCard('other', '[data-proposal-error]').hidden).toBe(true);
+  expect(inCard('other', '[data-proposal-action="reject"]').disabled).toBe(true);
+  expect(reads()).toHaveLength(0);
 });
 
 it('refreshes an action refusal and shows the server reason', async () => {
   fetch.mockImplementation(async (_url, options) => options.method === 'POST'
-    ? {ok: false, json: async () => ({ok: false, error: 'The proposal is stale.'})}
+    ? refused(409, 'The proposal is stale.')
     : response(completed()));
   mount(completed());
   button('accept').click();
   await vi.advanceTimersByTimeAsync(0);
   expect([node('error').hidden, node('error').textContent]).toEqual([false, 'The proposal is stale.']);
   expect(button('accept').disabled).toBe(false);
+  expect(reload).not.toHaveBeenCalled();
+});
+
+it('stops polling a card whose claim the server refuses and shows why', async () => {
+  fetch.mockImplementation(async () => refused(409, 'A newer preview replaced this one.'));
+  mount(payload(), {other: payload()});
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(reads()).toHaveLength(2);
+  expect(inCard('field', '[data-proposal-error]').textContent).toBe('A newer preview replaced this one.');
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(12000);
+  expect(reads()).toHaveLength(2);
+  expect(reload).not.toHaveBeenCalled();
 });
 
 it('retries a failed pending read at the next interval', async () => {

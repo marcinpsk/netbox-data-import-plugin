@@ -4,6 +4,7 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { claim, claimForm, postedFields, scriptSource, servePage } from "./preview_page.js";
 
 const controllerSource = readFileSync(
   resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/contact_candidate_modal.js"),
@@ -13,6 +14,7 @@ const tomSelectSource = readFileSync(
   resolve(process.cwd(), "node_modules/tom-select/dist/js/tom-select.complete.js"),
   "utf8",
 );
+const claimSource = scriptSource("preview_claim.js");
 const rowActionsSource = readFileSync(
   resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/preview_row_actions.js"),
   "utf8",
@@ -21,9 +23,7 @@ const rowActionsSource = readFileSync(
 const previewFixture = `
   <base href="http://preview.test/">
   <input type="hidden" name="csrfmiddlewaretoken" value="csrf-token">
-  <input type="hidden" id="ndi-preview-revision" value="revision-one">
-  <div id="ndi-preview-stale" hidden>Saved changes are pending.</div>
-  <button type="button" id="ndi-run-import">Run Import</button>
+  ${claimForm()}
   <button type="button" class="btn btn-outline-warning" data-ndi-modal="#contactCandidateModal"
           data-source-id="source-first" data-object-type="device"
           data-row-number="first-row">Resolve contact fields</button>
@@ -31,7 +31,6 @@ const previewFixture = `
     <form id="contactCandidateForm" action="/save-resolution/"
           data-contact-lookup-field="email" data-contact-lookup-url="/contact-lookup/">
       <div class="modal-body"></div>
-      <input type="hidden" name="profile_id" value="7">
       <input type="hidden" name="source_column" value="candidate:contact">
       <input type="hidden" name="source_id" id="contactCandidateSourceId">
       <input type="hidden" name="original_value" id="contactCandidateOriginalValue">
@@ -128,6 +127,7 @@ async function setUp(page, fixture = previewFixture, candidateRows = {}) {
     node.textContent = JSON.stringify({...JSON.parse(node.textContent), ...rows});
   }, candidateRows);
   await initNetBoxSelects(page);
+  await page.addScriptTag({ content: claimSource });
   await page.addScriptTag({ content: controllerSource });
 }
 
@@ -364,12 +364,14 @@ test("a detected NetBox Contact is offered without being applied silently", asyn
 async function stubRowAction(page, { fails = null } = {}) {
   await page.evaluate((failure) => {
     window.__calls = [];
-    window.__staleMarked = 0;
+    window.__reloads = 0;
     window.ndiPostPreviewAction = (url, body) => {
       window.__calls.push({ url, fields: Object.fromEntries(body.entries()) });
-      return failure ? Promise.reject(new Error(failure)) : Promise.resolve({ ok: true });
+      return failure
+        ? Promise.reject(new Error(failure))
+        : Promise.resolve({ ok: true, preview_state: "replanned" });
     };
-    window.ndiMarkPreviewStale = () => { window.__staleMarked += 1; };
+    window.ndiReloadPreview = () => { window.__reloads += 1; };
   }, fails);
 }
 
@@ -389,63 +391,20 @@ test("saving posts through the row-action helper instead of navigating", async (
     name: "Contact",
     phone: "Contact Number",
   });
-  expect(await page.evaluate(() => window.__staleMarked)).toBe(1);
-});
-
-test("a saved row reports itself resolved without a recalculation", async ({ page }) => {
-  await setUp(page);
-  await stubRowAction(page);
-  await openRow(page, "first-row", "source-first");
-
-  await page.evaluate(() => document.getElementById("contactCandidateForm")
-    .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-
-  const button = page.locator('[data-ndi-modal="#contactCandidateModal"][data-source-id="source-first"]');
-  await expect(button).toHaveClass(/ndi-contact-resolved/);
-  await expect(button).not.toHaveClass(/btn-outline-warning/);
-  await expect(button).toContainText("Contact resolved");
+  await expect.poll(() => page.evaluate(() => window.__reloads)).toBe(1);
 });
 
 test("a refused save states the reason in the modal and keeps it open", async ({ page }) => {
   await setUp(page);
-  await stubRowAction(page, { fails: "The preview was recalculated in another tab." });
+  await stubRowAction(page, { fails: "A newer preview replaced this one." });
   await openRow(page, "first-row", "source-first");
 
   await page.evaluate(() => document.getElementById("contactCandidateForm")
     .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
 
-  await expect(page.locator("#contactCandidateError")).toHaveText(
-    "The preview was recalculated in another tab.",
-  );
-  // The row is not resolved, so its button must still ask for a decision.
-  await expect(
-    page.locator('[data-ndi-modal="#contactCandidateModal"][data-source-id="source-first"]'),
-  ).not.toHaveClass(/ndi-contact-resolved/);
-  expect(await page.evaluate(() => window.__staleMarked)).toBe(0);
-});
-
-test("a saved decision is what the row shows when it is reopened", async ({ page }) => {
-  await setUp(page);
-  await stubRowAction(page);
-  await openRow(page, "first-row", "source-first");
-
-  // Decline a contact for this row, which is the furthest a decision can sit from the proposal.
-  await page.locator("#contactCandidateNone").check();
-  await page.evaluate(() => document.getElementById("contactCandidateForm")
-    .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-
-  await openRow(page, "first-row", "source-first");
-
-  await expect(page.locator("#contactCandidateNone")).toBeChecked();
-  expect(Object.values(await rolesByColumn(page)).filter(Boolean)).toEqual([]);
-  // Re-saving must not resurrect the proposal over the stored decision.
-  await page.evaluate(() => {
-    window.__calls.length = 0;
-    document.getElementById("contactCandidateForm")
-      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-  });
-  const calls = await page.evaluate(() => window.__calls);
-  expect(JSON.parse(calls[0].fields.resolved_fields).contact_field_sources).toEqual({});
+  await expect(page.locator("#contactCandidateError")).toHaveText("A newer preview replaced this one.");
+  await expect(page.locator("#contactCandidateForm button[type=submit]")).toBeEnabled();
+  expect(await page.evaluate(() => window.__reloads)).toBe(0);
 });
 
 test("a failure on one row is not shown when another row opens", async ({ page }) => {
@@ -461,12 +420,19 @@ test("a failure on one row is not shown when another row opens", async ({ page }
   await expect(page.locator("#contactCandidateError")).toHaveCount(0);
 });
 
-/* Load the fixture with both shipped controllers. Callers add their own stubs on top. */
+/* Load the fixture with both shipped controllers. Callers add their own stubs on top.
+ * `setContent` leaves the page on about:blank, where a reload would only erase it, so the
+ * reload is counted here; the routed tests below let a real one happen. */
 async function setUpShippedControllers(page) {
   await page.setContent(previewFixture);
   await initNetBoxSelects(page);
+  await page.addScriptTag({ content: claimSource });
   await page.addScriptTag({ content: rowActionsSource });
   await page.addScriptTag({ content: controllerSource });
+  await page.evaluate(() => {
+    window.__reloads = 0;
+    window.ndiReloadPreview = () => { window.__reloads += 1; };
+  });
 }
 
 /* Hold the save open so the modal can be driven while a request is still in flight. */
@@ -476,15 +442,13 @@ async function setUpWithPendingSave(page) {
     window.__requests = [];
     const realFetch = window.fetch.bind(window);
     window.__release = [];
-    window.__hides = 0;
-    window.Modal = { getOrCreateInstance: () => ({ hide: () => { window.__hides += 1; } }) };
     window.fetch = (url, options) => {
       if (!String(url).includes("/save-resolution/")) return realFetch(url, options);
       window.__requests.push({ url, fields: Object.fromEntries(options.body.entries()) });
       return new Promise((resolve, reject) => {
         window.__release.push({
           ok: () => resolve({ ok: true, status: 200, json: () => Promise.resolve(
-            { ok: true, row_number: 1, preview_state: "recalculation_required", message: "Saved." }) }),
+            { ok: true, row_number: 1, preview_state: "replanned", message: "Saved." }) }),
           fail: () => reject(new Error("save A failed")),
         });
       });
@@ -503,18 +467,12 @@ async function setUpBothControllers(page, { status = 200, payload = null } = {})
       window.fetch = (url, options) => {
         // Only the save is stubbed; the Contact lookup still goes out to its route.
         if (!String(url).includes("/save-resolution/")) return realFetch(url, options);
-        window.__requests.push({
-          url,
-          revision: options.body.get("preview_revision"),
-          csrf: options.headers["X-CSRFToken"],
-          accept: options.headers.Accept,
-          fields: Object.fromEntries(options.body.entries()),
-        });
+        window.__requests.push({ url, fields: Object.fromEntries(options.body.entries()) });
         return Promise.resolve({
           ok: code < 400,
           status: code,
           json: () => Promise.resolve(
-            responseBody || { ok: true, row_number: 1, preview_state: "recalculation_required", message: "Saved." },
+            responseBody || { ok: true, row_number: 1, preview_state: "replanned", message: "Saved." },
           ),
         });
       };
@@ -523,25 +481,78 @@ async function setUpBothControllers(page, { status = 200, payload = null } = {})
   );
 }
 
-test("the modal saves through the shipped row-action helper, not a copy of it", async ({ page }) => {
-  await setUpBothControllers(page);
+/* The page the preview serves, with both shipped controllers, so a save can reload it for real. */
+function routedPreview(revision, { suggestionUrl = "" } = {}) {
+  const page = previewFixture.replace(claimForm(), claimForm(revision)).replace(
+    'data-contact-lookup-url="/contact-lookup/"',
+    `data-contact-lookup-url="/contact-lookup/" data-contact-suggestion-url="${suggestionUrl}"`,
+  );
+  return `${page}<output id="ndi-revision">${revision}</output>
+    <script>${tomSelectSource}</script>
+    <script>
+      for (const select of document.querySelectorAll("select:not(.tomselected)")) {
+        new TomSelect(select, { create: false, maxOptions: undefined });
+      }
+      delete window.TomSelect;
+    </script>
+    <script>${claimSource}</script>
+    <script>${rowActionsSource}</script>
+    <script>${controllerSource}</script>`;
+}
+
+test("the modal saves through the shipped row-action helper and reloads the replanned preview", async ({ page }) => {
+  const saves = [];
+  await page.route("**/save-resolution/", async (route) => {
+    saves.push({ headers: route.request().headers(), fields: await postedFields(route.request()) });
+    await route.fulfill({ json: { ok: true, row_number: 1, preview_state: "replanned", message: "Saved." } });
+  });
+  const loads = await servePage(page, routedPreview);
   await openRow(page, "first-row", "source-first");
 
-  await page.evaluate(() => document.getElementById("contactCandidateForm")
-    .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-  await expect(page.locator("#ndi-preview-stale")).toBeVisible();
+  await page.locator("#contactCandidateForm button[type=submit]").click();
 
-  const requests = await page.evaluate(() => window.__requests);
-  expect(requests).toHaveLength(1);
-  expect(requests[0].url).toContain("/save-resolution/");
-  // The helper owns the revision stamp and the JSON negotiation, so both must arrive.
-  expect(requests[0].revision).toBe("revision-one");
-  expect(requests[0].csrf).toBe("csrf-token");
-  expect(requests[0].accept).toBe("application/json");
-  await expect(page.locator("#ndi-run-import")).toBeDisabled();
+  await expect(page.locator("#ndi-revision")).toHaveText("5");
+  expect(loads()).toBe(2);
+  expect(saves).toHaveLength(1);
+  // The helper owns the claim and the JSON negotiation, so both must arrive.
+  expect(saves[0].fields).toMatchObject({ source_id: "source-first", ...claim() });
+  expect(saves[0].headers["x-csrftoken"]).toBe("csrf-token");
+  expect(saves[0].headers.accept).toBe("application/json");
 });
 
-test("a server envelope without the recalculation state is refused", async ({ page }) => {
+test("a stale claim refusal stays in the modal and the page does not reload", async ({ page }) => {
+  await page.route("**/save-resolution/", (route) =>
+    route.fulfill({
+      status: 409,
+      json: { ok: false, error: "A newer preview replaced this one.", code: "preview_stale" },
+    }),
+  );
+  const loads = await servePage(page, routedPreview);
+  await openRow(page, "first-row", "source-first");
+
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+
+  await expect(page.locator("#contactCandidateError")).toHaveText("A newer preview replaced this one.");
+  await expect(page.locator("#contactCandidateForm button[type=submit]")).toBeEnabled();
+  expect(loads()).toBe(1);
+});
+
+test("the suggestion read sends the page claim and shows a refusal", async ({ page }) => {
+  const asked = [];
+  await page.route("**/contact-suggestion/**", async (route) => {
+    asked.push(new URL(route.request().url()).searchParams);
+    await route.fulfill({ status: 409, json: { error: "A newer preview replaced this one." } });
+  });
+  await servePage(page, (revision) => routedPreview(revision, { suggestionUrl: "/contact-suggestion/" }));
+
+  await openRow(page, "first-row", "source-first");
+
+  await expect(page.locator("#contactCandidateError")).toHaveText("A newer preview replaced this one.");
+  expect(asked).toHaveLength(1);
+  expect(Object.fromEntries(asked[0])).toEqual({ source_id: "source-first", ...claim() });
+});
+
+test("a server envelope without the replanned state is refused", async ({ page }) => {
   await setUpBothControllers(page, { payload: { ok: true, message: "Saved." } });
   await openRow(page, "first-row", "source-first");
 
@@ -549,28 +560,7 @@ test("a server envelope without the recalculation state is refused", async ({ pa
     .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
 
   await expect(page.locator("#contactCandidateError")).toContainText("invalid state");
-  await expect(page.locator("#ndi-preview-stale")).toBeHidden();
-});
-
-test("the save button is usable again on the next row", async ({ page }) => {
-  await setUpBothControllers(page);
-  await openRow(page, "first-row", "source-first");
-  // Press the real control, so a disabled button would stop the test the way it stops an operator.
-  await page.locator("#contactCandidateForm button[type=submit]").click();
-  await expect(page.locator("#ndi-preview-stale")).toBeVisible();
-
-  // `saved-row` stores a name only, so opening it proves the button is restored for a row the
-  // required-field check would still stop.
-  await openRow(page, "saved-row", "source-saved");
-  await expect(page.locator("#contactCandidateForm button[type=submit]")).toBeEnabled();
-
-  await openRow(page, "first-row", "source-first");
-
-  const save = page.locator("#contactCandidateForm button[type=submit]");
-  await expect(save).toBeEnabled();
-  await expect(save).toHaveText(/Save/);
-  await save.click();
-  expect(await page.evaluate(() => window.__requests.length)).toBe(2);
+  expect(await page.evaluate(() => window.__reloads)).toBe(0);
 });
 
 test("filling a missing field from a candidate row clears the block on saving", async ({ page }) => {
@@ -591,29 +581,6 @@ test("filling a missing field from a candidate row clears the block on saving", 
   const requests = await page.evaluate(() => window.__requests);
   expect(requests).toHaveLength(1);
   expect(JSON.parse(requests[0].fields.resolved_fields).contact_field_sources.name).toBe("Owner");
-});
-
-test("a linked Contact is still shown when the saved row is reopened", async ({ page }) => {
-  await page.route("**/contact-lookup/?q=*", async (route) => {
-    await route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({
-        results: [{ id: 91, name: "Late Contact", email: "late@example.invalid", phone: "+1 202-555-0199" }],
-      }),
-    });
-  });
-  await setUpBothControllers(page);
-  await openRow(page, "first-row", "source-first");
-  await page.locator("#contactCandidateLinkExisting").click();
-  await page.locator("#contactCandidateExisting + .ts-wrapper .ts-control input").fill("late");
-  await page.locator("#contactCandidateExisting + .ts-wrapper .ts-dropdown .option").click();
-  await page.locator("#contactCandidateForm button[type=submit]").click();
-  await expect(page.locator("#ndi-preview-stale")).toBeVisible();
-
-  await openRow(page, "first-row", "source-first");
-
-  await expect(page.locator("#contactCandidateContactId")).toHaveValue("91");
-  await expect(page.locator("#contactCandidateSummaryName")).toHaveText("Late Contact");
 });
 
 test("the missing-field message lands on an empty input, not a filled one", async ({ page }) => {
@@ -681,7 +648,7 @@ test("linking a Contact clears a validation message left on a literal", async ({
   expect(JSON.parse(requests[0].fields.resolved_fields).contact_id).toBe(77);
 });
 
-test("a save that settles late leaves the row now on screen alone", async ({ page }) => {
+test("a save that settles late still reloads the replanned preview", async ({ page }) => {
   await setUpWithPendingSave(page);
   await openRow(page, "first-row", "source-first");
   await page.locator("#contactCandidateForm button[type=submit]").click();
@@ -690,13 +657,9 @@ test("a save that settles late leaves the row now on screen alone", async ({ pag
   await openRow(page, "saved-row", "source-saved");
   await page.evaluate(() => window.__release[0].ok());
 
-  // The late response belongs to the row that is gone, so it must not close this one.
-  await expect(page.locator("#contactCandidateSourceId")).toHaveValue("source-saved");
+  // The save advanced the preview revision, so the row now on screen is stale as well.
+  await expect.poll(() => page.evaluate(() => window.__reloads)).toBe(1);
   await expect(page.locator("#contactCandidateError")).toHaveCount(0);
-  const submit = page.locator("#contactCandidateForm button[type=submit]");
-  await expect(submit).toBeEnabled();
-  await expect(submit).not.toHaveText("Saving...");
-  expect(await page.evaluate(() => window.__hides)).toBe(0);
 });
 
 test("a late failure does not report itself against another row", async ({ page }) => {
@@ -791,76 +754,4 @@ test("choosing no contact puts the offered fields out of use", async ({ page }) 
 
   await expect(page.locator("#contactCandidateValueRows .ndi-contact-literal").first()).toBeDisabled();
   await expect(page.locator("#contactCandidateSummaryName")).toHaveText("No contact for this row");
-});
-
-test("a Contact the save created is named on the page after the modal closes", async ({ page }) => {
-  await setUpBothControllers(page, {
-    payload: {
-      ok: true,
-      row_number: 1,
-      preview_state: "recalculation_required",
-      message: "Resolution saved.",
-      detail: "Contact 'Grace Hopper' was created in NetBox.",
-    },
-  });
-  await openRow(page, "first-row", "source-first");
-
-  await page.locator("#contactCandidateForm button[type=submit]").click();
-
-  await expect(page.locator("#ndi-preview-stale")).toBeVisible();
-  await expect(page.locator("#ndi-preview-stale .ndi-preview-stale-detail")).toHaveText(
-    "Contact 'Grace Hopper' was created in NetBox.",
-  );
-});
-
-test("a save that wrote nothing to NetBox claims nothing", async ({ page }) => {
-  await setUpBothControllers(page);
-  await openRow(page, "first-row", "source-first");
-
-  await page.locator("#contactCandidateForm button[type=submit]").click();
-
-  await expect(page.locator("#ndi-preview-stale")).toBeVisible();
-  await expect(page.locator("#ndi-preview-stale .ndi-preview-stale-detail")).toHaveCount(0);
-});
-
-test("a Contact this save created stays linked when the row is reopened", async ({ page }) => {
-  await setUp(page);
-  // The server answers with the decision it stored, which names the Contact it just created.
-  await page.evaluate(() => {
-    window.ndiMarkPreviewStale = () => {};
-    window.ndiPostPreviewAction = () =>
-      Promise.resolve({
-        ok: true,
-        detail: "Contact 'Grace Hopper' was created in NetBox.",
-        resolution: {
-          original_value: "{}",
-          resolved_fields: {
-            contact_resolution_applied: true,
-            contact_field_sources: { email: "Primary Contact", name: "Contact", phone: "Contact Number" },
-            contact_field_values: {},
-            contact_id: 4242,
-          },
-          contact: {
-            id: 4242,
-            name: "Grace Hopper",
-            email: "grace.hopper@example.invalid",
-            phone: "+44 20 7946 0102",
-          },
-        },
-      });
-  });
-  await openRow(page, "first-row", "source-first");
-
-  await page.evaluate(() => document.getElementById("contactCandidateForm")
-    .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-  await expect(
-    page.locator('[data-ndi-modal="#contactCandidateModal"][data-source-id="source-first"]'),
-  ).toHaveClass(/ndi-contact-resolved/);
-
-  await openRow(page, "first-row", "source-first");
-
-  await expect(page.locator("#contactCandidateContactId")).toHaveValue("4242");
-  expect(
-    await page.evaluate(() => document.getElementById("contactCandidateExisting").tomselect.getValue()),
-  ).toBe("4242");
 });

@@ -26,6 +26,14 @@ _Avoid_: Row action
 An audited attempt to apply selected Synchronization Units from an accepted Import Plan as one transaction.
 _Avoid_: Import run
 
+**Preview Coordinator**:
+The one database record of a browser session's active preview: its generation, revision, state, Import Plan, and queued Job. Every preview command changes it under its lock.
+_Avoid_: Preview session, session plan
+
+**Preview Claim**:
+The preview token, revision, Source Document, and Import Profile that a page posts with each preview command, so a command made against an older preview is refused.
+_Avoid_: Preview revision (alone)
+
 **Source Column**:
 A named column in a source file.
 

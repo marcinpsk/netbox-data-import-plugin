@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Preview quick actions enforce constrained ObjectPermission rows at their write seam."""
 
-from dcim.models import DeviceRole
+from dcim.models import DeviceRole, Site
+from django.contrib.messages import get_messages
 from django.test import Client, TestCase
 from django.urls import reverse
 
@@ -12,7 +13,14 @@ from netbox_data_import.models import (
     ImportProfile,
     ManufacturerMapping,
 )
-from netbox_data_import.tests.helpers import user_with_object_permission
+from netbox_data_import.tests.helpers import (
+    preview_claim,
+    preview_coordinator,
+    seed_workbook_preview,
+    user_with_object_permission,
+)
+
+SOURCE_IDS = ("allowed-source", "refused-source", "no-add-source", "no-delete-source")
 
 
 class QuickActionObjectPermissionTest(TestCase):
@@ -23,6 +31,9 @@ class QuickActionObjectPermissionTest(TestCase):
             name="Quick Action Scope Profile",
             adapter_config={"sheet_name": "Data", "source_id_column": "Id"},
         )
+        ColumnMapping.objects.create(profile=self.profile, source_column="Id", target_field="source_id")
+        ColumnMapping.objects.create(profile=self.profile, source_column="Name", target_field="device_name")
+        self.site = Site.objects.create(name="Quick Action Scope Site", slug="quick-action-scope-site")
         self.preview_url = reverse("plugins:netbox_data_import:import_preview")
 
     def _client_with(self, username, *grants):
@@ -30,21 +41,31 @@ class QuickActionObjectPermissionTest(TestCase):
             username,
             [
                 (ImportProfile, ["change"], {"pk": self.profile.pk}),
+                (Site, ["view"], {"pk": self.site.pk}),
                 *grants,
             ],
         )
         client = Client()
         client.force_login(user)
+        rows = [[source_id, f"device-{source_id}"] for source_id in SOURCE_IDS]
+        seed_workbook_preview(client, self.profile, self.site, ["Id", "Name"], rows)
         return client
 
     def _post(self, client, url_name, payload):
-        return client.post(
-            reverse(f"plugins:netbox_data_import:{url_name}"),
-            {"profile_id": self.profile.pk, **payload},
-        )
+        self._revision = preview_coordinator(client).revision
+        return client.post(reverse(f"plugins:netbox_data_import:{url_name}"), {**preview_claim(client), **payload})
 
     def _assert_preview_redirect(self, response):
         self.assertRedirects(response, self.preview_url, fetch_redirect_response=False)
+
+    def _assert_refused(self, client, response):
+        """The command went back to the preview with the permission refusal and left the revision."""
+        self._assert_preview_redirect(response)
+        self.assertIn(
+            "Permission denied: this action is outside your NetBox object permissions.",
+            [str(message) for message in get_messages(response.wsgi_request)],
+        )
+        self.assertEqual(preview_coordinator(client).revision, self._revision)
 
     def test_a_constrained_device_role_slug_is_refused_with_json_403(self):
         client = self._client_with(
@@ -88,7 +109,7 @@ class QuickActionObjectPermissionTest(TestCase):
             {"source_id": "refused-source", "device_name": "Refused Device"},
         )
 
-        self._assert_preview_redirect(response)
+        self._assert_refused(client, response)
         self.assertFalse(IgnoredDevice.objects.filter(profile=self.profile).exists())
 
     def test_profile_change_without_ignored_device_add_cannot_ignore(self):
@@ -100,7 +121,7 @@ class QuickActionObjectPermissionTest(TestCase):
             {"source_id": "no-add-source", "device_name": "No Add Device"},
         )
 
-        self._assert_preview_redirect(response)
+        self._assert_refused(client, response)
         self.assertFalse(IgnoredDevice.objects.filter(profile=self.profile).exists())
 
     def test_a_constrained_mapping_add_is_refused(self):
@@ -115,7 +136,7 @@ class QuickActionObjectPermissionTest(TestCase):
             {"source_make": "Refused Make", "netbox_mfg_slug": "refused"},
         )
 
-        self._assert_preview_redirect(response)
+        self._assert_refused(client, response)
         self.assertFalse(ManufacturerMapping.objects.filter(profile=self.profile).exists())
 
     def test_add_only_cannot_update_an_existing_mapping(self):
@@ -135,7 +156,7 @@ class QuickActionObjectPermissionTest(TestCase):
             {"source_make": "Acme", "netbox_mfg_slug": "after"},
         )
 
-        self._assert_preview_redirect(response)
+        self._assert_refused(client, response)
         mapping.refresh_from_db()
         self.assertEqual(mapping.netbox_manufacturer_slug, "before")
 
@@ -177,7 +198,7 @@ class QuickActionObjectPermissionTest(TestCase):
             {"source_make": "Acme", "netbox_mfg_slug": "outside"},
         )
 
-        self._assert_preview_redirect(response)
+        self._assert_refused(client, response)
         mapping.refresh_from_db()
         self.assertEqual(mapping.netbox_manufacturer_slug, "inside")
 
@@ -198,7 +219,7 @@ class QuickActionObjectPermissionTest(TestCase):
             {"source_column": "New Serial", "target_field": "serial"},
         )
 
-        self._assert_preview_redirect(response)
+        self._assert_refused(client, response)
         self.assertTrue(ColumnMapping.objects.filter(pk=displaced.pk).exists())
         self.assertFalse(ColumnMapping.objects.filter(profile=self.profile, source_column="New Serial").exists())
 
@@ -215,7 +236,7 @@ class QuickActionObjectPermissionTest(TestCase):
 
         response = self._post(client, "unignore_device", {"source_id": "refused-source"})
 
-        self._assert_preview_redirect(response)
+        self._assert_refused(client, response)
         self.assertTrue(IgnoredDevice.objects.filter(pk=ignored.pk).exists())
 
     def test_profile_change_without_ignored_device_delete_cannot_unignore(self):
@@ -228,15 +249,5 @@ class QuickActionObjectPermissionTest(TestCase):
 
         response = self._post(client, "unignore_device", {"source_id": ignored.source_id})
 
-        self._assert_preview_redirect(response)
+        self._assert_refused(client, response)
         self.assertTrue(IgnoredDevice.objects.filter(pk=ignored.pk).exists())
-
-    def test_unignore_rejects_a_non_numeric_profile_id_without_a_server_error(self):
-        client = self._client_with("quick-unignore-invalid-profile")
-
-        response = client.post(
-            reverse("plugins:netbox_data_import:unignore_device"),
-            {"profile_id": "not-an-id", "source_id": "source"},
-        )
-
-        self._assert_preview_redirect(response)

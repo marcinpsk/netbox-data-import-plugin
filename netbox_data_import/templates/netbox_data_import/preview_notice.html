@@ -1,0 +1,33 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
+{% extends 'base/layout.html' %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col col-md-7">
+    <div class="card">
+      <div class="card-header">
+        <h5 class="mb-0"><i class="mdi mdi-alert-circle-outline text-warning"></i> {{ title }}</h5>
+      </div>
+      <div class="card-body">
+        <p class="mb-3" role="alert">{{ message }}</p>
+        <div class="d-flex gap-2">
+          {% if offer_reread %}
+          <form method="post" action="{% url 'plugins:netbox_data_import:preview_reread' %}">
+            {% csrf_token %}
+            {% include "netbox_data_import/inc/preview_claim.html" %}
+            <input type="hidden" name="next" value="{{ next_url }}">
+            <button type="submit" class="btn btn-primary"><i class="mdi mdi-refresh"></i> Re-read the preview</button>
+          </form>
+          {% else %}
+          <a href="{{ next_url }}" class="btn btn-primary"><i class="mdi mdi-refresh"></i> Reload the preview</a>
+          {% endif %}
+          <a href="{% url 'plugins:netbox_data_import:import_setup' %}" class="btn btn-outline-secondary">Start a new import</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

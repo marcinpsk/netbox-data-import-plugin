@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""The session keeps pristine parsed rows, so a replayed resolution can express a removal."""
+"""The stored source keeps pristine parsed rows, so a replayed resolution can express a removal."""
 
 from threading import Event
 
 from django.contrib.auth import get_user_model
+from django.contrib.messages import get_messages
 from django.db import connection
 from django.db.utils import OperationalError
 from django.test import Client, TestCase, TransactionTestCase
@@ -12,7 +13,14 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from netbox_data_import.models import ColumnMapping, ImportProfile, SourceResolution
-from netbox_data_import.tests.helpers import profile_deleted_at_the_policy_lock, run_on_separate_connection
+from netbox_data_import.tests.helpers import (
+    preview_claim,
+    preview_coordinator,
+    profile_deleted_at_the_policy_lock,
+    run_on_separate_connection,
+    seed_workbook_preview,
+    upload_preview,
+)
 
 
 def _build_profile(name):
@@ -25,6 +33,15 @@ def _build_profile(name):
     ColumnMapping.objects.create(profile=profile, source_column="Tag", target_field="asset_tag")
     ColumnMapping.objects.create(profile=profile, source_column="Class", target_field="device_class")
     return profile
+
+
+def _seed_ignorable_row(client, profile):
+    """Make a one-row preview whose source ID is IGN-1 the client's active preview."""
+    from dcim.models import Site
+
+    ColumnMapping.objects.get_or_create(profile=profile, source_column="Id", target_field="source_id")
+    site, _ = Site.objects.get_or_create(name="Preview Lock Site", slug="preview-lock-site")
+    seed_workbook_preview(client, profile, site, ["Id", "Name", "Class"], [["IGN-1", "srv-1", "Server"]])
 
 
 def _seen(responses):
@@ -82,16 +99,15 @@ class UploadStoresPristineSourceTest(TestCase):
         )
 
         with open(fixture, "rb") as handle:
-            setup = self.client.post(
-                reverse("plugins:netbox_data_import:import_setup"),
-                {"profile": self.profile.pk, "site": self.site.pk, "excel_file": handle},
+            setup = upload_preview(
+                self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": handle}
             )
         self.assertEqual(setup.status_code, 302, setup.content[:300])
 
         from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.models import SourceDocument
 
-        stored = SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"])
+        stored = SourceDocument.objects.get(pk=preview_coordinator(self.client).source_document_id)
         replanned = ImportEngine.plan(
             self.profile,
             stored,
@@ -299,6 +315,7 @@ class PreviewActionWriteSerializationTest(TransactionTestCase):
             netbox_manufacturer_slug="dell",
             netbox_device_type_slug="dell-r660",
         )
+        _seed_ignorable_row(self.client, self.profile)
         responses = []
 
         def remap():
@@ -306,7 +323,7 @@ class PreviewActionWriteSerializationTest(TransactionTestCase):
                 self.client.post(
                     reverse("plugins:netbox_data_import:quick_resolve_device_type"),
                     {
-                        "profile_id": self.profile.pk,
+                        **preview_claim(self.client),
                         "source_make": "Dell",
                         "source_model": "R660",
                         "netbox_mfg_slug": "dell",
@@ -325,11 +342,12 @@ class PreviewActionWriteSerializationTest(TransactionTestCase):
         from netbox_data_import.models import IgnoredDevice
 
         IgnoredDevice.objects.create(profile=self.profile, source_id="IGN-1", device_name="srv-1")
+        _seed_ignorable_row(self.client, self.profile)
+        claim = preview_claim(self.client)
 
         with CaptureQueriesContext(connection) as captured:
             response = self.client.post(
-                reverse("plugins:netbox_data_import:unignore_device"),
-                {"profile_id": self.profile.pk, "source_id": "IGN-1"},
+                reverse("plugins:netbox_data_import:unignore_device"), {**claim, "source_id": "IGN-1"}
             )
 
         self.assertEqual(response.status_code, 302, response.content[:300])
@@ -404,10 +422,15 @@ class PreviewWriteVanishedProfileTest(TransactionTestCase):
         self.client.force_login(self.user)
 
     def _post_while_the_profile_vanishes(self, url_name, data):
-        """POST *data*, deleting the profile the moment the policy lock statement runs."""
+        """POST *data* with the preview's claim, deleting the profile the moment the policy lock runs."""
+        _seed_ignorable_row(self.client, self.profile)
+        claim = preview_claim(self.client)
         with profile_deleted_at_the_policy_lock(self.profile.pk) as deleted:
-            response = self.client.post(reverse(f"plugins:netbox_data_import:{url_name}"), data)
+            response = self.client.post(reverse(f"plugins:netbox_data_import:{url_name}"), {**claim, **data})
         self.assertEqual(deleted, [True], "the policy lock statement never ran")
+        self.assertIn(
+            "The import profile is no longer available.", [str(m) for m in get_messages(response.wsgi_request)]
+        )
         return response
 
     def test_unignoring_a_device_answers_a_deleted_profile(self):
@@ -418,7 +441,7 @@ class PreviewWriteVanishedProfileTest(TransactionTestCase):
 
         response = self._post_while_the_profile_vanishes(
             "unignore_device",
-            {"profile_id": self.profile.pk, "source_id": "IGN-1"},
+            {"source_id": "IGN-1"},
         )
 
         self.assertEqual(response.status_code, 302, response.content[:300])
@@ -428,7 +451,7 @@ class PreviewWriteVanishedProfileTest(TransactionTestCase):
         """The direct-mapping branch replaces a row under the lock, so it owes the same answer."""
         response = self._post_while_the_profile_vanishes(
             "quick_add_column_mapping",
-            {"profile_id": self.profile.pk, "source_column": "Hostname", "target_field": "device_name"},
+            {"source_column": "Hostname", "target_field": "device_name"},
         )
 
         self.assertEqual(response.status_code, 302, response.content[:300])

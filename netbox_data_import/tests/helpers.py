@@ -412,16 +412,98 @@ def make_dcim_objects(name_prefix=""):
     return site, manufacturer, device_type, role
 
 
+def _session_binding(client) -> str:
+    """Return the coordinator binding of the client's server-side session."""
+    import hashlib
+
+    return hashlib.sha256(client.session.session_key.encode()).hexdigest()
+
+
+def preview_coordinator(client):
+    """Return the Preview Coordinator row of the client's session."""
+    from netbox_data_import.models import PreviewCoordinator
+
+    return PreviewCoordinator.objects.get(session_binding=_session_binding(client))
+
+
+def preview_claim(client) -> dict:
+    """Return the Preview Claim the client's current page would post, as its form fields."""
+    from netbox_data_import.preview_coordinator import _claim_of
+
+    return _claim_of(preview_coordinator(client)).fields()
+
+
+def stored_plan(client) -> dict:
+    """Return the serialized Import Plan the client's preview holds."""
+    return preview_coordinator(client).plan
+
+
+def store_plan(client, data) -> None:
+    """Replace the stored plan in place, as a release with another plan schema would have left it."""
+    from netbox_data_import.models import PreviewCoordinator
+
+    PreviewCoordinator.objects.filter(pk=preview_coordinator(client).pk).update(plan=data)
+
+
+def upload_preview(client, data, **extra):
+    """Open the setup page and post its upload form with the claim that page rendered."""
+    from django.urls import reverse
+
+    url = reverse("plugins:netbox_data_import:import_setup")
+    client.get(url)
+    return client.post(url, {**preview_claim(client), **data}, **extra)
+
+
+def seed_preview(client, *, profile, document, plan, context):
+    """Make one planned upload the client's active preview, as the setup command leaves it."""
+    from django.utils import timezone
+
+    from netbox_data_import.models import PreviewCoordinator, PreviewState
+    from netbox_data_import.preview_coordinator import _new_token
+
+    owner_id = int(client.session["_auth_user_id"])
+    PreviewCoordinator.objects.update_or_create(
+        session_binding=_session_binding(client),
+        defaults={
+            "owner_id": owner_id,
+            "preview_token": _new_token(),
+            "revision": 1,
+            "state": PreviewState.READY,
+            "profile_id": profile.pk,
+            "source_document_id": document.pk,
+            "context": dict(context),
+            "plan": plan.to_dict(),
+            "job_id": None,
+            "expires_at": timezone.now() + PreviewCoordinator.PAYLOAD_LIFETIME,
+        },
+    )
+
+
+def seed_workbook_preview(client, profile, site, headers, rows, *, filename="preview.xlsx"):
+    """Store a workbook of these rows, plan it as the client's user, and make it the active preview."""
+    from django.contrib.auth import get_user_model
+
+    from netbox_data_import.import_engine import ImportEngine
+
+    actor = get_user_model().objects.get(pk=client.session["_auth_user_id"])
+    document = store_workbook_document(profile, headers, rows, actor, filename)
+    context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
+    seed_preview(
+        client,
+        profile=profile,
+        document=document,
+        plan=ImportEngine.plan(profile, document, actor, context),
+        context={**context, "filename": filename},
+    )
+    return document
+
+
 def setup_preview_with_device_matches(client, profile):
     """Populate a preview with two persisted device matches."""
     from dcim.models import Device
 
     from netbox_data_import.import_engine import ImportEngine
     from netbox_data_import.models import DeviceExistingMatch, SourceDocument
-    from netbox_data_import.preview_row_actions import (
-        PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
-        start_new_preview,
-    )
     from netbox_data_import.review_workspace import ReviewWorkspace
 
     site, _manufacturer, device_type, role = make_dcim_objects("Match")
@@ -462,22 +544,13 @@ def setup_preview_with_device_matches(client, profile):
             device_name=device2.name,
         )
 
-    plan = ImportEngine.plan(profile, document, actor, planning_context)
-    result = ReviewWorkspace(plan, actor)
-    session = client.session
-    start_new_preview(session, plan)
-    session["import_rows"] = result.source_rows
-    session["import_context"] = {
-        "profile_id": profile.pk,
-        "site_id": site.pk,
-        "location_id": None,
-        "tenant_id": None,
-        "filename": "sample_workbook.xlsx",
-        "source_document_id": document.pk,
-    }
-    session["import_preview_pending"] = True
-    session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
-    session.save()
+    seed_preview(
+        client,
+        profile=profile,
+        document=document,
+        plan=ImportEngine.plan(profile, document, actor, planning_context),
+        context={**planning_context, "filename": "sample_workbook.xlsx"},
+    )
     return site, device1, device2, device_rows
 
 

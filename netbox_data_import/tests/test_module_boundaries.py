@@ -11,7 +11,7 @@ from django.test import SimpleTestCase
 
 PACKAGE = pathlib.Path(__file__).resolve().parents[1]
 PACKAGE_NAME = PACKAGE.name
-CALLERS = ("views.py", "jobs.py")
+CALLERS = ("views.py", "jobs.py", "preview_coordinator.py")
 INTERPRETERS = ("flat_workbook.py", "trace_workbook.py")
 TARGET_MODULES = ("target_modules.py", "cable_target.py")
 FORBIDDEN_TARGET_MODULE_IMPORTS = frozenset({"flat_workbook", "trace_workbook", "views"})
@@ -293,7 +293,11 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
     def test_views_and_jobs_call_only_the_public_coordinator_methods(self):
         calls = {name: _import_engine_calls(PACKAGE / name) for name in CALLERS}
 
-        self.assertEqual(calls, {"views.py": {"plan", "execute"}, "jobs.py": {"execute"}})
+        # A preview command runs a single row through the operation that replans in its own savepoint.
+        self.assertEqual(
+            calls,
+            {"views.py": {"plan", "execute_and_replan"}, "jobs.py": {"execute"}, "preview_coordinator.py": {"plan"}},
+        )
 
     def test_private_coordinator_attribute_references_are_detected(self):
         """The boundary rejects private access even when it is not a call."""

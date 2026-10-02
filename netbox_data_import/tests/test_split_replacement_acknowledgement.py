@@ -10,8 +10,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 
 from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceResolution
-from netbox_data_import.preview_row_actions import PREVIEW_PLAN_SESSION_KEY, PREVIEW_REVISION_SESSION_KEY
-from netbox_data_import.tests.helpers import workbook_bytes
+from netbox_data_import.tests.helpers import preview_claim, upload_preview, workbook_bytes
 
 CAPITAL_SHARP = "STRAẞE"
 SHARP = "Straße"
@@ -54,24 +53,20 @@ class SplitReplacementAcknowledgementTest(TestCase):
             ),
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        setup = self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-        )
+        setup = upload_preview(self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload})
         self.assertEqual(setup.status_code, 302, setup.content[:300])
         preview = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         self.assertEqual(
             preview.context["split_field_values_by_source_id"]["D-1"]["asset_tag"], CAPITAL_SHARP, "fixture"
         )
 
-    def save(self, resolved_fields, acknowledged=None):
+    def save(self, resolved_fields, acknowledged=None, claim=None):
         data = {
-            "profile_id": self.profile.pk,
+            **(claim or preview_claim(self.client)),
             "source_id": "D-1",
             "source_column": "device_name",
             "original_value": NAME,
             "resolved_fields": json.dumps(resolved_fields),
-            "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
         }
         if acknowledged is not None:
             data["acknowledged_fields"] = json.dumps(acknowledged)
@@ -111,69 +106,35 @@ class SplitReplacementAcknowledgementTest(TestCase):
         self.assertFalse(self.saved())
         self.assertEqual(self.save({"serial": "SN900"}, acknowledged=["serial"]).status_code, 200)
 
-    def test_a_split_cannot_use_another_profiles_preview(self):
-        other = ImportProfile.objects.create(name="Other Split Profile")
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:save_resolution"),
-            {
-                "profile_id": other.pk,
-                "source_id": "D-1",
-                "source_column": "device_name",
-                "resolved_fields": json.dumps({"asset_tag": CAPITAL_SHARP}),
-                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
-            },
-            headers={"accept": "application/json"},
-        )
-        self.assertEqual(response.status_code, 400, response.content)
-        self.assertEqual(response.json()["error"], "The selected profile is not the active import profile.")
-        self.assertFalse(SourceResolution.objects.filter(profile=other).exists())
-
-    def test_a_split_requires_one_source_row_in_an_active_preview(self):
-        row = self.client.session[PREVIEW_PLAN_SESSION_KEY]["units"][0]
-        for count in (0, 2):
-            with self.subTest(count=count):
-                session = self.client.session
-                plan = session[PREVIEW_PLAN_SESSION_KEY]
-                plan["units"] = [] if count == 0 else [row, {**row, "identity": row["identity"] + ":duplicate"}]
-                session[PREVIEW_PLAN_SESSION_KEY] = plan
-                session.save()
-                response = self.save({"asset_tag": CAPITAL_SHARP})
-                self.assertEqual(response.status_code, 400, response.content)
-                self.assertEqual(response.json()["error"], "The source ID must identify one active import row.")
-                self.assertFalse(self.saved())
-
-    def test_a_preview_bound_split_requires_a_readable_plan(self):
-        for plan in (None, {"units": "invalid"}):
-            with self.subTest(plan=plan):
-                session = self.client.session
-                session[PREVIEW_PLAN_SESSION_KEY] = plan
-                session.save()
-                response = self.save({"asset_tag": CAPITAL_SHARP})
-                self.assertEqual(response.status_code, 400, response.content)
-                self.assertEqual(response.json()["error"], "The active Import Plan is no longer readable.")
-                self.assertFalse(self.saved())
-
-    def test_a_standalone_resolution_can_save_without_preview_values(self):
-        session = self.client.session
-        for key in tuple(session.keys()):
-            if key.startswith("import_"):
-                del session[key]
-        session.save()
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:save_resolution"),
-            {
-                "profile_id": self.profile.pk,
-                "source_id": "D-1",
-                "source_column": "device_name",
-                "resolved_fields": json.dumps({"asset_tag": SHARP}),
-            },
-            headers={"accept": "application/json"},
-        )
-        self.assertEqual(response.status_code, 200, response.content)
-        self.assertTrue(self.saved())
-
     def test_a_malformed_acknowledgement_is_refused(self):
         refused = self.save({"asset_tag": SHARP}, acknowledged={"asset_tag": True})
 
         self.assertEqual(refused.status_code, 400, refused.content)
         self.assertFalse(self.saved())
+
+    def test_a_second_split_compares_against_the_value_the_first_split_saved(self):
+        old_claim = preview_claim(self.client)
+        first = self.save({"asset_tag": SHARP, "device_name": "host-900"}, acknowledged=["asset_tag"])
+        self.assertEqual(first.status_code, 200, first.content)
+        preview = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        self.assertEqual(preview.context["split_field_values_by_source_id"]["D-1"]["asset_tag"], SHARP, "fixture")
+
+        refused = self.save({"asset_tag": CAPITAL_SHARP, "device_name": "host-900"})
+
+        self.assertEqual(refused.status_code, 400, refused.content)
+        self.assertEqual(
+            refused.json()["error"],
+            f"The split replaces the Asset tag '{SHARP}' with '{CAPITAL_SHARP}'. Acknowledge the replacement to "
+            "save it.",
+        )
+        self.assertEqual(
+            SourceResolution.objects.get(profile=self.profile, source_id="D-1").resolved_fields["asset_tag"], SHARP
+        )
+
+        stale = self.save({"asset_tag": CAPITAL_SHARP, "device_name": "host-900"}, claim=old_claim)
+
+        self.assertEqual(stale.status_code, 409, stale.content)
+        self.assertEqual(stale.json()["code"], "preview_stale")
+        self.assertEqual(
+            SourceResolution.objects.get(profile=self.profile, source_id="D-1").resolved_fields["asset_tag"], SHARP
+        )

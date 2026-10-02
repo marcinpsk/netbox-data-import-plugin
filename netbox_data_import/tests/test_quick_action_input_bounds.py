@@ -14,8 +14,7 @@ from django.test import Client, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import ImportProfile, ManufacturerMapping
-from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY
-from netbox_data_import.tests.helpers import store_workbook_document
+from netbox_data_import.tests.helpers import preview_claim, seed_preview, store_workbook_document
 
 LONG = "L" * 300
 LONG_SLUG = "l" * 300
@@ -157,20 +156,40 @@ def _permission_scoped_writer_url_names():
     return names - _quick_action_url_names()
 
 
-def _permission_scoped_writer_class_names(source):
-    """Return classes whose methods call either permission-scoped write helper."""
-    import ast
+def _calls_a_scoped_writer(node):
+    return any(
+        isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in SCOPED_WRITERS
+        for sub in ast.walk(node)
+    )
 
-    writers = set()
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        if any(
-            isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in SCOPED_WRITERS
-            for sub in ast.walk(node)
-        ):
-            writers.add(node.name)
-    return writers
+
+def _is_preview_command(name, classes):
+    """Return whether a module class derives from PreviewCommand, directly or through another command."""
+    node = classes.get(name)
+    if node is None:
+        return False
+    bases = {getattr(base, "id", None) for base in node.bases}
+    return "PreviewCommand" in bases or any(_is_preview_command(base, classes) for base in bases - {name})
+
+
+def _commands_of(view, classes):
+    """Return the PreviewCommand classes one view constructs."""
+    names = {
+        call.func.id
+        for call in ast.walk(view)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and _is_preview_command(call.func.id, classes)
+    }
+    return [classes[name] for name in sorted(names)]
+
+
+def _permission_scoped_writer_class_names(source):
+    """Return classes that call a permission-scoped write helper, themselves or through their command."""
+    classes = {node.name: node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ClassDef)}
+    return {
+        name
+        for name, node in classes.items()
+        if _calls_a_scoped_writer(node) or any(_calls_a_scoped_writer(cmd) for cmd in _commands_of(node, classes))
+    }
 
 
 def _quick_action_routes():
@@ -209,7 +228,7 @@ def _orm_receiver(call):
 
 
 def _quick_action_write_seam_errors(source, routes):
-    """Return quick-action classes that bypass the permission-scoped write seam."""
+    """Return quick actions that bypass the coordinator or the permission-scoped write seam."""
     classes = {node.name: node for node in ast.parse(source).body if isinstance(node, ast.ClassDef)}
     manager_mutations = {
         "create",
@@ -223,10 +242,6 @@ def _quick_action_write_seam_errors(source, routes):
 
     for url_name, class_name in sorted(routes.items()):
         view = classes[class_name]
-        base_names = {getattr(base, "id", None) for base in view.bases}
-        if "_PermissionScopedWriteMixin" not in base_names:
-            errors.append(f"{url_name}: {class_name} lacks _PermissionScopedWriteMixin")
-
         post = next(
             (node for node in view.body if isinstance(node, ast.FunctionDef) and node.name == "post"),
             None,
@@ -236,14 +251,27 @@ def _quick_action_write_seam_errors(source, routes):
             continue
 
         post_calls = [node for node in ast.walk(post) if isinstance(node, ast.Call)]
-        if not any(isinstance(call.func, ast.Name) and call.func.id in SCOPED_WRITERS for call in post_calls):
-            errors.append(f"{url_name}: {class_name}.post() does not call a scoped writer")
-        for call in (node for node in ast.walk(view) if isinstance(node, ast.Call)):
-            method = getattr(call.func, "attr", None)
-            if method in {"save", "delete"} or (method in manager_mutations and _orm_receiver(call)):
-                errors.append(f"{url_name}: {class_name} calls direct .{method}() at line {call.lineno}")
+        if not any(isinstance(call.func, ast.Name) and call.func.id == "apply_preview_command" for call in post_calls):
+            errors.append(f"{url_name}: {class_name}.post() does not run apply_preview_command")
+        commands = _commands_of(post, classes)
+        if not any(_calls_a_scoped_writer(command) for command in commands):
+            errors.append(f"{url_name}: {class_name}.post() runs no command that calls a scoped writer")
+        for node in (view, *commands):
+            for call in (sub for sub in ast.walk(node) if isinstance(sub, ast.Call)):
+                method = getattr(call.func, "attr", None)
+                if method in {"save", "delete"} or (method in manager_mutations and _orm_receiver(call)):
+                    errors.append(f"{url_name}: {node.name} calls direct .{method}() at line {call.lineno}")
 
     return errors
+
+
+def _assert_not_stale(test, response, label):
+    """Fail when the coordinator refused the claim, which would hide whether the bound was checked."""
+    if response.get("Content-Type", "").startswith("application/json"):
+        test.assertNotEqual(response.json().get("code"), "preview_stale", f"{label}: {response.content[:300]}")
+    else:
+        templates = [template.name for template in response.templates]
+        test.assertNotIn("netbox_data_import/preview_notice.html", templates, f"{label}: stale preview")
 
 
 class QuickActionInputBoundsTest(TransactionTestCase):
@@ -326,7 +354,6 @@ class QuickActionInputBoundsTest(TransactionTestCase):
     def _store_active_import(self, rows):
         """Store a real source document and accepted plan for deferred row actions."""
         from netbox_data_import.import_engine import ImportEngine
-        from netbox_data_import.preview_row_actions import start_new_preview
         from netbox_data_import.review_workspace import ReviewWorkspace
 
         headers = [key for key in rows[0] if not key.startswith("_")]
@@ -339,22 +366,14 @@ class QuickActionInputBoundsTest(TransactionTestCase):
         )
         planning_context = {"site_id": self.site.pk, "location_id": None, "tenant_id": None}
         plan = ImportEngine.plan(self.profile, document, self.user, planning_context)
-        result = ReviewWorkspace(plan, self.user)
-
-        session = self.client.session
-        start_new_preview(session, plan)
-        session["import_rows"] = result.source_rows
-        session["import_context"] = {
-            "profile_id": self.profile.pk,
-            "site_id": self.site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "quick-bounds.xlsx",
-            "source_document_id": document.pk,
-        }
-        session["import_preview_pending"] = True
-        session.save()
-        return result
+        seed_preview(
+            self.client,
+            profile=self.profile,
+            document=document,
+            plan=plan,
+            context={**planning_context, "filename": "quick-bounds.xlsx"},
+        )
+        return ReviewWorkspace(plan, self.user)
 
     def _prepare_row_action(self, url_name, payload, source_id, case_name):
         """Create the real active-import state one deferred action requires."""
@@ -431,7 +450,6 @@ class QuickActionInputBoundsTest(TransactionTestCase):
             self.assertEqual(preview_row.action, "create", preview_row)
         else:  # pragma: no cover - the coverage ratchet keeps this branch unreachable
             self.fail(f"No active-import fixture for {url_name}")
-        payload["preview_revision"] = self.client.session[PREVIEW_REVISION_SESSION_KEY]
         return payload
 
     def test_every_quick_action_is_covered(self):
@@ -463,37 +481,73 @@ class DeleteOnlyView:
 
         self.assertEqual(len(registries), 1)
 
-    def test_the_write_seam_scanner_checks_helpers_on_the_view_class(self):
+    def test_the_deferred_writer_scanner_follows_the_view_into_its_command(self):
+        """A view writes through the command it posts, so the command's writer makes it a writer."""
         source = """
-class DeleteThroughHelper(_PermissionScopedWriteMixin):
+class _DeleteWidget(PreviewCommand):
+    def apply(self, preview):
+        delete_permission_scoped_objects(user, queryset)
+
+class DeleteThroughCommandView:
+    def post(self, request):
+        return apply_preview_command(request, claim, _DeleteWidget())
+"""
+
+        self.assertEqual(_permission_scoped_writer_class_names(source), {"_DeleteWidget", "DeleteThroughCommandView"})
+
+    def test_the_write_seam_scanner_checks_helpers_on_the_command_class(self):
+        source = """
+class _DeleteWidget(PreviewCommand):
     def _delete(self):
         Widget.objects.create()
 
-    def post(self):
+    def apply(self, preview):
         delete_permission_scoped_objects(user, queryset)
+
+class DeleteThroughHelper(View):
+    def post(self, request):
+        return apply_preview_command(request, claim, _DeleteWidget())
 """
 
         errors = _quick_action_write_seam_errors(source, {"delete_widget": "DeleteThroughHelper"})
 
-        self.assertTrue(
-            any("DeleteThroughHelper calls direct .create()" in error for error in errors),
+        self.assertEqual(errors, ["delete_widget: _DeleteWidget calls direct .create() at line 4"])
+
+    def test_the_write_seam_scanner_refuses_a_write_outside_the_coordinator(self):
+        source = """
+class WritesItself(View):
+    def post(self, request):
+        save_permission_scoped_object(user, widget)
+"""
+
+        errors = _quick_action_write_seam_errors(source, {"write_widget": "WritesItself"})
+
+        self.assertEqual(
             errors,
+            [
+                "write_widget: WritesItself.post() does not run apply_preview_command",
+                "write_widget: WritesItself.post() runs no command that calls a scoped writer",
+            ],
         )
 
     def test_the_write_seam_scanner_ignores_non_orm_update_methods(self):
         source = """
-class UpdatesMetadata(_PermissionScopedWriteMixin):
-    def post(self):
+class _UpdateWidget(PreviewCommand):
+    def apply(self, preview):
         payload.update({"status": "ready"})
         Widget.objects.filter(active=True).update(status="ready")
         save_permission_scoped_object(user, widget)
+
+class UpdatesMetadata(View):
+    def post(self, request):
+        return apply_preview_command(request, claim, _UpdateWidget())
 """
 
         errors = _quick_action_write_seam_errors(source, {"update_widget": "UpdatesMetadata"})
 
         self.assertEqual(
             errors,
-            ["update_widget: UpdatesMetadata calls direct .update() at line 5"],
+            ["update_widget: _UpdateWidget calls direct .update() at line 5"],
         )
 
     def test_every_quick_action_uses_only_the_permission_scoped_write_seam(self):
@@ -505,14 +559,17 @@ class UpdatesMetadata(_PermissionScopedWriteMixin):
 
     def test_an_overlength_quick_action_leaves_the_database_unchanged(self):
         """Reject each create or update without truncating or changing an existing row."""
+        self._store_active_import([self._device_row("SRC-1", "widget-1")])
         for url_name, payloads in OVERLENGTH_PAYLOADS.items():
             for index, payload in enumerate(payloads):
                 with self.subTest(url_name=url_name, payload=index):
                     before = _writer_database_state()
                     response = self.client.post(
                         reverse(f"plugins:netbox_data_import:{url_name}"),
-                        {"profile_id": self.profile.pk, **payload},
+                        {**preview_claim(self.client), **payload},
                     )
+
+                    _assert_not_stale(self, response, f"{url_name} payload {index}")
 
                     self.assertLess(
                         response.status_code,
@@ -544,10 +601,10 @@ class UpdatesMetadata(_PermissionScopedWriteMixin):
                 before = _writer_database_state()
                 response = self.client.post(
                     reverse(f"plugins:netbox_data_import:{url_name}"),
-                    {"profile_id": self.profile.pk, **prepared_payload},
+                    {**preview_claim(self.client), **prepared_payload},
                 )
 
-                self.assertLess(response.status_code, 500)
+                self.assertLess(response.status_code, 500, response.content[:300])
                 self.assertNotEqual(
                     _writer_database_state(),
                     before,
@@ -569,8 +626,10 @@ class UpdatesMetadata(_PermissionScopedWriteMixin):
                     before = _writer_database_state()
                     response = self.client.post(
                         reverse(f"plugins:netbox_data_import:{url_name}"),
-                        {"profile_id": self.profile.pk, **prepared_payload},
+                        {**preview_claim(self.client), **prepared_payload},
                     )
+
+                    _assert_not_stale(self, response, f"{url_name} payload {index}")
 
                     self.assertLess(
                         response.status_code,

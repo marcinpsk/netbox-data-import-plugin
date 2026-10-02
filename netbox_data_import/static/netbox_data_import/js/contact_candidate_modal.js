@@ -37,7 +37,6 @@
   var editToggle = document.getElementById('contactCandidateEditToggle');
   var addValue = document.getElementById('contactCandidateAddValue');
   var provenance = document.getElementById('contactCandidateProvenance');
-  var linkedContacts = {};
   var shownRowKey = null;
   var heldOffer = null;
   var saveInFlight = false;
@@ -345,8 +344,6 @@
       instance.clear(true);
       instance.clearOptions();
       if (suggestion) instance.addOption(contactOption(suggestion));
-      var remembered = linkedContacts[resolvedFields.contact_id || ''];
-      if (remembered) instance.addOption(remembered);
       if (resolvedFields.contact_id && instance.options[String(resolvedFields.contact_id)]) {
         instance.setValue(String(resolvedFields.contact_id), true);
       }
@@ -415,21 +412,27 @@
    * on another row, is only offered here if the server is asked again. */
   function refreshSuggestion(sourceId, rowKey) {
     var url = form.dataset.contactSuggestionUrl;
-    var profileField = form.querySelector('input[name=profile_id]');
-    var profileId = profileField ? profileField.value : '';
-    if (!url || !sourceId || !profileId || contactId.value) return;
+    if (!url || !sourceId || contactId.value) return;
     var separator = url.includes('?') ? '&' : '?';
-    var query = 'profile_id=' + encodeURIComponent(profileId) + '&source_id=' + encodeURIComponent(sourceId);
+    var query = window.ndiPreviewClaim(new URLSearchParams({source_id: sourceId}));
     var asked = ++latestRefresh;
-    fetch(url + separator + query, {headers: {'Accept': 'application/json'}})
-      .then(function (response) { return response.json(); })
-      .then(function (data) {
+    fetch(url + separator + query.toString(), {headers: {'Accept': 'application/json'}})
+      .then(function (response) {
+        return response.json().then(function (data) { return {ok: response.ok, data: data}; });
+      })
+      .then(function (answer) {
+        var data = answer.data;
         // Reopening the same row asks again, which the row identity alone cannot tell apart.
         if (!data || asked !== latestRefresh) return;
         // The modal is shared, so a late answer must not write over the row now on screen.
         if (!stillShowing(sourceId)) return;
         // Two rows can share a source ID, so only the composite key tells the rows apart.
         if (rowKey !== shownRowKey) return;
+        // A refusal, such as a stale preview, says nothing about the Contact, so the offer stays.
+        if (!answer.ok) {
+          modalError(data.error || 'The Contact suggestion could not be read.');
+          return;
+        }
         var instance = picker();
         var offered = contactSuggestions[rowKey];
         if (!data.suggestion) {
@@ -538,76 +541,26 @@
     modalError('');
 
     var sourceId = document.getElementById('contactCandidateSourceId').value;
-    var snapshot = {
-      resolvedFields: document.getElementById('contactCandidateResolvedFields').value,
-      originalValue: document.getElementById('contactCandidateOriginalValue').value,
-      contactId: contactId.value,
-      linkedOption: existingContact.tomselect && contactId.value
-        ? existingContact.tomselect.options[contactId.value]
-        : null,
-    };
-
     saveInFlight = true;
     window.ndiPostPreviewAction(form.getAttribute('action'), new FormData(form))
-      .then(function (payload) {
-        window.ndiMarkPreviewStale(payload && payload.detail);
-        rememberResolution(sourceId, snapshot, payload && payload.resolution);
-        markRowResolved(sourceId);
-        if (!stillShowing(sourceId)) return;
-        var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;
-        if (ModalClass) {
-          ModalClass.getOrCreateInstance(modal).hide();
-        }
-        // The page is not reloaded, so the button is the only thing that can report the result.
+      .then(function () {
+        // The page is leaving, so the request keeps the button until the reload replaces it.
         save.innerHTML = '<i class="mdi mdi-check"></i> Saved';
-      })
-      .catch(function (error) {
-        if (!stillShowing(sourceId)) return;
+        window.ndiReloadPreview();
+      }, function (error) {
+        saveInFlight = false;
+        if (!stillShowing(sourceId)) {
+          resetSaveButton();
+          return;
+        }
         modalError(error.message);
         save.disabled = false;
         save.innerHTML = original;
-      })
-      .then(function () {
-        saveInFlight = false;
-        if (!stillShowing(sourceId)) resetSaveButton();
       });
   }
 
-  /* The page no longer reloads after a save, so the map the modal reads on open has to record
-   * the decision here. `saved` is what the server stored: the snapshot predates the request, so a
-   * Contact this save created is absent from it and only the stored decision names that Contact. */
-  function rememberResolution(sourceId, snapshot, saved) {
-    if (!window.EXISTING_RESOLUTIONS) window.EXISTING_RESOLUTIONS = {};
-    var forSource = window.EXISTING_RESOLUTIONS[sourceId] || {};
-    forSource['candidate:contact'] = saved
-      ? { original_value: saved.original_value, resolved_fields: saved.resolved_fields }
-      : { original_value: snapshot.originalValue, resolved_fields: JSON.parse(snapshot.resolvedFields) };
-    window.EXISTING_RESOLUTIONS[sourceId] = forSource;
-
-    // The picker rebuilds from the page's suggestions, which never held a Contact the operator
-    // searched for, nor one this save created. Keep the option so reopening shows the link.
-    if (snapshot.linkedOption) linkedContacts[snapshot.contactId] = snapshot.linkedOption;
-    // `contactOption` reads the picker's field names, so it needs the picker to exist.
-    if (saved && saved.contact && picker()) {
-      linkedContacts[String(saved.contact.id)] = contactOption(saved.contact);
-    }
-  }
-
-  /* The row keeps the action it was rendered with until the preview is recalculated. Only the
-   * Contact button answers now, so the operator can see which rows are still open. */
-  function markRowResolved(sourceId) {
-    var button = document.querySelector(
-      '[data-ndi-modal="#contactCandidateModal"][data-source-id="' + CSS.escape(sourceId) + '"]'
-    );
-    if (!button) return;
-    button.classList.remove('btn-outline-warning');
-    button.classList.add('btn-outline-success', 'ndi-contact-resolved');
-    button.innerHTML = '<i class="mdi mdi-account-check"></i> Contact resolved';
-    button.title = "This row's Contact fields are resolved. Open to review or change them.";
-  }
-
-  /* The modal is shared. A response that arrives after the operator moved on still records its
-   * decision, but it must not close or write over the row now on screen. */
+  /* The modal is shared, so a response that arrives after the operator moved on must not write
+   * over the row now on screen. */
   function stillShowing(sourceId) {
     return document.getElementById('contactCandidateSourceId').value === sourceId;
   }

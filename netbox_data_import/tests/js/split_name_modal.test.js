@@ -38,7 +38,7 @@ function render({ existingResolutions = {}, original = ORIGINAL_VALUE, fieldValu
         <div id="res_duplicate_alert" class="d-none"></div>
         <div id="res_device_check" class="d-none"><small id="res_device_check_msg"></small></div>
         <div id="res_save_error" class="d-none" role="alert" aria-live="polite"></div>
-        <button type="submit">Save</button>
+        <button type="submit"><i class="mdi mdi-content-save"></i> Save resolution</button>
       </form>
     </div>
     <script type="application/json" id="ndi-split-field-values">${JSON.stringify(fieldValues)}</script>
@@ -113,9 +113,9 @@ async function settleDeviceCheck() {
 
 beforeEach(() => {
   window.ndiPostPreviewAction = vi.fn(() =>
-    Promise.resolve({ ok: true, preview_state: "recalculation_required", message: "Saved." }),
+    Promise.resolve({ ok: true, preview_state: "replanned", message: "Saved." }),
   );
-  window.ndiMarkPreviewStale = vi.fn();
+  window.ndiReloadPreview = vi.fn();
   vi.stubGlobal(
     "fetch",
     vi.fn((url) => {
@@ -144,22 +144,14 @@ describe("split modal parts", () => {
     expect([partValue(0).value, partValue(1).value, partValue(2).value]).toEqual(["AT900 ", " host", "900"]);
   });
 
-  it("saves the field each part was sent to without navigating away", async () => {
-    submitForm();
+  it("saves the field each part was sent to and reloads the replanned preview", async () => {
+    expect(submitForm()).toBe(false);
     expect(resolvedFields()).toEqual({ asset_tag: "AT900", device_name: "host-900" });
-    await vi.waitFor(() => expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce());
-    expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce();
-  });
-
-  it("keeps a successful save successful without optional response details", async () => {
-    window.ndiPostPreviewAction = vi.fn().mockResolvedValueOnce({ ok: true });
-    window.ndiMarkPreviewStale = undefined;
-
-    submitForm();
-
-    await vi.waitFor(() => expect(saveButton().textContent).toBe("Saved"));
-    expect(saveButton().title).toBe("Resolution saved.");
-    expect(document.getElementById("res_save_error").classList.contains("d-none")).toBe(true);
+    await vi.waitFor(() => expect(window.ndiReloadPreview).toHaveBeenCalledOnce());
+    expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce();
+    // The page is leaving, so the button does not offer a second save.
+    expect(saveButton().disabled).toBe(true);
+    expect(saveButton().textContent).toBe("Saved");
   });
 
   it("leaves native submission available when the preview-action helper is unavailable", () => {
@@ -168,29 +160,18 @@ describe("split modal parts", () => {
     expect(submitForm()).toBe(true);
 
     expect(saveButton().disabled).toBe(false);
-    expect(saveButton().textContent).toBe("Save resolution");
+    expect(saveButton().innerHTML).toBe('<i class="mdi mdi-content-save"></i> Save resolution');
   });
 
   it("does not offer the source identity as a resolution target", () => {
     expect([...partField(0).options].map((option) => option.value)).not.toContain("source_id");
   });
 
-  it("restores the unsaved button state when the modal opens again", async () => {
-    submitForm();
-    await vi.waitFor(() => expect(saveButton().textContent).toBe("Saved"));
-    expect(saveButton().title).toBe("Saved.");
-
-    openModal();
-
-    expect(saveButton().textContent).toBe("Save resolution");
-    expect(saveButton().title).toBe("");
-  });
-
   it("reports a save failure inside the modal and clears it when reopened", async () => {
     window.ndiPostPreviewAction = vi
       .fn()
       .mockRejectedValueOnce(new Error("Resolution was rejected."))
-      .mockResolvedValueOnce({ ok: true, preview_state: "recalculation_required", message: "Saved." });
+      .mockResolvedValueOnce({ ok: true, preview_state: "replanned", message: "Saved." });
 
     submitForm();
 
@@ -199,7 +180,8 @@ describe("split modal parts", () => {
     expect(alertBox.classList.contains("d-none")).toBe(false);
     expect(saveButton().title).toBe("");
     expect(saveButton().disabled).toBe(false);
-    expect(saveButton().textContent).toBe("Save resolution");
+    expect(saveButton().innerHTML).toBe('<i class="mdi mdi-content-save"></i> Save resolution');
+    expect(window.ndiReloadPreview).not.toHaveBeenCalled();
 
     submitForm();
 

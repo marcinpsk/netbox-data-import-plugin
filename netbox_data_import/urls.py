@@ -101,13 +101,16 @@ urlpatterns = [
     path("import/", views.ImportSetupView.as_view(), name="import_setup"),
     path("import/preview/", views.ImportPreviewView.as_view(), name="import_preview"),
     path("import/run/", views.ImportRunView.as_view(), name="import_run"),
+    path("import/re-read/", views.PreviewRereadView.as_view(), name="preview_reread"),
+    path("import/discard/", views.PreviewDiscardView.as_view(), name="preview_discard"),
     path("import/progress/<int:pk>/", views.ImportProgressView.as_view(), name="import_progress"),
+    path("import/progress/<int:pk>/restore/", views.ImportRestoreView.as_view(), name="import_restore"),
     path(
         "import/progress/<int:pk>/status/",
         views.ImportProgressStatusView.as_view(),
         name="import_progress_status",
     ),
-    path("import/results/", views.ImportResultsView.as_view(), name="import_results"),
+    path("import/results/<int:pk>/", views.ImportResultsView.as_view(), name="import_results"),
     # Ignore / Unignore device
     path("ignore-device/", views.IgnoreDeviceView.as_view(), name="ignore_device"),
     path("unignore-device/", views.UnignoreDeviceView.as_view(), name="unignore_device"),
@@ -170,7 +173,6 @@ urlpatterns = [
     path("auto-match-devices/", views.AutoMatchDevicesView.as_view(), name="auto_match_devices"),
     # Trace Review Workspace (section 10.2)
     path("trace-workspace/", views.TraceReviewWorkspaceView.as_view(), name="trace_workspace"),
-    path("trace-workspace/re-read/", views.TraceWorkspaceRereadView.as_view(), name="trace_workspace_reread"),
     path(
         "trace-workspace/candidates/",
         views.TraceTerminationCandidatesView.as_view(),

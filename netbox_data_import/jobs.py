@@ -7,8 +7,12 @@ import logging
 from typing import NoReturn
 
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError
+from django.db import DatabaseError, connection
+from django.utils import timezone
+from django_pg_utils import advisory_lock
 from rq import get_current_job
+from rq.exceptions import InvalidJobOperation, NoSuchJobError
+from rq.job import Job as RQJob, JobStatus
 
 from core.exceptions import JobFailed
 from netbox.context_managers import event_tracking
@@ -42,6 +46,73 @@ from .plan import PlanError
 _PROGRESS_REPORT_INTERVAL = 25
 logger = logging.getLogger(__name__)
 
+IMPORT_TASK_LOST = "The import task is no longer queued or running. Re-read its preview to recover."
+
+
+def _import_job_lock(job):
+    """Name the session lock that serializes worker delivery with explicit recovery."""
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT hashtextextended(%s, 0)", [f"netbox-data-import-job:{job.job_id}"])
+        return cursor.fetchone()[0]
+
+
+def import_queue_task(job):
+    """Fetch queue evidence without removing a missing task's ID from Redis."""
+    import django_rq
+
+    try:
+        queue = django_rq.get_queue(job.queue_name or "default")
+    except KeyError:
+        return None
+    try:
+        return RQJob.fetch(str(job.job_id), connection=queue.connection, serializer=queue.serializer)
+    except NoSuchJobError:
+        return None
+
+
+def import_job_abandoned(job) -> bool:
+    """Read whether a native active import has lost its queue task, without changing either."""
+    from core.choices import JobStatusChoices
+
+    if job.status not in JobStatusChoices.ENQUEUED_STATE_CHOICES:
+        return False
+    rq_job = import_queue_task(job)
+    if rq_job is None:
+        return True
+    try:
+        status = rq_job.get_status(refresh=True)
+    except InvalidJobOperation:
+        return True
+    return status in (
+        None,
+        JobStatus.FINISHED,
+        JobStatus.FAILED,
+        JobStatus.CANCELED,
+        JobStatus.STOPPED,
+    )
+
+
+def recover_abandoned_import_job(job) -> None:
+    """Fail a lost task under the profile lock, unless a worker still owns its delivery."""
+    from core.choices import JobStatusChoices
+    from core.models import Job
+
+    if not connection.in_atomic_block:
+        raise RuntimeError("Job recovery requires the preview command transaction.")
+    # Never wait for a worker while holding its profile. PostgreSQL holds this lock through commit or rollback.
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [_import_job_lock(job)])
+        acquired = cursor.fetchone()[0]
+    if acquired:
+        job.refresh_from_db()
+        if import_job_abandoned(job):
+            Job.objects.filter(pk=job.pk, status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES).update(
+                status=JobStatusChoices.STATUS_ERRORED,
+                completed=timezone.now(),
+                error=IMPORT_TASK_LOST,
+                data={**(job.data or {}), "phase": "failed", "message": IMPORT_TASK_LOST},
+            )
+
 
 class ImportJobRunner(JobRunner):
     """Validate and execute one import while publishing row progress to RQ."""
@@ -50,6 +121,20 @@ class ImportJobRunner(JobRunner):
 
     class Meta:
         name = "Data Import"
+
+    @classmethod
+    def handle(cls, job, *args, **kwargs):
+        """Skip late or duplicate delivery without adding a transaction around the durable audit."""
+        from core.choices import JobStatusChoices
+        from core.models import Job
+
+        with advisory_lock(_import_job_lock(job)):
+            try:
+                job.refresh_from_db()
+            except Job.DoesNotExist:
+                return
+            if job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES:
+                super().handle(job, *args, **kwargs)
 
     def _save_data(self, **values):
         """Merge values into the native Job data."""
@@ -169,9 +254,30 @@ class ImportJobRunner(JobRunner):
         )
 
 
+def retained_sync_running(user, profile_id, document_id) -> bool:
+    """Return whether a per-trace sync Job for this source still runs, whichever preview queued it.
+
+    The Job rows are the record, so a request that lost a race to the coordinator still sees the sync.
+    """
+    from core.choices import JobStatusChoices
+
+    return (
+        ImportJobRunner.get_jobs()
+        .filter(
+            user=user,
+            data__job_type=ImportJobRunner.job_type,
+            data__keeps_preview=True,
+            data__profile_id=profile_id,
+            data__source_document_id=document_id,
+            status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
+        )
+        .exists()
+    )
+
+
 @system_job(interval=60 * 24)
 class SourceDocumentRetentionJob(JobRunner):
-    """Reclaim stored uploads no Import Execution references (section 9.1)."""
+    """Reclaim stored uploads no Import Execution references (section 9.1), and expire old previews."""
 
     class Meta:
         name = "Data Import source document retention"
@@ -182,8 +288,11 @@ class SourceDocumentRetentionJob(JobRunner):
         return SourceDocument.purge_unreferenced()
 
     def run(self, *args, **kwargs):
-        """Run one retention pass."""
+        """Run one retention pass; a preview expires with the 30 days its Source Document is kept."""
+        from .preview_coordinator import expire_previews
+
         branching.fail_job_in_branch(self)
+        expire_previews()
         return self.purge()
 
 

@@ -129,23 +129,10 @@
     btn.textContent = 'Saving…';
 
     window.ndiPostPreviewAction(form.getAttribute('action'), new FormData(form))
-      .then(function (payload) {
-        var currentForm = releaseSubmission();
-        if (typeof window.ndiMarkPreviewStale === 'function') {
-          window.ndiMarkPreviewStale();
-        }
-        if (!currentForm) return;
-        if (currentForm.dataset.ndiConflictModalGeneration !== submissionGeneration) {
-          document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
-            other.disabled = false;
-          });
-          return;
-        }
+      .then(function () {
+        // The page is leaving, so every button stays disabled and the submission stays latched.
         btn.textContent = 'Saved';
-        btn.title = payload.message || 'Resolution saved.';
-        document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
-          other.disabled = other.dataset.fieldName === btn.dataset.fieldName;
-        });
+        window.ndiReloadPreview();
       })
       .catch(function (error) {
         var currentForm = releaseSubmission();

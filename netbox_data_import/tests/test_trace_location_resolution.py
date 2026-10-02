@@ -13,19 +13,25 @@ from django.urls import reverse
 from netbox_data_import.models import (
     CableClassMapping,
     ImportProfile,
+    PreviewCoordinator,
+    PreviewState,
     TraceDeviceResolution,
     TraceLocationResolution,
 )
 from netbox_data_import.netbox_reader import NetBoxReader
-from netbox_data_import.preview_row_actions import PREVIEW_PLAN_SESSION_KEY, PREVIEW_REVISION_SESSION_KEY
 from netbox_data_import.profile_yaml import serialize_profile
 from netbox_data_import.trace_device_resolution import CandidateFact, DeviceEvidence, eligible_trace_devices
 from netbox_data_import.tests.helpers import (
     executed_sql,
+    preview_claim,
+    preview_coordinator,
+    seed_preview,
+    stored_plan,
     trace_endpoint_line,
     trace_segment,
     trace_termination,
     trace_workbook_bytes,
+    upload_preview,
     user_with_object_permission,
 )
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin
@@ -522,14 +528,36 @@ class LocationWorkspaceMixin(LocationTreeMixin):
         data = {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload}
         if location is not None:
             data["location"] = location.pk
-        setup = client.post(reverse("plugins:netbox_data_import:import_setup"), data, follow=True)
+        setup = upload_preview(client, data, follow=True)
         self.assertEqual(setup.status_code, 200)
         return client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+    def stale_claim(self, client=None):
+        """Return the claim the page held before a re-read retired it."""
+        client = client or self.client
+        claim = preview_claim(client)
+        reread = client.post(reverse("plugins:netbox_data_import:preview_reread"), claim)
+        self.assertEqual(reread.status_code, 302, reread.content[:300])
+        return claim
+
+    def seed_as(self, actor):
+        """Log *actor* in and give that session the current upload, planned as *actor*."""
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.models import SourceDocument
+
+        coordinator = preview_coordinator(self.client)
+        document = SourceDocument.objects.get(pk=coordinator.source_document_id)
+        context = dict(coordinator.context)
+        self.client.force_login(actor)
+        planning_context = {key: context[key] for key in ("site_id", "location_id", "tenant_id")}
+        plan = ImportEngine.plan(self.profile, document, actor, planning_context)
+        seed_preview(self.client, profile=self.profile, document=document, plan=plan, context=context)
 
     def post_mapping(self, client=None, *, as_json=True, **data):
         """Post one Location mapping command through the workspace endpoint."""
         client = client or self.client
-        data.setdefault("preview_revision", client.session[PREVIEW_REVISION_SESSION_KEY])
+        for key, value in preview_claim(client).items():
+            data.setdefault(key, value)
         data.setdefault("location_key", " ".join(SOURCE_PATH.split()).upper())
         return client.post(
             reverse("plugins:netbox_data_import:trace_location_mapping"),
@@ -542,7 +570,7 @@ class LocationWorkspaceMixin(LocationTreeMixin):
         client = client or self.client
         response = client.get(
             reverse("plugins:netbox_data_import:trace_device_candidates"),
-            {"device_key": device_key, "preview_revision": client.session[PREVIEW_REVISION_SESSION_KEY]},
+            {"device_key": device_key, **preview_claim(client)},
         )
         self.assertEqual(response.status_code, 200, response.content)
         return {item["id"]: item for item in response.json()["candidates"]}
@@ -551,7 +579,8 @@ class LocationWorkspaceMixin(LocationTreeMixin):
         """Ask the shared Location picker endpoint the way the picker asks."""
         client = client or self.client
         params.setdefault("location_key", " ".join(SOURCE_PATH.split()).upper())
-        params.setdefault("preview_revision", client.session[PREVIEW_REVISION_SESSION_KEY])
+        for key, value in preview_claim(client).items():
+            params.setdefault(key, value)
         return client.get(reverse("plugins:netbox_data_import:trace_location_candidates"), params)
 
     @staticmethod
@@ -626,15 +655,16 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
 
     def test_saving_a_mapping_replans_and_explains_the_candidates(self):
         opened = self.open_workspace()
-        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
+        before = preview_coordinator(self.client).revision
 
         saved = self.post_mapping(location_id=self.hall.pk, trace=opened.context["selected_trace"].identity)
 
-        self.assertEqual(saved.status_code, 302, saved.content)
+        self.assertEqual(saved.status_code, 200, saved.content)
+        self.assertEqual(saved.json()["preview_state"], "replanned")
         stored = TraceLocationResolution.objects.get(profile=self.profile)
         self.assertEqual((stored.selected_location_id, stored.selected_display_name), (self.hall.pk, "DH4"))
         self.assertEqual(stored.source_location_path, SOURCE_PATH)
-        self.assertNotEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], before)
+        self.assertEqual(preview_coordinator(self.client).revision, before + 1)
         page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         row = self.mapping_row(page)
         self.assertEqual((row.state, row.location), ("mapped", "DH4"))
@@ -651,16 +681,16 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
     def test_clearing_a_mapping_removes_it_and_replans(self):
         self.open_workspace()
         self.post_mapping(location_id=self.hall.pk)
-        mapped_fingerprint = self.client.session[PREVIEW_PLAN_SESSION_KEY]["profile_fingerprint"]
-        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
+        mapped_fingerprint = stored_plan(self.client)["profile_fingerprint"]
+        before = preview_coordinator(self.client).revision
 
         cleared = self.post_mapping(clear="1")
 
-        self.assertEqual(cleared.status_code, 302, cleared.content)
+        self.assertEqual(cleared.status_code, 200, cleared.content)
         self.assertFalse(TraceLocationResolution.objects.filter(profile=self.profile).exists())
-        self.assertNotEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], before)
+        self.assertEqual(preview_coordinator(self.client).revision, before + 1)
         # The stored plan was planned without the mapping, so the workspace reads it as current.
-        replanned = self.client.session[PREVIEW_PLAN_SESSION_KEY]["profile_fingerprint"]
+        replanned = stored_plan(self.client)["profile_fingerprint"]
         self.assertNotEqual(replanned, mapped_fingerprint)
         self.assertEqual(replanned, ImportProfile.objects.get(pk=self.profile.pk).planning_fingerprint)
         page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
@@ -762,14 +792,13 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
             (second["candidates"], second["shown"], second["total"], second["offset"]),
             ([{"id": rooms[-1].pk, "name": "Room", "parent": "Hall 21"}], 1, 21, 20),
         )
-        self.assertEqual(saved.status_code, 302, saved.content)
+        self.assertEqual(saved.status_code, 200, saved.content)
         self.assertEqual(TraceLocationResolution.objects.get(profile=self.profile).selected_location_id, rooms[-1].pk)
 
     def test_the_location_picker_refuses_what_the_preview_did_not_ask(self):
         self.open_workspace()
         cases = (
             ({"location_key": "invented path"}, 400, "This preview carries no such source Location path."),
-            ({"preview_revision": "obsolete"}, 409, "No current import preview matches this request."),
             ({"search": "x" * 201}, 400, "Location search must be 200 characters or fewer."),
             ({"limit": "0"}, 400, "Candidate limit must be an integer from 1 to 20."),
             ({"offset": "-1"}, 400, CANDIDATE_OFFSET_INVALID),
@@ -783,6 +812,16 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
 
                 self.assertEqual(response.status_code, status)
                 self.assertEqual(response.json(), {"ok": False, "error": error})
+
+    def test_the_location_picker_refuses_a_stale_claim(self):
+        from netbox_data_import.preview_coordinator import STALE_PREVIEW
+
+        self.open_workspace()
+
+        response = self.location_candidates(**self.stale_claim())
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {"ok": False, "error": STALE_PREVIEW, "code": "preview_stale"})
 
     def test_the_largest_offset_reads_an_empty_location_page(self):
         """The bound leaves room for one page, and a page past the count is empty."""
@@ -865,7 +904,7 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
                 "device_key": "SRV ALIAS",
                 "device_id": self.in_hall.pk,
                 "search": "",
-                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+                **preview_claim(self.client),
             },
             headers={"accept": "application/json"},
         )
@@ -874,15 +913,31 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         self.assertIn("policy changed since this preview was planned", refused.json()["error"])
         self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
 
-    def test_a_stale_preview_revision_writes_nothing(self):
+    def test_a_save_with_a_stale_claim_writes_nothing(self):
         self.open_workspace()
+        stale = self.stale_claim()
 
-        refused = self.post_mapping(location_id=self.hall.pk, preview_revision="obsolete", as_json=False)
+        refused = self.post_mapping(location_id=self.hall.pk, **stale)
+        refused_form = self.post_mapping(location_id=self.hall.pk, as_json=False, **stale)
 
-        self.assertRedirects(
-            refused, reverse("plugins:netbox_data_import:trace_workspace"), fetch_redirect_response=False
-        )
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(refused.json()["code"], "preview_stale")
+        self.assertEqual(refused_form.status_code, 409)
         self.assertFalse(TraceLocationResolution.objects.exists())
+
+    def test_a_clear_with_a_stale_claim_writes_nothing(self):
+        self.map_path(SOURCE_PATH, self.hall)
+        self.open_workspace()
+        stale = self.stale_claim()
+        before = list(TraceLocationResolution.objects.values())
+
+        refused = self.post_mapping(clear="1", **stale)
+        refused_form = self.post_mapping(clear="1", as_json=False, **stale)
+
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(refused.json()["code"], "preview_stale")
+        self.assertEqual(refused_form.status_code, 409)
+        self.assertEqual(list(TraceLocationResolution.objects.values()), before)
 
     def test_the_saved_decisions_count_includes_location_mappings(self):
         self.map_path(SOURCE_PATH, self.hall)
@@ -925,7 +980,7 @@ class ImportLocationEvidenceTest(LocationWorkspaceMixin, TestCase):
                 response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
                 self.assertEqual(response.status_code, 200)
-                self.assertTrue(self.client.session["import_preview_pending"])
+                self.assertEqual(preview_coordinator(self.client).state, PreviewState.READY)
                 self.assertContains(response, "The import Location is no longer available")
                 self.assertTrue(all(item["import_location"] is None for item in self.device_candidates().values()))
 
@@ -935,11 +990,7 @@ class ImportLocationEvidenceTest(LocationWorkspaceMixin, TestCase):
         grants[2] = (Location, ("view",), {"name__in": ["DH4", "DH5", "T", "1st Floor", "Building X"]})
         actor = user_with_object_permission("import-location-hidden", grants)
         self.open_workspace(location=hidden)
-        session = {key: value for key, value in self.client.session.items() if key.startswith("import_")}
-        self.client.force_login(actor)
-        stored = self.client.session
-        stored.update(session)
-        stored.save()
+        self.seed_as(actor)
 
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
@@ -947,16 +998,15 @@ class ImportLocationEvidenceTest(LocationWorkspaceMixin, TestCase):
         self.assertContains(response, "The import Location is no longer available")
         self.assertNotContains(response, "Import Hidden")
 
-    def test_a_lost_tenant_still_ends_the_trace_preview(self):
+    def test_a_lost_tenant_still_sends_the_trace_workspace_to_setup(self):
         """Only the import Location became evidence; the rest of the target stays required."""
         from tenancy.models import Tenant
 
         tenant = Tenant.objects.create(name="Workspace Tenant", slug="workspace-tenant")
         upload = BytesIO(trace_workbook_bytes(path_blocks=(located_path(SOURCE_PATH),)))
         upload.name = "traces.xlsx"
-        self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "tenant": tenant.pk, "excel_file": upload},
+        upload_preview(
+            self.client, {"profile": self.profile.pk, "site": self.site.pk, "tenant": tenant.pk, "excel_file": upload}
         )
         tenant.delete()
 
@@ -965,7 +1015,8 @@ class ImportLocationEvidenceTest(LocationWorkspaceMixin, TestCase):
         self.assertRedirects(
             response, reverse("plugins:netbox_data_import:import_setup"), fetch_redirect_response=False
         )
-        self.assertFalse(self.client.session["import_preview_pending"])
+        # A page load only reads, so the preview stays until a command replaces it.
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.READY)
 
     def test_setup_refuses_a_location_outside_the_selected_site(self):
         other_site = Site.objects.create(name="Setup Other Site", slug="setup-other-site")
@@ -973,14 +1024,14 @@ class ImportLocationEvidenceTest(LocationWorkspaceMixin, TestCase):
         upload = BytesIO(trace_workbook_bytes(path_blocks=(located_path(SOURCE_PATH),)))
         upload.name = "traces.xlsx"
 
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
+        response = upload_preview(
+            self.client,
             {"profile": self.profile.pk, "site": self.site.pk, "location": elsewhere.pk, "excel_file": upload},
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "does not belong to the selected site")
-        self.assertNotIn("import_context", self.client.session)
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.EMPTY)
 
 
 class ImportLocationExecutionTest(LocationWorkspaceMixin, TransactionTestCase):
@@ -997,12 +1048,11 @@ class ImportLocationExecutionTest(LocationWorkspaceMixin, TransactionTestCase):
         from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.models import SourceDocument
         from netbox_data_import.plan import Disposition, ImportPlan
-        from netbox_data_import.preview_row_actions import PREVIEW_PLAN_SESSION_KEY
 
         location = Location.objects.create(site=self.site, name="Import Executed", slug="import-executed")
         self.open_workspace(located_path(SOURCE_PATH, source_label="DEV-A"), location=location)
         Location.objects.filter(pk=location.pk).delete()
-        plan = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        plan = ImportPlan.from_dict(stored_plan(self.client))
 
         execution = ImportEngine.execute(
             self.profile,
@@ -1055,7 +1105,7 @@ class LocationMappingPermissionTest(LocationWorkspaceMixin, TestCase):
         self.assertFalse(TraceLocationResolution.objects.exists())
 
         saved = self.post_mapping(location_id=self.hall.pk)
-        self.assertEqual(saved.status_code, 302, saved.content)
+        self.assertEqual(saved.status_code, 200, saved.content)
         self.assertEqual(TraceLocationResolution.objects.get().selected_location_id, self.hall.pk)
 
     def test_change_is_checked_apart_from_add(self):
@@ -1109,7 +1159,7 @@ class LocationMappingPermissionTest(LocationWorkspaceMixin, TestCase):
 
         cleared = self.post_mapping(clear="1")
 
-        self.assertEqual(cleared.status_code, 302, cleared.content)
+        self.assertEqual(cleared.status_code, 200, cleared.content)
         self.assertFalse(TraceLocationResolution.objects.exists())
 
     def test_the_location_picker_offers_only_visible_locations_and_names_only_a_visible_parent(self):
@@ -1198,20 +1248,22 @@ class LocationMappingRefusalTest(LocationWorkspaceMixin, TestCase):
             },
         )
 
-    def test_without_a_preview_the_command_returns_to_setup(self):
+    def test_without_a_preview_the_command_is_refused(self):
         refused = self.client.post(
             reverse("plugins:netbox_data_import:trace_location_mapping"),
             {"location_key": "DH4", "location_id": self.hall.pk},
         )
 
-        self.assertRedirects(refused, reverse("plugins:netbox_data_import:import_setup"), fetch_redirect_response=False)
+        self.assertEqual(refused.status_code, 409)
         self.assertFalse(TraceLocationResolution.objects.exists())
 
     def test_a_retained_sync_refuses_the_command(self):
-        from netbox_data_import.preview_row_actions import RETAINED_SYNC_BLOCK_REASON
+        from netbox_data_import.preview_coordinator import RETAINED_SYNC_BLOCK_REASON
 
         self.open_workspace()
-        self.retained_sync_job(self.client.session["import_context"]["source_document_id"])
+        coordinator = preview_coordinator(self.client)
+        job = self.retained_sync_job(coordinator.source_document_id)
+        PreviewCoordinator.objects.filter(pk=coordinator.pk).update(state=PreviewState.SYNC_PENDING, job_id=job.pk)
 
         refused = self.post_mapping(location_id=self.hall.pk)
 
@@ -1219,55 +1271,31 @@ class LocationMappingRefusalTest(LocationWorkspaceMixin, TestCase):
         self.assertEqual(refused.json()["error"], RETAINED_SYNC_BLOCK_REASON)
         self.assertFalse(TraceLocationResolution.objects.exists())
 
-    def test_a_sync_that_starts_during_the_write_rolls_the_mapping_back(self):
-        from django.db import connection
-
-        self.open_workspace()
-        document_id = self.client.session["import_context"]["source_document_id"]
-        writes = []
-
-        def retain_after_the_write(execute, sql, params, many, context):
-            result = execute(sql, params, many, context)
-            if "netbox_data_import_tracelocationresolution" in sql.lower() and sql.lstrip().upper().startswith(
-                "INSERT"
-            ):
-                writes.append(sql)
-                self.retained_sync_job(document_id)
-            return result
-
-        with connection.execute_wrapper(retain_after_the_write):
-            refused = self.post_mapping(location_id=self.hall.pk)
-
-        self.assertTrue(writes)
-        self.assertEqual(refused.status_code, 409)
-        self.assertFalse(TraceLocationResolution.objects.exists())
-
-    def test_an_adapter_this_release_dropped_ends_the_preview(self):
+    def test_an_adapter_this_release_dropped_refuses_the_command(self):
         self.open_workspace()
         ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired-adapter")
 
         refused = self.post_mapping(location_id=self.hall.pk)
 
-        self.assertRedirects(refused, reverse("plugins:netbox_data_import:import_setup"), fetch_redirect_response=False)
+        self.assertEqual(refused.status_code, 409)
+        self.assertIn("retired-adapter", refused.json()["error"])
         self.assertFalse(TraceLocationResolution.objects.exists())
 
-    def test_a_lost_import_target_ends_the_preview(self):
+    def test_a_lost_import_target_returns_to_setup(self):
         from tenancy.models import Tenant
 
         tenant = Tenant.objects.create(name="Mapping Tenant", slug="mapping-tenant")
         upload = BytesIO(trace_workbook_bytes(path_blocks=(located_path(SOURCE_PATH),)))
         upload.name = "traces.xlsx"
-        self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "tenant": tenant.pk, "excel_file": upload},
+        upload_preview(
+            self.client, {"profile": self.profile.pk, "site": self.site.pk, "tenant": tenant.pk, "excel_file": upload}
         )
         tenant.delete()
 
-        refused = self.post_mapping(location_id=self.hall.pk)
+        refused = self.post_mapping(location_id=self.hall.pk, as_json=False)
 
         self.assertRedirects(refused, reverse("plugins:netbox_data_import:import_setup"), fetch_redirect_response=False)
         self.assertFalse(TraceLocationResolution.objects.exists())
-        self.assertFalse(self.client.session["import_preview_pending"])
 
     def test_a_row_whose_digest_names_another_key_is_refused(self):
         from netbox_data_import.trace_location_resolution import trace_location_mappings

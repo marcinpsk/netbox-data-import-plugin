@@ -600,3 +600,43 @@ class SourceDocumentRetentionJobTest(TestCase):
         self.assertFalse(SourceDocument.objects.filter(pk=stale.pk).exists())
         self.assertTrue(SourceDocument.objects.filter(pk=referenced.pk).exists())
         self.assertTrue(SourceDocument.objects.filter(pk=recent.pk).exists())
+
+
+class CallerOwnedReservationTest(TransactionTestCase):
+    """A preview command reserves inside its own transaction, which then commits the failed audit row."""
+
+    def setUp(self):
+        """Create the profile, upload, and actor each reservation needs."""
+        self.profile = ImportProfile.objects.create(name="Caller Reservation Profile", adapter_config={})
+        self.actor = _operator("caller-reservation-actor")
+        self.document = _document(self.profile, uploaded_by=self.actor)
+
+    def test_a_caller_owned_reservation_needs_the_callers_transaction(self):
+        with self.assertRaises(RuntimeError):
+            ImportExecution.reserve(committed_by_caller=True, **_reservation(self.profile, self.document, self.actor))
+        with transaction.atomic():
+            _execution, created = ImportExecution.reserve(
+                committed_by_caller=True, **_reservation(self.profile, self.document, self.actor)
+            )
+        self.assertTrue(created)
+
+    def test_a_refused_insert_leaves_the_callers_transaction_usable(self):
+        """The insert runs in a savepoint, so the caller can still record the failure afterwards."""
+        from django.db import DataError
+
+        with transaction.atomic():
+            with self.assertRaises(DataError):
+                ImportExecution.reserve(
+                    committed_by_caller=True, **_reservation(self.profile, self.document, self.actor, key="k" * 65)
+                )
+            ImportExecution.reserve(committed_by_caller=True, **_reservation(self.profile, self.document, self.actor))
+        self.assertEqual(ImportExecution.objects.count(), 1)
+
+    def test_a_selective_execution_with_a_replan_needs_its_callers_transaction(self):
+        from netbox_data_import.import_engine import ImportEngine
+
+        with self.assertRaises(RuntimeError):
+            ImportEngine.execute_and_replan(
+                self.profile, self.document, {}, ["unit:1"], "replan-key", self.actor, validate_replan=lambda plan: None
+            )
+        self.assertFalse(ImportExecution.objects.exists())

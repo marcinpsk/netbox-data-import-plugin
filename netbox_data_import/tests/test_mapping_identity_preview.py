@@ -15,7 +15,7 @@ from netbox_data_import.models import (
     ManufacturerMapping,
 )
 from netbox_data_import.review_workspace import _DIAGNOSTIC_MESSAGES
-from netbox_data_import.tests.helpers import workbook_bytes
+from netbox_data_import.tests.helpers import upload_preview, workbook_bytes
 
 DOTLESS_I = "\u0131"
 
@@ -54,10 +54,7 @@ class MappingIdentityPreviewTest(TestCase):
             workbook_bytes(["Source ID", "Class", "Name", "Make", "Model"], [list(row) for row in rows]),
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        setup = client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-        )
+        setup = upload_preview(client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload})
         self.assertEqual(setup.status_code, 302, setup.content[:300])
         response = client.get(reverse("plugins:netbox_data_import:import_preview"))
         return {row.name: row for row in response.context["preview_rows"] if row.object_type == "device"}

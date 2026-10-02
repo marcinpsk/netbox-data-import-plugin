@@ -3,6 +3,7 @@
 """Preview row actions consume target-neutral Import Plans."""
 
 import time
+from contextlib import contextmanager
 from threading import Event
 
 from django.contrib.auth import get_user_model
@@ -10,19 +11,64 @@ from django.db import transaction
 from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 
+from netbox_data_import.import_engine import ImportEngine
 from netbox_data_import.models import (
     ClassRoleMapping,
+    ColumnMapping,
     DeviceExistingMatch,
     IgnoredFieldDifference,
     ImportProfile,
 )
-from netbox_data_import.preview_row_actions import start_new_preview
+from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.tests.helpers import (
     apply_source_rows,
     plan_source_rows,
+    preview_claim,
     run_on_separate_connection,
+    seed_preview,
+    store_plan,
+    store_workbook_document,
+    stored_plan,
     user_with_object_permission,
 )
+
+# The first data row of a stored workbook is row 2, under its header.
+ROW = 2
+WORKBOOK_FIELDS = (
+    "source_id",
+    "device_name",
+    "device_class",
+    "rack_name",
+    "make",
+    "model",
+    "u_position",
+    "face",
+    "status",
+    "serial",
+    "asset_tag",
+)
+
+
+def map_workbook_fields(profile):
+    """Map one workbook column to each canonical field the rows below carry."""
+    for field in WORKBOOK_FIELDS:
+        ColumnMapping.objects.create(profile=profile, source_column=field, target_field=field)
+
+
+def preview_rows(client, profile, site, rows):
+    """Store a workbook of these rows, plan it as the client's operator, and make it the preview."""
+    actor = get_user_model().objects.get(pk=client.session["_auth_user_id"])
+    document = store_workbook_document(
+        profile,
+        list(WORKBOOK_FIELDS),
+        [[row.get(field, "") for field in WORKBOOK_FIELDS] for row in rows],
+        actor,
+        "r.xlsx",
+    )
+    context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
+    plan = ImportEngine.plan(profile, document, actor, context)
+    seed_preview(client, profile=profile, document=document, plan=plan, context=context)
+    return ReviewWorkspace(plan, actor)
 
 
 class TargetNeutralFieldReviewTest(TransactionTestCase):
@@ -62,8 +108,9 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         )
         self.profile = ImportProfile.objects.create(
             name="Review Action Profile",
-            adapter_config={"update_existing": True},
+            adapter_config={"sheet_name": "Data", "update_existing": True},
         )
+        map_workbook_fields(self.profile)
         ClassRoleMapping.objects.create(
             profile=self.profile,
             source_class="Server",
@@ -94,24 +141,29 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         ]
         self._materialize()
 
-    def _materialize(self, *, expect_ignored=False):
-        """Store a new-interface workspace as the active browser preview."""
-        workspace = plan_source_rows(self.rows, self.profile, self.site, actor=self.actor)
+    def _materialize(self, *, expect_ignored=False, client=None):
+        """Store the rows as a workbook and make its plan the client's active preview."""
+        workspace = preview_rows(client or self.client, self.profile, self.site, self.rows)
+        self.assertEqual(self._bucket(workspace, expect_ignored)["u_position"], {"netbox": "5", "file": "7"})
+
+    def _bucket(self, workspace, ignored):
+        """Return the field differences or the ignored fields of the Device row."""
         device_unit = next(unit for unit in workspace.units if unit.object_type == "device")
         self.assertEqual(device_unit.action, "update", device_unit)
-        review_bucket = "field_ignored" if expect_ignored else "field_diff"
-        self.assertEqual(device_unit.extra_data[review_bucket]["u_position"], {"netbox": "5", "file": "7"})
-        session = self.client.session
-        start_new_preview(session, workspace.plan)
-        session["import_rows"] = workspace.source_rows
-        session["import_context"] = {
-            "profile_id": self.profile.pk,
-            "site_id": self.site.pk,
-            "location_id": None,
-            "tenant_id": None,
-        }
-        session["import_preview_pending"] = True
-        session.save()
+        self.assertEqual(device_unit.row_number, ROW)
+        return device_unit.extra_data["field_ignored" if ignored else "field_diff"]
+
+    def _planning_view_grants(self):
+        """Return the view grants an operator needs to plan the rows against the import site."""
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        return [(model, ("view",), None) for model in (Site, Rack, Manufacturer, DeviceType, DeviceRole)]
+
+    def _stored_workspace(self):
+        """Return the plan the client's preview now holds."""
+        from netbox_data_import.plan import ImportPlan
+
+        return ReviewWorkspace(ImportPlan.from_dict(stored_plan(self.client)), self.actor)
 
     def test_planning_requires_an_actor_before_it_reads_rows(self):
         with self.assertRaisesRegex(TypeError, "actor"):
@@ -139,12 +191,7 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         """Post one JSON row action against the current preview revision."""
         return self.client.post(
             reverse(f"plugins:netbox_data_import:{view_name}"),
-            {
-                "profile_id": self.profile.pk,
-                "row_number": 1,
-                "target_field": target_field,
-                "preview_revision": self.client.session["import_preview_revision"],
-            },
+            {**preview_claim(self.client), "row_number": ROW, "target_field": target_field},
             HTTP_ACCEPT="application/json",
         )
 
@@ -152,11 +199,7 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         """Post one inline field sync against the current preview revision."""
         return self.client.post(
             reverse("plugins:netbox_data_import:sync_device_field"),
-            {
-                "row_number": 1,
-                "field": field,
-                "preview_revision": self.client.session["import_preview_revision"],
-            },
+            {**preview_claim(self.client), "row_number": ROW, "field": field},
             HTTP_ACCEPT="application/json",
         )
 
@@ -164,24 +207,27 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         """Post one inline placement sync against the current preview revision."""
         return self.client.post(
             reverse("plugins:netbox_data_import:sync_placement"),
-            {
-                "row_number": 1,
-                "preview_revision": self.client.session["import_preview_revision"],
-            },
+            {**preview_claim(self.client), "row_number": ROW},
             HTTP_ACCEPT="application/json",
         )
 
-    def _device_unit_data(self):
-        """Return the mutable serialized Device unit in the active session."""
-        session = self.client.session
-        unit = next(item for item in session["import_plan"]["units"] if item["identity"].startswith("device:"))
-        return session, unit
+    def _tamper_device_unit(self, change):
+        """Change the serialized Device unit the preview stores, as a stale plan would carry it."""
+        plan = stored_plan(self.client)
+        change(next(item for item in plan["units"] if item["identity"].startswith("device:")))
+        store_plan(self.client, plan)
+
+    def _discard(self):
+        """End the preview and return the claim the page held before."""
+        claim = preview_claim(self.client)
+        self.client.post(reverse("plugins:netbox_data_import:preview_discard"), claim)
+        return claim
 
     def _ignore_and_replan(self):
-        """Save one review and materialize the resulting ignored state."""
+        """Save one review; the command replans, so the stored plan shows it ignored."""
         response = self._post("ignore_field_difference")
         self.assertEqual(response.status_code, 200, response.content)
-        self._materialize(expect_ignored=True)
+        self.assertEqual(self._bucket(self._stored_workspace(), True)["u_position"], {"netbox": "5", "file": "7"})
 
     def test_ignore_and_unignore_round_trip(self):
         """A saved review moves through two fresh plans without legacy result rows."""
@@ -189,50 +235,53 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
 
         self.assertEqual(ignored.status_code, 200)
         self.assertTrue(ignored.json()["ok"])
-        self.assertTrue(self.client.session["import_preview_dirty"])
+        self.assertEqual(ignored.json()["preview_state"], "replanned")
         self.assertTrue(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
+        self.assertIn("u_position", self._bucket(self._stored_workspace(), True))
 
-        self._materialize(expect_ignored=True)
         restored = self._post("unignore_field_difference")
 
         self.assertEqual(restored.status_code, 200)
         self.assertTrue(restored.json()["ok"])
         self.assertFalse(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
+        self.assertIn("u_position", self._bucket(self._stored_workspace(), False))
 
     def test_ignore_rejects_absent_and_malformed_preview_rows(self):
         """An absent preview, malformed row number, or unknown field cannot authorize a review."""
-        session = self.client.session
-        session["import_preview_pending"] = False
-        session.save()
-        self.assertEqual(self._post("ignore_field_difference").status_code, 409)
+        ended = self._discard()
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            {**ended, "row_number": ROW, "target_field": "u_position"},
+            HTTP_ACCEPT="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
 
         self._materialize()
         self.assertEqual(
             self.client.post(
                 reverse("plugins:netbox_data_import:ignore_field_difference"),
-                {"row_number": "invalid", "target_field": "u_position"},
+                {**preview_claim(self.client), "row_number": "invalid", "target_field": "u_position"},
                 HTTP_ACCEPT="application/json",
             ).status_code,
-            409,
+            400,
         )
         self.assertEqual(self._post("ignore_field_difference", "unknown").status_code, 409)
 
     def test_ignore_rejects_a_cached_plan_that_cannot_be_deserialized(self):
         """A stale cached schema follows the normal unavailable-preview response path."""
-        session = self.client.session
-        session["import_plan"]["schema_version"] = 999
-        session.save()
+        plan = stored_plan(self.client)
+        plan["schema_version"] = 999
+        store_plan(self.client, plan)
 
         response = self._post("ignore_field_difference")
 
         self.assertEqual(response.status_code, 409)
-        self.assertIn("no longer current", response.json()["error"])
+        self.assertEqual(response.json()["error"], "This preview cannot be read. Re-read the preview.")
+        self.assertFalse(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
 
     def test_ignore_rejects_a_difference_removed_from_the_plan(self):
         """The action refuses a field that the accepted plan no longer offers."""
-        session, unit = self._device_unit_data()
-        unit["display"]["extra_data"]["field_diff"].pop("u_position")
-        session.save()
+        self._tamper_device_unit(lambda unit: unit["display"]["extra_data"]["field_diff"].pop("u_position"))
 
         response = self._post("ignore_field_difference")
 
@@ -241,16 +290,16 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
 
     def test_ignore_rejects_missing_snapshots_and_a_deleted_device(self):
         """A review requires both authoritative snapshots and its visible Device."""
-        session, unit = self._device_unit_data()
-        unit["display"]["extra_data"]["field_review_snapshots"].pop("u_position")
-        session.save()
+        self._tamper_device_unit(lambda unit: unit["display"]["extra_data"]["field_review_snapshots"].pop("u_position"))
         self.assertEqual(self._post("ignore_field_difference").status_code, 409)
 
         self._materialize()
         self.device.delete()
         response = self._post("ignore_field_difference")
         self.assertEqual(response.status_code, 409)
-        self.assertIn("no longer available", response.json()["error"])
+        self.assertEqual(
+            response.json()["error"], "The selected field difference is no longer present. Re-read the preview."
+        )
 
     def test_ignore_rejects_a_changed_netbox_baseline(self):
         """A Device change after planning invalidates the review snapshot."""
@@ -262,6 +311,27 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("value changed", response.json()["error"])
 
+    @contextmanager
+    def _bindings_changed_at_the_locked_read(self, change):
+        """Commit *change* on another connection just before the command locks its binding rows.
+
+        The policy check has passed by then, so only the locked read can see the change.
+        """
+        from django.db import connection
+
+        changed = []
+
+        def change_before_the_locked_read(execute, sql, params, many, context):
+            if not changed and "FOR UPDATE" in sql and DeviceExistingMatch._meta.db_table in sql:
+                changed.append(True)
+                with run_on_separate_connection(change):
+                    pass
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(change_before_the_locked_read):
+            yield
+        self.assertEqual(changed, [True], "the binding rows were never locked")
+
     def test_ignore_rejects_conflicting_device_bindings(self):
         """A field review cannot move a source binding or reuse another source's Device."""
         from dcim.models import Device
@@ -272,11 +342,15 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
             device_type=self.device_type,
             role=self.role,
         )
-        DeviceExistingMatch.objects.filter(profile=self.profile, source_id="REVIEW-ACTION-ROW").update(
-            netbox_device_id=replacement.pk,
-            device_name=replacement.name,
-        )
-        response = self._post("ignore_field_difference")
+
+        def move_the_binding():
+            DeviceExistingMatch.objects.filter(profile=self.profile, source_id="REVIEW-ACTION-ROW").update(
+                netbox_device_id=replacement.pk,
+                device_name=replacement.name,
+            )
+
+        with self._bindings_changed_at_the_locked_read(move_the_binding):
+            response = self._post("ignore_field_difference")
         self.assertEqual(response.status_code, 409)
         self.assertIn("linked elsewhere", response.json()["error"])
 
@@ -284,12 +358,32 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         DeviceExistingMatch.objects.create(
             profile=self.profile,
             source_id="OTHER-ROW",
-            netbox_device_id=self.device.pk,
-            device_name=self.device.name,
+            netbox_device_id=replacement.pk,
+            device_name=replacement.name,
         )
-        response = self._post("ignore_field_difference")
+        self.client.post(reverse("plugins:netbox_data_import:preview_reread"), preview_claim(self.client))
+
+        def link_another_row():
+            DeviceExistingMatch.objects.filter(profile=self.profile, source_id="OTHER-ROW").update(
+                netbox_device_id=self.device.pk, device_name=self.device.name
+            )
+
+        with self._bindings_changed_at_the_locked_read(link_another_row):
+            response = self._post("ignore_field_difference")
         self.assertEqual(response.status_code, 409)
         self.assertIn("linked elsewhere", response.json()["error"])
+        self.assertFalse(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
+
+    def test_a_binding_changed_after_planning_is_a_moved_policy(self):
+        """A binding written outside the preview moves the profile policy, so the command is refused."""
+        DeviceExistingMatch.objects.filter(profile=self.profile).update(device_name="renamed-elsewhere")
+
+        response = self._post("ignore_field_difference")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "preview_stale")
+        self.assertIn("policy changed", response.json()["error"])
+        self.assertFalse(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
 
     def test_ignore_sanitizes_a_real_object_permission_failure(self):
         """A constrained add permission rolls back and returns a bounded row-action error."""
@@ -301,10 +395,12 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
                 (ImportProfile, ("change",), {"pk": self.profile.pk}),
                 (Device, ("view",), {"pk": self.device.pk}),
                 (IgnoredFieldDifference, ("add",), {"source_id": "OTHER-ROW"}),
+                *self._planning_view_grants(),
             ],
         )
         self.client.force_login(actor)
-        self._materialize()
+        # Without dcim.change_device the row is refused, and its difference is still offered for review.
+        preview_rows(self.client, self.profile, self.site, self.rows)
 
         response = self._post("ignore_field_difference")
 
@@ -337,11 +433,12 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         self.device.delete()
         response = self._post("unignore_field_difference")
         self.assertEqual(response.status_code, 409)
-        self.assertIn("no longer available", response.json()["error"])
+        self.assertEqual(
+            response.json()["error"], "The selected field review is no longer current. Re-read the preview."
+        )
 
     def test_unignore_rejects_a_real_concurrent_binding_change(self):
         """Unignore preserves its record if the source binding moves before its locked read."""
-        from django.db import connection
         from dcim.models import Device
 
         self._ignore_and_replan()
@@ -351,27 +448,16 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
             device_type=self.device_type,
             role=self.role,
         )
-        binding_moved = []
 
-        def move_binding_before_read(execute, sql, params, many, context):
-            if not binding_moved and "SELECT" in sql and DeviceExistingMatch._meta.db_table in sql:
-                binding_moved.append(True)
+        def move_binding():
+            DeviceExistingMatch.objects.filter(
+                profile=self.profile,
+                source_id="REVIEW-ACTION-ROW",
+            ).update(netbox_device_id=replacement.pk, device_name=replacement.name)
 
-                def move_binding():
-                    DeviceExistingMatch.objects.filter(
-                        profile=self.profile,
-                        source_id="REVIEW-ACTION-ROW",
-                    ).update(netbox_device_id=replacement.pk, device_name=replacement.name)
-
-                with run_on_separate_connection(move_binding):
-                    # Finish the competing update before the locked read.
-                    pass
-            return execute(sql, params, many, context)
-
-        with connection.execute_wrapper(move_binding_before_read):
+        with self._bindings_changed_at_the_locked_read(move_binding):
             response = self._post("unignore_field_difference")
 
-        self.assertEqual(binding_moved, [True])
         self.assertEqual(response.status_code, 409)
         self.assertIn("linked elsewhere", response.json()["error"])
         self.assertTrue(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
@@ -384,49 +470,32 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         self.assertTrue(response.json()["ok"])
         self.device.refresh_from_db()
         self.assertEqual(self.device.position, 7)
-        self.assertTrue(self.client.session["import_preview_dirty"])
+        self.assertEqual(response.json()["preview_state"], "replanned")
+        device_unit = next(unit for unit in self._stored_workspace().units if unit.object_type == "device")
+        self.assertNotIn("u_position", device_unit.extra_data.get("field_diff", {}))
 
     def test_inline_field_sync_rejects_stale_plan_state(self):
         """An absent row, removed difference, missing snapshot, and changed Device are refused."""
-        session = self.client.session
-        session["import_preview_pending"] = False
-        session.save()
-        self.assertEqual(self._sync_field().status_code, 409)
+        ended = self._discard()
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            {**ended, "row_number": ROW, "field": "u_position"},
+            HTTP_ACCEPT="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
 
         self._materialize()
-        session, unit = self._device_unit_data()
-        unit["display"]["extra_data"]["field_diff"].pop("u_position")
-        session.save()
+        self._tamper_device_unit(lambda unit: unit["display"]["extra_data"]["field_diff"].pop("u_position"))
         self.assertIn("no longer present", self._sync_field().json()["error"])
 
         self._materialize()
-        session, unit = self._device_unit_data()
-        unit["display"]["extra_data"]["field_review_snapshots"].pop("u_position")
-        session.save()
+        self._tamper_device_unit(lambda unit: unit["display"]["extra_data"]["field_review_snapshots"].pop("u_position"))
         self.assertIn("no authoritative", self._sync_field().json()["error"])
 
         self._materialize()
         self.device.position = 6
         self.device.save(update_fields=["position"])
         self.assertIn("value changed", self._sync_field().json()["error"])
-
-    def test_inline_field_sync_rechecks_the_value_on_the_locked_row(self):
-        """A change after the unlocked baseline read is refused under the row lock."""
-        from django.db.models.signals import post_init
-        from dcim.models import Device
-
-        from netbox_data_import.tests.helpers import competing_write_during
-
-        with competing_write_during(
-            post_init, Device, lambda: Device.objects.filter(pk=self.device.pk).update(position=6)
-        ) as (observed, blocked):
-            response = self._sync_field()
-
-        self.assertEqual((observed, blocked), ([True], []), "the competing write did not land after the first read")
-        self.assertEqual(response.status_code, 409)
-        self.assertIn("value changed", response.json()["error"])
-        self.device.refresh_from_db()
-        self.assertEqual(self.device.position, 6)
 
     def test_inline_position_sync_rejects_a_stale_rack(self):
         """Position sync refuses a Device that moved racks after the preview."""
@@ -531,14 +600,18 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
 
     def test_inline_placement_sync_rejects_an_absent_preview_row(self):
         """A cleared preview cannot authorize placement from client-supplied data."""
-        session = self.client.session
-        session["import_preview_pending"] = False
-        session.save()
+        ended = self._discard()
 
-        response = self._sync_placement()
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            {**ended, "row_number": ROW},
+            HTTP_ACCEPT="application/json",
+        )
 
         self.assertEqual(response.status_code, 409)
-        self.assertIn("no longer available", response.json()["error"])
+        self.assertEqual(response.json()["code"], "preview_stale")
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.position, 5)
 
     def test_unlink_removes_the_binding_and_its_dependent_field_reviews(self):
         """A source link and all reviews scoped by it are removed together."""
@@ -546,7 +619,7 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:unlink_device"),
-            {"profile_id": self.profile.pk, "source_id": "REVIEW-ACTION-ROW"},
+            {**preview_claim(self.client), "source_id": "REVIEW-ACTION-ROW"},
         )
 
         self.assertEqual(response.status_code, 302)
@@ -557,19 +630,21 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         """Object-scoped denial preserves the whole source-to-device review state."""
         self._ignore_and_replan()
         endpoint = reverse("plugins:netbox_data_import:unlink_device")
-        data = {"profile_id": self.profile.pk, "source_id": "REVIEW-ACTION-ROW"}
+        data = {"source_id": "REVIEW-ACTION-ROW"}
         binding_denied = user_with_object_permission(
             "review-action-binding-denied",
             [
                 (ImportProfile, ("change",), None),
                 (DeviceExistingMatch, ("delete",), {"source_id": "OTHER-ROW"}),
                 (IgnoredFieldDifference, ("delete",), None),
+                *self._planning_view_grants(),
             ],
         )
         binding_client = Client()
         binding_client.force_login(binding_denied)
+        preview_rows(binding_client, self.profile, self.site, self.rows)
 
-        self.assertEqual(binding_client.post(endpoint, data).status_code, 302)
+        self.assertEqual(binding_client.post(endpoint, {**preview_claim(binding_client), **data}).status_code, 302)
         self.assertTrue(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
 
         review_denied = user_with_object_permission(
@@ -578,12 +653,14 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
                 (ImportProfile, ("change",), None),
                 (DeviceExistingMatch, ("delete",), None),
                 (IgnoredFieldDifference, ("delete",), {"source_id": "OTHER-ROW"}),
+                *self._planning_view_grants(),
             ],
         )
         review_client = Client()
         review_client.force_login(review_denied)
+        preview_rows(review_client, self.profile, self.site, self.rows)
 
-        self.assertEqual(review_client.post(endpoint, data).status_code, 302)
+        self.assertEqual(review_client.post(endpoint, {**preview_claim(review_client), **data}).status_code, 302)
         self.assertTrue(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
         self.assertTrue(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
 
@@ -611,28 +688,18 @@ class PlacementRackScopeTest(TestCase):
 
     def test_the_rack_lookup_honours_the_actor_view_scope(self):
         """A Rack outside the operator's scope must not be bound, and its name must not leak."""
-        from django.test import RequestFactory
-
         from netbox_data_import.views import _lookup_rack_for_device
 
-        request = RequestFactory().post("/")
-        request.user = self.user
-
-        found, error = _lookup_rack_for_device(request, self._device(), "scope-hidden")
+        found, error = _lookup_rack_for_device(self.user, self._device(), "scope-hidden")
 
         self.assertIsNone(found, "the lookup bound a Rack the operator cannot see")
         self.assertIn("not found", error)
 
     def test_the_rack_lookup_still_finds_a_rack_in_scope(self):
         """The scoping must not refuse the Rack the operator is allowed to use."""
-        from django.test import RequestFactory
-
         from netbox_data_import.views import _lookup_rack_for_device
 
-        request = RequestFactory().post("/")
-        request.user = self.user
-
-        found, error = _lookup_rack_for_device(request, self._device(), "scope-visible")
+        found, error = _lookup_rack_for_device(self.user, self._device(), "scope-visible")
 
         self.assertIsNone(error)
         self.assertEqual(found, self.visible)
@@ -672,8 +739,9 @@ class UnplacedNameMatchPlacementSyncTest(TransactionTestCase):
         )
         self.profile = ImportProfile.objects.create(
             name="Unplaced Profile",
-            adapter_config={"update_existing": True},
+            adapter_config={"sheet_name": "Data", "update_existing": True},
         )
+        map_workbook_fields(self.profile)
         ClassRoleMapping.objects.create(
             profile=self.profile,
             source_class="Server",
@@ -696,19 +764,8 @@ class UnplacedNameMatchPlacementSyncTest(TransactionTestCase):
                 "asset_tag": "",
             }
         ]
-        workspace = plan_source_rows(self.rows, self.profile, self.site, actor=self.actor)
+        workspace = preview_rows(self.client, self.profile, self.site, self.rows)
         self.device_unit = next(unit for unit in workspace.units if unit.object_type == "device")
-        session = self.client.session
-        start_new_preview(session, workspace.plan)
-        session["import_rows"] = workspace.source_rows
-        session["import_context"] = {
-            "profile_id": self.profile.pk,
-            "site_id": self.site.pk,
-            "location_id": None,
-            "tenant_id": None,
-        }
-        session["import_preview_pending"] = True
-        session.save()
 
     def test_the_refused_row_still_carries_its_placement_baseline(self):
         """The unit states only a diagnostic, so the baseline has to reach the row another way."""
@@ -731,10 +788,7 @@ class UnplacedNameMatchPlacementSyncTest(TransactionTestCase):
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:sync_placement"),
-            {
-                "row_number": 1,
-                "preview_revision": self.client.session["import_preview_revision"],
-            },
+            {**preview_claim(self.client), "row_number": ROW},
             HTTP_ACCEPT="application/json",
         )
 
@@ -747,10 +801,7 @@ class UnplacedNameMatchPlacementSyncTest(TransactionTestCase):
         """Nothing in NetBox changed, so the refusal must not claim that it did."""
         response = self.client.post(
             reverse("plugins:netbox_data_import:sync_placement"),
-            {
-                "row_number": 1,
-                "preview_revision": self.client.session["import_preview_revision"],
-            },
+            {**preview_claim(self.client), "row_number": ROW},
             HTTP_ACCEPT="application/json",
         )
 

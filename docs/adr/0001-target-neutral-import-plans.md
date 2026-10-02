@@ -77,7 +77,7 @@ Progress counts selected Synchronization Units and Planned Changes. It does not 
 
 Serialized Import Plans carry an explicit schema version. An incompatible active preview or queued job fails before writes and requires replanning. Historical Import Executions remain audit records. The runtime does not migrate old executable plans or keep compatibility executors.
 
-The Import Plan contract is storage-neutral. An active preview can store it in the session, and a background job can receive the accepted serialized plan. A durable review-session model is justified only if the review-workspace design proves that resumable plans require one.
+The Import Plan contract is storage-neutral. A background job receives the accepted serialized plan. The active preview is stored in one database Preview Coordinator per browser session, which [ADR 0004](0004-database-preview-coordinator.md) adopted for concurrent correctness; it supersedes the earlier allowance to keep the active preview in the session.
 
 ## Examples
 

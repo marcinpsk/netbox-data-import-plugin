@@ -3,23 +3,38 @@
 
 import {expect, test} from '@playwright/test';
 import {readFileSync} from 'node:fs';
-import {completed, fixture, payload} from '../js/trace_proposal_fixture.js';
+import {claimFields, completed, fixture, payload} from '../js/trace_proposal_fixture.js';
+import {postedFields, scriptSource, servePage} from './preview_page.js';
 
+const WORKSPACE_URL = 'http://preview.test/plugins/data-import/trace-workspace/';
 const source = readFileSync('netbox_data_import/static/netbox_data_import/js/trace_proposals.js', 'utf8');
+const claimSource = scriptSource('preview_claim.js');
 const slot = (page, name) => page.locator('[data-proposal-' + name + ']');
 const action = (page, name) => page.locator('[data-proposal-action="' + name + '"]');
+const inCard = (page, key, selector) => page.locator('[data-proposal-field="' + key + '"] ' + selector);
+const readCounter = `
+  window.proposalReads = 0;
+  var originalFetch = window.fetch;
+  window.fetch = function (url, options) {
+    if (!options.method) window.proposalReads += 1;
+    return originalFetch(url, options);
+  };
+`;
 
 async function mount(page, initial = payload()) {
   await page.setContent(fixture(initial));
-  await page.addScriptTag({content: `
-    window.proposalReads = 0;
-    var originalFetch = window.fetch;
-    window.fetch = function (url, options) {
-      if (!options.method) window.proposalReads += 1;
-      return originalFetch(url, options);
-    };
-  `});
+  await page.addScriptTag({content: readCounter});
+  await page.addScriptTag({content: claimSource});
   await page.addScriptTag({content: source});
+}
+
+/* A routed workspace, so a successful action can reload it; `cards(revision)` names what each load shows. */
+async function mountRouted(page, cards) {
+  return servePage(page, revision => {
+    const [initial, others] = cards(revision);
+    return fixture(initial, others, revision)
+      + `<script>${readCounter}</script><script>${claimSource}</script><script>${source}</script>`;
+  }, WORKSPACE_URL);
 }
 
 async function serve(page, current = completed()) {
@@ -29,13 +44,18 @@ async function serve(page, current = completed()) {
 test('pending progress polls every three seconds and stops on completion', async ({page}) => {
   await page.clock.install({time: new Date("2026-09-11T08:00:00Z")});
   await page.clock.pauseAt(new Date("2026-09-11T08:00:01Z"));
-  await serve(page);
+  const asked = [];
+  await page.route('**/proposal/**', route => {
+    asked.push(new URL(route.request().url()).searchParams);
+    return route.fulfill({json: completed()});
+  });
   await mount(page);
   await expect(slot(page, 'progress')).toBeVisible();
   await page.clock.runFor(2999);
   expect(await page.evaluate(() => window.proposalReads)).toBe(0);
   await page.clock.runFor(1);
   await expect(slot(page, 'badge')).toHaveText('Proposal - not applied');
+  expect([...asked[0]]).toEqual([['field_key', 'field'], ...claimFields()]);
   await expect(slot(page, 'progress')).toBeHidden();
   await page.clock.runFor(12000);
   expect(await page.evaluate(() => window.proposalReads)).toBe(1);
@@ -52,9 +72,10 @@ test('a boost removes the old poll and binds the replacement card only once', as
   await page.clock.runFor(12000);
   expect(await page.evaluate(() => window.proposalReads)).toBe(1);
   let posts = 0;
+  // A refusal keeps the page, so the test can count what one click posted.
   await page.route('**/cancel/', async route => {
     posts += 1;
-    await route.fulfill({json: {ok: true}});
+    await route.fulfill({status: 409, json: {ok: false, error: 'The proposal moved on.'}});
   });
   await page.evaluate(markup => { document.body.innerHTML = markup; }, fixture());
   await page.addScriptTag({content: source});
@@ -103,63 +124,88 @@ test('stale and no-match cards keep Accept disabled with the reason underneath',
   }
 });
 
-test('Ask AI again posts a new request after failure and shows pending progress', async ({page}) => {
-  const initial = completed({badge: 'Failed', field_state: 'failed', failure: 'Backend refusal', failure_code: 'backend_refusal'});
-  initial.presentation.actions[0].label = 'Ask AI again';
-  let received;
+test('Ask AI again posts the claim and the reloaded workspace shows pending progress', async ({page}) => {
+  const failed = completed({badge: 'Failed', field_state: 'failed', failure: 'Backend refusal', failure_code: 'backend_refusal'});
+  failed.presentation.actions[0].label = 'Ask AI again';
+  const posted = [];
   await page.route('**/request/', async route => {
-    received = route.request().postData();
-    await route.fulfill({json: {ok: true, proposal_id: 8}});
+    posted.push(await postedFields(route.request()));
+    await route.fulfill({json: {ok: true, proposal_id: 8, status: 'queued', job_id: 3}});
   });
   await serve(page, payload({badge: 'Running'}));
-  await mount(page, initial);
+  const loads = await mountRouted(page, revision => [revision === 4 ? failed : payload({badge: 'Running'})]);
   await expect(slot(page, 'failure')).toHaveText('Backend refusal (backend_refusal)');
+
   await action(page, 'request').click();
+
+  await expect(page.locator('#ndi-revision')).toHaveText('5');
   await expect(slot(page, 'badge')).toHaveText('Running');
   await expect(slot(page, 'progress')).toBeVisible();
-  expect(received).toContain('name="field_key"\r\n\r\nfield');
+  expect(loads()).toBe(2);
+  expect(posted).toEqual([{
+    csrfmiddlewaretoken: 'fixture-token', ...Object.fromEntries(claimFields()), field_key: 'field', proposal_id: '7',
+  }]);
 });
 
-test('acceptance refreshes the accepted field and submits the existing replan form', async ({page}) => {
-  let postBody;
+test('acceptance posts the claim and reloads the workspace', async ({page}) => {
+  const posted = [];
   await page.route('**/accept/', async route => {
-    postBody = route.request().postData();
-    await route.fulfill({json: {ok: true, preview_state: 'recalculation_required'}});
+    posted.push(await postedFields(route.request()));
+    await route.fulfill({json: {ok: true, proposal_id: 7, status: 'completed', decision: 'accepted'}});
   });
-  await serve(page, completed({badge: 'Accepted', field_state: 'accepted'}));
-  await mount(page, completed());
-  await page.evaluate(() => {
-    window.replans = 0;
-    document.getElementById('traceWorkspaceReread').form.addEventListener('submit', event => {
-      event.preventDefault();
-      window.replans += 1;
-    });
-  });
+  const loads = await mountRouted(page, revision => [
+    revision === 4 ? completed() : completed({badge: 'Accepted', field_state: 'accepted'}),
+  ]);
+
   await action(page, 'accept').click();
+
+  await expect(page.locator('#ndi-revision')).toHaveText('5');
   await expect(slot(page, 'state')).toHaveText('accepted');
-  await expect.poll(() => page.evaluate(() => window.replans)).toBe(1);
-  expect(postBody).toContain('name="proposal_id"\r\n\r\n7');
-  expect(postBody).toContain('name="csrfmiddlewaretoken"\r\n\r\nfixture-token');
-  expect(postBody).toContain('name="preview_revision"\r\n\r\nrevision-1');
+  expect(loads()).toBe(2);
+  expect(posted[0]).toMatchObject({proposal_id: '7', preview_revision: '4', preview_token: 'token-1'});
 });
 
-test('rejection stays in the field and shows the refreshed decision', async ({page}) => {
-  let posts = 0;
-  await page.route('**/reject/', async route => { posts += 1; await route.fulfill({json: {ok: true}}); });
-  await serve(page, completed({badge: 'Rejected'}));
-  await mount(page, completed());
-  await action(page, 'reject').click();
-  await expect(slot(page, 'badge')).toHaveText('Rejected');
-  expect(posts).toBe(1);
+test('actions on two cards reload once, and the late answer changes nothing', async ({page}) => {
+  const held = [];
+  await page.route('**/reject/', route => { held.push(route); });
+  await page.route('**/accept/', route =>
+    route.fulfill({json: {ok: true, proposal_id: 7, status: 'completed', decision: 'accepted'}}));
+  const loads = await mountRouted(page, () => [completed(), {other: completed()}]);
+
+  await inCard(page, 'other', '[data-proposal-action="reject"]').click();
+  await expect.poll(() => held.length).toBe(1);
+  await inCard(page, 'field', '[data-proposal-action="accept"]').click();
+  await expect(page.locator('#ndi-revision')).toHaveText('5');
+
+  // The page that sent the rejection is gone, so its answer has nothing to update.
+  await held[0].fulfill({status: 409, json: {ok: false, error: 'A newer preview replaced this one.'}}).catch(() => {});
+  await page.waitForTimeout(200);
+  expect(loads()).toBe(2);
+  await expect(inCard(page, 'other', '[data-proposal-error]')).toBeHidden();
+  await expect(inCard(page, 'other', '[data-proposal-action="reject"]')).toBeEnabled();
 });
 
-test('HTTP action refusals are visible in the field', async ({page}) => {
+test('HTTP action refusals are visible in the field and do not reload', async ({page}) => {
   await page.route('**/accept/', route => route.fulfill({status: 409, json: {ok: false, error: 'The proposal is stale.'}}));
   await serve(page);
-  await mount(page, completed());
+  const loads = await mountRouted(page, () => [completed()]);
   await action(page, 'accept').click();
   await expect(slot(page, 'error')).toHaveText('The proposal is stale.');
   await expect(slot(page, 'error')).toBeVisible();
+  await expect(action(page, 'accept')).toBeEnabled();
+  expect(loads()).toBe(1);
+});
+
+test('a poll the server refuses stops polling and says why', async ({page}) => {
+  await page.clock.install({time: new Date("2026-09-11T08:00:00Z")});
+  await page.clock.pauseAt(new Date("2026-09-11T08:00:01Z"));
+  await page.route('**/proposal/**', route =>
+    route.fulfill({status: 409, json: {ok: false, error: 'A newer preview replaced this one.', code: 'preview_stale'}}));
+  await mount(page);
+  await page.clock.runFor(3000);
+  await expect(slot(page, 'error')).toHaveText('A newer preview replaced this one.');
+  await page.clock.runFor(12000);
+  expect(await page.evaluate(() => window.proposalReads)).toBe(1);
 });
 
 test('a netbox-branching refusal is visible in the field', async ({page}) => {
@@ -176,27 +222,15 @@ test('a netbox-branching refusal is visible in the field', async ({page}) => {
   await expect(slot(page, 'error')).toBeVisible();
 });
 
-test('a saved acceptance explains why an active sync prevents the replan', async ({page}) => {
-  await page.route('**/accept/', route => route.fulfill({json: {ok: true, preview_state: 'recalculation_required'}}));
-  await serve(page, completed({badge: 'Accepted', field_state: 'accepted'}));
-  await mount(page, completed());
-  await page.evaluate(() => {
-    window.replans = 0;
-    const reread = document.getElementById('traceWorkspaceReread');
-    reread.disabled = true;
-    reread.form.addEventListener('submit', event => { event.preventDefault(); window.replans += 1; });
-  });
-  await action(page, 'accept').click();
-  await expect(slot(page, 'error')).toHaveText('The resolution was saved. Re-read the workspace when the active sync finishes.');
-  expect(await page.evaluate(() => window.replans)).toBe(0);
-});
-
-test('a first request adds the card and history while field actions stay outside it', async ({page}) => {
+test('a proposal another tab requested adds the card and history while field actions stay outside it', async ({page}) => {
   const initial = completed({field_state: 'unresolved', state_style: 'unresolved'});
   initial.proposal = null;
   initial.history_display = [];
   await serve(page, payload());
-  await page.route('**/request/', route => route.fulfill({json: {ok: true, proposal_id: 7}}));
+  // The refusal reads the field again, and the read finds the proposal the other tab asked for.
+  await page.route('**/request/', route => route.fulfill({
+    status: 409, json: {ok: false, error: 'This field already has an active Resolution Proposal.'},
+  }));
   await mount(page, initial);
   await expect(slot(page, 'display')).toHaveCount(0);
   await expect(action(page, 'accept')).toHaveCount(0);

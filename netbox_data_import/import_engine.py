@@ -10,11 +10,12 @@ workbook, no column and no NetBox object type.
 from __future__ import annotations
 
 from contextlib import suppress
+from collections.abc import Callable
 import logging
 from typing import cast
 
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError
+from django.db import DatabaseError, transaction
 
 from . import adapter_config, adapters, branching, catalog, target_modules
 from .models import FailureReason, ImportExecution, SourceDocument, locked_profile_policy
@@ -172,6 +173,68 @@ class ImportEngine:
         progress_callback=None,
     ) -> ImportExecution:
         """Apply selected units from one accepted serialized plan and return their audit row."""
+        execution, _replanned = cls._execute(
+            profile,
+            source_document,
+            accepted_plan,
+            selection,
+            idempotency_key,
+            actor,
+            job=job,
+            progress_callback=progress_callback,
+        )
+        return execution
+
+    @classmethod
+    def execute_and_replan(
+        cls,
+        profile,
+        source_document,
+        accepted_plan,
+        selection,
+        idempotency_key,
+        actor,
+        *,
+        validate_replan: Callable[[ImportPlan], object],
+    ) -> tuple[ImportExecution, ImportPlan]:
+        """Apply a selection and plan the source again in one savepoint of the caller's transaction.
+
+        The audit reservation and a failure record stay outside the savepoint, so a failed write or a
+        failed replan rolls back the NetBox changes and the replan together, and the caller commits
+        the failed audit row. A duplicate key returns that row and no plan.
+        """
+        if not transaction.get_connection().in_atomic_block:
+            raise RuntimeError("A selective execution with a replan runs inside its caller's transaction.")
+        execution, replanned = cls._execute(
+            profile,
+            source_document,
+            accepted_plan,
+            selection,
+            idempotency_key,
+            actor,
+            replan=True,
+            validate_replan=validate_replan,
+        )
+        if replanned is None:
+            raise SelectionError("This execution was already requested, so it does not run again.")
+        return execution, replanned
+
+    @classmethod
+    def _execute(
+        cls,
+        profile,
+        source_document,
+        accepted_plan,
+        selection,
+        idempotency_key,
+        actor,
+        *,
+        job=None,
+        progress_callback=None,
+        replan=False,
+        validate_replan=None,
+    ) -> tuple[ImportExecution, ImportPlan | None]:
+        """Reserve, apply and audit one selection, optionally replanning inside the write savepoint."""
         branching.refuse_branch()
         accepted = ImportPlan.from_dict(accepted_plan)
         selected_identities = tuple(selection)
@@ -186,10 +249,12 @@ class ImportEngine:
             accepted_plan_fingerprint=accepted.fingerprint,
             selected_units=list(selected_identities),
             input_filename=source_document.filename,
+            committed_by_caller=replan,
         )
         if not created:
-            return execution
+            return execution, None
 
+        replanned = None
         try:
             if job is not None:
                 execution.link_job(job)
@@ -201,7 +266,7 @@ class ImportEngine:
             # One lock over the replan, the comparison and the writes: policy cannot move between them.
             with locked_profile_policy(profile.pk):
                 profile.refresh_from_db()
-                cls._write_selection(
+                completed = cls._write_selection(
                     execution,
                     profile,
                     source_document,
@@ -210,6 +275,10 @@ class ImportEngine:
                     actor,
                     progress_callback,
                 )
+                if replan:
+                    replanned = cls._replan_after_writes(
+                        profile, source_document, actor, accepted, completed, validate_replan
+                    )
         except _ExecutionFailed as failure:
             cls._mark_failed(
                 execution,
@@ -227,7 +296,24 @@ class ImportEngine:
                 not_attempted=cls._selected_change_identities(accepted, selected_identities),
             )
             raise
-        return execution
+        return execution, replanned
+
+    @classmethod
+    def _replan_after_writes(cls, profile, source_document, actor, accepted, completed, validate_replan) -> ImportPlan:
+        """Plan the source against the writes just made; a failure rolls those writes back with it."""
+        clear_user_permission_caches(actor)
+        try:
+            plan = cls.plan(profile, source_document, actor, accepted.planning_context)
+            validate_replan(plan)
+        except Exception as exc:
+            raise _ExecutionFailed(
+                cause=exc,
+                reason=cls._failure_reason(exc),
+                failed_change=None,
+                rolled_back=completed,
+                not_attempted=[],
+            ) from exc
+        return plan
 
     @classmethod
     def _write_selection(
@@ -239,7 +325,7 @@ class ImportEngine:
         selected_identities,
         actor,
         progress_callback,
-    ) -> None:
+    ) -> list[str]:
         """Compare the selection against a fresh plan and apply it, inside the caller's transaction."""
         clear_user_permission_caches(actor)
         current = cls.plan(
@@ -292,6 +378,7 @@ class ImportEngine:
             applied_changes={"changes": completed, "deleted": deleted},
             result_counts=cls._result_counts(changes),
         )
+        return completed
 
     @staticmethod
     def _result_counts(changes) -> dict:

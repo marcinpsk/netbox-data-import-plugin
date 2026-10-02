@@ -28,7 +28,6 @@ from netbox_data_import.models import (
     validate_contact_candidate_resolution,
 )
 from netbox_data_import.plan import Disposition, PlannedChange, SynchronizationUnit
-from netbox_data_import.preview_row_actions import current_preview_revision
 from netbox_data_import.source_resolution import derive_effective_rows
 from netbox_data_import.tests.helpers import workbook_bytes
 from netbox_data_import.values import comparison_key, normalize_for_compare, source_position
@@ -102,14 +101,6 @@ class ValueAndReviewBoundaryTest(SimpleTestCase):
         self.assertIn("u_position", differences)
         self.assertIn("device_name", differences)
         self.assertNotIn("device_name", DeviceFieldReviewer.field_diff(device, {"device_name": "new-name"}))
-
-    def test_preview_revision_is_created_once_for_a_new_session(self):
-        """A preview session gets one stable revision until an action retires it."""
-        session = {}
-
-        first = current_preview_revision(session)
-
-        self.assertEqual(current_preview_revision(session), first)
 
 
 class IdentityAndResolutionBoundaryTest(TestCase):

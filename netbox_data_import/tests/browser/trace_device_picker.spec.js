@@ -4,6 +4,7 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { claimForm, claimInputs, script } from "./preview_page.js";
 
 const pickerSource = readFileSync(
   resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_picker.js"),
@@ -12,12 +13,14 @@ const pickerSource = readFileSync(
 
 const fixture = `
   <base href="http://preview.test/">
+  ${claimForm()}
+  ${script("preview_claim.js")}
   <button type="button" data-trace-device-picker="source alias" data-trace-device-label="Source Alias">Choose Device</button>
   <div class="modal" id="traceDevicePicker">
     <form id="traceDeviceForm" method="post"
           action="/plugins/data-import/trace-workspace/resolve-device/"
           data-candidates-url="/plugins/data-import/trace-workspace/device-candidates/">
-      <input type="hidden" name="preview_revision" value="rev-1">
+      ${claimInputs()}
       <input type="hidden" name="search" id="traceDeviceOfferedSearch">
       <input type="hidden" name="offset" id="traceDeviceOfferedOffset">
       <input type="hidden" name="device_key" id="traceDeviceKey">
