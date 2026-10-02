@@ -2428,6 +2428,55 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
         super().setUp()
         self.build_topology()
 
+    def test_failed_sync_progress_keeps_its_execution_results_link(self):
+        """Topology drift fails a real queued sync without hiding its audit record."""
+        from core.choices import JobStatusChoices
+        from core.models import Job
+        from netbox_data_import.models import ExecutionOutcome, ImportExecution
+
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(),)))
+        upload.name = "traces.xlsx"
+        upload_preview(
+            self.client,
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        chosen = workspace.context["traces"][0]
+        queued = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {"identity": chosen.identity, **preview_claim(self.client)},
+        )
+        job = Job.objects.get(data__job_type="netbox_data_import.import")
+        self.assertRedirects(
+            queued,
+            reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}),
+            fetch_redirect_response=False,
+        )
+        before = preview_coordinator(self.client)
+        self.connect(self.panel_1_rear, self.panel_2_rear)
+
+        self.run_rq_jobs()
+
+        job.refresh_from_db()
+        execution = ImportExecution.objects.get(job=job)
+        self.assertEqual(job.status, JobStatusChoices.STATUS_FAILED)
+        self.assertEqual(execution.outcome, ExecutionOutcome.FAILED)
+        self.assertEqual(job.data["import_execution_id"], execution.pk)
+        results_url = reverse("plugins:netbox_data_import:import_results", kwargs={"pk": execution.pk})
+        for route in ("import_progress", "import_progress_status"):
+            with self.subTest(route=route):
+                progress = self.client.get(reverse(f"plugins:netbox_data_import:{route}", kwargs={"pk": job.pk}))
+
+                self.assertContains(progress, "View results")
+                self.assertContains(progress, f'href="{results_url}"')
+                self.assertNotContains(progress, "A newer preview replaced this import's preview.")
+        self.assertEqual(self.client.get(results_url).status_code, 200)
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.state, after.job_id), (PreviewState.SYNC_PENDING, job.pk))
+        self.assertEqual(after.revision, before.revision)
+
     def test_synchronizing_one_trace_writes_only_its_own_segments(self):
         """A per-trace command is a selection, so it must not queue the whole plan."""
         from core.models import Job
