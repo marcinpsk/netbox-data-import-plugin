@@ -1675,7 +1675,20 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
             {(item["selected_type"], item["state"]) for item in trace.terminations},
             {("dcim.interface", AUTOMATICALLY_RESOLVED)},
         )
-        self.assertEqual({item["selected"] for item in trace.terminations}, {str(capital_port), str(expanded_port)})
+        # Equal port names need object IDs to distinguish the source-to-port assignments.
+        self.assertEqual(
+            {item["field_key"]: (item["selected"], item["disclosure_source"]["pk"]) for item in trace.terminations},
+            {
+                termination_field_key(device="STRA\u1e9eE-SW", cards="", port="eth0", kind="interface"): (
+                    str(capital_port),
+                    capital_port.pk,
+                ),
+                termination_field_key(device="STRASSE-SW", cards="", port="eth0", kind="interface"): (
+                    str(expanded_port),
+                    expanded_port.pk,
+                ),
+            },
+        )
 
     def test_a_candidate_deleted_after_ranking_drops_out_of_the_read_and_the_write(self):
         """A port deleted between the ranked page and its row load is not offered, and nothing fails."""
