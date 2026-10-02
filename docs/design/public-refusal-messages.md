@@ -9,7 +9,8 @@ SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 
 Public responses read authored refusal text through `PublicRefusal.operator_message`.
 They do not convert the caught exception to a string. HTTP views and the Job formatter share
-this model-free interface. Existing refusal constructors retain their message, status and reason.
+this model-free interface. Existing refusal constructors retain their message, status and reason. An unknown Source Adapter
+retains its authored adapter name so the operator can repair the profile.
 
 The Job formatter uses fixed text for database errors, unreadable plans, object-permission
 failures, source-reader failures and unexpected exceptions. Django validation errors expose their

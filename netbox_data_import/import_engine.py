@@ -69,8 +69,6 @@ def operator_failure_message(exc) -> str:
         return exc.operator_message
     if isinstance(exc, adapters.SourceUnreadable):
         return "The source file cannot be read. Check the file and the import profile."
-    if isinstance(exc, adapters.UnknownSourceAdapter):
-        return "The source adapter is not available. Check the import profile."
     return "An unexpected error occurred. See server logs."
 
 

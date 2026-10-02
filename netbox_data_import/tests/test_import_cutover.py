@@ -919,7 +919,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             adapter_config={**self.profile.adapter_config, "sheet_name": "Missing"}
         )
 
-        with self.assertRaises(JobFailed):
+        with self.assertLogs("netbox_data_import.jobs", level="ERROR") as captured, self.assertRaises(JobFailed):
             ImportJobRunner(job).run(
                 self.profile.pk,
                 document.pk,
@@ -930,7 +930,9 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         job.refresh_from_db()
         self.assertEqual(job.data["phase"], "failed")
-        self.assertIn("Missing", job.data["message"])
+        self.assertEqual(job.data["message"], "The source file cannot be read. Check the file and the import profile.")
+        self.assertNotIn("Missing", job.data["message"])
+        self.assertTrue(any("Missing" in record for record in captured.output))
 
     def test_job_runner_keeps_the_execution_id_when_the_target_disappears(self):
         """A target failure after reservation still links the failed audit row to its Job."""

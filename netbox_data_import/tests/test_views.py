@@ -764,6 +764,9 @@ class ImportSetupViewTest(BaseViewTestCase):
         bad_file.name = "garbage.xlsx"
         resp = upload_preview(self.client, {"profile": profile.pk, "site": site.pk, "excel_file": bad_file})
         self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "The source file cannot be read. Check the file and the import profile.")
+        self.assertNotContains(resp, "File is not a zip file")
+        self.assertNotContains(resp, "Cannot open Excel file:")
 
 
 class PreviewSessionMixin:
