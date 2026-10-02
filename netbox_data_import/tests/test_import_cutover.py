@@ -70,6 +70,15 @@ class ImportJobRunnerMessageTest(SimpleTestCase):
             "First validation failure.; Second validation failure.",
         )
 
+    def test_an_unexpected_failure_keeps_internal_details_private(self):
+        """The public formatter refuses arbitrary exception text."""
+        error = RuntimeError("Internal storage failure in private_table")
+
+        self.assertEqual(
+            operator_failure_message(error),
+            "An unexpected error occurred. See server logs.",
+        )
+
     def test_import_plan_details_are_not_shown_to_the_operator(self):
         """An Import Plan error can name source data, so a Job record states one fixed sentence."""
         from netbox_data_import.import_engine import UNREADABLE_PLAN
@@ -896,7 +905,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         job.refresh_from_db()
         self.assertEqual(job.data["phase"], "failed")
-        self.assertIn("source_resolutions", job.data["message"])
+        self.assertEqual(job.data["message"], "An unexpected error occurred. See server logs.")
+        self.assertNotIn("source_resolutions", job.data["message"])
 
     def test_job_runner_reports_source_policy_that_changed_before_the_lock(self):
         """A source that the locked policy can no longer read leaves an operator-facing failure."""

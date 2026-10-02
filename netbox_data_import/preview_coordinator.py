@@ -43,6 +43,7 @@ from .plan import ImportPlan, PlanError, canonical_json
 from .preview_limits import MAX_PLAN_BYTES, preview_plan_byte_limit
 from .object_permissions import clear_user_permission_caches
 from .review_workspace import ReviewWorkspace, refuse_moved_policy
+from .public_refusal import PublicRefusal
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +78,11 @@ PREVIEW_TOO_LARGE = "This preview is too large to store. Split the source file a
 SOURCE_GONE = "The stored source is no longer available. Upload it again."
 
 
-class StalePreview(Exception):
+class StalePreview(PublicRefusal):
     """The command named a preview that is not the active one, or one that cannot take it now."""
 
 
-class PreviewCommandRefused(Exception):
+class PreviewCommandRefused(PublicRefusal):
     """A command refused for a reason this plugin wrote, so the response may state it."""
 
     def __init__(self, message: str, status: int = 400):

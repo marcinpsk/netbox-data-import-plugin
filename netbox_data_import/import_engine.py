@@ -24,6 +24,7 @@ from .object_permissions import ObjectPermissionDenied, clear_user_permission_ca
 from .plan import Diagnostic, Disposition, ImportPlan, PlanError, PlanInvalid, Severity, executable_units, merge_changes
 from .source_resolution import derive_effective_rows
 from .target_runtime import DeletedObject, ExecutionContext, PreconditionFailed
+from .public_refusal import PublicRefusal
 
 logger = logging.getLogger(__name__)
 
@@ -53,26 +54,35 @@ UNMERGEABLE_SELECTION = (
 def operator_failure_message(exc) -> str:
     """Return one execution failure as the text the operator reads.
 
-    A database message names the table, the column and the constraint that refused the write, so it
-    stays in the log, and so does an Import Plan error. Every other exception here carries a message
-    this plugin or NetBox wrote.
+    Database, plan and unexpected failure details stay in the server log. Public refusals carry
+    an authored message, while Django validation errors expose only their field messages.
     """
     if isinstance(exc, DatabaseError):
         return "The import could not be written. Check the NetBox logs and try again."
     if isinstance(exc, PlanError):
         return UNREADABLE_PLAN
-    return "; ".join(exc.messages) if isinstance(exc, ValidationError) else str(exc)
+    if isinstance(exc, ObjectPermissionDenied):
+        return "Permission denied: this action is outside your NetBox object permissions."
+    if isinstance(exc, ValidationError):
+        return "; ".join(exc.messages)
+    if isinstance(exc, PublicRefusal):
+        return exc.operator_message
+    if isinstance(exc, adapters.SourceUnreadable):
+        return "The source file cannot be read. Check the file and the import profile."
+    if isinstance(exc, adapters.UnknownSourceAdapter):
+        return "The source adapter is not available. Check the import profile."
+    return "An unexpected error occurred. See server logs."
 
 
-class StaleSourceDocument(Exception):
+class StaleSourceDocument(PublicRefusal):
     """The referenced stored source no longer exists, so the operator has to upload it again."""
 
 
-class StalePlan(Exception):
+class StalePlan(PublicRefusal):
     """A selected unit no longer has the decision inputs the operator accepted."""
 
 
-class SelectionError(Exception):
+class SelectionError(PublicRefusal):
     """The requested Synchronization Unit selection is not executable as stated."""
 
 

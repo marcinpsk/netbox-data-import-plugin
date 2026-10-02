@@ -35,6 +35,7 @@ from .values import (
     source_text,
     translation_maps,
 )
+from .public_refusal import PublicRefusal
 
 
 TERMINATION_UNRESOLVABLE = "That termination cannot be resolved here."
@@ -87,7 +88,7 @@ def save_termination_resolution_and_replan(
         return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
 
 
-class ProfilePolicyMoved(Exception):
+class ProfilePolicyMoved(PublicRefusal):
     """Another operator changed this profile's policy after the reviewed preview was planned."""
 
 
