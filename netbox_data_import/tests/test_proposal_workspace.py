@@ -1675,6 +1675,39 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         proposal.refresh_from_db()
         self.assertEqual(proposal.decision, "rejected")
 
+    def test_duplicate_field_assessments_use_each_source_spelling(self):
+        """Identity-equivalent fields can have different permission constraints on their spellings."""
+        from netbox_data_import.cable_target import UNRESOLVED
+        from netbox_data_import.netbox_reader import NetBoxReader
+        from netbox_data_import.proposal_presentation import ProposalPresentation
+
+        self.completed()
+        source = {"device": "DEV-A", "cards": "", "port": "absent-port"}
+        for part, other in (("device", "dev-a"), ("cards", " "), ("port", "ABSENT-PORT")):
+            actor = user_with_object_permission(
+                f"spelling-{part}",
+                [
+                    (ImportProfile, ["view", "change"], {"pk": self.profile.pk}),
+                    (Device, ["view"], {"site_id": self.site.pk}),
+                    (Interface, ["view"], {}),
+                    (TerminationResolution, ["add"], {f"source_{part}": source[part]}),
+                ],
+            )
+            allowed = {"field_key": self.field_key, "state": UNRESOLVED, "source": source}
+            denied = {**allowed, "source": {**source, part: other}}
+            reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
+            for fields, final_allowed in (((allowed, denied), False), ((denied, allowed), True)):
+                with self.subTest(part=part, final_allowed=final_allowed):
+                    presentation = ProposalPresentation(profile=self.profile, actor=actor, reader=reader)
+                    payload = presentation.fields(fields)[self.field_key]
+                    self.assertFalse(payload["staleness"]["is_stale"])
+                    accept = next(row for row in payload["presentation"]["actions"] if row["key"] == "accept")
+                    self.assertEqual(
+                        accept["reason"],
+                        "" if final_allowed else "You do not have permission to save a termination resolution.",
+                    )
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+
     def test_fields_reuse_inventory_for_the_same_device_kind_and_role(self):
         """Two proposal fields with one eligibility key must not repeat its inventory reads."""
         from django.db import connection

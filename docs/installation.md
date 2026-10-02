@@ -28,10 +28,18 @@ for every character.
 
 Before you upgrade:
 
-1. Merge or discard every open netbox-branching branch. Migration `0045_rekey_name_identities`
+1. Stop NetBox web requests and background imports before you run migration
+   `0045_rekey_name_identities`. Wait for active requests and import jobs to finish. Confirm that
+   no web process or worker can start another import or change a saved decision. The migration
+   does not acquire the profile locks that normal writers use.
+2. Save a restorable database backup. Migration `0045_rekey_name_identities` merges and deletes
+   decisions and cannot be reversed.
+3. Merge or discard every open netbox-branching branch. Migration `0045_rekey_name_identities`
    rewrites Cable provenance only in main, so a branch would bring back its old trace keys.
-2. Expect each open import preview to rebuild from its stored workbook. The plan schema version
+4. Expect each open import preview to rebuild from its stored workbook. The plan schema version
    changes.
+
+Restart web processes and workers only after the migration completes.
 
 Migration `0045_rekey_name_identities` rekeys every saved termination, Device and Location
 decision, every Cable provenance row and every Cable segment override. It never stops the upgrade:

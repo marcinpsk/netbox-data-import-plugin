@@ -617,8 +617,11 @@ A browser carries its own Unicode version and trims its own whitespace set, so n
 decides an identity. The split-name modal compares a split part with the value the row carries
 exactly, as typed, and asks for an acknowledgement on any difference. The server then refuses a split
 that replaces a value of another identity, or a serial that differs at all, unless the acknowledgement
-names that field; a value of the same identity saves without it. A guard refuses any browser case fold
-that is not listed with its display-only reason.
+names that field; a value of the same identity saves without it. An active preview must belong to the
+posted profile and contain exactly one Device row with the posted source ID. A missing, ambiguous or
+unreadable preview row refuses the save. A standalone policy save without an import preview has no
+carried row values to compare and remains permitted under the profile's object permissions.
+A guard refuses any browser case fold that is not listed with its display-only reason.
 
 Mappings whose make, or make and model, share one identity are one mapping when they name one
 target. When they name different targets, a row with that make and model is blocked with

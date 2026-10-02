@@ -3241,20 +3241,26 @@ def _split_field_values(unit) -> dict[str, str]:
     }
 
 
-def _carried_split_values(request, source_id) -> dict[str, str]:
-    """Return the split target values the active preview shows for one source row, or none without one row."""
+def _carried_split_values(request, profile_id, source_id) -> dict[str, str]:
+    """Return one active preview row's split values, or no values for a standalone policy save."""
+    if not _session_holds_a_preview(request):
+        return {}
+    if str((request.session.get("import_context") or {}).get("profile_id")) != str(profile_id):
+        raise ValidationError("The selected profile is not the active import profile.")
     plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY)
     if not plan_data:
-        return {}
+        raise ValidationError("The active Import Plan is no longer readable.")
     try:
         workspace = ReviewWorkspace.from_dict(plan_data, request.user)
     except PlanError as exc:
         raise ValidationError("The active Import Plan is no longer readable.") from exc
     rows = [unit for unit in workspace.units if unit.object_type == "device" and str(unit.source_id) == str(source_id)]
-    return _split_field_values(rows[0]) if len(rows) == 1 else {}
+    if len(rows) != 1:
+        raise ValidationError("The source ID must identify one active import row.")
+    return _split_field_values(rows[0])
 
 
-def _unacknowledged_replacement(request, source_id, source_column, resolved_fields) -> str:
+def _unacknowledged_replacement(request, profile_id, source_id, source_column, resolved_fields) -> str:
     """Return why a split replaces a value the preview row carries without the operator's acknowledgement."""
     import json
 
@@ -3266,7 +3272,7 @@ def _unacknowledged_replacement(request, source_id, source_column, resolved_fiel
         return ACKNOWLEDGEMENT_INVALID
     if not isinstance(acknowledged, list) or not all(isinstance(field, str) for field in acknowledged):
         return ACKNOWLEDGEMENT_INVALID
-    carried = _carried_split_values(request, source_id)
+    carried = _carried_split_values(request, profile_id, source_id)
     for field, value in resolved_fields.items():
         if field == source_column or field not in SPLIT_TARGET_FIELDS or field in acknowledged:
             continue
@@ -3326,7 +3332,7 @@ class SaveResolutionView(_PermissionScopedWriteMixin, _AjaxPermissionView):
                 return _preview_action_error(request, next_url, stale_reason, status=409)
 
             try:
-                refusal = _unacknowledged_replacement(request, source_id, source_column, resolved_fields)
+                refusal = _unacknowledged_replacement(request, profile.pk, source_id, source_column, resolved_fields)
             except ValidationError as exc:
                 return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
             if refusal:

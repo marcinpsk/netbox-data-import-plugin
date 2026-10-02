@@ -10,7 +10,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 
 from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceResolution
-from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY
+from netbox_data_import.preview_row_actions import PREVIEW_PLAN_SESSION_KEY, PREVIEW_REVISION_SESSION_KEY
 from netbox_data_import.tests.helpers import workbook_bytes
 
 CAPITAL_SHARP = "STRAẞE"
@@ -110,6 +110,67 @@ class SplitReplacementAcknowledgementTest(TestCase):
         self.assertEqual(refused.status_code, 400, refused.content)
         self.assertFalse(self.saved())
         self.assertEqual(self.save({"serial": "SN900"}, acknowledged=["serial"]).status_code, 200)
+
+    def test_a_split_cannot_use_another_profiles_preview(self):
+        other = ImportProfile.objects.create(name="Other Split Profile")
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": other.pk,
+                "source_id": "D-1",
+                "source_column": "device_name",
+                "resolved_fields": json.dumps({"asset_tag": CAPITAL_SHARP}),
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+            headers={"accept": "application/json"},
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json()["error"], "The selected profile is not the active import profile.")
+        self.assertFalse(SourceResolution.objects.filter(profile=other).exists())
+
+    def test_a_split_requires_one_source_row_in_an_active_preview(self):
+        row = self.client.session[PREVIEW_PLAN_SESSION_KEY]["units"][0]
+        for count in (0, 2):
+            with self.subTest(count=count):
+                session = self.client.session
+                plan = session[PREVIEW_PLAN_SESSION_KEY]
+                plan["units"] = [] if count == 0 else [row, {**row, "identity": row["identity"] + ":duplicate"}]
+                session[PREVIEW_PLAN_SESSION_KEY] = plan
+                session.save()
+                response = self.save({"asset_tag": CAPITAL_SHARP})
+                self.assertEqual(response.status_code, 400, response.content)
+                self.assertEqual(response.json()["error"], "The source ID must identify one active import row.")
+                self.assertFalse(self.saved())
+
+    def test_a_preview_bound_split_requires_a_readable_plan(self):
+        for plan in (None, {"units": "invalid"}):
+            with self.subTest(plan=plan):
+                session = self.client.session
+                session[PREVIEW_PLAN_SESSION_KEY] = plan
+                session.save()
+                response = self.save({"asset_tag": CAPITAL_SHARP})
+                self.assertEqual(response.status_code, 400, response.content)
+                self.assertEqual(response.json()["error"], "The active Import Plan is no longer readable.")
+                self.assertFalse(self.saved())
+
+    def test_a_standalone_resolution_can_save_without_preview_values(self):
+        session = self.client.session
+        for key in tuple(session.keys()):
+            if key.startswith("import_"):
+                del session[key]
+        session.save()
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "D-1",
+                "source_column": "device_name",
+                "resolved_fields": json.dumps({"asset_tag": SHARP}),
+            },
+            headers={"accept": "application/json"},
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(self.saved())
 
     def test_a_malformed_acknowledgement_is_refused(self):
         refused = self.save({"asset_tag": SHARP}, acknowledged={"asset_tag": True})

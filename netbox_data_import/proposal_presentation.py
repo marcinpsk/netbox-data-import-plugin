@@ -346,6 +346,7 @@ class ProposalPresentation:
         elif selected_entry is not None and "source" in field:
             assessment_key = (
                 proposal.field_key,
+                tuple(field["source"][part] for part in ("device", "cards", "port")),
                 selected_entry.object_type,
                 selected_entry.object_id,
                 selected_entry.display_name,
