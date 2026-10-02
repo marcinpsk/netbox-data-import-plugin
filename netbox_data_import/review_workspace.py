@@ -37,6 +37,9 @@ from .values import (
 )
 
 
+TERMINATION_UNRESOLVABLE = "That termination cannot be resolved here."
+
+
 class IneligibleDeviceSelection(Exception):
     """The selected Device is absent from the candidates offered for this request."""
 

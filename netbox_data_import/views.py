@@ -117,6 +117,7 @@ from .profile_yaml import (
 )
 from .review_workspace import (
     PROFILE_POLICY_MOVED,
+    TERMINATION_UNRESOLVABLE,
     IneligibleDeviceSelection,
     IneligibleLocationSelection,
     ProfilePolicyMoved,
@@ -4235,7 +4236,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         proposal_display = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
         proposal_fields = proposal_display.fields(
             [
-                {**field, "offered": workspace.termination_sources.get(field["field_key"]) is not None}
+                {**field, "source_ambiguous": workspace.termination_sources.get(field["field_key"]) is None}
                 for field in selected.terminations
             ]
             if selected
@@ -4417,7 +4418,6 @@ class TraceSyncView(_PermissionScopedWriteMixin, _TraceWorkspaceMixin, Permissio
             return redirect(next_url)
 
 
-TERMINATION_UNRESOLVABLE = "That termination cannot be resolved here."
 CANDIDATE_LIMIT_INVALID = f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}."
 # PostgreSQL reads OFFSET and LIMIT as bigint, so the last row of a page must stay inside that range.
 CANDIDATE_OFFSET_MAX = 2**63 - 1 - ELIGIBLE_TERMINATION_LIMIT
@@ -5183,7 +5183,7 @@ class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
             reader = _trace_reader(request, profile, planning_context)
         except PlanningTargetUnavailable:
             reader = None
-        field = {**field, "offered": workspace.termination_sources.get(field_key) is not None}
+        field = {**field, "source_ambiguous": workspace.termination_sources.get(field_key) is None}
         presentation = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
         return JsonResponse(presentation.fields([field])[field_key])
 
@@ -5215,8 +5215,6 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
         )
         if proposal.field_key not in workspace.termination_sources:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
-        if workspace.termination_sources[proposal.field_key] is None:
-            raise InvalidProposalTarget(TERMINATION_UNRESOLVABLE)
         if not self.apply(proposal, request, reader, workspace):
             raise PreviewActionInvalid("This proposal no longer permits that action. Re-read it before continuing.")
         proposal.refresh_from_db()
@@ -5257,6 +5255,8 @@ class TraceAcceptProposalView(_TraceProposalActionView):
         """Record the accepted resolution and require an explicit preview recalculation."""
         from .proposal_decisions import accept_proposal
 
+        if workspace.termination_sources[proposal.field_key] is None:
+            raise InvalidProposalTarget(TERMINATION_UNRESOLVABLE)
         accepted = accept_proposal(
             proposal.pk,
             source=workspace.termination_sources[proposal.field_key],

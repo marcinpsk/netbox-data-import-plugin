@@ -21,6 +21,7 @@ from .inference_backend import (
 from .inference_trust import InvalidInferenceConfiguration
 from .models import ImportProfile, ProposalDecision, ProposalOutcome, ProposalStatus, ResolutionProposal
 from .proposal_decisions import proposal_staleness
+from .review_workspace import TERMINATION_UNRESOLVABLE
 from .resolution_proposals import page_exhausted
 from .proposal_tasks import CandidateSnapshot, proposal_task
 from .cable_target import AUTOMATICALLY_RESOLVED, MANUALLY_RESOLVED, UNRESOLVED
@@ -194,6 +195,8 @@ class ProposalPresentation:
 
     def request_permission_reason(self, field, inventory):
         """Explain access and candidate eligibility for a proposal request."""
+        if field.get("source_ambiguous", False):
+            return TERMINATION_UNRESOLVABLE
         reason = self.action_permission_reason(field, inventory)
         if reason:
             return reason
@@ -341,6 +344,8 @@ class ProposalPresentation:
                 else "The backend found no match. There is no candidate to accept."
             )
         accept_reason = accept_reason or stale_reason
+        if field.get("source_ambiguous", False):
+            accept_reason = TERMINATION_UNRESOLVABLE
         if not self.preview_allowed:
             accept_reason = "You do not have permission to save a termination resolution."
         elif selected_entry is not None and "source" in field:

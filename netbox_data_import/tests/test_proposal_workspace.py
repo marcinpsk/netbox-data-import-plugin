@@ -36,6 +36,7 @@ from netbox_data_import.preview_row_actions import (
     retained_sync_block_reason,
 )
 from netbox_data_import.proposal_tasks import CandidateSnapshot
+from netbox_data_import.review_workspace import TERMINATION_UNRESOLVABLE
 from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, complete_proposal, fail_proposal
 from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes, user_with_object_permission
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
@@ -1675,13 +1676,10 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         proposal.refresh_from_db()
         self.assertEqual(proposal.decision, "rejected")
 
-    def test_conflicting_source_spellings_refuse_preview_resolutions(self):
-        """One canonical field cannot authorize a different spelling from the reviewed card."""
+    def upload_shared_source_spellings(self):
+        """Open two valid traces that share a segment but spell its source Device differently."""
         from netbox_data_import.review_workspace import ReviewWorkspace
-        from netbox_data_import.views import TERMINATION_UNRESOLVABLE
 
-        proposal = self.completed()
-        proposal.refresh_from_db()
         upload = BytesIO(
             trace_workbook_bytes(
                 path_blocks=[
@@ -1700,7 +1698,13 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             follow=True,
         )
         self.assertEqual(response.status_code, 200, response.content)
-        workspace = ReviewWorkspace.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY], self.actor)
+        return ReviewWorkspace.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY], self.actor)
+
+    def test_conflicting_source_spellings_refuse_preview_resolutions(self):
+        """One canonical field cannot authorize a different spelling from the reviewed card."""
+        proposal = self.completed()
+        proposal.refresh_from_db()
+        workspace = self.upload_shared_source_spellings()
         sources = [
             item["source"]["device"]
             for trace in workspace.traces
@@ -1733,6 +1737,32 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         )
         self.assertEqual(candidates.status_code, 400, candidates.content)
         self.assertEqual(candidates.json()["error"], TERMINATION_UNRESOLVABLE)
+
+    def test_ambiguous_sources_allow_rejection_without_a_resolution(self):
+        proposal = self.completed()
+        self.upload_shared_source_spellings()
+        actions = {row["key"]: row for row in self.presentation()["actions"]}
+        self.assertEqual(actions["request"]["reason"], TERMINATION_UNRESOLVABLE)
+        self.assertEqual(actions["accept"]["reason"], TERMINATION_UNRESOLVABLE)
+        self.assertEqual(actions["reject"]["reason"], "")
+        response = self.call("reject_proposal", proposal_id=proposal.pk)
+        self.assertEqual(response.status_code, 200, response.content)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.decision, "rejected")
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+
+    def test_ambiguous_sources_allow_cancelling_queued_work(self):
+        proposal = self.request_proposal()
+        self.upload_shared_source_spellings()
+        actions = {row["key"]: row for row in self.presentation()["actions"]}
+        self.assertEqual(actions["request"]["reason"], TERMINATION_UNRESOLVABLE)
+        self.assertEqual(actions["accept"]["reason"], TERMINATION_UNRESOLVABLE)
+        self.assertEqual(actions["cancel"]["reason"], "")
+        response = self.call("cancel_proposal", proposal_id=proposal.pk)
+        self.assertEqual(response.status_code, 200, response.content)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.status, ProposalStatus.CANCELLED)
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
 
     def test_duplicate_field_assessments_use_each_source_spelling(self):
         """Identity-equivalent fields can have different permission constraints on their spellings."""
