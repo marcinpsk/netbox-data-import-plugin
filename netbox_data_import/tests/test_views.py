@@ -5265,6 +5265,37 @@ class SyncIPSafetyTests(TestCase):
         row_number = _preview_matched_device(self.client, self.user, self.device, **{field: value})
         return _post_row_sync(self.client, self.url, row_number, field=field)
 
+    def test_an_ip_write_outside_object_scope_hides_the_permission_identifier(self):
+        """A real scoped IPAM denial rolls back the address and exposes only its public refusal."""
+        from dcim.models import Device, DeviceRole, DeviceType, Interface, Manufacturer, Site
+        from ipam.models import IPAddress
+
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        self.user = user_with_object_permission(
+            "restricted-ip-writer",
+            [
+                (ImportProfile, ("view", "change"), None),
+                (Site, ("view",), None),
+                (Device, ("view", "change"), {"pk": self.device.pk}),
+                (DeviceRole, ("view",), None),
+                (DeviceType, ("view",), None),
+                (Manufacturer, ("view",), None),
+                (Interface, ("view",), {"device_id": self.device.pk}),
+                (IPAddress, ("view", "add"), {"address": "198.18.0.254/32"}),
+            ],
+        )
+        self.client.force_login(self.user)
+
+        response = self._sync("primary_ip4", "198.18.0.23/32")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Permission denied: cannot assign this IP address.")
+        self.assertNotIn("ipam.add_ipaddress", response.json()["error"])
+        self.assertFalse(IPAddress.objects.filter(address="198.18.0.23/32").exists())
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.primary_ip4)
+
     def test_an_ipv6_address_is_refused_for_the_ipv4_field(self):
         """NetBox stores the family in the field name; this would persist a v6 value in it."""
         response = self._sync("primary_ip4", "2001:db8::1")

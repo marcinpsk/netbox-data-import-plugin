@@ -1358,6 +1358,10 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         response = self._sync_single_row({"row_number": 2})
 
         self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(
+            response.json()["error"], "Permission denied: this action is outside your NetBox object permissions."
+        )
+        self.assertNotIn("dcim.add_rack", response.json()["error"])
         self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
         self.assertEqual(
             ImportExecution.objects.latest("pk").failure_detail["reason"],
