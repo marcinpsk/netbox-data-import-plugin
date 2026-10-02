@@ -40,6 +40,7 @@ from netbox_data_import.review_workspace import TERMINATION_UNRESOLVABLE
 from netbox_data_import.views import TARGET_GONE
 from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, complete_proposal, fail_proposal
 from netbox_data_import.tests.helpers import (
+    retired_claim,
     preview_claim,
     preview_coordinator,
     seed_preview,
@@ -207,10 +208,8 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         return response
 
     def stale_claim(self):
-        """Return the claim the page held before a re-read retired it."""
-        claim = preview_claim(self.client)
-        self.reread()
-        return claim
+        """Return the claim a successful re-read retired."""
+        return retired_claim(self.client)
 
     def login_with_preview(self, actor):
         """Log *actor* in with this upload as its preview, planned before its permissions were narrowed."""

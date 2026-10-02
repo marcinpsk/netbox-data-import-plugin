@@ -1696,7 +1696,7 @@ function cmCreateRole() {
         errEl.style.display = '';
         return;
       }
-      window.location.reload();
+      window.ndiReloadPreview();
     })
     .catch(function() {
       errEl.textContent = 'Request failed. Please try again.';

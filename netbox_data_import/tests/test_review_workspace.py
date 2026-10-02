@@ -124,6 +124,26 @@ class ReviewWorkspacePresentationTest(TestCase):
         self.assertEqual(workspace.units[3].action, "ignore")
         self.assertEqual(workspace.units[4].detail, "device.example")
 
+    def test_object_visibility_reuses_the_render_projection(self):
+        """The real projection reuses serialized display data across workspace readers."""
+
+        class CountedUnit(SynchronizationUnit):
+            serializations = 0
+
+            def to_dict(self):
+                type(self).serializations += 1
+                return super().to_dict()
+
+        unit = CountedUnit(
+            identity="device:1", disposition=Disposition.NO_OP, display={"name": "device-a", "object_type": "device"}
+        )
+        workspace = _workspace(unit)
+        self.assertEqual(workspace.units[0].name, "device-a")
+        self.assertEqual(dict(workspace.counts), {"skipped": 1})
+        self.assertFalse(workspace.has_errors)
+        # Cable disclosure reads once, then object visibility and rendering share one projection.
+        self.assertEqual(CountedUnit.serializations, 2)
+
     def test_target_refusals_have_operator_facing_details(self):
         """Every target refusal without a custom message renders stable operator wording."""
         cases = {

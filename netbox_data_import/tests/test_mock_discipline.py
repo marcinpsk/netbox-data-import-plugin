@@ -117,6 +117,21 @@ def test_flags_patching_the_proposal_eligible_set_limit_with_a_real_replacement(
     ]
 
 
+def test_flags_preview_size_constant_patches():
+    """Size tests use the validated setting instead of replacing an internal policy value."""
+    for statement in (
+        'patch.object(coordinator, "MAX_PLAN_BYTES", new=16)',
+        'patch("netbox_data_import.preview_coordinator.MAX_PLAN_BYTES", new=16)',
+    ):
+        source = (
+            "from unittest.mock import patch\n"
+            "from netbox_data_import import preview_coordinator as coordinator\n" + statement
+        )
+        hits = scan_source(source, "size_test.py")
+        assert len(hits) == 1
+        assert hits[0].kind == "policy-patch"
+
+
 def test_flags_keyword_form_policy_patches():
     src = (
         "from unittest.mock import patch\n"

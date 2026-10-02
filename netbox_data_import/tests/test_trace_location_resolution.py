@@ -22,6 +22,7 @@ from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.profile_yaml import serialize_profile
 from netbox_data_import.trace_device_resolution import CandidateFact, DeviceEvidence, eligible_trace_devices
 from netbox_data_import.tests.helpers import (
+    retired_claim,
     executed_sql,
     preview_claim,
     preview_coordinator,
@@ -533,12 +534,8 @@ class LocationWorkspaceMixin(LocationTreeMixin):
         return client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
     def stale_claim(self, client=None):
-        """Return the claim the page held before a re-read retired it."""
-        client = client or self.client
-        claim = preview_claim(client)
-        reread = client.post(reverse("plugins:netbox_data_import:preview_reread"), claim)
-        self.assertEqual(reread.status_code, 302, reread.content[:300])
-        return claim
+        """Return the claim a successful re-read retired."""
+        return retired_claim(client or self.client)
 
     def seed_as(self, actor):
         """Log *actor* in and give that session the current upload, planned as *actor*."""

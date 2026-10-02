@@ -197,7 +197,10 @@ def _dynamic_session_lookup(node) -> bool:
     attribute = node.args[1]
     if isinstance(attribute, ast.Constant):
         return attribute.value == "session"
-    return isinstance(node.args[0], ast.Name) and node.args[0].id == "request"
+    receiver = node.args[0]
+    return (isinstance(receiver, ast.Name) and receiver.id in {"request", "req"}) or (
+        isinstance(receiver, ast.Attribute) and receiver.attr == "request"
+    )
 
 
 def literal_findings(source: str, name: str) -> list[str]:
@@ -281,6 +284,16 @@ class SessionScanTest(SimpleTestCase):
     def test_finds_a_dynamic_attribute_lookup(self):
         source = "def f(request, row, name):\n    getattr(request, 'session')\n    getattr(request, name)\n    getattr(row, name)\n"
         self.assertEqual(len(session_findings(source, "views.py")), 2)
+
+    def test_finds_computed_attributes_on_request_receivers(self):
+        for receiver in ("request", "req", "self.request", "view.request"):
+            for function in ("getattr", "setattr", "delattr", "hasattr"):
+                with self.subTest(receiver=receiver, function=function):
+                    source = f"def f(request, req, self, view, name):\n    {function}({receiver}, name)\n"
+                    self.assertEqual(
+                        session_findings(source, "views.py"),
+                        ["views.py:2: reaches the session by a computed attribute name"],
+                    )
 
     def test_permits_only_the_discovery_key_in_views_and_only_the_key_in_the_owner(self):
         views_source = f"def f(request):\n    request.session.pop({DISCOVERY_KEY}, None)\n    request.session[{DISCOVERY_KEY}] = 1\n"

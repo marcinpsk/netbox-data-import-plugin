@@ -1424,12 +1424,10 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertEqual((after.revision, after.plan), (before.revision, before.plan))
 
     def test_a_plan_size_refusal_keeps_the_failed_row_sync_audit(self):
-        from unittest.mock import patch
-
         from dcim.models import Device, Rack
         from django.db import connection
 
-        from netbox_data_import import preview_coordinator as coordinator_module
+        from netbox_data_import.tests.plugins_config import override_plugins_config
 
         Rack.objects.create(name="rack-a", site=self.site, u_height=42)
         self._upload()
@@ -1441,7 +1439,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
                 writes.append(True)
             return execute(sql, params, many, context)
 
-        with patch.object(coordinator_module, "MAX_PLAN_BYTES", new=16):
+        with override_plugins_config(netbox_data_import={"preview_max_plan_bytes": 16}):
             with connection.execute_wrapper(record_device_write):
                 response = self._sync_single_row({"row_number": 3})
 

@@ -10,8 +10,6 @@ delete that lands before the lock leaves the view. A view that does not answer i
 `_PreviewCommandMixin` answers it once for every view that inherits it, directly or through another
 mixin. A view that does not inherit it has to catch the exception itself. A write inside a Preview
 Command runs under `apply_preview_command()`, so the view that applies the command answers for it.
-One view lost its handler to a cleanup that assumed removing an outer lock removed the exception,
-which it did not, so this scanner exists.
 """
 
 import ast

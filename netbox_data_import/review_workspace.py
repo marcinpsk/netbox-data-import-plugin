@@ -890,7 +890,8 @@ def _present_object_reviews(units, viewer) -> tuple:
     from dcim.models import Device, Rack
 
     # Use the same projection as rendering, including changes and secondary diagnostics.
-    references = [WorkspaceUnit.from_unit(unit).extra_data for unit in units]
+    projections = [WorkspaceUnit.from_unit(unit) for unit in units]
+    references = [projection.extra_data for projection in projections]
     visible_ids = {}
     for object_type, model in (("device", Device), ("rack", Rack)):
         key = f"netbox_{object_type}_id"
@@ -899,7 +900,7 @@ def _present_object_reviews(units, viewer) -> tuple:
             model.objects.restrict(viewer, "view").filter(pk__in=reviewed_ids).values_list("pk", flat=True)
         )
     presented = []
-    for unit, references_for_unit in zip(units, references, strict=True):
+    for unit, projection, references_for_unit in zip(units, projections, references, strict=True):
         hidden_type = next(
             (
                 object_type
@@ -910,7 +911,7 @@ def _present_object_reviews(units, viewer) -> tuple:
             None,
         )
         if hidden_type is None:
-            presented.append(unit)
+            presented.append((unit, projection))
             continue
         # Only source evidence survives: details and field snapshots can name the hidden object.
         display = {
@@ -918,22 +919,22 @@ def _present_object_reviews(units, viewer) -> tuple:
             for key, value in unit.display.items()
             if key in {"object_type", "row_number", "source_id", "name", "rack_name", "source_row"}
         }
-        presented.append(
-            replace(
-                unit,
-                disposition=Disposition.INVALID,
-                changes=(),
-                display=display,
-                diagnostics=(
-                    Diagnostic(
-                        code=f"{hidden_type}.inaccessible_match",
-                        severity=Severity.ERROR,
-                        identities=(unit.identity,),
-                        display=display,
-                    ),
+        redacted = replace(
+            unit,
+            disposition=Disposition.INVALID,
+            changes=(),
+            display=display,
+            diagnostics=(
+                Diagnostic(
+                    code=f"{hidden_type}.inaccessible_match",
+                    severity=Severity.ERROR,
+                    identities=(unit.identity,),
+                    display=display,
                 ),
-            )
+            ),
         )
+
+        presented.append((redacted, WorkspaceUnit.from_unit(redacted)))
     return tuple(presented)
 
 
@@ -947,16 +948,21 @@ class ReviewWorkspace:
         self._viewer = viewer
 
     @cached_property
-    def _presentation_units(self) -> tuple:
-        """Return the viewer's redacted copy, built on first use so a command that renders nothing reads nothing."""
+    def _presentation(self) -> tuple:
+        """Build redacted units and their projections only when a command needs presentation."""
         from .cable_disclosure import present_units
 
         return _present_object_reviews(present_units(self.plan.units, self._viewer), self._viewer)
 
     @cached_property
+    def _presentation_units(self) -> tuple:
+        """Return the viewer's redacted plan units."""
+        return tuple(unit for unit, _projection in self._presentation)
+
+    @cached_property
     def units(self) -> tuple[WorkspaceUnit, ...]:
         """Return the presentation of every unit, in plan order."""
-        return tuple(WorkspaceUnit.from_unit(unit) for unit in self._presentation_units)
+        return tuple(projection for _unit, projection in self._presentation)
 
     @classmethod
     def from_dict(cls, data: dict, viewer) -> ReviewWorkspace:

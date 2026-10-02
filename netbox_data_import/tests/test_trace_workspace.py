@@ -1482,11 +1482,10 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
 
     def test_a_refused_recovery_rolls_back_the_job_and_releases_its_lock(self):
         import threading
-        from unittest.mock import patch
         from core.choices import JobStatusChoices
         from core.models import Job
         from django_rq import get_queue
-        from netbox_data_import import preview_coordinator as coordinator_module
+        from netbox_data_import.tests.plugins_config import override_plugins_config
         from netbox_data_import.jobs import ImportJobRunner
 
         chosen = self._upload_and_choose()
@@ -1500,7 +1499,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         rq_job.delete()
         before = preview_coordinator(self.client)
 
-        with patch.object(coordinator_module, "MAX_PLAN_BYTES", new=16):
+        with override_plugins_config(netbox_data_import={"preview_max_plan_bytes": 16}):
             refused = _reread(self.client, HTTP_ACCEPT="application/json")
 
         self.assertEqual(refused.status_code, 413)

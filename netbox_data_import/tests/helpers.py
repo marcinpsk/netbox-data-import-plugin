@@ -433,6 +433,17 @@ def preview_claim(client) -> dict:
     return _claim_of(preview_coordinator(client)).fields()
 
 
+def retired_claim(client) -> dict:
+    """Re-read a live preview and return the exact claim that the successful command retired."""
+    from django.urls import reverse
+
+    claim = preview_claim(client)
+    response = client.post(reverse("plugins:netbox_data_import:preview_reread"), claim)
+    assert response.status_code == 302, response.content[:300]
+    assert preview_claim(client) != claim, "The re-read did not retire the claim."
+    return claim
+
+
 def stored_plan(client) -> dict:
     """Return the serialized Import Plan the client's preview holds."""
     return preview_coordinator(client).plan
