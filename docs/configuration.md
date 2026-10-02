@@ -369,8 +369,10 @@ The plugin does not split the path and does not compare it with a NetBox Locatio
 as a hint, map it to a NetBox Location of the Site under **Source Locations** in the workspace. A
 Device in the mapped Location, or in a Location below it, then matches the path. A Device in another
 Location of the Site conflicts with it. An unmapped path is not a hint. The Import Profile stores the
-mapping, and a later trace file reuses it for the same path. The separator spelling is part of the
-path, so `A>>B` and `A >> B` are two paths. Profile YAML does not include these mappings.
+mapping, and a later trace file reuses it after case and whitespace normalization. Matching ignores
+case, trims whitespace at both ends, and collapses each run of internal whitespace to one space. The
+separator spelling is part of the path, so `A>>B` and `A >> B` are two paths. Profile YAML does not
+include these mappings.
 
 A Device's Location is its own Location. Only a Device with no Location of its own uses its Rack's
 Location.
