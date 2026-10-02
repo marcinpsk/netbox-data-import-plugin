@@ -84,10 +84,20 @@ test("every row opens the one shared dialog for its own path", async ({ page }) 
 
   await page.locator("[data-trace-location-picker]").nth(0).click();
   await expect(page.locator("#traceLocationCount")).toHaveText("2 of 7 visible Locations");
+  // The label changes before the second request is delivered.
+  let releaseSecondRequest;
+  const secondRequest = new Promise((resolve) => {
+    releaseSecondRequest = resolve;
+  });
+  await page.route("**/trace-workspace/location-candidates/**", async (route) => {
+    await secondRequest;
+    await route.fallback();
+  });
   await page.locator("[data-trace-location-picker]").nth(1).click();
   await expect(page.locator("#traceLocationLabel")).toHaveText("Region >> DH5");
 
-  expect(asked).toEqual(["region >> dh4", "region >> dh5"]);
+  releaseSecondRequest();
+  await expect.poll(() => asked).toEqual(["region >> dh4", "region >> dh5"]);
   await expect(page.locator("#traceLocationKey")).toHaveValue("region >> dh5");
   expect(await page.evaluate(() => window.ndiModalInstances)).toBe(1);
   expect(await page.evaluate(() => window.ndiModalShows)).toEqual(["region >> dh4", "region >> dh5"]);
