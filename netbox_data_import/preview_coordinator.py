@@ -711,7 +711,7 @@ class RestorePreview(PreviewCommand):
         failed = Job.objects.filter(
             pk=self.job_id, status__in=(JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED)
         )
-        if preview.job_id != self.job_id or not failed.exists():
+        if not failed.exists():
             raise StalePreview("This preview does not belong to that failed import.")
         return CommandOutcome(message="The preview of the failed import was re-read from NetBox.")
 

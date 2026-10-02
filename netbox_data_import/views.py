@@ -1503,7 +1503,9 @@ def _import_job_progress(request, job):
         "is_completed": job.status == JobStatusChoices.STATUS_COMPLETED,
         "is_failed": is_failed,
         "restore_claim": snapshot.claim if restorable else None,
-        "preview_replaced": is_failed and not restorable and isinstance(data.get("context_data"), dict),
+        "preview_replaced": (
+            is_failed and not restorable and isinstance(data.get("context_data"), dict) and snapshot.job_id != job.pk
+        ),
         "results_url": (
             reverse("plugins:netbox_data_import:import_results", kwargs={"pk": execution_id}) if execution_id else ""
         ),
