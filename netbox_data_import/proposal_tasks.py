@@ -175,7 +175,7 @@ def proposal_inventory_staleness(proposal, inventory) -> ProposalStaleness:
     return ProposalStaleness(resolved_device_changed=device_changed, candidates_changed=candidates_changed)
 
 
-def snapshot_from(candidate_set, *, label_for, name_for, limit) -> CandidateSnapshot:
+def snapshot_from(candidate_set, *, name_for, limit) -> CandidateSnapshot:
     """Turn one retrieved set into a snapshot, refusing a set that cannot back a proposal.
 
     A truncated result must never establish freshness, so the retrieved count has to equal the
@@ -197,7 +197,7 @@ def snapshot_from(candidate_set, *, label_for, name_for, limit) -> CandidateSnap
     entries = tuple(
         CandidateSnapshotEntry(
             candidate_id=candidate_id_for(position),
-            object_type=label_for(candidate),
+            object_type=candidate._meta.label_lower,
             object_id=candidate.pk,
             display_name=name_for(candidate),
         )

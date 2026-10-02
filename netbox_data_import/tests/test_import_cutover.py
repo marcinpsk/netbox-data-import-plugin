@@ -68,6 +68,15 @@ class ImportJobRunnerMessageTest(SimpleTestCase):
             "First validation failure.; Second validation failure.",
         )
 
+    def test_import_plan_details_are_not_shown_to_the_operator(self):
+        """An Import Plan error can name session data, so a Job record states one fixed sentence."""
+        from netbox_data_import.import_engine import UNREADABLE_PLAN
+        from netbox_data_import.plan import PlanInvalid
+
+        error = PlanInvalid("The Import Plan has no Synchronization Unit 'device:name:private-name'.")
+
+        self.assertEqual(operator_failure_message(error), UNREADABLE_PLAN)
+
     def test_database_details_are_not_shown_to_the_operator(self):
         """A database failure keeps statement and constraint details out of the Job record."""
         error = DatabaseError("duplicate key value violates constraint private_constraint")
@@ -956,6 +965,42 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"]).delete()
         self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
 
+    def test_an_unreadable_session_plan_answers_one_fixed_sentence(self):
+        """Code scanning taints every caught exception, so no Import Plan error text reaches a response."""
+        from django.contrib.messages import get_messages
+
+        from netbox_data_import.plan import PlanError
+
+        setup_url = reverse("plugins:netbox_data_import:import_setup")
+        corruptions = (("wrong schema version", {"schema_version": 999}), ("malformed units", {"units": "not units"}))
+        for label, changes in corruptions:
+            for view in ("preview", "run", "sync"):
+                with self.subTest(label=label, view=view):
+                    self._upload()
+                    session = self.client.session
+                    session[PREVIEW_PLAN_SESSION_KEY].update(changes)
+                    session.save()
+                    with self.assertRaises(PlanError) as raised:
+                        ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+                    detail = str(raised.exception)
+
+                    if view == "sync":
+                        response = self._sync_single_row({"row_number": 2})
+                        self.assertEqual(response.status_code, 409)
+                        self.assertEqual(
+                            response.json(), {"ok": False, "error": "This preview cannot be read. Re-read the preview."}
+                        )
+                        self.assertNotIn(detail, response.content.decode())
+                        continue
+                    if view == "preview":
+                        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+                    else:
+                        response = self.client.post(reverse("plugins:netbox_data_import:import_run"))
+                    self.assertRedirects(response, setup_url, fetch_redirect_response=False)
+                    shown = [str(message) for message in get_messages(response.wsgi_request)]
+                    self.assertIn("This preview cannot be read. Start a new import.", shown)
+                    self.assertFalse([message for message in shown if detail in message], shown)
+
     def test_single_row_sync_executes_an_update_row(self):
         """Per-row sync runs the same engine step 3 runs, for a row that updates a device."""
         from dcim.models import Device, DeviceRole, DeviceType, Rack
@@ -1061,12 +1106,10 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         )
 
     def test_single_row_sync_does_not_echo_why_the_stored_plan_is_unreadable(self):
-        """A malformed stored plan answers with a sentence this plugin wrote and logs the Python error."""
-        cases = (
-            ("units", None, "The serialized Import Plan is malformed.", "KeyError"),
-            ("display", float("nan"), "Synchronization Unit display must be JSON-serializable plan data.", "nan"),
-        )
-        for field, value, message, detail in cases:
+        """A malformed stored plan answers one fixed sentence and logs the Python error."""
+        message = "This preview cannot be read. Re-read the preview."
+        cases = (("units", None, "KeyError"), ("display", float("nan"), "nan"))
+        for field, value, detail in cases:
             with self.subTest(field=field):
                 self._upload()
                 session = self.client.session
@@ -1161,6 +1204,23 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         response = self._sync_single_row({"row_number": 2})
 
         self.assertEqual(response.status_code, 500)
+
+    def test_single_row_sync_answers_a_row_that_needs_an_unselected_row_with_one_sentence(self):
+        """A Device whose new Rack is another row cannot run alone, and the answer names no plan identity."""
+        from netbox_data_import.import_engine import UNMERGEABLE_SELECTION
+
+        self._upload()
+        plan = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        rack_change = next(
+            change.identity for unit in plan.units for change in unit.changes if "rack" in change.identity
+        )
+
+        response = self._sync_single_row({"row_number": 3})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {"ok": False, "error": UNMERGEABLE_SELECTION})
+        self.assertNotIn(rack_change, response.content.decode())
+        self.assertNotIn(rack_change, str(ImportExecution.objects.latest("pk").failure_detail))
 
     def test_single_row_sync_names_the_object_it_wrote(self):
         """The modal closes on success, so the page needs the write named to keep it on screen."""

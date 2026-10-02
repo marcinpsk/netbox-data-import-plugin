@@ -41,11 +41,12 @@ class NetBoxDataImportConfig(PluginConfig):
             raise ImproperlyConfigured(f"Plugin {cls.__module__} has an invalid configuration: {exc}") from exc
 
     def ready(self):
-        """Import the modules NetBox does not load, and register with netbox-branching when it is installed."""
+        """Import the modules NetBox does not load, and register the Cable display vocabulary and netbox-branching."""
         super().ready()
 
-        from . import branching, jobs, termination_proposal
+        from . import branching, cable_disclosure, jobs, termination_proposal
 
+        cable_disclosure.register()
         branching.register()
 
 

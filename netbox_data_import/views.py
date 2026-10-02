@@ -26,7 +26,7 @@ from utilities.permissions import get_permission_for_model
 from utilities.views import ConditionalLoginRequiredMixin
 
 from .filters import ImportProfileFilterSet, InferenceBackendFilterSet
-from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, POLICY_WRITE_REFUSED, policy_row_is_disclosed
+from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, policy_row_is_disclosed
 from .forms import (
     CableClassMappingForm,
     CableSegmentOverrideForm,
@@ -91,12 +91,19 @@ from . import adapters, ip_assignment
 from .contact_resolution import PrimaryContactResolver, contact_identity, suggest_contact_roles
 from .device_field_review import DeviceFieldReviewer, sync_change_preview
 from .object_permissions import (
+    POLICY_WRITE_REFUSED,
     ObjectPermissionDenied,
     assess_permission_scoped_save_option,
     delete_permission_scoped_objects,
     save_permission_scoped_object,
 )
-from .profile_yaml import DuplicateYamlKeyError, apply_profile_document, load_yaml_document, serialize_profile
+from .profile_yaml import (
+    DuplicateYamlKeyError,
+    ProfileDocumentInvalid,
+    apply_profile_document,
+    load_yaml_document,
+    serialize_profile,
+)
 from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
@@ -128,17 +135,26 @@ from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .plan import ImportPlan, PlanError, fingerprint_of, is_current_schema_version
 from .review_workspace import (
     IneligibleDeviceSelection,
+    IneligibleLocationSelection,
     PROFILE_POLICY_MOVED,
     ProfilePolicyMoved,
     ReviewWorkspace,
-    UnacceptableCablePolicy,
+    UnacceptablePolicyDecision,
     clear_cable_segment_override_and_replan,
+    clear_trace_location_resolution_and_replan,
     save_cable_class_mapping_and_replan,
     save_cable_segment_override_and_replan,
     save_termination_resolution_and_replan,
     save_trace_device_resolution_and_replan,
+    save_trace_location_resolution_and_replan,
 )
 from .trace_device_resolution import DeviceEvidence, eligible_trace_devices, source_device_key
+from .trace_location_resolution import (
+    eligible_trace_locations,
+    present_location_mappings,
+    site_locations,
+    source_location_key,
+)
 
 
 def _safe_next_url(request, fallback: str) -> str:
@@ -493,6 +509,13 @@ def _fuzzy_match_netbox_field(column_name: str) -> str | None:
 
 logger = logging.getLogger(__name__)
 
+# An Import Plan error can name session data, so a response states one fixed sentence instead.
+UNREADABLE_PREVIEW = "This preview cannot be read. Re-read the preview."
+UNREADABLE_PREVIEW_ENDED = "This preview cannot be read. Start a new import."
+UNPLANNABLE_IMPORT = "This import could not be planned. The server log names the reason."
+UPLOAD_NOT_UTF8 = "The uploaded file is not UTF-8 text."
+UPLOAD_UNREADABLE = "Could not read the uploaded file. The server log names the reason."
+
 
 class ImportProfileListView(generic.ObjectListView):
     """List all import profiles with their mapping counts."""
@@ -689,8 +712,12 @@ class ImportProfileBulkImportView(generic.BulkImportView):
         if upload:
             try:
                 raw = upload.read().decode("utf-8-sig")
-            except (UnicodeDecodeError, OSError) as exc:
-                messages.error(request, f"Could not read uploaded file: {exc}")
+            except UnicodeDecodeError:
+                messages.error(request, UPLOAD_NOT_UTF8)
+                return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
+            except OSError:
+                logger.warning("ImportProfileBulkImportView: the uploaded file cannot be read.", exc_info=True)
+                messages.error(request, UPLOAD_UNREADABLE)
                 return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
         else:
             raw = request.POST.get("data", "").strip()
@@ -717,7 +744,7 @@ class ImportProfileBulkImportView(generic.BulkImportView):
                 profile, stats = apply_profile_document(data, request.user)
             except ObjectPermissionDenied as exc:
                 raise PermissionDenied from exc
-            except (TypeError, ValueError) as exc:  # The YAML helpers validate mapping types and required keys.
+            except ProfileDocumentInvalid as exc:
                 messages.error(request, str(exc))
                 return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
             summary = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stats.items())
@@ -1022,9 +1049,14 @@ class ImportSetupView(PermissionRequiredMixin, View):
         }
         try:
             plan = ImportEngine.plan(profile, document, request.user, planning_context)
-        except (adapters.SourceUnreadable, adapters.UnknownSourceAdapter, PlanningTargetUnavailable, PlanError) as exc:
+        except (adapters.SourceUnreadable, adapters.UnknownSourceAdapter, PlanningTargetUnavailable) as exc:
             document.delete()
             messages.error(request, f"Failed to parse file: {exc}")
+            return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
+        except PlanError:
+            logger.warning("ImportSetupView: planning produced an unreadable Import Plan.", exc_info=True)
+            document.delete()
+            messages.error(request, UNPLANNABLE_IMPORT)
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
         workspace = ReviewWorkspace(plan, request.user)
@@ -1234,9 +1266,10 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         if (use_materialized_result or retained_reason) and isinstance(stored_plan, dict):
             try:
                 plan = ImportPlan.from_dict(stored_plan)
-            except PlanError as exc:
+            except PlanError:
+                logger.warning("ImportPreviewView: the stored Import Plan is unreadable.", exc_info=True)
                 _discard_import_preview(request)
-                messages.error(request, str(exc))
+                messages.error(request, UNREADABLE_PREVIEW_ENDED)
                 return redirect(reverse("plugins:netbox_data_import:import_setup"))
         else:
             planning_context = {
@@ -1669,9 +1702,10 @@ class ImportRunView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         try:
             accepted = ImportPlan.from_dict(plan_data)
-        except PlanError as exc:
+        except PlanError:
+            logger.warning("ImportRunView: the stored Import Plan is unreadable.", exc_info=True)
             _discard_import_preview(request)
-            messages.error(request, str(exc))
+            messages.error(request, UNREADABLE_PREVIEW_ENDED)
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         if ReviewWorkspace(accepted, request.user).has_errors:
             messages.warning(request, "Resolve every preview error before importing.")
@@ -3358,6 +3392,14 @@ class DeviceTypeAnalysisView(PermissionRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
+def _bulk_row_refusal(item, required: tuple[str, ...]) -> str:
+    """Return why one bulk YAML mapping row cannot be imported, or an empty string when it can."""
+    if not isinstance(item, dict):
+        return "A row is not a mapping."
+    missing = [key for key in required if key not in item]
+    return f"A row is missing the key(s): {', '.join(missing)}." if missing else ""
+
+
 class BulkYamlImportView(PermissionRequiredMixin, View):
     """Accept a YAML file and bulk-create ClassRoleMappings or DeviceTypeMappings for a profile.
 
@@ -3375,6 +3417,9 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
         """Import a list of class-role mapping items; return (created, skipped)."""
         created = skipped = 0
         for item in data:
+            if refusal := _bulk_row_refusal(item, ("source_class",)):
+                errors.append(refusal)
+                continue
             try:
                 rack_type = None
                 rack_type_present = "rack_type" in item
@@ -3410,8 +3455,6 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
                     created += 1
                 else:
                     skipped += 1
-            except (KeyError, ValueError) as exc:
-                errors.append(str(exc))
             except Exception:
                 logger.exception("BulkYamlImportView class_role row failed for profile_id=%s", profile.pk)
                 errors.append("A row failed due to an unexpected error — see server logs.")
@@ -3420,7 +3463,11 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
     def _import_device_type_rows(self, data, profile, errors):
         """Import a list of device-type mapping items; return (created, skipped)."""
         created = skipped = 0
+        required = ("source_make", "source_model", "netbox_manufacturer_slug", "netbox_device_type_slug")
         for item in data:
+            if refusal := _bulk_row_refusal(item, required):
+                errors.append(refusal)
+                continue
             try:
                 _, was_created = DeviceTypeMapping.objects.get_or_create(
                     profile=profile,
@@ -3435,8 +3482,6 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
                     created += 1
                 else:
                     skipped += 1
-            except (KeyError, ValueError) as exc:
-                errors.append(str(exc))
             except Exception:
                 logger.exception("BulkYamlImportView device_type row failed for profile_id=%s", profile.pk)
                 errors.append("A row failed due to an unexpected error — see server logs.")
@@ -3551,15 +3596,19 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
 
         try:
             data = load_yaml_document(yaml_file.read())
-        except (yaml.YAMLError, UnicodeDecodeError, OSError) as exc:
+        except yaml.YAMLError as exc:
             messages.error(request, f"Failed to parse YAML: {exc}")
+            return render(request, "netbox_data_import/import_profile_yaml.html")
+        except OSError:
+            logger.warning("ImportProfileYamlView: the uploaded file cannot be read.", exc_info=True)
+            messages.error(request, UPLOAD_UNREADABLE)
             return render(request, "netbox_data_import/import_profile_yaml.html")
 
         try:
             profile, stats = apply_profile_document(data, request.user)
         except ObjectPermissionDenied as exc:
             raise PermissionDenied from exc
-        except (TypeError, ValueError) as exc:  # The YAML helpers validate mapping types and required keys.
+        except ProfileDocumentInvalid as exc:
             messages.error(request, str(exc))
             return render(request, "netbox_data_import/import_profile_yaml.html")
 
@@ -3718,11 +3767,6 @@ def _with_device_resolution_permissions(profile, actor, questions):
             }
         )
     return results
-
-
-def _workspace_field_keys(workspace) -> set:
-    """Return every termination field key the reviewed preview actually asked about."""
-    return {item["field_key"] for trace in workspace.traces for item in trace.terminations}
 
 
 def _disable_policy_form(form) -> None:
@@ -3917,6 +3961,17 @@ def _workspace_device_questions(workspace) -> dict[str, dict]:
     return questions
 
 
+def _workspace_location_paths(workspace) -> dict[str, str]:
+    """Return each source Location path the active plan carries, by canonical key, in key order."""
+    paths: dict[str, str] = {}
+    for trace in workspace.traces:
+        for item in trace.devices:
+            for path in item.get("locations", ()):
+                if key := source_location_key(path):
+                    paths.setdefault(key, path)
+    return dict(sorted(paths.items()))
+
+
 def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]]:
     """Return findings once per message in first-seen order, keeping every lost override."""
     messages: set[str] = set()
@@ -3926,11 +3981,6 @@ def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]
             messages.add(finding["message"])
             unique.append(finding)
     return unique
-
-
-def _object_type_label(obj) -> str:
-    """Return the ``app_label.model_name`` key one termination is offered under."""
-    return f"{obj._meta.app_label}.{obj._meta.model_name}"
 
 
 def _rebuild_schema_rejected_preview(request) -> None:
@@ -4047,6 +4097,13 @@ class _TraceWorkspaceMixin:
             return None
 
 
+def _trace_reader(request, profile, planning_context):
+    """Return the operator's scoped reader for the import target of one trace preview."""
+    return NetBoxReader.for_actor(request.user).for_planning_context(
+        planning_context, output_kinds=profile.output_kinds
+    )
+
+
 def _trace_workspace_url(identity: str) -> str:
     """Return the workspace URL that reopens one trace."""
     url = reverse("plugins:netbox_data_import:trace_workspace")
@@ -4085,20 +4142,31 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         wanted = request.GET.get("trace", "")
         selected = next((trace for trace in traces if trace.identity == wanted), traces[0] if traces else None)
         summary = dict(workspace.trace_summary)
-        from .models import TerminationResolution, TraceDeviceResolution
+        from .models import TerminationResolution, TraceDeviceResolution, TraceLocationResolution
 
-        summary["saved_decisions"] = (
-            TerminationResolution.objects.restrict(request.user, "view").filter(profile=profile).count()
-            + TraceDeviceResolution.objects.restrict(request.user, "view").filter(profile=profile).count()
+        summary["saved_decisions"] = sum(
+            model.objects.restrict(request.user, "view").filter(profile=profile).count()
+            for model in (TerminationResolution, TraceDeviceResolution, TraceLocationResolution)
         )
         summary["preview_state"] = self._preview_state(request, drift)
         from .proposal_presentation import ProposalPresentation, group_terminations
 
         try:
-            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+            reader = _trace_reader(request, profile, planning_context)
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
-        proposal_display = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
+        # The picker reads Locations a page at a time, so the page only asks whether any is visible.
+        has_locations = site_locations(reader).exists()
+        location_mappings = present_location_mappings(
+            profile=profile,
+            viewer=request.user,
+            reader=reader,
+            paths=_workspace_location_paths(workspace),
+            has_locations=has_locations,
+        )
+        proposal_display = ProposalPresentation(
+            profile=profile, actor=request.user, reader=reader, asked=workspace.asked_terminations
+        )
         proposal_fields = proposal_display.fields(selected.terminations if selected else [])
         if selected is not None:
             selected = replace(
@@ -4154,7 +4222,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             summary["active_proposals"] = ResolutionProposal.objects.filter(
                 profile=profile,
                 task_type=SELECT_TERMINATION_TASK,
-                field_key__in=_workspace_field_keys(workspace),
+                field_key__in=list(workspace.asked_terminations),
                 status__in=ProposalStatus.ACTIVE,
             ).count()
         return render(
@@ -4173,6 +4241,9 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "cable_policy_forms": cable_policy_forms,
                 "segment_policy_forms": segment_policy_forms,
                 "summary": summary,
+                "location_mappings": location_mappings,
+                "has_locations": has_locations,
+                "import_location_unavailable": reader.location_unavailable,
                 "drift": drift,
                 "retained_sync_reason": retained_reason,
                 "preview_revision": current_preview_revision(request.session),
@@ -4273,14 +4344,38 @@ class TraceSyncView(_PermissionScopedWriteMixin, _TraceWorkspaceMixin, Permissio
             return redirect(next_url)
 
 
-def _candidate_page_limit(raw_limit) -> int:
-    """Return one valid picker page limit."""
-    if raw_limit is None:
-        return ELIGIBLE_TERMINATION_LIMIT
-    limit = int(raw_limit)
+TERMINATION_UNRESOLVABLE = "That termination cannot be resolved here."
+CANDIDATE_LIMIT_INVALID = f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}."
+# PostgreSQL reads OFFSET and LIMIT as bigint, so the last row of a page must stay inside that range.
+CANDIDATE_OFFSET_MAX = 2**63 - 1 - ELIGIBLE_TERMINATION_LIMIT
+CANDIDATE_OFFSET_INVALID = f"Candidate offset must be an integer from 0 to {CANDIDATE_OFFSET_MAX}."
+
+
+@dataclass(frozen=True)
+class CandidatePage:
+    """One picker page, or the fixed sentence that refuses it."""
+
+    limit: int = 0
+    offset: int = 0
+    error: str = ""
+
+
+def _candidate_page(params) -> CandidatePage:
+    """Return the page limit and offset of one picker read, or of the write that rechecks its offer."""
+    raw_limit, raw_offset = params.get("limit"), params.get("offset")
+    try:
+        limit = ELIGIBLE_TERMINATION_LIMIT if raw_limit is None else int(raw_limit)
+    except (TypeError, ValueError):
+        return CandidatePage(error=CANDIDATE_LIMIT_INVALID)
     if not 1 <= limit <= ELIGIBLE_TERMINATION_LIMIT:
-        raise ValueError("Candidate limit is outside the supported range.")
-    return limit
+        return CandidatePage(error=CANDIDATE_LIMIT_INVALID)
+    try:
+        offset = 0 if raw_offset in (None, "") else int(raw_offset)
+    except (TypeError, ValueError):
+        return CandidatePage(error=CANDIDATE_OFFSET_INVALID)
+    if not 0 <= offset <= CANDIDATE_OFFSET_MAX:
+        return CandidatePage(error=CANDIDATE_OFFSET_INVALID)
+    return CandidatePage(limit=limit, offset=offset)
 
 
 class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
@@ -4293,39 +4388,52 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         loaded = self.reviewed_preview(request)
         if loaded is None:
             return JsonResponse({"ok": False, "error": "No import preview in progress."}, status=409)
-        profile, _document, _workspace, planning_context = loaded
+        profile, _document, workspace, planning_context = loaded
         field_key = request.GET.get("field_key", "").strip()
-        try:
-            limit = _candidate_page_limit(request.GET.get("limit"))
-        except (TypeError, ValueError):
+        # A review read answers a question this preview asked, never one the caller invented.
+        if field_key not in workspace.asked_terminations:
             return JsonResponse(
-                {
-                    "ok": False,
-                    "error": f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
-                },
-                status=400,
+                {"ok": False, "error": "This preview asked no question about that termination."}, status=400
             )
+        page = _candidate_page(request.GET)
+        if page.error:
+            return JsonResponse({"ok": False, "error": page.error}, status=400)
+        limit, offset = page.limit, page.offset
+        asked = workspace.asked_terminations[field_key]
+        if asked is None:
+            return JsonResponse({"ok": False, "error": TERMINATION_UNRESOLVABLE}, status=400)
         try:
-            found = self._eligible(request, profile, planning_context, field_key, request.GET.get("search", ""), limit)
+            found = self._eligible(
+                request, profile, planning_context, asked, request.GET.get("search", ""), limit, offset
+            )
         except (PlanningTargetUnavailable, ValueError):
-            return JsonResponse({"ok": False, "error": "That termination cannot be resolved here."}, status=400)
+            return JsonResponse({"ok": False, "error": TERMINATION_UNRESOLVABLE}, status=400)
         return JsonResponse(
             {
                 "ok": True,
+                # A candidate is its model and its id together, because two models can share one id.
                 "candidates": [
-                    {"id": candidate.pk, "name": candidate.name, "display": str(candidate)}
+                    {
+                        "id": candidate.pk,
+                        "object_type": candidate._meta.label_lower,
+                        "model": str(candidate._meta.verbose_name),
+                        "name": candidate.name,
+                        "display": str(candidate),
+                    }
                     for candidate in found.candidates
                 ],
                 "shown": len(found.candidates),
                 "total": found.total,
+                "offset": offset,
+                "limit": limit,
             }
         )
 
     @staticmethod
-    def _eligible(request, profile, planning_context, field_key, search, limit):
+    def _eligible(request, profile, planning_context, asked, search, limit, offset):
         """Return the eligible page, inside the caller's own read scope."""
-        reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
-        return eligible_terminations(field_key, reader, profile=profile, search=search, limit=limit)
+        reader = _trace_reader(request, profile, planning_context)
+        return eligible_terminations(asked, reader, profile=profile, search=search, limit=limit, offset=offset)
 
 
 class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
@@ -4339,7 +4447,7 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
         loaded = self.reviewed_preview(request)
         if loaded is None:
             return JsonResponse({"ok": False, "error": "No current import preview matches this request."}, status=409)
-        _profile, _document, workspace, planning_context = loaded
+        profile, _document, workspace, planning_context = loaded
         device_key = source_device_key(request.GET.get("device_key", ""))
         question = _workspace_device_questions(workspace).get(device_key)
         if question is None:
@@ -4347,23 +4455,19 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
         search = request.GET.get("search", "")
         if len(search) > 200:
             return JsonResponse({"ok": False, "error": "Device search must be 200 characters or fewer."}, status=400)
-        try:
-            limit = _candidate_page_limit(request.GET.get("limit"))
-        except (TypeError, ValueError):
-            return JsonResponse(
-                {
-                    "ok": False,
-                    "error": f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
-                },
-                status=400,
-            )
+        page = _candidate_page(request.GET)
+        if page.error:
+            return JsonResponse({"ok": False, "error": page.error}, status=400)
+        limit, offset = page.limit, page.offset
         try:
             evidence = DeviceEvidence.from_dict(question)
         except (TypeError, ValueError):
             return JsonResponse({"ok": False, "error": "That Device cannot be resolved here."}, status=400)
         try:
-            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
-            found = eligible_trace_devices(reader=reader, evidence=evidence, search=search, limit=limit)
+            reader = _trace_reader(request, profile, planning_context)
+            found = eligible_trace_devices(
+                profile=profile, reader=reader, evidence=evidence, search=search, limit=limit, offset=offset
+            )
         except PlanningTargetUnavailable:
             return JsonResponse({"ok": False, "error": "That Device cannot be resolved here."}, status=400)
         return JsonResponse(
@@ -4374,13 +4478,18 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
                         "id": candidate.device.pk,
                         "name": candidate.device.name,
                         "display": str(candidate.device),
-                        "matched_hints": candidate.matched_hints,
-                        "conflicting_hints": candidate.conflicting_hints,
+                        "matched_facts": [fact.to_dict() for fact in candidate.matched],
+                        "conflicting_facts": [fact.to_dict() for fact in candidate.conflicting],
+                        "import_location": (
+                            candidate.import_location.to_dict() if candidate.import_location is not None else None
+                        ),
                     }
                     for candidate in found.candidates
                 ],
                 "shown": len(found.candidates),
                 "total": found.total,
+                "offset": offset,
+                "limit": limit,
             }
         )
 
@@ -4432,6 +4541,11 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
                 "That Device is not one of the eligible candidates.",
                 status=400,
             )
+        # The write rechecks the page that made the offer.
+        page = _candidate_page(request.POST)
+        if page.error:
+            return _preview_action_error(request, next_url, page.error, status=400)
+        limit, offset = page.limit, page.offset
         try:
             with transaction.atomic():
                 plan, chosen = save_trace_device_resolution_and_replan(
@@ -4442,9 +4556,13 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
                     evidence=evidence,
                     selected_device_id=device_id,
                     search=search,
-                    limit=ELIGIBLE_TERMINATION_LIMIT,
+                    limit=limit,
+                    offset=offset,
+                    reviewed_fingerprint=workspace.plan.profile_fingerprint,
                 )
                 record_recalculated_preview(request.session, plan, user=request.user)
+        except ProfilePolicyMoved as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
         except IneligibleDeviceSelection:
             return _preview_action_error(
                 request,
@@ -4457,6 +4575,125 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
         except PreviewLocked as exc:
             return _preview_action_error(request, next_url, str(exc), status=409)
         messages.success(request, f"Source Device resolved to '{chosen}'.")
+        return redirect(next_url)
+
+
+LOCATION_CHOICE_REFUSED = "Choose a visible Location in the selected Site."
+
+
+class TraceLocationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Serve one bounded page of the selected Site's visible Locations for one source Location path."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+    requires_preview_revision = True
+
+    def get(self, request):
+        """Return the searched page and the uncapped total the picker counts."""
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            return JsonResponse({"ok": False, "error": "No current import preview matches this request."}, status=409)
+        profile, _document, workspace, planning_context = loaded
+        # A review read answers a question this preview asked, never one the caller invented.
+        if source_location_key(request.GET.get("location_key", "")) not in _workspace_location_paths(workspace):
+            return JsonResponse(
+                {"ok": False, "error": "This preview carries no such source Location path."}, status=400
+            )
+        search = request.GET.get("search", "")
+        if len(search) > 200:
+            return JsonResponse({"ok": False, "error": "Location search must be 200 characters or fewer."}, status=400)
+        page = _candidate_page(request.GET)
+        if page.error:
+            return JsonResponse({"ok": False, "error": page.error}, status=400)
+        limit, offset = page.limit, page.offset
+        try:
+            found = eligible_trace_locations(
+                _trace_reader(request, profile, planning_context), search=search, limit=limit, offset=offset
+            )
+        except PlanningTargetUnavailable:
+            return JsonResponse({"ok": False, "error": "The import target is no longer available."}, status=400)
+        return JsonResponse(
+            {
+                "ok": True,
+                "candidates": [
+                    {"id": candidate.location.pk, "name": candidate.location.name, "parent": candidate.parent}
+                    for candidate in found.candidates
+                ],
+                "shown": len(found.candidates),
+                "total": found.total,
+                "offset": offset,
+                "limit": limit,
+            }
+        )
+
+
+class TraceLocationMappingView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+    """Map one source Location path the reviewed preview carries, or clear its mapping, then replan."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Write the decision under the profile lock, so it and its replan commit together."""
+        next_url = _trace_workspace_url(request.POST.get("trace", ""))
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, workspace, planning_context = loaded
+        if stale_reason := _stale_preview_reason(request):
+            return _preview_action_error(request, next_url, stale_reason, status=409)
+        if retained_reason := _retained_sync_block_reason(request):
+            return _preview_action_error(request, next_url, retained_reason, status=409)
+        refusal = self.refuse_unregistered_adapter(request, profile)
+        if refusal is not None:
+            return refusal
+        key = source_location_key(request.POST.get("location_key", ""))
+        paths = _workspace_location_paths(workspace)
+        # A review command answers a question this preview asked, never one the caller invented.
+        if key not in paths:
+            return _preview_action_error(
+                request, next_url, "This preview carries no such source Location path.", status=400
+            )
+        clearing = bool(request.POST.get("clear"))
+        location_id = None
+        if not clearing:
+            try:
+                location_id = int(request.POST.get("location_id", ""))
+            except (TypeError, ValueError):
+                return _preview_action_error(request, next_url, LOCATION_CHOICE_REFUSED, status=400)
+        try:
+            with transaction.atomic():
+                if clearing:
+                    plan = clear_trace_location_resolution_and_replan(
+                        profile=profile,
+                        source_document=document,
+                        actor=request.user,
+                        planning_context=planning_context,
+                        source_location_key=key,
+                        reviewed_fingerprint=workspace.plan.profile_fingerprint,
+                    )
+                else:
+                    plan = save_trace_location_resolution_and_replan(
+                        profile=profile,
+                        source_document=document,
+                        actor=request.user,
+                        planning_context=planning_context,
+                        source_location_key=key,
+                        selected_location_id=location_id,
+                        reviewed_fingerprint=workspace.plan.profile_fingerprint,
+                    )
+                record_recalculated_preview(request.session, plan, user=request.user)
+        except ProfilePolicyMoved as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
+        except UnacceptablePolicyDecision as exc:
+            return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
+        except IneligibleLocationSelection:
+            return _preview_action_error(request, next_url, LOCATION_CHOICE_REFUSED, status=400)
+        except PlanningTargetUnavailable:
+            return self.discard_unavailable_target(request)
+        except PreviewLocked as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
+        settled = "cleared for" if clearing else "saved for"
+        messages.success(request, f"Location mapping {settled} '{paths[key]}'.")
         return redirect(next_url)
 
 
@@ -4503,7 +4740,7 @@ class TraceCablePolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, Pe
                 record_recalculated_preview(request.session, plan, user=request.user)
         except ProfilePolicyMoved as exc:
             return _preview_action_error(request, next_url, str(exc), status=409)
-        except UnacceptableCablePolicy as exc:
+        except UnacceptablePolicyDecision as exc:
             return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
@@ -4571,7 +4808,7 @@ class TraceCableSegmentPolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
                 record_recalculated_preview(request.session, plan, user=request.user)
         except ProfilePolicyMoved as exc:
             return _preview_action_error(request, next_url, str(exc), status=409)
-        except UnacceptableCablePolicy as exc:
+        except UnacceptablePolicyDecision as exc:
             return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
@@ -4611,28 +4848,36 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
         except (TypeError, ValueError):
             return _preview_action_error(request, next_url, "A termination selection names one object.", status=400)
         # A review command answers a question this preview asked, never one the caller invented.
-        if field_key not in _workspace_field_keys(workspace):
+        if field_key not in workspace.asked_terminations:
             return _preview_action_error(
                 request, next_url, "This preview asked no question about that termination.", status=400
             )
+        page = _candidate_page(request.POST)
+        if page.error:
+            return _preview_action_error(request, next_url, page.error, status=400)
+        limit, offset = page.limit, page.offset
+        asked = workspace.asked_terminations[field_key]
+        if asked is None:
+            return _preview_action_error(request, next_url, TERMINATION_UNRESOLVABLE, status=400)
         try:
-            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
-            # The recheck repeats the query that made the offer, so a searched candidate still counts.
+            reader = _trace_reader(request, profile, planning_context)
+            # The recheck repeats the query that made the offer, so a searched or paged candidate still counts.
             found = eligible_terminations(
-                field_key,
+                asked,
                 reader,
                 profile=profile,
                 search=request.POST.get("search", ""),
-                limit=ELIGIBLE_TERMINATION_LIMIT,
+                limit=limit,
+                offset=offset,
             )
         except (PlanningTargetUnavailable, ValueError):
-            return _preview_action_error(request, next_url, "That termination cannot be resolved here.", status=400)
+            return _preview_action_error(request, next_url, TERMINATION_UNRESOLVABLE, status=400)
         # The picker is the only legal source of a choice, so the write rechecks the offer.
         chosen = next(
             (
                 candidate
                 for candidate in found.candidates
-                if candidate.pk == object_id and _object_type_label(candidate) == object_type
+                if candidate.pk == object_id and candidate._meta.label_lower == object_type
             ),
             None,
         )
@@ -4655,8 +4900,11 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
                     selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
                     selected_object_id=chosen.pk,
                     selected_display_name=str(chosen),
+                    reviewed_fingerprint=workspace.plan.profile_fingerprint,
                 )
                 record_recalculated_preview(request.session, plan, user=request.user)
+        except ProfilePolicyMoved as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
         except PreviewLocked as exc:
@@ -4691,7 +4939,7 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
     def proposal_context(self, request):
         """Return the preview and scoped reader, refusing requests without a preview."""
         profile, document, workspace, planning_context = self.proposal_preview(request)
-        reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+        reader = _trace_reader(request, profile, planning_context)
         return profile, document, workspace, planning_context, reader
 
     def dispatch(self, request, *args, **kwargs):
@@ -4711,7 +4959,7 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
             return JsonResponse({"ok": False, "error": "The import profile is no longer available."}, status=404)
         except ResolutionProposal.DoesNotExist:
             return JsonResponse({"ok": False, "error": "That proposal is no longer available."}, status=404)
-        except (PreviewActionInvalid, ActiveProposalExists) as exc:
+        except (PreviewActionInvalid, ActiveProposalExists, ProfilePolicyMoved) as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=409)
         except UnusableCandidateSet as exc:
             return JsonResponse({"ok": False, "error": str(exc), "reason": exc.reason}, status=400)
@@ -4767,15 +5015,16 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             _discard_import_preview(request)
             return JsonResponse({"ok": False, "error": reason}, status=409)
         field_key = request.POST.get("field_key", "").strip()
-        if field_key not in _workspace_field_keys(workspace):
+        if field_key not in workspace.asked_terminations:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
         task = proposal_task(SELECT_TERMINATION_TASK)
         with locked_profile_policy(profile.pk):
             live = ImportEngine.plan(profile, document, request.user, planning_context)
+            live_workspace = ReviewWorkspace(live, request.user)
             field = next(
                 (
                     item
-                    for trace in ReviewWorkspace(live, request.user).traces
+                    for trace in live_workspace.traces
                     for item in trace.terminations
                     if item["field_key"] == field_key
                 ),
@@ -4783,13 +5032,16 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             )
             if field is None:
                 raise InvalidProposalTarget("This field is no longer in the preview.")
+            asked = live_workspace.asked_terminations[field_key]
+            if asked is None:
+                raise PreviewActionInvalid(TERMINATION_UNRESOLVABLE)
             if field["state"] != UNRESOLVED:
                 raise PreviewActionInvalid("This termination is already resolved.")
             # Refuse on the observed predecessor, not on the index: see active_proposal_exists.
             if active_proposal_exists(profile=profile, task_type=SELECT_TERMINATION_TASK, field_key=field_key):
                 raise ActiveProposalExists("This field already has an active Resolution Proposal.")
             inventory = task.inventory(
-                profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_eligible_set_limit()
+                profile=profile, asked=asked, netbox_reader=reader, limit=proposal_eligible_set_limit()
             )
             device = inventory.resolved_device
             if device is None:
@@ -4858,11 +5110,21 @@ class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
             {"field_key": field_key, "state": "", "offered": False},
         )
         try:
-            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+            reader = _trace_reader(request, profile, planning_context)
         except PlanningTargetUnavailable:
             reader = None
-        presentation = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
+        presentation = ProposalPresentation(
+            profile=profile, actor=request.user, reader=reader, asked=workspace.asked_terminations
+        )
         return JsonResponse(presentation.fields([field])[field_key])
+
+
+def _asked_by_proposal(workspace, proposal):
+    """Return the question this preview asked for the proposal's field, or refuse when it cannot name one."""
+    asked = workspace.asked_terminations.get(proposal.field_key)
+    if asked is None:
+        raise PreviewActionInvalid(TERMINATION_UNRESOLVABLE)
+    return asked
 
 
 class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, View):
@@ -4890,9 +5152,9 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             profile=profile,
             task_type=SELECT_TERMINATION_TASK,
         )
-        if proposal.field_key not in _workspace_field_keys(workspace):
+        if proposal.field_key not in workspace.asked_terminations:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
-        if not self.apply(proposal, request, reader):
+        if not self.apply(proposal, request, reader, workspace):
             raise PreviewActionInvalid("This proposal no longer permits that action. Re-read it before continuing.")
         proposal.refresh_from_db()
         payload = {"ok": True, "proposal_id": proposal.pk, "status": proposal.status, "decision": proposal.decision}
@@ -4900,7 +5162,7 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             payload["preview_state"] = "recalculation_required"
         return JsonResponse(payload)
 
-    def apply(self, proposal, request, reader):
+    def apply(self, proposal, request, reader, workspace):
         """Apply the action implemented by the concrete endpoint."""
         raise NotImplementedError
 
@@ -4908,7 +5170,7 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
 class TraceCancelProposalView(_TraceProposalActionView):
     """Allow any operator with preview and resolved Device access to cancel active work."""
 
-    def apply(self, proposal, request, reader):
+    def apply(self, proposal, request, reader, workspace):
         """Cancel through the lifecycle's conditional transition."""
         from .proposal_tasks import proposal_task
         from .resolution_proposals import cancel_proposal
@@ -4916,7 +5178,7 @@ class TraceCancelProposalView(_TraceProposalActionView):
         if (
             proposal_task(proposal.task_type).resolved_device(
                 profile=proposal.profile,
-                field_key=proposal.field_key,
+                asked=_asked_by_proposal(workspace, proposal),
                 netbox_reader=reader,
             )
             is None
@@ -4928,11 +5190,17 @@ class TraceCancelProposalView(_TraceProposalActionView):
 class TraceAcceptProposalView(_TraceProposalActionView):
     """Accept through the existing transaction; the operator replans their own preview."""
 
-    def apply(self, proposal, request, reader):
+    def apply(self, proposal, request, reader, workspace):
         """Record the accepted resolution and require an explicit preview recalculation."""
         from .proposal_decisions import accept_proposal
 
-        accepted = accept_proposal(proposal.pk, operator=request.user, netbox_reader=reader)
+        accepted = accept_proposal(
+            proposal.pk,
+            asked=_asked_by_proposal(workspace, proposal),
+            operator=request.user,
+            netbox_reader=reader,
+            reviewed_fingerprint=workspace.plan.profile_fingerprint,
+        )
         if accepted:
             mark_preview_dirty(request.session)
         return accepted
@@ -4945,7 +5213,7 @@ class TraceRejectProposalView(_TraceProposalActionView):
     preview_profile_action = "view"
     requires_reader = False
 
-    def apply(self, proposal, request, reader):
+    def apply(self, proposal, request, reader, workspace):
         """Reject through the permission-checked decision service."""
         from .proposal_decisions import reject_proposal
 
@@ -5609,6 +5877,33 @@ class SyncSingleRowView(_AjaxPermissionView):
             clear_events.send(sender=self)
             raise
 
+    def _execution_refusal(self, profile, document, plan_data, identity, user, row_number):
+        """Execute one unit, and return the response that refuses it, or None once it committed."""
+        try:
+            self._execute_unit(profile, document, plan_data, identity, user)
+        except PlanError:
+            logger.warning(
+                "SyncSingleRowView: the Import Plan for row_number=%s is unreadable.", row_number, exc_info=True
+            )
+            return JsonResponse({"ok": False, "error": UNREADABLE_PREVIEW}, status=409)
+        except (
+            PlanningTargetUnavailable,
+            PreconditionFailed,
+            SelectionError,
+            StalePlan,
+            StaleSourceDocument,
+        ) as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=409)
+        except (DatabaseError, ObjectPermissionDenied, ValidationError) as exc:
+            return _refused_row_write_response(exc, row_number)
+        except Exception:
+            logger.exception("SyncSingleRowView: unexpected error for row_number=%s", row_number)
+            return JsonResponse(
+                {"ok": False, "error": "An unexpected error occurred. See server logs."},
+                status=500,
+            )
+        return None
+
     def post(self, request):
         """Execute one selected Synchronization Unit and return JSON."""
         ctx_data = request.session.get("import_context")
@@ -5642,8 +5937,9 @@ class SyncSingleRowView(_AjaxPermissionView):
 
         try:
             accepted = ImportPlan.from_dict(plan_data)
-        except PlanError as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=409)
+        except PlanError:
+            logger.warning("SyncSingleRowView: the stored Import Plan is unreadable.", exc_info=True)
+            return JsonResponse({"ok": False, "error": UNREADABLE_PREVIEW}, status=409)
         workspace = ReviewWorkspace(accepted, request.user)
         preview_unit = next(
             (
@@ -5668,26 +5964,9 @@ class SyncSingleRowView(_AjaxPermissionView):
                 status=400,
             )
 
-        try:
-            self._execute_unit(profile, document, plan_data, preview_unit.identity, request.user)
-        except (
-            PlanError,
-            PlanningTargetUnavailable,
-            PreconditionFailed,
-            SelectionError,
-            StalePlan,
-            StaleSourceDocument,
-        ) as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=409)
-        except (DatabaseError, ObjectPermissionDenied, ValidationError) as exc:
-            return _refused_row_write_response(exc, row_number)
-        except Exception:
-            logger.exception("SyncSingleRowView: unexpected error for row_number=%s", row_number)
-            return JsonResponse(
-                {"ok": False, "error": "An unexpected error occurred. See server logs."},
-                status=500,
-            )
-
+        refusal = self._execution_refusal(profile, document, plan_data, preview_unit.identity, request.user, row_number)
+        if refusal is not None:
+            return refusal
         mark_preview_dirty(request.session)
         verb = "created" if preview_unit.action == "create" else "updated"
         written = f"{preview_unit.object_type.capitalize()} '{preview_unit.name}' was {verb} in NetBox."

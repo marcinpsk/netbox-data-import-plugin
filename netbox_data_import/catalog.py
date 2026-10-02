@@ -51,6 +51,8 @@ class TargetModule:
     consumes: frozenset[str]
     # A declared module the release does not implement yet cannot make its adapters selectable.
     implemented: bool
+    # A module that writes into the import Location needs it; every other module reads it as evidence.
+    writes_placement: bool
 
 
 TARGET_MODULES: tuple[TargetModule, ...] = (
@@ -59,18 +61,21 @@ TARGET_MODULES: tuple[TargetModule, ...] = (
         label="Device",
         consumes=frozenset({OutputKind.DEVICE_SOURCE_ROW}),
         implemented=True,
+        writes_placement=True,
     ),
     TargetModule(
         key=TargetModuleKey.RACK,
         label="Rack",
         consumes=frozenset({OutputKind.RACK_SOURCE_ROW}),
         implemented=True,
+        writes_placement=True,
     ),
     TargetModule(
         key=TargetModuleKey.CABLE,
         label="Cable",
         consumes=frozenset({OutputKind.SOURCE_TRACE}),
         implemented=True,
+        writes_placement=False,
     ),
 )
 
@@ -260,6 +265,7 @@ POLICY_SECTIONS: tuple[PolicySection, ...] = (
     PolicySection("device_existing_matches", "Device Existing Matches", _DEVICE_ONLY),
     PolicySection("ignored_field_differences", "Ignored Field Differences", _DEVICE_ONLY),
     PolicySection("trace_device_resolutions", "Trace Device Resolutions", _TRACE_ONLY),
+    PolicySection("trace_location_resolutions", "Trace Location Resolutions", _TRACE_ONLY),
     PolicySection("termination_resolutions", "Termination Resolutions", _TRACE_ONLY),
     PolicySection("cable_class_mappings", "CableClass Mappings", _TRACE_ONLY),
     PolicySection("cable_segment_overrides", "Cable Segment Overrides", _TRACE_ONLY),
@@ -311,6 +317,11 @@ def has_implemented_module(output_kinds: frozenset[str]) -> bool:
     return any(module.implemented for module in consuming_modules(output_kinds))
 
 
+def import_location_required(output_kinds: frozenset[str]) -> bool:
+    """Return True when a Target Module that consumes *output_kinds* writes into the import Location."""
+    return any(module.writes_placement for module in consuming_modules(output_kinds))
+
+
 __all__ = (
     "CANDIDATE_TARGET_PREFIX",
     "CATALOG",
@@ -329,6 +340,7 @@ __all__ = (
     "declared_modules",
     "declared_modules_override",
     "has_implemented_module",
+    "import_location_required",
     "policy_section",
     "target_module",
 )

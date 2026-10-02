@@ -4,99 +4,86 @@
 
 from dataclasses import replace
 from types import MappingProxyType
+from typing import NamedTuple
+
+from .catalog import TargetModuleKey
+from .field_keys import CABLE_END_KINDS
+from .plan import ImportPlan, register_diagnostic_display
 
 CABLE_ROW = "dcim.cable"
 CABLE_CLASS_MAPPING_ROW = "netbox_data_import.cableclassmapping"
 CABLE_SEGMENT_OVERRIDE_ROW = "netbox_data_import.cablesegmentoverride"
+DEVICE_HIDDEN = "a Device you cannot view"
+DEVICE_ROW = "dcim.device"
 DISCLOSURE_SOURCE = "disclosure_source"
 POLICY_HIDDEN = "a policy you cannot view"
 POLICY_VISIBLE = "policy_visible"
-POLICY_WRITE_REFUSED = "You cannot change a policy you cannot view."
+TERMINATION_HIDDEN = "a termination you cannot view"
+TERMINATION_SOURCES = "termination_sources"
+
+# A segment names its two planned ends apart, so one hidden end leaves the other readable.
+SEGMENT_END_SOURCES = MappingProxyType({"left": "left_sources", "right": "right_sources"})
 
 _REFERENCE_FIELDS = frozenset({"device", "cards", "port", "port_class"})
+# These codes replace the source `port` with the NetBox port they resolved.
+_RESOLVED_PORT_FIELDS = _REFERENCE_FIELDS - {"port"}
+
+
+class _DisplaySchema(NamedTuple):
+    """The display fields one diagnostic may carry, grouped by the row that authorizes them."""
+
+    public: frozenset
+    cable: frozenset = frozenset()
+    policy: frozenset = frozenset()
+    termination: frozenset = frozenset()
+
 
 _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
     {
-        "cable.ambiguous_mapped_peer": (_REFERENCE_FIELDS | {"peers"}, frozenset(), frozenset()),
-        "cable.attribute_drift": (
+        "cable.ambiguous_mapped_peer": _DisplaySchema(_RESOLVED_PORT_FIELDS, termination=frozenset({"port", "peers"})),
+        "cable.attribute_drift": _DisplaySchema(
+            frozenset({"segment_index"}), cable=frozenset({"cable", "status", "type", "profile", "label"})
+        ),
+        "cable.cableclass_unmapped": _DisplaySchema(frozenset({"segment_index", "cable_class"})),
+        "cable.incompatible_terminations": _DisplaySchema(
+            frozenset({"segment_index", "left_field_key", "right_field_key"}),
+            termination=frozenset({"left_model", "right_model"}),
+        ),
+        "cable.media_family_mismatch": _DisplaySchema(
+            frozenset(), cable=frozenset({"segments"}), policy=frozenset({"segments"})
+        ),
+        "cable.multi_termination_conflict": _DisplaySchema(
+            frozenset({"segment_index"}), cable=frozenset({"cable"}), termination=frozenset({"port"})
+        ),
+        "cable.pass_through_not_mapped": _DisplaySchema(
+            _REFERENCE_FIELDS, termination=frozenset({"entry", "exit", "mapped"})
+        ),
+        "cable.pass_through_verified": _DisplaySchema(_REFERENCE_FIELDS, termination=frozenset({"entry", "exit"})),
+        "cable.permission_denied": _DisplaySchema(_REFERENCE_FIELDS | {"permission"}, cable=frozenset({"cable"})),
+        "cable.planned_termination_conflict": _DisplaySchema(
+            frozenset({"segment_index", "competing_trace"}), termination=frozenset({"termination"})
+        ),
+        "cable.policy_stale": _DisplaySchema(frozenset({"segment_index", "cable_class"})),
+        "cable.profile_incompatible": _DisplaySchema(frozenset({"segment_index", "cable_class"})),
+        "cable.resolved_segment_conflict": _DisplaySchema(
             frozenset({"segment_index"}),
-            frozenset({"cable", "status", "type", "profile", "label"}),
-            frozenset(),
+            policy=frozenset({"cable_type", "cable_profile"}),
+            termination=frozenset({"terminations"}),
         ),
-        "cable.cableclass_unmapped": (frozenset({"segment_index", "cable_class"}), frozenset(), frozenset()),
-        "cable.media_family_mismatch": (
-            frozenset(),
-            frozenset({"segments"}),
-            frozenset({"segments"}),
+        "cable.same_port_continuation": _DisplaySchema(_RESOLVED_PORT_FIELDS, termination=frozenset({"port", "peer"})),
+        "cable.segment_override_lost": _DisplaySchema(
+            frozenset({"segment_index"}), policy=frozenset({"cable_type", "cable_profile"})
         ),
-        "cable.multi_termination_conflict": (
-            frozenset({"segment_index", "port"}),
-            frozenset({"cable"}),
-            frozenset(),
+        "cable.segment_reused": _DisplaySchema(frozenset({"segment_index"}), cable=frozenset({"cable"})),
+        "cable.segment_self_connection": _DisplaySchema(
+            frozenset({"segment_index", "cable_class"}), termination=frozenset({"termination"})
         ),
-        "cable.pass_through_not_mapped": (
-            _REFERENCE_FIELDS | {"entry", "exit", "mapped"},
-            frozenset(),
-            frozenset(),
+        "cable.termination_kind_mismatch": _DisplaySchema(_REFERENCE_FIELDS | {"claimed_kind", "selected_object_type"}),
+        "cable.termination_occupied": _DisplaySchema(
+            frozenset({"segment_index"}), cable=frozenset({"cable"}), termination=frozenset({"port"})
         ),
-        "cable.pass_through_verified": (
-            _REFERENCE_FIELDS | {"entry", "exit"},
-            frozenset(),
-            frozenset(),
-        ),
-        "cable.permission_denied": (
-            _REFERENCE_FIELDS | {"permission"},
-            frozenset({"cable"}),
-            frozenset(),
-        ),
-        "cable.planned_termination_conflict": (
-            frozenset({"segment_index", "termination", "competing_trace"}),
-            frozenset(),
-            frozenset(),
-        ),
-        "cable.policy_stale": (frozenset({"segment_index", "cable_class"}), frozenset(), frozenset()),
-        "cable.profile_incompatible": (frozenset({"segment_index", "cable_class"}), frozenset(), frozenset()),
-        "cable.resolved_segment_conflict": (
-            frozenset({"segment_index", "terminations"}),
-            frozenset(),
-            frozenset({"cable_type", "cable_profile"}),
-        ),
-        "cable.same_port_continuation": (_REFERENCE_FIELDS | {"peer"}, frozenset(), frozenset()),
-        "cable.segment_override_lost": (
-            frozenset({"segment_index"}),
-            frozenset(),
-            frozenset({"cable_type", "cable_profile"}),
-        ),
-        "cable.segment_reused": (
-            frozenset({"segment_index"}),
-            frozenset({"cable"}),
-            frozenset(),
-        ),
-        "cable.segment_self_connection": (
-            frozenset({"segment_index", "cable_class", "termination"}),
-            frozenset(),
-            frozenset(),
-        ),
-        "cable.termination_kind_mismatch": (
-            _REFERENCE_FIELDS | {"selected_display_name", "claimed_kind", "selected_kind"},
-            frozenset(),
-            frozenset(),
-        ),
-        "cable.termination_occupied": (
-            frozenset({"segment_index", "port"}),
-            frozenset({"cable"}),
-            frozenset(),
-        ),
-        "cable.termination_unresolved": (
-            _REFERENCE_FIELDS | {"matches", "selected_display_name"},
-            frozenset(),
-            frozenset(),
-        ),
-        "cable.unsupported_termination_kind": (
-            _REFERENCE_FIELDS | {"selected_object_type"},
-            frozenset(),
-            frozenset(),
-        ),
+        "cable.termination_unresolved": _DisplaySchema(_REFERENCE_FIELDS),
+        "cable.unsupported_termination_kind": _DisplaySchema(_REFERENCE_FIELDS | {"selected_object_type"}),
     }
 )
 
@@ -105,17 +92,36 @@ CABLE_DIAGNOSTIC_FIELDS = MappingProxyType(
 )
 
 CABLE_DIAGNOSTIC_DISCLOSURES = MappingProxyType(
-    {code: fields[1] for code, fields in _DIAGNOSTIC_DISCLOSURE_FIELDS.items() if fields[1]}
+    {code: fields.cable for code, fields in _DIAGNOSTIC_DISCLOSURE_FIELDS.items() if fields.cable}
 )
 
 POLICY_DIAGNOSTIC_DISCLOSURES = MappingProxyType(
-    {code: fields[2] for code, fields in _DIAGNOSTIC_DISCLOSURE_FIELDS.items() if fields[2]}
+    {code: fields.policy for code, fields in _DIAGNOSTIC_DISCLOSURE_FIELDS.items() if fields.policy}
+)
+
+TERMINATION_DIAGNOSTIC_DISCLOSURES = MappingProxyType(
+    {code: fields.termination for code, fields in _DIAGNOSTIC_DISCLOSURE_FIELDS.items() if fields.termination}
 )
 
 
 def disclosure_source(row_kind: str, row_pk: int) -> dict:
     """Return the plan-side identity for one row that supplied display text."""
     return {"kind": row_kind, "pk": row_pk}
+
+
+def device_source(device_id: int) -> dict:
+    """Return the source a display needs when it names one resolved Device."""
+    return disclosure_source(DEVICE_ROW, device_id)
+
+
+def segment_end_sources(port: tuple[str, int], device_id: int) -> list:
+    """Return the rows that authorize one planned segment end, which names its Device and its port."""
+    return [disclosure_source(*port), device_source(device_id)]
+
+
+def termination_sources(*terminations) -> dict:
+    """Return the sources a display needs when it names the given resolved terminations."""
+    return {TERMINATION_SOURCES: [disclosure_source(label, object_id) for label, object_id in terminations]}
 
 
 def disclosed_cable(cable) -> dict:
@@ -159,12 +165,10 @@ def policy_row_is_disclosed(display: dict, row) -> bool:
 
 def validate_diagnostic_disclosures(code: str, display: dict) -> None:
     """Reject diagnostic display fields that bypass the shared disclosure vocabulary."""
-    if not code.startswith("cable."):
-        return
     fields = _DIAGNOSTIC_DISCLOSURE_FIELDS.get(code)
     if fields is None:
         raise ValueError(f"Diagnostic '{code}' has no registered display schema.")
-    public, cable, policy = fields
+    public, cable, policy, termination = fields
     if code == "cable.media_family_mismatch":
         _validate_media_segments(display)
         return
@@ -173,10 +177,19 @@ def validate_diagnostic_disclosures(code: str, display: dict) -> None:
         metadata.update({DISCLOSURE_SOURCE, "cable_visible"})
     if policy:
         metadata.update({DISCLOSURE_SOURCE, POLICY_VISIBLE})
-    unknown = set(display) - set(public) - set(cable) - set(policy) - metadata
+    if termination:
+        metadata.add(TERMINATION_SOURCES)
+        if not _well_formed_termination_sources(display.get(TERMINATION_SOURCES)):
+            raise ValueError(f"Diagnostic '{code}' names terminations without their sources.")
+    unknown = set(display) - set(public) - set(cable) - set(policy) - set(termination) - metadata
     if unknown:
         names = ", ".join(sorted(unknown))
         raise ValueError(f"Diagnostic '{code}' has unregistered display fields: {names}.")
+    _validate_row_flags(code, display, cable, policy)
+
+
+def _validate_row_flags(code: str, display: dict, cable: frozenset, policy: frozenset) -> None:
+    """Reject Cable and policy fields whose visibility flag and source disagree."""
     source = display.get(DISCLOSURE_SOURCE)
     if set(display) & set(cable) or "cable_visible" in display:
         visible = display.get("cable_visible")
@@ -225,11 +238,56 @@ def _source_pk(value, row_kind: str) -> int | None:
     return row_pk if isinstance(row_pk, int) and not isinstance(row_pk, bool) else None
 
 
-def _source_is_visible(value, row_kinds: tuple[str, ...], visible_row_ids: dict[str, set[int]]) -> bool:
+def _source_is_visible(value, row_kinds, visible_row_ids: dict[str, set[int]]) -> bool:
     """Return whether one well-formed source names a row visible in its expected kind."""
     return any(
-        (row_pk := _source_pk(value, row_kind)) is not None and row_pk in visible_row_ids[row_kind]
+        (row_pk := _source_pk(value, row_kind)) is not None and row_pk in visible_row_ids.get(row_kind, ())
         for row_kind in row_kinds
+    )
+
+
+def _well_formed_termination_sources(sources) -> bool:
+    """Return whether *sources* is a nonempty list of sources that each name a Cable End Kind row."""
+    return (
+        isinstance(sources, list)
+        and bool(sources)
+        and all(any(_source_pk(source, kind) is not None for kind in CABLE_END_KINDS) for source in sources)
+    )
+
+
+def _terminations_are_visible(sources, visible_row_ids: dict[str, set[int]]) -> bool:
+    """Return whether every termination one display names is live and visible."""
+    return _well_formed_termination_sources(sources) and all(
+        _source_is_visible(source, CABLE_END_KINDS, visible_row_ids) for source in sources
+    )
+
+
+def _identity_key(identity) -> tuple[str, int] | None:
+    """Return the Cable End Kind row one plan identity names, or None for any other identity."""
+    label, _, object_id = str(identity).rpartition(":")
+    if label not in CABLE_END_KINDS or not object_id.isdigit():
+        return None
+    return label, int(object_id)
+
+
+def _row_sources(value: dict) -> list:
+    """Return every row source one display mapping carries."""
+    sources = [value.get(DISCLOSURE_SOURCE)]
+    for key in (TERMINATION_SOURCES, *SEGMENT_END_SOURCES.values()):
+        listed = value.get(key)
+        # A frozen plan holds a list as a tuple.
+        if isinstance(listed, (list, tuple)):
+            sources.extend(listed)
+    return sources
+
+
+def _end_is_visible(sources, visible_row_ids: dict[str, set[int]]) -> bool:
+    """Return whether a planned end's port and Device are both live and visible."""
+    return (
+        isinstance(sources, (list, tuple))
+        and len(sources) == 2
+        and _source_is_visible(sources[0], CABLE_END_KINDS, visible_row_ids)
+        and _source_is_visible(sources[1], (DEVICE_ROW,), visible_row_ids)
     )
 
 
@@ -238,14 +296,16 @@ def _row_ids(units) -> dict[str, set[int]]:
         CABLE_ROW: set(),
         CABLE_CLASS_MAPPING_ROW: set(),
         CABLE_SEGMENT_OVERRIDE_ROW: set(),
+        DEVICE_ROW: set(),
+        **{kind: set() for kind in sorted(CABLE_END_KINDS)},
     }
 
     def collect(value) -> None:
         if isinstance(value, dict):
-            source = value.get(DISCLOSURE_SOURCE)
-            for row_kind, ids in row_ids.items():
-                if row_pk := _source_pk(source, row_kind):
-                    ids.add(row_pk)
+            for source in _row_sources(value):
+                for row_kind, ids in row_ids.items():
+                    if row_pk := _source_pk(source, row_kind):
+                        ids.add(row_pk)
             for child in value.values():
                 collect(child)
         elif isinstance(value, (list, tuple)):
@@ -256,6 +316,9 @@ def _row_ids(units) -> dict[str, set[int]]:
         collect(unit.display)
         for diagnostic in unit.diagnostics:
             collect(diagnostic.display)
+            for identity in diagnostic.identities:
+                if key := _identity_key(identity):
+                    row_ids[key[0]].add(key[1])
     return row_ids
 
 
@@ -299,43 +362,32 @@ def _media_segment(segment: dict, visible_row_ids: dict[str, set[int]]) -> dict:
     }
 
 
-def _media_message(segments: list[dict]) -> str:
-    from .cable_policy import cable_media_family_label, cable_type_label
+def _redact_terminations(display: dict, keys: frozenset[str]) -> dict:
+    for key in keys & set(display):
+        display[key] = [] if isinstance(display[key], list) else TERMINATION_HIDDEN
+    display.pop(TERMINATION_SOURCES, None)
+    return display
 
-    statements = []
-    for segment in segments:
-        position = segment["segment_index"] + 1
-        if not segment["visible"]:
-            hidden = POLICY_HIDDEN if segment.get("origin") == "policy" else "a Cable you cannot view"
-            statements.append(f"segment {position} uses {hidden}")
-            continue
-        family = cable_media_family_label(segment["family"])
-        statement = f"segment {position} is {cable_type_label(segment['cable_type'])} ({family})"
-        if segment["retained"]:
-            statement += ", on the Cable this import keeps"
-        statements.append(statement)
-    remedy = (
-        "Correct those Cables in NetBox, then re-read."
-        if all(segment["retained"] for segment in segments)
-        else "Force the segment that states the wrong medium, or correct the source."
+
+def _visible_identities(identities, visible_row_ids: dict[str, set[int]]) -> tuple:
+    """Return the identities a viewer may read: a hidden or deleted termination drops out."""
+    return tuple(
+        identity
+        for identity in identities
+        if (key := _identity_key(identity)) is None or key[1] in visible_row_ids.get(key[0], ())
     )
-    return f"Verified pass-throughs join these segments, and {'; '.join(statements)}. {remedy}"
 
 
 def _diagnostic(diagnostic, visible_row_ids: dict[str, set[int]]):
     display = diagnostic.to_dict()["display"]
     if diagnostic.code == "cable.media_family_mismatch":
-        segments = [_media_segment(segment, visible_row_ids) for segment in display["segments"]]
-        display["segments"] = segments
-        display["families"] = sorted(
-            {_family_label(segment["family"]) for segment in segments if segment["visible"] and segment.get("family")}
-        )
-        display["message"] = _media_message(segments)
-    elif keys := CABLE_DIAGNOSTIC_DISCLOSURES.get(diagnostic.code):
-        if display.get("cable_visible") is True and not _source_is_visible(
-            display.get(DISCLOSURE_SOURCE), (CABLE_ROW,), visible_row_ids
-        ):
-            display = _redact_cable(display, keys)
+        display["segments"] = [_media_segment(segment, visible_row_ids) for segment in display["segments"]]
+    elif (
+        (keys := CABLE_DIAGNOSTIC_DISCLOSURES.get(diagnostic.code))
+        and display.get("cable_visible") is True
+        and not _source_is_visible(display.get(DISCLOSURE_SOURCE), (CABLE_ROW,), visible_row_ids)
+    ):
+        display = _redact_cable(display, keys)
     if (
         diagnostic.code in POLICY_DIAGNOSTIC_DISCLOSURES
         and display.get(POLICY_VISIBLE) is True
@@ -346,13 +398,10 @@ def _diagnostic(diagnostic, visible_row_ids: dict[str, set[int]]):
         )
     ):
         display = _redact_policy(display)
-    return replace(diagnostic, display=display)
-
-
-def _family_label(family: str) -> str:
-    from .cable_policy import cable_media_family_label
-
-    return cable_media_family_label(family)
+    keys = TERMINATION_DIAGNOSTIC_DISCLOSURES.get(diagnostic.code)
+    if keys and not _terminations_are_visible(display.get(TERMINATION_SOURCES), visible_row_ids):
+        display = _redact_terminations(display, keys)
+    return replace(diagnostic, display=display, identities=_visible_identities(diagnostic.identities, visible_row_ids))
 
 
 def _unit(unit, visible_row_ids: dict[str, set[int]]):
@@ -380,28 +429,41 @@ def _unit(unit, visible_row_ids: dict[str, set[int]]):
             ):
                 policy.pop(DISCLOSURE_SOURCE, None)
                 policy.update(_redact_policy(policy))
+        for question in trace.get("devices") or ():
+            if question.get("selected") and not _source_is_visible(
+                question.get(DISCLOSURE_SOURCE), (DEVICE_ROW,), visible_row_ids
+            ):
+                question.pop(DISCLOSURE_SOURCE, None)
+                question["selected"] = DEVICE_HIDDEN
+        for field in trace.get("terminations") or ():
+            if field.get("selected") and not _source_is_visible(
+                field.get(DISCLOSURE_SOURCE), CABLE_END_KINDS, visible_row_ids
+            ):
+                field.pop(DISCLOSURE_SOURCE, None)
+                field.update(selected=TERMINATION_HIDDEN, selected_type="")
+        for segment in trace.get("segments") or ():
+            # Only a planned segment names NetBox ports; an unplanned one repeats the source text.
+            if not segment.get("segment_key"):
+                continue
+            for end, source_key in SEGMENT_END_SOURCES.items():
+                if not _end_is_visible(segment.get(source_key), visible_row_ids):
+                    segment.pop(source_key, None)
+                    segment[end] = TERMINATION_HIDDEN
     diagnostics = tuple(_diagnostic(item, visible_row_ids) for item in unit.diagnostics)
     return replace(unit, diagnostics=diagnostics, display=display)
 
 
 def present_units(units, viewer) -> tuple:
-    """Return presentation copies after one live Cable visibility query."""
+    """Return presentation copies after one live visibility query per referenced row kind."""
     if viewer is None:
         raise TypeError("ReviewWorkspace requires a live viewer.")
     units = tuple(units)
-    from dcim.models import Cable
-
-    from .models import CableClassMapping, CableSegmentOverride
+    from django.apps import apps
 
     row_ids = _row_ids(units)
-    models = {
-        CABLE_ROW: Cable,
-        CABLE_CLASS_MAPPING_ROW: CableClassMapping,
-        CABLE_SEGMENT_OVERRIDE_ROW: CableSegmentOverride,
-    }
     visible = {}
-    for row_kind, model in models.items():
-        ids = row_ids[row_kind]
+    for row_kind, ids in row_ids.items():
+        model = apps.get_model(row_kind)
         visible[row_kind] = (
             set(model.objects.restrict(viewer, "view").filter(pk__in=sorted(ids)).values_list("pk", flat=True))
             if ids
@@ -412,8 +474,6 @@ def present_units(units, viewer) -> tuple:
 
 def redact_deleted_cables(plan_data: dict) -> dict:
     """Return an execution copy whose deleted Cable rows authorize no stored display text."""
-    from .plan import ImportPlan
-
     plan = ImportPlan.from_dict(plan_data)
     visible = _row_ids(plan.units)
     deleted_ids = {
@@ -427,22 +487,36 @@ def redact_deleted_cables(plan_data: dict) -> dict:
     return replace(plan, units=units).to_dict()
 
 
+def register() -> None:
+    """Register the Cable display vocabulary, so a cached plan with an unknown Cable display field is refused."""
+    register_diagnostic_display(TargetModuleKey.CABLE, validate_diagnostic_disclosures)
+
+
 __all__ = (
     "CABLE_CLASS_MAPPING_ROW",
     "CABLE_DIAGNOSTIC_DISCLOSURES",
     "CABLE_DIAGNOSTIC_FIELDS",
     "CABLE_ROW",
     "CABLE_SEGMENT_OVERRIDE_ROW",
+    "DEVICE_HIDDEN",
+    "DEVICE_ROW",
     "DISCLOSURE_SOURCE",
     "POLICY_DIAGNOSTIC_DISCLOSURES",
     "POLICY_HIDDEN",
     "POLICY_VISIBLE",
-    "POLICY_WRITE_REFUSED",
+    "SEGMENT_END_SOURCES",
+    "TERMINATION_DIAGNOSTIC_DISCLOSURES",
+    "TERMINATION_HIDDEN",
+    "TERMINATION_SOURCES",
+    "device_source",
     "disclosed_cable",
     "disclosed_policy",
     "disclosure_source",
     "policy_row_is_disclosed",
     "present_units",
     "redact_deleted_cables",
+    "register",
+    "segment_end_sources",
+    "termination_sources",
     "validate_diagnostic_disclosures",
 )

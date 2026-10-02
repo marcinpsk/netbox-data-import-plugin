@@ -309,7 +309,9 @@ class ImportEnginePlanTest(ImportEngineTestDataMixin, TestCase):
         plan = self._plan(actor=actor)
         context = ExecutionContext(
             actor=actor,
-            reader=NetBoxReader.for_actor(actor).for_planning_context(self.planning_context),
+            reader=NetBoxReader.for_actor(actor).for_planning_context(
+                self.planning_context, output_kinds=self.profile.output_kinds
+            ),
             profile=self.profile,
         )
 

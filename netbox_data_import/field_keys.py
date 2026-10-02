@@ -23,6 +23,23 @@ PORT_CLASS_CLAIMED_KINDS = {
     **dict.fromkeys(REAR_PORT_CLASSES, REAR_PORT_KIND),
 }
 
+FRONT_PORT_MODEL = "dcim.frontport"
+REAR_PORT_MODEL = "dcim.rearport"
+
+#: The NetBox termination models each claimed kind admits, in match order (section 6.1).
+ADMITTED_TERMINATION_MODELS = {
+    INTERFACE_KIND: (
+        "dcim.interface",
+        "dcim.consoleport",
+        "dcim.consoleserverport",
+        "dcim.powerport",
+        "dcim.poweroutlet",
+    ),
+    FRONT_PORT_KIND: (FRONT_PORT_MODEL,),
+    REAR_PORT_KIND: (REAR_PORT_MODEL,),
+}
+CABLE_END_KINDS = frozenset(model for models in ADMITTED_TERMINATION_MODELS.values() for model in models)
+
 TERMINATION_ROLE = "termination"
 MAPPED_PEER_ROLE = "mapped_peer"
 TERMINATION_ROLES = frozenset({TERMINATION_ROLE, MAPPED_PEER_ROLE})
@@ -52,7 +69,7 @@ def claimed_termination_kind(port_class: str) -> str:
 
 def termination_field_key(*, device, cards, port, kind: str, role: str = TERMINATION_ROLE) -> str:
     """Return the canonical JSON key for one termination-selection role."""
-    if kind not in {INTERFACE_KIND, FRONT_PORT_KIND, REAR_PORT_KIND}:
+    if kind not in ADMITTED_TERMINATION_MODELS:
         raise ValueError(f"Unknown claimed termination kind '{kind}'.")
     if role not in TERMINATION_ROLES:
         raise ValueError(f"Unknown termination field-key role '{role}'.")
@@ -92,8 +109,11 @@ def parse_termination_field_key(value: str) -> dict[str, str]:
 
 
 __all__ = (
+    "ADMITTED_TERMINATION_MODELS",
+    "CABLE_END_KINDS",
     "FRONT_PORT_CLASSES",
     "FRONT_PORT_KIND",
+    "FRONT_PORT_MODEL",
     "INTERFACE_KIND",
     "INTERFACE_PORT_CLASSES",
     "MAPPED_PEER_ROLE",
@@ -101,6 +121,7 @@ __all__ = (
     "PORT_CLASS_CLAIMED_KINDS",
     "REAR_PORT_CLASSES",
     "REAR_PORT_KIND",
+    "REAR_PORT_MODEL",
     "SELECT_TERMINATION_TASK",
     "TERMINATION_ROLE",
     "TERMINATION_ROLES",

@@ -9,9 +9,9 @@ from unittest.mock import patch
 
 from core.choices import JobStatusChoices
 from core.models import Job, ObjectType
-from dcim.models import Device, Interface, Site
+from dcim.models import Device, Interface, PowerPort, Site
 from django.db import connection
-from django.test import RequestFactory, SimpleTestCase, TestCase
+from django.test import Client, RequestFactory, SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
 from django.views import View
@@ -35,9 +35,15 @@ from netbox_data_import.preview_row_actions import (
     PREVIEW_REVISION_SESSION_KEY,
     retained_sync_block_reason,
 )
+from netbox_data_import.proposal_presentation import PROPOSAL_FRESHNESS_UNCHECKED
 from netbox_data_import.proposal_tasks import CandidateSnapshot
 from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, complete_proposal, fail_proposal
-from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes, user_with_object_permission
+from netbox_data_import.tests.helpers import (
+    asked_termination,
+    trace_termination,
+    trace_workbook_bytes,
+    user_with_object_permission,
+)
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
 from netbox_data_import.tests.plugins_config import override_plugins_config
@@ -146,6 +152,14 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         actor = user_with_object_permission(f"operator-{uuid.uuid4().hex}", grants)
         self.login_with_preview(actor)
         return actor
+
+    def reread(self):
+        """Adopt the plan live NetBox states now, as the workspace re-read action does."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
+        )
+        self.assertEqual(response.status_code, 302)
 
     def login_with_preview(self, actor):
         preview = {key: value for key, value in self.client.session.items() if key.startswith("import_")}
@@ -450,7 +464,14 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
             self.no_match(self.request_proposal())
             reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
-            presentation = CountingPresentation(profile=self.profile, actor=self.actor, reader=reader)
+            presentation = CountingPresentation(
+                profile=self.profile,
+                actor=self.actor,
+                reader=reader,
+                asked={
+                    self.field_key: asked_termination(device="DEV-A", cards="", port="absent-port", kind="interface")
+                },
+            )
             payload = presentation.fields(({"field_key": self.field_key, "state": UNRESOLVED},))
 
         self.assertEqual(payload[self.field_key]["presentation"]["page_status"], "Searched candidates 1-2 of 3.")
@@ -869,6 +890,79 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], revision)
         self.assertTrue(self.client.session[PREVIEW_DIRTY_SESSION_KEY])
 
+    def test_accepting_a_power_port_that_shares_an_interface_id_saves_the_power_port(self):
+        """The accept view writes the candidate's own model, never another model with the same numeric id."""
+        shared_id = 900_002
+        Interface.objects.create(pk=shared_id, device=self.device_a, name="eth-shared", type="1000base-t")
+        PowerPort.objects.create(pk=shared_id, device=self.device_a, name="psu-shared")
+        proposal = self.request_proposal()
+        entry = next(
+            item
+            for item in proposal.candidate_snapshot["candidates"]
+            if (item["object_type"], item["object_id"]) == ("dcim.powerport", shared_id)
+        )
+        self.assertTrue(claim_proposal(proposal.pk))
+        self.assertTrue(
+            complete_proposal(
+                proposal.pk,
+                outcome=ProposalOutcome.CANDIDATE,
+                explanation="The source port is the server power inlet.",
+                selected_candidate_id=entry["candidate_id"],
+                selected_object_type=ObjectType.objects.get_for_model(PowerPort),
+                selected_object_id=shared_id,
+            )
+        )
+
+        response = self.call("accept_proposal", proposal_id=proposal.pk)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        row = TerminationResolution.objects.get(profile=self.profile, field_key=self.field_key)
+        self.assertEqual(
+            (row.selected_object_type.app_label, row.selected_object_type.model, row.selected_object_id),
+            ("dcim", "powerport", shared_id),
+        )
+        self.assertEqual(row.selected_display_name, "psu-shared")
+        proposal.refresh_from_db()
+        self.assertEqual((proposal.decision, proposal.written_resolution_id), ("accepted", row.pk))
+
+    def test_acceptance_against_a_moved_policy_is_refused(self):
+        """Two sessions on one profile: an acceptance cannot commit against a policy its preview never saw."""
+        proposal = self.completed()
+        other = Client()
+        other.force_login(self.actor)
+        upload = BytesIO(
+            trace_workbook_bytes(
+                path_blocks=[
+                    direct_path(
+                        from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
+                        to_end=trace_termination("DEV-B", "", "eth1", "Port"),
+                    )
+                ]
+            )
+        )
+        upload.name = "traces.xlsx"
+        other.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        saved = other.post(
+            reverse("plugins:netbox_data_import:trace_cable_policy"),
+            {
+                "cable_class": "Patch",
+                "cable_type": "cat6a",
+                "cable_profile": "single-1c1p",
+                "preview_revision": other.session[PREVIEW_REVISION_SESSION_KEY],
+            },
+        )
+        self.assertEqual(saved.status_code, 302)
+
+        response = self.call("accept_proposal", proposal_id=proposal.pk)
+
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertIn("policy changed since this preview was planned", response.json()["error"])
+        self.assert_unwritten(proposal)
+
     def test_reject_by_another_operator_records_decision_only(self):
         proposal = self.completed(no_match=True)
         actor = self.operator(decide=True)
@@ -912,6 +1006,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
                 (TerminationResolution, ["add"], {"profile_id": self.profile.pk}),
             ],
         )
+        # The operator reviews the policy row above, so the acceptance does not meet a moved policy.
+        self.reread()
         self.login_with_preview(actor)
 
         self.assertIn("permission", self.presentation()["actions"][2]["reason"])
@@ -944,6 +1040,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
                 (TerminationResolution, ["change"], {"missing_field": "value"}),
             ],
         )
+        # The operator reviews the policy row above, so the acceptance does not meet a moved policy.
+        self.reread()
         self.login_with_preview(actor)
 
         self.assertIn("permission", self.presentation()["actions"][2]["reason"])
@@ -1192,6 +1290,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
                 (TerminationResolution, ["add"], {"profile__termination_resolutions__pk": sibling.pk}),
             ],
         )
+        # The operator reviews the policy row above, so the acceptance does not meet a moved policy.
+        self.reread()
         self.login_with_preview(actor)
 
         self.assertEqual(self.presentation()["actions"][2]["reason"], "")
@@ -1229,6 +1329,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
                 ),
             ],
         )
+        # The operator reviews the policy row above, so the acceptance does not meet a moved policy.
+        self.reread()
         self.login_with_preview(actor)
 
         self.assertEqual(self.presentation()["actions"][2]["reason"], "")
@@ -1238,6 +1340,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(TerminationResolution.objects.filter(profile=self.profile).count(), 2)
 
     def test_proposal_survives_replanning_after_its_field_leaves_the_preview(self):
+        """The attempt still reads, but its freshness needs a question this preview no longer asks."""
         proposal = self.completed()
         before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
         self.client.force_login(self.actor)
@@ -1261,7 +1364,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertNotEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], before)
         response = self.call("proposal", field_key=self.field_key)
         self.assertEqual(response.json()["proposal"]["id"], proposal.pk)
-        self.assertFalse(response.json()["staleness"]["is_stale"])
+        self.assertIsNone(response.json()["staleness"])
+        self.assertEqual(response.json()["staleness_error"], PROPOSAL_FRESHNESS_UNCHECKED)
 
     def test_profile_view_alone_can_read_when_planning_target_is_not_visible(self):
         proposal = self.completed()
@@ -1619,7 +1723,11 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             {"field_key": second_key, "state": UNRESOLVED},
         )
         reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
-        presentation = ProposalPresentation(profile=self.profile, actor=self.actor, reader=reader)
+        asked = {
+            key: asked_termination(device="DEV-A", cards="", port=port, kind="interface")
+            for key, port in ((self.field_key, "absent-port"), (second_key, "another-port"))
+        }
+        presentation = ProposalPresentation(profile=self.profile, actor=self.actor, reader=reader, asked=asked)
 
         with CaptureQueriesContext(connection) as queries:
             payloads = presentation.fields(fields)
@@ -1627,9 +1735,17 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertFalse(payloads[self.field_key]["staleness"]["is_stale"])
         self.assertFalse(payloads[second_key]["staleness"]["is_stale"])
         device_reads = [query for query in queries if 'FROM "dcim_device"' in query["sql"]]
-        candidate_reads = [query for query in queries if 'FROM "dcim_interface"' in query["sql"]]
         self.assertEqual(len(device_reads), 1)
-        self.assertEqual(len(candidate_reads), 2)
+        # Each model is counted and ranked once, only interfaces load page rows, and the second field reads none.
+        for table, reads in (
+            ("dcim_interface", 3),
+            ("dcim_consoleport", 2),
+            ("dcim_consoleserverport", 2),
+            ("dcim_powerport", 2),
+            ("dcim_poweroutlet", 2),
+        ):
+            with self.subTest(table=table):
+                self.assertEqual(len([query for query in queries if f'FROM "{table}"' in query["sql"]]), reads)
 
     def test_mapped_peer_has_a_manual_reason(self):
         from netbox_data_import.field_keys import MAPPED_PEER_ROLE

@@ -36,6 +36,10 @@ _USER_PERMISSION_CACHE_ATTRIBUTES = (
 )
 
 
+# A workspace refuses a blind write to any policy row its actor cannot view, Cable or Location alike.
+POLICY_WRITE_REFUSED = "You cannot change a policy you cannot view."
+
+
 class ObjectPermissionDenied(Exception):
     """Reject a write outside the caller's NetBox object scope."""
 

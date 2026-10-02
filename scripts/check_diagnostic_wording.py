@@ -35,9 +35,13 @@ def emitted_codes() -> set[str]:
 def answered_codes(source: pathlib.Path) -> set[str]:
     """Return the literal keys of the wording table, so prose naming a code cannot answer for it."""
     for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
-        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
             continue
-        if not any(isinstance(t, ast.Name) and t.id == TABLE for t in node.targets):
+        if not isinstance(node.value, ast.Dict) or not any(isinstance(t, ast.Name) and t.id == TABLE for t in targets):
             continue
         return {k.value for k in node.value.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
     raise SystemExit(f"check-diagnostic-wording: {TABLE} is not a dict literal in {source.name}")

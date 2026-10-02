@@ -455,6 +455,14 @@ class ImportSetupForm(forms.Form):
         validate_registered_adapter(profile)
         return profile
 
+    def clean(self):
+        """Reject a Location outside the selected Site, which no import can target or rank with."""
+        cleaned = super().clean()
+        site, location = cleaned.get("site"), cleaned.get("location")
+        if site is not None and location is not None and location.site_id != site.pk:
+            self.add_error("location", "The selected location does not belong to the selected site.")
+        return cleaned
+
     def clean_excel_file(self):
         """Reject files that exceed the maximum upload size."""
         f = self.cleaned_data.get("excel_file")
