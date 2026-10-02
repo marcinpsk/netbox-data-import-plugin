@@ -38,6 +38,7 @@
     {% if results_url %}<a href="{{ results_url }}" class="btn btn-outline-secondary">View results</a>{% endif %}
     {% elif is_failed %}
     <a href="{% url 'plugins:netbox_data_import:import_setup' %}" class="btn btn-primary">Start a new import</a>
+    {% if results_url %}<a href="{{ results_url }}" class="btn btn-outline-secondary">View results</a>{% endif %}
     {% else %}
     <span class="text-muted"><i class="mdi mdi-loading mdi-spin"></i> This page updates automatically.</span>
     {% endif %}
