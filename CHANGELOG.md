@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v2.9.0 (2026-10-03)
+
+### Bug Fixes
+
+- Allow proposal lifecycle actions for ambiguous sources
+  ([`a9ca06f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a9ca06fec01f2a604dd14b048b4eca41ef76218e))
+
+- Refuse ambiguous termination source decisions
+  ([`884b306`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/884b306eef42ece0c303429bd161250fa2352960))
+
+### Chores
+
+- **deps**: Bump the uv group across 1 directory with 2 updates
+  ([`f6eb4c4`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f6eb4c45bbaf4cf23b2fd95bde9a65623adb0839))
+
+
 ## v2.8.0 (2026-10-02)
 
 ### Testing
