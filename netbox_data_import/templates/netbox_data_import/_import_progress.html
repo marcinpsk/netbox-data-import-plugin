@@ -26,6 +26,8 @@
   <div class="d-flex gap-2">
     {% if is_completed and results_url %}
     <a href="{{ results_url }}" class="btn btn-success">View results</a>
+    {% elif is_completed %}
+    <a href="{% url 'plugins:netbox_data_import:import_setup' %}" class="btn btn-primary">Start a new import</a>
     {% elif is_failed and restore_claim %}
     <form method="post" action="{% url 'plugins:netbox_data_import:import_restore' pk=job.pk %}">
       {% csrf_token %}

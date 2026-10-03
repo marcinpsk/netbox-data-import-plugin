@@ -392,6 +392,35 @@ class StaleFlatCommandTest(IsolatedRQQueueTestMixin, _FlatPreviewMixin, Transact
         self.assertEqual(preview.status_code, 200)
         self.assertContains(preview, "server-c")
 
+    def test_a_completed_job_without_results_offers_a_new_import(self):
+        from core.models import Job
+
+        self.upload_flat(self.client, "first.xlsx", "server-a")
+        page = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        self.client.post(
+            reverse("plugins:netbox_data_import:import_run"),
+            page_claim(page, action=reverse("plugins:netbox_data_import:import_run")),
+        )
+        self.run_rq_jobs()
+        job = Job.objects.get(data__job_type="netbox_data_import.import")
+        self.assertEqual(job.status, "completed")
+        progress_url = reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk})
+        self.assertContains(self.client.get(progress_url), "View results")
+        data = dict(job.data)
+        data.pop("import_execution_id")
+        Job.objects.filter(pk=job.pk).update(data=data)
+
+        for view in ("import_progress", "import_progress_status"):
+            with self.subTest(view=view):
+                response = self.client.get(reverse(f"plugins:netbox_data_import:{view}", kwargs={"pk": job.pk}))
+                self.assertContains(response, "Import complete.")
+                self.assertContains(response, "Start a new import")
+                self.assertContains(response, reverse("plugins:netbox_data_import:import_setup"))
+                self.assertNotContains(response, "This page updates automatically.")
+                self.assertNotContains(response, "mdi-spin")
+                self.assertNotContains(response, "View results")
+                self.assertNotContains(response, 'hx-trigger="every 2s"')
+
 
 class LateSessionSaveTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TransactionTestCase):
     """An older response that saves its session last cannot bring its preview back."""
@@ -689,6 +718,7 @@ class CoordinatorContractTest(IsolatedRQQueueTestMixin, _FlatPreviewMixin, Trans
 
         self.assertEqual(response.status_code, 413)
         self.assertFalse(IgnoredDevice.objects.exists())
+        self.assertFalse(ImportExecution.objects.exists())
         after = _coordinator(self.client)
         self.assertEqual((after.revision, after.plan), (before.revision, before.plan))
 
