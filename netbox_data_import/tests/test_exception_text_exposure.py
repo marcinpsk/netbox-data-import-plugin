@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """No view renders the text of a caught exception whose type does not promise plugin-written text.
 
-The curated-type policy: an exception class defined in this plugin carries a message the plugin
-wrote, so a view may show it. A `ValidationError` is shown through `messages` or `message_dict`,
+PublicRefusal exposes only operator_message, status and reason. Other plugin exceptions retain
+the audited curated-type policy: their authored text may be shown. A `ValidationError` is shown through `messages` or `message_dict`,
 never `str()`. An Import Plan error (`PlanError`) and a `DatabaseError` name session data or the
 schema, so no view shows their text, and `import_engine.operator_failure_message` words them for a
 Job. A builtin or third-party exception shows its text only where an audit below says why.
@@ -30,12 +30,21 @@ from django.db import DatabaseError
 from django.test import SimpleTestCase
 
 from netbox_data_import.plan import PlanError
+from netbox_data_import.public_refusal import PublicRefusal
 
 PACKAGE = pathlib.Path(__file__).resolve().parents[1]
 PACKAGE_NAME = PACKAGE.name
 RESPONSE_MODULES = ("views.py",)
 NEVER_RENDERED = (PlanError, DatabaseError)
-SANITIZERS = frozenset({"operator_failure_message", "_refused_row_write_response", "_placement_error_text"})
+SANITIZERS = frozenset(
+    {
+        "operator_failure_message",
+        "_refused_row_write_response",
+        "_placement_error_text",
+        "_stale_response",
+        "_stale_json",
+    }
+)
 VALIDATION_ATTRIBUTES = frozenset({"messages", "message_dict"})
 _LOGGER_NAMES = frozenset({"logger", "logging"})
 
@@ -303,6 +312,8 @@ def _render_allowed(cls: type, kinds: set[str], carriers: set[type]) -> bool:
     """Return whether the policy lets a response show these uses of one caught class."""
     if issubclass(cls, (*NEVER_RENDERED, *carriers)):
         return False
+    if issubclass(cls, PublicRefusal):
+        return kinds <= {"operator_message", "status", "reason"}
     if issubclass(cls, ValidationError):
         return kinds <= VALIDATION_ATTRIBUTES
     return cls.__module__.startswith(f"{PACKAGE_NAME}.")
@@ -372,14 +383,12 @@ class ExceptionTextScannerTest(SimpleTestCase):
 
     def test_a_curated_type_that_carries_a_plan_error_is_reported(self):
         engine = "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n        raise SelectionError(str(exc)) from exc\n"
-        view = "def post():\n    try:\n        run()\n    except (SelectionError, StalePlan) as exc:\n        return Json(f'{exc}')\n"
+        view = "def post():\n    try:\n        run()\n    except (SelectionError, StalePlan) as exc:\n        return Json(exc.operator_message)\n"
         self.assertEqual(self.scan(view), [])
         self.assertEqual(self.scan(view, engine), [("post", "SelectionError")])
 
     def test_a_plan_error_text_carried_through_a_variable_or_a_helper_is_reported(self):
-        view = (
-            "def post():\n    try:\n        run()\n    except SelectionError as exc:\n        return Json(str(exc))\n"
-        )
+        view = "def post():\n    try:\n        run()\n    except SelectionError as exc:\n        return Json(exc.operator_message)\n"
         engines = (
             (
                 "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n"
@@ -423,16 +432,23 @@ class ExceptionTextScannerTest(SimpleTestCase):
                 "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n        _wrap(error=exc)\n"
             ),
         )
+        self.assertEqual(self.scan(view), [])
         for engine in engines:
             with self.subTest(engine=engine):
                 self.assertEqual(self.scan(view, engine), [("post", "SelectionError")])
 
     def test_a_curated_type_raised_with_a_fixed_sentence_stays_curated(self):
         engine = "def merge():\n    try:\n        order()\n    except PlanInvalid as exc:\n        raise SelectionError(FIXED) from exc\n"
-        view = (
-            "def post():\n    try:\n        run()\n    except SelectionError as exc:\n        return Json(str(exc))\n"
-        )
+        view = "def post():\n    try:\n        run()\n    except SelectionError as exc:\n        return Json(exc.operator_message)\n"
         self.assertEqual(self.scan(view, engine), [])
+
+    def test_public_refusals_use_only_the_authored_message(self):
+        raw = "def post():\n    try:\n        run()\n    except SelectionError as exc:\n        return str(exc)\n"
+        public = "def post():\n    try:\n        run()\n    except SelectionError as exc:\n        return exc.operator_message\n"
+        for expression in ("str(exc)", "repr(exc)", "exc.args[0]"):
+            with self.subTest(expression=expression):
+                self.assertEqual(self.scan(raw.replace("str(exc)", expression)), [("post", "SelectionError")])
+        self.assertEqual(self.scan(public), [])
 
     def test_a_builtin_text_is_reported_and_a_logged_one_is_not(self):
         shown = "def post():\n    try:\n        run()\n    except ValueError as exc:\n        messages.error(request, exc)\n"

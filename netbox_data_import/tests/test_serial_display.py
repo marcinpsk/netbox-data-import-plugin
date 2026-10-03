@@ -7,7 +7,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 from dcim.models import Device
 
-from netbox_data_import.tests.helpers import FIXTURE_PATH, make_dcim_objects
+from netbox_data_import.tests.helpers import FIXTURE_PATH, make_dcim_objects, upload_preview
 
 User = get_user_model()
 
@@ -50,12 +50,9 @@ class SearchDeviceSerialDisplayTest(TestCase):
         self.client.force_login(self.user)
 
     def _setup_preview_session(self, profile):
-        """Populate session so ImportPreviewView renders instead of redirecting."""
+        """Upload the sample workbook so ImportPreviewView renders instead of redirecting."""
         with open(FIXTURE_PATH, "rb") as f:
-            response = self.client.post(
-                reverse("plugins:netbox_data_import:import_setup"),
-                {"profile": profile.pk, "site": self.site.pk, "excel_file": f},
-            )
+            response = upload_preview(self.client, {"profile": profile.pk, "site": self.site.pk, "excel_file": f})
         self.assertEqual(response.status_code, 302, response.content[:300])
 
     def test_search_objects_includes_serial_in_response(self):
@@ -253,4 +250,5 @@ class SearchDeviceSerialDisplayTest(TestCase):
         self.assertIn("data-source-name=", html)
         self.assertIn("data-source-serial=", html)
         self.assertIn("data-source-asset-tag=", html)
-        self.assertIn("data-profile-id=", html)
+        self.assertNotIn("data-profile-id=", html)
+        self.assertIn('name="preview_profile"', html)

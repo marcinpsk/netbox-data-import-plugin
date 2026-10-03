@@ -7,7 +7,7 @@ from django.test import TestCase
 
 from netbox_data_import.models import ClassRoleMapping, DeviceExistingMatch, ImportProfile
 from netbox_data_import.plan import Diagnostic, Disposition, ImportPlan, PlannedChange, Severity, SynchronizationUnit
-from netbox_data_import.review_workspace import AutoMatchSummary, ReviewWorkspace
+from netbox_data_import.review_workspace import AutoMatchSummary, ReviewWorkspace, auto_match_devices
 from netbox_data_import.tests.helpers import make_dcim_objects, user_with_object_permission
 
 
@@ -123,6 +123,26 @@ class ReviewWorkspacePresentationTest(TestCase):
         self.assertTrue(workspace.has_errors)
         self.assertEqual(workspace.units[3].action, "ignore")
         self.assertEqual(workspace.units[4].detail, "device.example")
+
+    def test_object_visibility_reuses_the_render_projection(self):
+        """The real projection reuses serialized display data across workspace readers."""
+
+        class CountedUnit(SynchronizationUnit):
+            serializations = 0
+
+            def to_dict(self):
+                type(self).serializations += 1
+                return super().to_dict()
+
+        unit = CountedUnit(
+            identity="device:1", disposition=Disposition.NO_OP, display={"name": "device-a", "object_type": "device"}
+        )
+        workspace = _workspace(unit)
+        self.assertEqual(workspace.units[0].name, "device-a")
+        self.assertEqual(dict(workspace.counts), {"skipped": 1})
+        self.assertFalse(workspace.has_errors)
+        # Cable disclosure reads once, then object visibility and rendering share one projection.
+        self.assertEqual(CountedUnit.serializations, 2)
 
     def test_target_refusals_have_operator_facing_details(self):
         """Every target refusal without a custom message renders stable operator wording."""
@@ -272,8 +292,8 @@ class ReviewWorkspaceAutoMatchTest(TestCase):
         )
         workspace = self._workspace(self._row("SOURCE-1", "source-name", serial=device.serial))
 
-        first = workspace.auto_match_devices(self.profile, self.actor, self.target)
-        second = workspace.auto_match_devices(self.profile, self.actor, self.target)
+        first = auto_match_devices(workspace, self.profile, self.actor, self.target)
+        second = auto_match_devices(workspace, self.profile, self.actor, self.target)
 
         self.assertEqual(first.matched, 1)
         self.assertEqual(second.already, 1)
@@ -312,7 +332,7 @@ class ReviewWorkspaceAutoMatchTest(TestCase):
             self._row("OTHER", "other", serial="SERIAL-OTHER"),
         )
 
-        summary = workspace.auto_match_devices(self.profile, self.actor, self.target)
+        summary = auto_match_devices(workspace, self.profile, self.actor, self.target)
 
         self.assertEqual(summary.ambiguous, 4)
         self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
@@ -354,7 +374,7 @@ class ReviewWorkspaceAutoMatchTest(TestCase):
             [(Device, ("view",), {})],
         )
 
-        summary = workspace.auto_match_devices(self.profile, limited, self.target)
+        summary = auto_match_devices(workspace, self.profile, limited, self.target)
 
         self.assertEqual(summary.placement_conflicts, 1)
         self.assertEqual(summary.probable, 1)

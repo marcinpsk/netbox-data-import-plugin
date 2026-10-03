@@ -2,60 +2,19 @@
 /* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
 
 /* The per-row "Sync to NetBox" confirmation: it shows what the row would write, posts the write,
- * and then either recalculates the preview or reports that one is due. */
+ * and loads the replanned preview again. */
 (function () {
   var modal = document.getElementById('syncRowModal');
   if (!modal) return;
-
-  var RECALCULATE_CHOICE_KEY = 'ndi-sync-recalculate';
 
   var currentRowNumber = null;
   var currentSyncButton = null;
   var currentSyncRequest = null;
   var pendingSyncRequests = new WeakMap();
-  var syncsInFlight = 0;
-  var syncWritePending = false;
-  var recalculateChoice = document.getElementById('syncRowRecalculate');
 
   function readJson(id) {
     var node = document.getElementById(id);
     return node ? JSON.parse(node.textContent) : {};
-  }
-
-  /* The choice lasts for this tab only. A browser that refuses storage keeps the default. */
-  function storedChoice() {
-    try {
-      return window.sessionStorage.getItem(RECALCULATE_CHOICE_KEY);
-    } catch (error) {
-      return null;
-    }
-  }
-
-  function rememberChoice(checked) {
-    try {
-      window.sessionStorage.setItem(RECALCULATE_CHOICE_KEY, checked ? 'on' : 'off');
-    } catch (error) {
-      /* The choice still holds for this page. */
-    }
-  }
-
-  if (recalculateChoice) {
-    recalculateChoice.checked = storedChoice() !== 'off';
-    recalculateChoice.addEventListener('change', function () {
-      rememberChoice(recalculateChoice.checked);
-    });
-  }
-
-  /* A write the operator cannot see the result of is the reason this exists, so the preview is
-   * recalculated once the last request settles, never while another one is still in flight.
-   * The last request to settle owns the recalculation even when it is the one that failed. */
-  function recalculateAfterSync() {
-    if (!syncWritePending) return false;
-    if (!recalculateChoice || !recalculateChoice.checked) return false;
-    if (syncsInFlight > 0) return false;
-    if (typeof window.ndiRecalculatePreview !== 'function') return false;
-    syncWritePending = false;
-    return window.ndiRecalculatePreview();
   }
 
   function pendingWriteSummary(btn) {
@@ -286,54 +245,23 @@
     currentSyncRequest = submittedSyncRequest;
     pendingSyncRequests.set(submittedSyncButton, submittedSyncRequest);
     submittedSyncButton.disabled = true;
-    syncsInFlight += 1;
     var body = new URLSearchParams({row_number: submittedRowNumber});
     window.ndiPostPreviewAction(modal.dataset.syncUrl, body)
-    .then(function (data) {
-      syncsInFlight -= 1;
-      syncWritePending = true;
-      submittedSyncButton.disabled = true;
-      submittedSyncButton.removeAttribute('data-ndi-modal');
-      submittedSyncButton.title = data.message || 'Synced to NetBox.';
-      submittedSyncButton.innerHTML = '<i class="mdi mdi-check"></i> Synced';
-      if (pendingSyncRequests.get(submittedSyncButton) === submittedSyncRequest) {
-        pendingSyncRequests.delete(submittedSyncButton);
+    .then(function () {
+      // The page is leaving, so the modal reports the wait rather than closing onto a stale page.
+      if (currentSyncRequest === submittedSyncRequest && currentSyncButton === submittedSyncButton) {
+        confirmBtn.querySelector('.ndi-sync-row-loading-label').textContent = 'Reloading preview…';
       }
-      var ownsCurrentModal = currentSyncRequest === submittedSyncRequest
-        && currentSyncButton === submittedSyncButton;
-      if (currentSyncRequest === submittedSyncRequest) currentSyncRequest = null;
-      if (recalculateAfterSync()) {
-        // The page is leaving, so the modal reports the wait rather than closing onto a dead page.
-        if (ownsCurrentModal) {
-          confirmBtn.querySelector('.ndi-sync-row-loading-label').textContent = 'Recalculating preview…';
-        }
-        return;
-      }
-      if (typeof window.ndiMarkPreviewStale === 'function') {
-        window.ndiMarkPreviewStale(data.detail);
-      }
-      if (!ownsCurrentModal) return;
-      var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;
-      if (ModalClass) {
-        ModalClass.getOrCreateInstance(modal).hide();
-      }
+      window.ndiReloadPreview();
     })
     .catch(function (error) {
-      syncsInFlight -= 1;
       if (pendingSyncRequests.get(submittedSyncButton) === submittedSyncRequest) {
         pendingSyncRequests.delete(submittedSyncButton);
-        // markPreviewStale() skips a button that is already disabled, so a write that landed while
-        // this one was in flight never latched it. Retrying it would only meet the server refusal.
-        if (syncWritePending) {
-          submittedSyncButton.title = 'Recalculate the preview before synchronizing a row.';
-        } else {
-          submittedSyncButton.disabled = false;
-        }
+        submittedSyncButton.disabled = false;
       }
       var ownsCurrentModal = currentSyncRequest === submittedSyncRequest
         && currentSyncButton === submittedSyncButton;
       if (currentSyncRequest === submittedSyncRequest) currentSyncRequest = null;
-      recalculateAfterSync();
       if (!ownsCurrentModal) return;
       confirmBtn.disabled = false;
       confirmBtn.querySelector('.ndi-sync-row-idle').classList.remove('d-none');

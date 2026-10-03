@@ -7,6 +7,7 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { claim, claimForm, postedFields, script, servePage } from "./preview_page.js";
 
 const previewTemplate = readFileSync(
   resolve(process.cwd(), "netbox_data_import/templates/netbox_data_import/import_preview.html"),
@@ -30,14 +31,54 @@ if (!modalWiring.includes("setTimeout(dmSearch, 200)")) {
 }
 const bootstrapSource = readFileSync(resolve(process.cwd(), "node_modules/bootstrap/dist/js/bootstrap.js"), "utf8");
 
+test("creating a role refreshes the page before another mapping uses its claim", async ({ page }) => {
+  const start = previewTemplate.indexOf("function cmCreateRole()");
+  const end = previewTemplate.indexOf("// ---- Device Match modal ----", start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  const createRole = previewTemplate.slice(start, end)
+    .replace('{% url "plugins:netbox_data_import:quick_create_role" %}', "/create-role/");
+  const posted = [];
+  await page.route("**/create-role/", async route => {
+    posted.push(await postedFields(route.request()));
+    await route.fulfill({ json: { ok: true, name: "New role", slug: "new-role", created: true } });
+  });
+  const loads = await servePage(page, revision => `
+    ${claimForm(revision)}<span id="revision">${revision}</span>
+    <input name="csrfmiddlewaretoken" value="fixture-token">
+    <input id="cm_new_role_name" value="New role"><input id="cm_new_role_slug" value="new-role">
+    <input id="cm_role_slug"><div id="cm_create_role_error" style="display:none"></div>
+    <div id="cm_create_role_form"></div><div id="cm_role_search_results"></div>
+    <button id="create" onclick="cmCreateRole()">Create role</button>
+    <input id="previewRowFilter"><button id="previewRowFilterClear"></button>
+    <select id="previewActionFilter"><option value="">All</option></select>
+    <table><tbody id="previewRowsBody"><tr data-action="update"><td>server-a</td></tr></tbody></table>
+    ${script("preview_claim.js")}${script("preview_row_actions.js")}${script("preview_row_controls.js")}
+    <script>
+      window.addEventListener('beforeunload', function () {
+        sessionStorage.setItem('role-reload-latch', document.getElementById('ndi-preview-claim').dataset.ndiReloading || '');
+      });
+      ${createRole}
+    </script>`);
+  await page.locator("#previewRowFilter").fill("server-a");
+
+  await page.locator("#create").click();
+
+  await expect(page.locator("#revision")).toHaveText("5");
+  expect(loads()).toBe(2);
+  expect(posted).toEqual([{ name: "New role", slug: "new-role", ...claim() }]);
+  await expect(page.locator("#previewRowFilter")).toHaveValue("server-a");
+  expect(await page.evaluate(() => sessionStorage.getItem("role-reload-latch"))).toBe("true");
+});
+
 /* Only the elements the class-mapping handler touches. */
 const pageContent = `
   <button type="button" id="configure-class" data-bs-toggle="modal" data-bs-target="#classMappingModal"
-          data-source-class="Controller" data-profile-id="7" data-initial-action="ignore">Configure class</button>
+          data-source-class="Controller" data-initial-action="ignore">Configure class</button>
   <div class="modal" id="classMappingModal" tabindex="-1">
     <div class="modal-dialog"><div class="modal-content">
       <span id="cm_title_class"></span><span id="cm_source_class_display"></span>
-      <input type="hidden" id="cm_profile_id"><input type="hidden" id="cm_source_class">
+      <input type="hidden" id="cm_source_class">
       <input type="radio" name="cm_action" id="cm_action_ignore">
       <input type="radio" name="cm_action" id="cm_action_role">
       <input type="radio" name="cm_action" id="cm_action_rack">
@@ -56,7 +97,7 @@ async function openConfigureClass(page) {
   await expect(page.locator("#classMappingModal")).toBeVisible();
 }
 
-test("a row modal keeps its profile after an HTMX page-content swap", async ({ page }) => {
+test("a row modal keeps its source class after an HTMX page-content swap", async ({ page }) => {
   await page.setContent(`
     <head>
       <script>${bootstrapSource}</script>
@@ -67,7 +108,6 @@ test("a row modal keeps its profile after an HTMX page-content swap", async ({ p
   await page.addScriptTag({ content: modalWiring });
 
   await openConfigureClass(page);
-  await expect(page.locator("#cm_profile_id")).toHaveValue("7");
   await expect(page.locator("#cm_source_class")).toHaveValue("Controller");
   await page.getByRole("button", { name: "Close" }).click();
   await expect(page.locator("#classMappingModal")).toBeHidden();
@@ -79,8 +119,6 @@ test("a row modal keeps its profile after an HTMX page-content swap", async ({ p
   await page.addScriptTag({ content: modalWiring });
 
   await openConfigureClass(page);
-
-  await expect(page.locator("#cm_profile_id")).toHaveValue("7");
   await expect(page.locator("#cm_source_class")).toHaveValue("Controller");
 });
 
@@ -99,5 +137,5 @@ test("a modal opened with no row button leaves its form empty", async ({ page })
   });
 
   await expect(page.locator("#classMappingModal")).toBeVisible();
-  await expect(page.locator("#cm_profile_id")).toHaveValue("");
+  await expect(page.locator("#cm_source_class")).toHaveValue("");
 });

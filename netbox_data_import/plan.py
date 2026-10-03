@@ -4,7 +4,7 @@
 
 An Import Plan is a serializable derived artifact: Synchronization Units holding typed Planned
 Changes, their dispositions, and structured diagnostics. It is the contract between the Import
-Engine, the Review Workspace, the session, and a background job payload.
+Engine, the Review Workspace, the Preview Coordinator, and a background job payload.
 
 This module holds no NetBox import. Every value that enters a plan passes through a canonical JSON
 round trip, so a live ORM object, a queryset, a callable, or a template fragment cannot reach one.
@@ -458,7 +458,7 @@ class ImportPlan:
         return fingerprint_of({**self._selection_context_data, "unit": unit.fingerprint_data})
 
     def to_dict(self) -> dict:
-        """Return the serialized form the session and a job payload carry."""
+        """Return the serialized form the Preview Coordinator and a job payload carry."""
         return {
             "schema_version": self.schema_version,
             "units": [unit.to_dict() for unit in self.units],
@@ -475,7 +475,7 @@ class ImportPlan:
         """Rebuild a plan, rejecting a schema version this release does not execute.
 
         Every other malformed payload also raises a PlanError, so one caller-side ``except PlanError``
-        covers a corrupted session entry or job payload (section 4.8).
+        covers a corrupted stored preview or job payload (section 4.8).
         """
         try:
             version = data.get("schema_version")

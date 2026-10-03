@@ -21,25 +21,35 @@
           </a>
         </div>
         {% endif %}
-        {% if resume_preview %}
-        <div class="alert alert-info d-flex justify-content-between align-items-center">
-          <span><i class="mdi mdi-eye-check"></i> Your uploaded import preview is still available.</span>
-          <a href="{% url 'plugins:netbox_data_import:import_preview' %}" class="btn btn-info">
-            Resume preview
-          </a>
+        {% if resume_preview_url or discardable %}
+        <div class="alert alert-info d-flex justify-content-between align-items-center gap-2">
+          <span><i class="mdi mdi-eye-check"></i>
+            {% if resume_preview_url %}Your uploaded import preview is still available.{% else %}Your last import preview can no longer be reviewed.{% endif %}
+          </span>
+          <span class="d-flex gap-2 flex-shrink-0">
+            {% if resume_preview_url %}
+            <a href="{{ resume_preview_url }}" class="btn btn-info">Resume preview</a>
+            {% endif %}
+            <form method="post" action="{% url 'plugins:netbox_data_import:preview_discard' %}" class="d-inline">
+              {% csrf_token %}
+              {% include "netbox_data_import/inc/preview_claim.html" %}
+              <button type="submit" class="btn btn-outline-secondary">Discard preview</button>
+            </form>
+          </span>
         </div>
         {% endif %}
         <p class="text-muted">
           Select an import profile, upload your Excel file, and choose the target site.
           You will see a full preview before anything is written to NetBox.
         </p>
-        <form method="post" enctype="multipart/form-data"
+        <form id="importSetupForm" method="post" enctype="multipart/form-data"
               hx-boost="true"
               hx-encoding="multipart/form-data"
               hx-push-url="true"
               hx-indicator="#import-preview-pending"
               hx-disabled-elt="#preview-import-submit">
           {% csrf_token %}
+          {% include "netbox_data_import/inc/preview_claim.html" %}
           {% render_form form %}
           <div id="import-preview-pending" class="htmx-indicator alert alert-info mt-3" role="status" aria-live="polite">
             <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>

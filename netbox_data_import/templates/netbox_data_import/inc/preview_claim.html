@@ -1,0 +1,7 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
+{# The Preview Claim every preview command posts (ADR 0004): one source, so no form can drift. #}
+<input type="hidden" name="preview_token" value="{{ preview_claim.token }}">
+<input type="hidden" name="preview_revision" value="{{ preview_claim.revision }}">
+<input type="hidden" name="preview_document" value="{{ preview_claim.document_id|default_if_none:'' }}">
+<input type="hidden" name="preview_profile" value="{{ preview_claim.profile_id|default_if_none:'' }}">

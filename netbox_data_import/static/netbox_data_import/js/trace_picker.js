@@ -132,10 +132,18 @@
         // boost replaced must not be shown on the page that replaced it.
         return request === pending && part('Form') === form;
       }
-      var url = form.dataset.candidatesUrl + '?' + config.keyParam + '=' + encodeURIComponent(part('Key').value)
-        + '&search=' + encodeURIComponent(offer.search)
-        + '&offset=' + offer.offset
-        + '&preview_revision=' + encodeURIComponent(form.elements.namedItem('preview_revision').value);
+      var query;
+      try {
+        // The candidates answer for the preview this page shows, so the read names its whole claim.
+        query = window.ndiPreviewClaim(new URLSearchParams());
+      } catch (error) {
+        reportFailure(error.message);
+        return;
+      }
+      query.set(config.keyParam, part('Key').value);
+      query.set('search', offer.search);
+      query.set('offset', offer.offset);
+      var url = form.dataset.candidatesUrl + '?' + query.toString();
       fetch(url, {headers: {Accept: 'application/json'}, credentials: 'same-origin'})
         .then(function (response) {
           return response.json().then(function (payload) {

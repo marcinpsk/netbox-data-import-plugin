@@ -4,6 +4,8 @@ from typing import Any
 
 from netbox.plugins import PluginConfig
 
+from .preview_limits import MAX_PLAN_BYTES
+
 __version__ = "2.9.0"
 
 
@@ -24,20 +26,23 @@ class NetBoxDataImportConfig(PluginConfig):
     default_settings: dict[str, Any] = {
         # A deployment that names no allowlist reaches no origin, rather than every origin.
         "inference_backend_origin_allowlist": [],
+        "preview_max_plan_bytes": MAX_PLAN_BYTES,
     }
 
     @classmethod
     def validate(cls, user_config, netbox_version):
-        """Reject a malformed Inference Backend configuration before the application serves a request."""
+        """Reject a malformed plugin configuration before the application serves a request."""
         super().validate(user_config, netbox_version)
 
         from django.core.exceptions import ImproperlyConfigured
 
         from .inference_settings import InvalidInferenceConfiguration, validate_plugin_settings
+        from .preview_limits import InvalidPreviewConfiguration, preview_plan_byte_limit
 
         try:
             validate_plugin_settings(user_config)
-        except InvalidInferenceConfiguration as exc:
+            preview_plan_byte_limit(user_config["preview_max_plan_bytes"])
+        except (InvalidInferenceConfiguration, InvalidPreviewConfiguration) as exc:
             raise ImproperlyConfigured(f"Plugin {cls.__module__} has an invalid configuration: {exc}") from exc
 
     def ready(self):

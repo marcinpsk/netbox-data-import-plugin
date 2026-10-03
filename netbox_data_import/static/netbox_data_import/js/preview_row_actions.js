@@ -1,13 +1,22 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
 
+/* A preview command replans the preview and advances its revision on the server (ADR 0004), so
+ * every successful command leaves this page stale and the page loads again. */
 (function () {
   function csrfToken() {
     return document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
   }
 
-  function previewRevision() {
-    return document.getElementById('ndi-preview-revision')?.value || '';
+  /* The claim this page holds is spent once a reload starts, so the latch lives on the claim. */
+  function reloadPreview() {
+    var claim = document.getElementById('ndi-preview-claim');
+    if (claim) {
+      if (claim.dataset.ndiReloading === 'true') return;
+      claim.dataset.ndiReloading = 'true';
+    }
+    if (typeof window.ndiRememberPreviewView === 'function') window.ndiRememberPreviewView();
+    window.location.reload();
   }
 
   function setPending(button, label) {
@@ -35,64 +44,18 @@
     }
   }
 
-  /* Every deferred row action leaves the rendered row showing the state it had before, so the
-   * page reports that a recalculation is due and refuses an import until it happens. */
-  function markPreviewStale(detail) {
-    var staleNotice = document.getElementById('ndi-preview-stale');
-    if (staleNotice) {
-      staleNotice.hidden = false;
-      // A write this action already made in NetBox outlives the modal that made it.
-      if (detail) {
-        var line = staleNotice.querySelector('.ndi-preview-stale-detail');
-        if (!line) {
-          line = document.createElement('div');
-          line.className = 'ndi-preview-stale-detail small mt-1';
-          staleNotice.appendChild(line);
-        }
-        line.textContent = detail;
-      }
-    }
-    var runImport = document.getElementById('ndi-run-import');
-    if (runImport) {
-      runImport.disabled = true;
-      runImport.title = 'Recalculate the preview before importing.';
-    }
-    // A button that is already disabled states its own reason, which stays the more specific one.
-    document.querySelectorAll('.ndi-sync-row-btn:not([disabled])').forEach(function (syncRow) {
-      syncRow.disabled = true;
-      syncRow.title = 'Recalculate the preview before synchronizing a row.';
-    });
-  }
-
-  function markSaved(button, message) {
-    button.disabled = true;
-    button.dataset.ndiSaved = 'true';
-    button.innerHTML = '<i class="mdi mdi-check"></i> Saved';
-    button.title = message || 'Saved. Recalculate the preview to refresh this row.';
-    markPreviewStale();
-  }
-
-  function resetSavedModalForm(modal) {
-    modal.querySelectorAll('.ndi-deferred-preview-form button[type=submit][data-ndi-saved="true"]')
-      .forEach(function (button) {
-        button.disabled = false;
-        button.innerHTML = button.dataset.originalHtml || button.textContent;
-        button.title = '';
-        delete button.dataset.ndiSaved;
-      });
-  }
-
-  /* The one place that states the deferred row action contract, so the modal and the row
-   * buttons cannot drift over the envelope or the revision guard. */
+  /* The one place that states the row command contract, so the modals and the row buttons
+   * cannot drift over the envelope or the claim. */
   function requestAction(url, body) {
-    body.set('preview_revision', previewRevision());
-    return fetch(url, {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'X-CSRFToken': csrfToken(),
-      },
-      body: body,
+    return Promise.resolve().then(function () {
+      return fetch(url, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'X-CSRFToken': csrfToken(),
+        },
+        body: window.ndiPreviewClaim(body),
+      });
     })
       .then(function (response) {
         // An HTML error page or login redirect would surface as a JSON parse error.
@@ -102,7 +65,7 @@
           if (!response.ok || !payload.ok) {
             throw new Error(payload.error || 'The preview action failed.');
           }
-          if (payload.preview_state !== 'recalculation_required') {
+          if (payload.preview_state !== 'replanned') {
             throw new Error('The preview action returned an invalid state.');
           }
           return payload;
@@ -110,46 +73,13 @@
       });
   }
 
-  /* The page holds more than one link to the same recalculation, so starting one latches them all. */
-  function latchRecalculation(started) {
-    document.querySelectorAll('.ndi-recalculate-preview').forEach(function (link) {
-      link.dataset.ndiRecalculating = 'true';
-      link.classList.add('disabled');
-      link.setAttribute('aria-busy', 'true');
-      link.setAttribute('aria-disabled', 'true');
-    });
-    started.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i> Recalculating...';
-  }
-
-  /* One recalculation path, so an automatic recalculation leaves the page exactly as a press does.
-   * Returns whether it started one, because the caller must not also report a stale preview. */
-  function recalculatePreview() {
-    var link = document.querySelector('.ndi-recalculate-preview');
-    if (!link) return false;
-    // One recalculation is already on its way, and a second navigation would only interrupt it.
-    if (link.dataset.ndiRecalculating === 'true') return true;
-    // An automatic recalculation navigates without a click, so the view is stored here.
-    if (typeof window.ndiRememberPreviewView === 'function') window.ndiRememberPreviewView();
-    latchRecalculation(link);
-    window.location.assign(link.href);
-    return true;
-  }
-
   window.ndiPostPreviewAction = requestAction;
-  window.ndiMarkPreviewStale = markPreviewStale;
-  window.ndiRecalculatePreview = recalculatePreview;
-
-  document.addEventListener('show.bs.modal', function (event) {
-    resetSavedModalForm(event.target);
-  });
+  window.ndiReloadPreview = reloadPreview;
 
   function postAction(url, body, button, pendingLabel, placementError) {
     setPending(button, pendingLabel);
     return requestAction(url, body)
-      .then(function (payload) {
-        markSaved(button, payload.message);
-        return payload;
-      })
+      .then(reloadPreview)
       .catch(function (error) {
         restore(button, error.message);
         if (placementError) window.alert('Placement sync failed: ' + error.message);
@@ -165,22 +95,6 @@
     // A control named `action` shadows the form property of the same name, so read the attribute.
     postAction(form.getAttribute('action'), new FormData(form), button, 'Updating...', false);
   }, true);
-
-  /* Recalculation reloads the whole preview and can take a while, so the page reports that it
-   * was pressed and refuses a second press until the new page arrives. */
-  document.addEventListener('click', function (event) {
-    var recalculate = event.target.closest('.ndi-recalculate-preview');
-    if (!recalculate) return;
-    // A modified click opens a second tab and leaves this page, and its links, as they are.
-    // It runs before the latch so a latched link still opens a second tab.
-    if (event.defaultPrevented || event.button !== 0) return;
-    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    if (recalculate.dataset.ndiRecalculating === 'true') {
-      event.preventDefault();
-      return;
-    }
-    latchRecalculation(recalculate);
-  });
 
   document.addEventListener('click', function (event) {
     var placement = event.target.closest('.ndi-sync-placement-btn');

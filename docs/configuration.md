@@ -1,5 +1,13 @@
 # Configuration
 
+## Preview storage limit
+
+`preview_max_plan_bytes` sets the maximum UTF-8 JSON size of an active Import Plan. Set it in the
+plugin's `PLUGINS_CONFIG` entry. It defaults to 67,108,864 bytes (64 MiB). Use an integer from 1
+through 67,108,864 to apply a lower storage limit. Invalid values stop startup. A command whose
+replan exceeds the limit rolls back its changes. A single-row sync also keeps its failed execution
+audit.
+
 ## Inference backend credentials
 
 Configure the Vault connection before you add an Inference Backend. The recommended setup uses a

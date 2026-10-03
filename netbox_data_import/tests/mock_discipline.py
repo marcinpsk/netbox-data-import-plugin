@@ -80,7 +80,7 @@ _FIRST_PARTY = "netbox_data_import"
 # The canonical binding a first-party import gets, so a later local rebinding shadows it.
 _FIRST_PARTY_BINDING = "<first-party>"
 # Deterministic policies that tests must exercise with real inputs.
-_REAL_BEHAVIOR_PATCH_TARGETS = {"proposal_eligible_set_limit"}
+_REAL_BEHAVIOR_PATCH_TARGETS = {"proposal_eligible_set_limit", "MAX_PLAN_BYTES"}
 # Inline opt-out marker (in a comment): `# mock-ok` or `# mock-ok: reason`.
 _MARKER = "mock-ok"
 # Files the scanner never inspects (itself + its own test).

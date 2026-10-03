@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "defusedxml>=0.7.1",
+    "django-pgware>=1.0,<2",
     "google-re2>=1.1.20251105",
     "openpyxl>=3.1",
     "packaging>=24",
@@ -166,6 +167,7 @@ module = [
     "django.*",
     "django_filters.*",
     "django_rq.*",
+    "django_pg_utils.*",
     "django_tables2.*",
     "extras.*",
     "ipam.*",
@@ -174,7 +176,7 @@ module = [
     "pytest",
     "redis.*",
     "rest_framework.*",
-    "rq",
+    "rq.*",
     "strawberry.*",
     "strawberry_django.*",
     "tenancy.*",

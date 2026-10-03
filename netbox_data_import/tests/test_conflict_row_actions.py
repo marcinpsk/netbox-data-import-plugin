@@ -8,8 +8,15 @@ from django.test import Client, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceResolution
-from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY
-from netbox_data_import.tests.helpers import workbook_bytes
+from netbox_data_import.tests.helpers import (
+    preview_claim,
+    preview_coordinator,
+    profile_deleted_at_the_policy_lock,
+    store_plan,
+    stored_plan,
+    upload_preview,
+    workbook_bytes,
+)
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 HEADERS = ["Source ID", "Class", "Name", "Rack", "Make", "Model", "Position", "Face"]
@@ -64,10 +71,7 @@ class RackPositionConflictActionTest(IsolatedRQQueueTestMixin, TransactionTestCa
             _workbook(rows),
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        return self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-        )
+        return upload_preview(self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload})
 
     def _colliding_rows(self):
         """Two rows that both ask for U5 front in the same rack."""
@@ -79,11 +83,10 @@ class RackPositionConflictActionTest(IsolatedRQQueueTestMixin, TransactionTestCa
     def _preview_rows(self):
         """Return the preview rows the template renders, with conflict comparisons attached."""
         from netbox_data_import.plan import ImportPlan
-        from netbox_data_import.preview_row_actions import PREVIEW_PLAN_SESSION_KEY
         from netbox_data_import.review_workspace import ReviewWorkspace
         from netbox_data_import.views import _preview_rows_with_conflict_comparisons
 
-        plan = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        plan = ImportPlan.from_dict(stored_plan(self.client))
         workspace = ReviewWorkspace(plan, self.actor)
         source_rows = [
             {"_row_number": 2, "source_id": "S-1", "u_position": 5, "face": "Front", "rack_name": "rack-a"},
@@ -111,22 +114,13 @@ class RackPositionConflictActionTest(IsolatedRQQueueTestMixin, TransactionTestCa
         """The row that gives up its position still imports, into the rack but unplaced."""
         self._upload(self._colliding_rows())
 
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:ignore_position"),
-            {
-                "profile_id": self.profile.pk,
-                "source_id": "S-2",
-                "row_number": 3,
-                "preview_revision": self.client.session.get(PREVIEW_REVISION_SESSION_KEY),
-                "next": reverse("plugins:netbox_data_import:import_preview"),
-            },
-        )
-        self.assertIn(response.status_code, (200, 302), getattr(response, "content", b"")[:300])
+        response = self._ignore_position()
+        self.assertEqual(response.status_code, 302, response.content[:300])
 
         saved = SourceResolution.objects.get(profile=self.profile, source_id="S-2", source_column="u_position")
         self.assertIsNone(saved.resolved_fields["u_position"])
 
-        self._upload(self._colliding_rows())
+        # The command replanned the preview, so the stored plan already shows the decision.
         rows = {row.row_number: row for row in self._preview_rows() if row.object_type == "device"}
         self.assertNotEqual(rows[3].action, "error", rows[3].detail)
         self.assertEqual(rows[2].action, "create", rows[2].detail)
@@ -144,26 +138,28 @@ class RackPositionConflictActionTest(IsolatedRQQueueTestMixin, TransactionTestCa
         self.assertIn(reverse("plugins:netbox_data_import:ignore_position"), body)
 
     def _ignore_position(self, **overrides):
-        """Post one Ignore position action with the active preview revision."""
+        """Post one Ignore position action with the claim of the active preview."""
         payload = {
-            "profile_id": self.profile.pk,
+            **preview_claim(self.client),
             "source_id": "S-2",
             "row_number": 3,
-            "preview_revision": self.client.session.get(PREVIEW_REVISION_SESSION_KEY),
             "next": reverse("plugins:netbox_data_import:import_preview"),
         }
         payload.update(overrides)
         return self.client.post(reverse("plugins:netbox_data_import:ignore_position"), payload)
 
     def test_a_position_action_naming_another_profile_is_refused(self):
-        """The shared preview gate settles the profile before the action writes anything."""
+        """The claim names the preview's profile, so a claim naming another one writes nothing."""
         self._upload(self._colliding_rows())
         other = ImportProfile.objects.create(name="Other Profile", adapter_config={"sheet_name": "Data"})
+        revision = preview_coordinator(self.client).revision
 
-        self._ignore_position(profile_id=other.pk)
+        response = self._ignore_position(preview_profile=str(other.pk))
 
+        self.assertEqual(response.status_code, 409, response.content[:300])
         self.assertFalse(SourceResolution.objects.filter(profile=other).exists())
         self.assertFalse(SourceResolution.objects.filter(profile=self.profile).exists())
+        self.assertEqual(preview_coordinator(self.client).revision, revision)
 
     def test_a_row_outside_any_position_conflict_is_refused(self):
         """The write is tied to a collision the current preview reports, not to any row."""
@@ -174,22 +170,29 @@ class RackPositionConflictActionTest(IsolatedRQQueueTestMixin, TransactionTestCa
             ]
         )
 
-        self._ignore_position()
+        response = self._ignore_position()
 
+        self.assertEqual(response.status_code, 302, response.content[:300])
         self.assertFalse(SourceResolution.objects.exists())
 
     def test_a_row_whose_stored_source_lost_its_position_is_refused(self):
-        """The stored rows and the plan can disagree, and an empty position writes nothing."""
+        """The stored rows and the conflict can disagree, and an empty position writes nothing."""
+        from django.contrib.messages import get_messages
+
         self._upload(self._colliding_rows())
-        session = self.client.session
-        for row in session["import_rows"]:
+        plan = stored_plan(self.client)
+        for unit in plan["units"]:
+            row = unit["display"].get("source_row") or {}
             if row.get("_row_number") == 3:
                 row["u_position"] = ""
-        session.save()
+        store_plan(self.client, plan)
 
-        self._ignore_position()
+        response = self._ignore_position()
 
+        self.assertEqual(response.status_code, 302, response.content[:300])
         self.assertFalse(SourceResolution.objects.exists())
+        messages = [str(message) for message in get_messages(response.wsgi_request)]
+        self.assertEqual(messages, ["This row carries no rack position to give up."])
 
     def test_ignoring_the_row_removes_it_from_the_import(self):
         """The operator can drop the colliding row outright instead of only its position."""
@@ -200,42 +203,32 @@ class RackPositionConflictActionTest(IsolatedRQQueueTestMixin, TransactionTestCa
         response = self.client.post(
             reverse("plugins:netbox_data_import:ignore_device"),
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "S-2",
                 "device_name": "srv-02",
                 "next": reverse("plugins:netbox_data_import:import_preview"),
             },
         )
-        self.assertIn(response.status_code, (200, 302))
+        self.assertEqual(response.status_code, 302, response.content[:300])
         self.assertTrue(IgnoredDevice.objects.filter(profile=self.profile, source_id="S-2").exists())
 
-        self._upload(self._colliding_rows())
         rows = {row.row_number: row for row in self._preview_rows() if row.object_type == "device"}
         self.assertEqual(rows[3].action, "ignore", rows[3].detail)
         self.assertEqual(rows[2].action, "create", rows[2].detail)
 
     def test_a_profile_deleted_inside_the_write_window_is_refused_not_a_crash(self):
-        """The preview gate and the saver's lock read the profile at two different moments."""
+        """The view reads no profile before the coordinator locks it, so a delete lands at that lock."""
         from django.contrib.messages import get_messages
-        from django.db.models.signals import post_init
-
-        from netbox_data_import.tests.helpers import competing_write_during
 
         self._upload(self._colliding_rows())
         profile_id = self.profile.pk
 
-        def delete_the_profile():
-            ImportProfile.objects.filter(pk=profile_id).delete()
-
-        # Skipping the gate's own read lands the delete after it and before the saver takes its lock.
-        with competing_write_during(post_init, ImportProfile, delete_the_profile, skip=1) as (observed, blocked):
+        with profile_deleted_at_the_policy_lock(profile_id) as deleted:
             response = self._ignore_position()
 
-        self.assertEqual(observed, [True], "the competing delete never ran, so no race was exercised")
-        self.assertEqual(blocked, [], "the competing delete waited for a lock instead of landing")
+        self.assertEqual(deleted, [True], "the policy lock statement never ran, so no race was exercised")
         self.assertFalse(ImportProfile.objects.filter(pk=profile_id).exists())
         self.assertEqual(response.status_code, 302)
         self.assertFalse(SourceResolution.objects.exists())
-        # Without this the gate's own refusal satisfies every assertion above, saver never reached.
         messages = [str(message) for message in get_messages(response.wsgi_request)]
         self.assertEqual(messages, ["The import profile is no longer available."])

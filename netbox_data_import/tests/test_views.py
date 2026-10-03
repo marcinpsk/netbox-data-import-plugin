@@ -21,19 +21,21 @@ from netbox_data_import.models import (
     SourceResolution,
     stored_import_source,
 )
-from netbox_data_import.preview_row_actions import (
-    PREVIEW_PLAN_SESSION_KEY,
-    PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
-)
 from netbox_data_import.tests.helpers import (
     assert_action_link_is_named,
     competing_write_during,
+    preview_claim,
+    preview_coordinator,
+    queued_webhooks,
     recorded_updates,
     run_on_separate_connection,
+    seed_preview,
     set_import_source,
-    queued_webhooks,
     setup_preview_with_device_matches,
+    store_workbook_document,
+    stored_plan,
     update_webhook_rule,
+    upload_preview,
 )
 from netbox_data_import.profile_yaml import ProfileDocumentInvalid
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
@@ -122,44 +124,109 @@ def _make_profile(name="ViewTest") -> ImportProfile:
     return profile
 
 
-def _store_workspace_rows(client, user, profile, site, rows):
-    """Store a small target-neutral preview for tests of Review Workspace commands."""
-    from netbox_data_import.plan import Disposition, ImportPlan, SynchronizationUnit
-    from netbox_data_import.preview_row_actions import start_new_preview
+def _store_workspace_rows(client, user, profile, site, rows, *, location=None):
+    """Upload a workbook of these canonical rows and make its plan the client's active preview."""
+    from netbox_data_import.import_engine import ImportEngine
 
-    units = tuple(
-        SynchronizationUnit(
-            identity=f"device:source:{row.get('source_id') or index}",
-            disposition=Disposition.NO_OP,
-            display={
-                "row_number": row.get("_row_number"),
-                "source_id": row.get("source_id", ""),
-                "name": row.get("device_name", ""),
-                "object_type": "device",
-                "source_row": row,
-            },
-        )
-        for index, row in enumerate(rows, start=1)
+    columns = {mapping.target_field: mapping.source_column for mapping in profile.column_mappings.all()}
+    fields = sorted({key for row in rows for key in row if not key.startswith("_")})
+    document = store_workbook_document(
+        profile,
+        [columns[field] for field in fields] or ["Id"],
+        [[row.get(field, "") for field in fields] for row in rows],
+        user,
+        "workspace-test.xlsx",
     )
-    plan = ImportPlan(
-        units=units,
-        source_fingerprint="0" * 64,
-        profile_fingerprint=profile.planning_fingerprint,
-        actor=str(user.pk),
-        planning_context={"site_id": site.pk, "location_id": None, "tenant_id": None},
+    context = {"site_id": site.pk, "location_id": location.pk if location else None, "tenant_id": None}
+    seed_preview(
+        client,
+        profile=profile,
+        document=document,
+        plan=ImportEngine.plan(profile, document, user, context),
+        context={**context, "filename": "workspace-test.xlsx"},
     )
-    session = client.session
-    start_new_preview(session, plan)
-    session["import_rows"] = list(rows)
-    session["import_context"] = {
-        "profile_id": profile.pk,
-        "site_id": site.pk,
-        "location_id": None,
-        "tenant_id": None,
-        "filename": "workspace-test.xlsx",
+
+
+_SOURCE_COLUMNS = {
+    "source_id": "Id",
+    "device_name": "Name",
+    "device_class": "Class",
+    "make": "Make",
+    "model": "Model",
+    "rack_name": "Rack",
+    "u_position": "UPosition",
+    "face": "Side",
+    "airflow": "Airflow",
+    "status": "Status",
+    "serial": "Serial Number",
+    "asset_tag": "Asset Tag",
+    "primary_ip4": "IPv4",
+    "primary_ip6": "IPv6",
+    "oob_ip": "OOB IP",
+}
+
+
+def _preview_matched_device(client, user, device, **values):
+    """Make one source row bound to *device* the client's preview, and return its row number.
+
+    The row names the Device's own type and role, so only the fields in *values* can differ.
+    """
+    from netbox_data_import.models import DeviceExistingMatch
+
+    manufacturer = device.device_type.manufacturer
+    profile = ImportProfile.objects.create(
+        name=f"Sync {device.name}",
+        adapter_config={"sheet_name": "Data", "source_id_column": "Id", "update_existing": True},
+    )
+    row = {
+        "source_id": f"SYNC-{device.pk}",
+        "device_name": device.name,
+        "device_class": "Server",
+        "make": manufacturer.name,
+        "model": device.device_type.model,
+        **values,
     }
-    session["import_preview_pending"] = True
-    session.save()
+    for field in row:
+        ColumnMapping.objects.create(profile=profile, source_column=_SOURCE_COLUMNS[field], target_field=field)
+    ClassRoleMapping.objects.create(profile=profile, source_class="Server", role_slug=device.role.slug)
+    DeviceTypeMapping.objects.create(
+        profile=profile,
+        source_make=manufacturer.name,
+        source_model=device.device_type.model,
+        netbox_manufacturer_slug=manufacturer.slug,
+        netbox_device_type_slug=device.device_type.slug,
+    )
+    DeviceExistingMatch.objects.create(
+        profile=profile, source_id=row["source_id"], netbox_device_id=device.pk, device_name=device.name
+    )
+    _store_workspace_rows(client, user, profile, device.site, [row], location=device.location)
+    (row_number,) = {
+        unit["display"]["row_number"]
+        for unit in stored_plan(client)["units"]
+        if unit["display"].get("object_type") == "device"
+    }
+    return row_number
+
+
+def _post_row_sync(client, url, row_number, **data):
+    """Post one inline row sync with the claim of the current preview, asking for JSON."""
+    return client.post(url, {**preview_claim(client), "row_number": row_number, **data}, HTTP_ACCEPT="application/json")
+
+
+def _open_preview(client, user, profile, rows=({"source_id": "SRC-1", "device_name": "device-1"},)):
+    """Give the client an active preview of a few rows, for commands that name no source row."""
+    from dcim.models import Site
+
+    site, _ = Site.objects.get_or_create(name="Command Preview Site", slug="command-preview-site")
+    _store_workspace_rows(client, user, profile, site, list(rows))
+    return site
+
+
+def _reread(client):
+    """Re-read the client's preview from NetBox, as an operator does after a change outside it."""
+    response = client.post(reverse("plugins:netbox_data_import:preview_reread"), preview_claim(client))
+    if response.status_code != 302:
+        raise AssertionError(f"the preview re-read was refused with HTTP {response.status_code}")
 
 
 def _ensure_source_device_types(content):
@@ -655,9 +722,25 @@ class ImportSetupViewTest(BaseViewTestCase):
 
     def test_post_invalid_form(self):
         """POST with no file returns 200 with form errors."""
-        url = reverse("plugins:netbox_data_import:import_setup")
-        resp = self.client.post(url, {})
+        resp = upload_preview(self.client, {})
         self.assertEqual(resp.status_code, 200)
+
+    def test_post_without_the_setup_claim_is_refused(self):
+        """A valid upload that names no preview is a stale command: HTTP 409 and nothing stored."""
+        from dcim.models import Site
+
+        from netbox_data_import.models import SourceDocument
+
+        site = Site.objects.create(name="NoClaimSite", slug="no-claim-site")
+        profile = _make_profile("NoClaimProfile")
+        url = reverse("plugins:netbox_data_import:import_setup")
+        self.client.get(url)
+
+        with open(FIXTURE_PATH, "rb") as f:
+            response = self.client.post(url, {"profile": profile.pk, "site": site.pk, "excel_file": f})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(SourceDocument.objects.filter(profile=profile).exists())
 
     def test_post_with_valid_file_redirects_to_preview(self):
         """POST with a valid file redirects to the preview page."""
@@ -665,9 +748,8 @@ class ImportSetupViewTest(BaseViewTestCase):
 
         site = Site.objects.create(name="SetupSite", slug="setup-site")
         profile = _make_profile("SetupProfile")
-        url = reverse("plugins:netbox_data_import:import_setup")
         with open(FIXTURE_PATH, "rb") as f:
-            resp = self.client.post(url, {"profile": profile.pk, "site": site.pk, "excel_file": f})
+            resp = upload_preview(self.client, {"profile": profile.pk, "site": site.pk, "excel_file": f})
         self.assertIn(resp.status_code, [200, 302])
         if resp.status_code == 302:
             self.assertIn("preview", resp["Location"])
@@ -678,11 +760,13 @@ class ImportSetupViewTest(BaseViewTestCase):
 
         site = Site.objects.create(name="BadFileSite", slug="bad-file-site")
         profile = _make_profile("BadFileProfile")
-        url = reverse("plugins:netbox_data_import:import_setup")
         bad_file = BytesIO(b"not an excel file")
         bad_file.name = "garbage.xlsx"
-        resp = self.client.post(url, {"profile": profile.pk, "site": site.pk, "excel_file": bad_file})
+        resp = upload_preview(self.client, {"profile": profile.pk, "site": site.pk, "excel_file": bad_file})
         self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "The source file cannot be read. Check the file and the import profile.")
+        self.assertNotContains(resp, "File is not a zip file")
+        self.assertNotContains(resp, "Cannot open Excel file:")
 
 
 class PreviewSessionMixin:
@@ -703,10 +787,6 @@ class PreviewSessionMixin:
 
         from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.models import SourceDocument
-        from netbox_data_import.preview_row_actions import (
-            start_new_preview,
-        )
-        from netbox_data_import.review_workspace import ReviewWorkspace
 
         site = Site.objects.create(name="PreviewSite", slug="preview-site")
         profile = _make_profile("PreviewProfile")
@@ -727,23 +807,13 @@ class PreviewSessionMixin:
             uploaded_by=self.user,
         )
         planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
-        plan = ImportEngine.plan(profile, document, self.user, planning_context)
-        workspace = ReviewWorkspace(plan, self.user)
-
-        session = self.client.session
-        start_new_preview(session, plan)
-        session["import_rows"] = workspace.source_rows
-        session["import_context"] = {
-            "profile_id": profile.pk,
-            "site_id": site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "sample_workbook.xlsx",
-            "source_document_id": document.pk,
-        }
-        session["import_preview_pending"] = True
-        session.pop(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, None)
-        session.save()
+        seed_preview(
+            self.client,
+            profile=profile,
+            document=document,
+            plan=ImportEngine.plan(profile, document, self.user, planning_context),
+            context={**planning_context, "filename": "sample_workbook.xlsx"},
+        )
         return profile
 
 
@@ -775,21 +845,17 @@ class ImportPreviewViewTest(PreviewSessionMixin, BaseViewTestCase):
         resp = self.client.get(url)
         self.assertContains(resp, "sample_workbook.xlsx")
 
-    def test_first_preview_get_renders_the_materialized_upload_result(self):
-        """The upload result is not calculated again on its redirect target."""
+    def test_preview_get_renders_the_stored_plan_without_a_write(self):
+        """A page load is read-only: it renders the stored plan and leaves the revision unchanged."""
         self._setup_session()
-        session = self.client.session
-        stored_plan = session[PREVIEW_PLAN_SESSION_KEY]
-        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
-        session.save()
+        before = preview_coordinator(self.client)
 
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.context["result"].plan.to_dict(), stored_plan)
-        self.assertNotIn(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, self.client.session)
-        self.assertContains(response, 'id="ndi-preview-revision"')
-        self.assertContains(response, "Recalculate Preview")
+        self.assertEqual(response.context["result"].plan.to_dict(), before.plan)
+        self.assertEqual(preview_coordinator(self.client).revision, before.revision)
+        self.assertContains(response, "Re-read from NetBox")
 
 
 class ImportPreviewViewContextTest(BaseViewTestCase):
@@ -820,10 +886,7 @@ class ImportPreviewViewContextTest(BaseViewTestCase):
         site = Site.objects.create(name="EmptySite", slug="empty-site")
 
         with open(FIXTURE_PATH, "rb") as f:
-            setup = self.client.post(
-                reverse("plugins:netbox_data_import:import_setup"),
-                {"profile": profile.pk, "site": site.pk, "excel_file": f},
-            )
+            setup = upload_preview(self.client, {"profile": profile.pk, "site": site.pk, "excel_file": f})
         self.assertEqual(setup.status_code, 302)
 
         url = reverse("plugins:netbox_data_import:import_preview")
@@ -871,10 +934,7 @@ class ImportPreviewTemplateUnlinkButtonTest(BaseViewTestCase):
         site = Site.objects.create(name="UnlinkSite", slug="unlink-site")
 
         with open(FIXTURE_PATH, "rb") as f:
-            setup = self.client.post(
-                reverse("plugins:netbox_data_import:import_setup"),
-                {"profile": profile.pk, "site": site.pk, "excel_file": f},
-            )
+            setup = upload_preview(self.client, {"profile": profile.pk, "site": site.pk, "excel_file": f})
         self.assertEqual(setup.status_code, 302)
 
         url = reverse("plugins:netbox_data_import:import_preview")
@@ -902,7 +962,7 @@ class ImportPreviewTemplateUnlinkButtonTest(BaseViewTestCase):
         self.assertIn("Unlink", content)
 
     def test_unlink_button_has_correct_form(self):
-        """Unlink button should have correct form structure with profile_id and source_id."""
+        """Unlink button should have correct form structure with the preview claim and source_id."""
         profile = _make_profile("UnlinkTestProfile3")
         self._setup_session_with_matches(profile)
 
@@ -911,8 +971,8 @@ class ImportPreviewTemplateUnlinkButtonTest(BaseViewTestCase):
 
         self.assertEqual(resp.status_code, 200)
         content = resp.content.decode()
-        # Verify form contains hidden inputs for profile_id and source_id
-        self.assertIn('name="profile_id"', content)
+        # Verify form contains hidden inputs for the preview claim and source_id
+        self.assertIn('name="preview_profile"', content)
         self.assertIn('name="source_id"', content)
         self.assertIn('onclick="unlinkFromModal(this)"', content)
         # Verify context has some matched source IDs
@@ -929,10 +989,11 @@ class ImportPreviewTemplateUnlinkButtonTest(BaseViewTestCase):
         self.assertEqual(resp.status_code, 200)
         content = resp.content.decode()
         self.assertIn("function unlinkFromModal(btn)", content)
-        self.assertIn(reverse("plugins:netbox_data_import:unlink_device"), content)
-        self.assertIn("application/x-www-form-urlencoded", content)
-        self.assertIn("Cannot unlink: missing profile or source ID.", content)
-        self.assertIn("window.location.reload()", content)
+        # The shared row command helper posts the claim the page holds.
+        self.assertIn(f"window.ndiPostPreviewAction('{reverse('plugins:netbox_data_import:unlink_device')}'", content)
+        self.assertIn('id="ndi-preview-claim"', content)
+        self.assertIn("Cannot unlink: missing source ID.", content)
+        self.assertIn(".then(window.ndiReloadPreview)", content)
 
     def test_unlink_button_has_csrf_token(self):
         """Unlink button form should include CSRF token."""
@@ -965,10 +1026,7 @@ class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
         site = Site.objects.create(name="ModalSite", slug="modal-site")
 
         with open(FIXTURE_PATH, "rb") as f:
-            setup = self.client.post(
-                reverse("plugins:netbox_data_import:import_setup"),
-                {"profile": profile.pk, "site": site.pk, "excel_file": f},
-            )
+            setup = upload_preview(self.client, {"profile": profile.pk, "site": site.pk, "excel_file": f})
         self.assertEqual(setup.status_code, 302)
 
         url = reverse("plugins:netbox_data_import:import_preview")
@@ -1125,14 +1183,15 @@ class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
 class ImportResultsViewTest(BaseViewTestCase):
     """Tests for ImportResultsView."""
 
-    def test_results_without_session_redirects(self):
-        """GET /import/results/ without session data redirects."""
-        url = reverse("plugins:netbox_data_import:import_results")
+    def test_results_of_an_unknown_execution_redirects(self):
+        """GET the results of an Import Execution that does not exist redirects to setup."""
+        url = reverse("plugins:netbox_data_import:import_results", kwargs={"pk": 999999})
         resp = self.client.get(url)
-        self.assertIn(resp.status_code, [302])
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp["Location"], reverse("plugins:netbox_data_import:import_setup"))
 
-    def test_results_with_session_returns_200(self):
-        """GET /import/results/ with an execution audit in session returns 200."""
+    def test_results_of_an_execution_returns_200(self):
+        """GET the results of one Import Execution this operator ran returns 200."""
         from netbox_data_import.models import ExecutionOutcome, ImportExecution
 
         profile = _make_profile("Results Profile")
@@ -1142,11 +1201,8 @@ class ImportResultsViewTest(BaseViewTestCase):
             outcome=ExecutionOutcome.SUCCEEDED,
             applied_changes={"changes": ["rack:1:create"], "deleted": []},
         )
-        session = self.client.session
-        session["import_execution_id"] = execution.pk
-        session.save()
 
-        url = reverse("plugins:netbox_data_import:import_results")
+        url = reverse("plugins:netbox_data_import:import_results", kwargs={"pk": execution.pk})
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
@@ -1165,9 +1221,22 @@ class IgnoreUnignoreViewTest(BaseViewTestCase):
     """Tests for IgnoreDeviceView and UnignoreDeviceView."""
 
     def setUp(self):
-        """Set up profile."""
+        """Set up a profile and a preview with three source rows."""
+        from dcim.models import Site
+
         super().setUp()
         self.profile = _make_profile("IgnoreProfile")
+        _store_workspace_rows(
+            self.client,
+            self.user,
+            self.profile,
+            Site.objects.create(name="IgnoreSite", slug="ignore-site"),
+            [
+                {"source_id": source_id, "device_name": name}
+                for source_id, name in (("SRC-001", "switch-01"), ("SRC-DUP", "dup-01"), ("SRC-002", "server-01"))
+            ]
+            + [{"source_id": "SRC-NOTEXIST", "device_name": "never-ignored"}],
+        )
 
     def test_ignore_device_post(self):
         """POST to ignore creates an IgnoredDevice record."""
@@ -1177,13 +1246,13 @@ class IgnoreUnignoreViewTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "SRC-001",
                 "device_name": "switch-01",
                 "next": "/",
             },
         )
-        self.assertIn(resp.status_code, [200, 302])
+        self.assertEqual(resp.status_code, 302)
         self.assertTrue(IgnoredDevice.objects.filter(profile=self.profile, source_id="SRC-001").exists())
 
     def test_ignore_device_idempotent(self):
@@ -1192,32 +1261,59 @@ class IgnoreUnignoreViewTest(BaseViewTestCase):
 
         url = reverse("plugins:netbox_data_import:ignore_device")
         for _ in range(2):
-            self.client.post(url, {"profile_id": self.profile.pk, "source_id": "SRC-DUP", "next": "/"})
+            response = self.client.post(url, {**preview_claim(self.client), "source_id": "SRC-DUP", "next": "/"})
+            self.assertEqual(response.status_code, 302)
         self.assertEqual(IgnoredDevice.objects.filter(profile=self.profile, source_id="SRC-DUP").count(), 1)
+
+    def test_ignore_a_source_id_outside_the_preview_is_refused(self):
+        """A command may only name a source row of the stored plan."""
+        from netbox_data_import.models import IgnoredDevice
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_device"),
+            {**preview_claim(self.client), "source_id": "SRC-ELSEWHERE"},
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(IgnoredDevice.objects.filter(profile=self.profile).exists())
+
+    def test_ignore_without_the_claim_is_refused(self):
+        """A command that names no preview is stale, so it writes nothing."""
+        from netbox_data_import.models import IgnoredDevice
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_device"),
+            {"profile_id": self.profile.pk, "source_id": "SRC-001"},
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "preview_stale")
+        self.assertFalse(IgnoredDevice.objects.filter(profile=self.profile).exists())
 
     def test_unignore_device_post(self):
         """POST to unignore removes the IgnoredDevice record."""
         from netbox_data_import.models import IgnoredDevice
 
         IgnoredDevice.objects.create(profile=self.profile, source_id="SRC-002", device_name="server-01")
+        _reread(self.client)
         url = reverse("plugins:netbox_data_import:unignore_device")
-        self.client.post(url, {"profile_id": self.profile.pk, "source_id": "SRC-002", "next": "/"})
+        response = self.client.post(url, {**preview_claim(self.client), "source_id": "SRC-002", "next": "/"})
+        self.assertEqual(response.status_code, 302)
         self.assertFalse(IgnoredDevice.objects.filter(profile=self.profile, source_id="SRC-002").exists())
 
     def test_unignore_device_not_on_list_shows_warning(self):
-        """Unignoring a device that was never individually ignored shows a warning message."""
+        """Unignoring a device that was never individually ignored is refused with a message."""
+        from django.contrib.messages import get_messages
+
         url = reverse("plugins:netbox_data_import:unignore_device")
-        resp = self.client.post(url, {"profile_id": self.profile.pk, "source_id": "SRC-NOTEXIST", "next": "/"})
-        # Redirects back; no crash
-        self.assertIn(resp.status_code, [200, 302])
-        if resp.status_code == 302:
-            follow_resp = self.client.get(resp["Location"])
-            msgs = [str(m) for m in follow_resp.context.get("messages", [])] if follow_resp.context else []
-        else:
-            msgs = [str(m) for m in resp.context.get("messages", [])] if resp.context else []
-        self.assertTrue(
-            any("not on the ignore list" in m or "warning" in m.lower() for m in msgs)
-            or True,  # message may not be in context if redirect target differs; no crash is the key assertion
+        resp = self.client.post(url, {**preview_claim(self.client), "source_id": "SRC-NOTEXIST", "next": "/"})
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(
+            [str(message) for message in get_messages(resp.wsgi_request)],
+            ["Device was not on the ignore list (may be ignored by class mapping)."],
         )
 
 
@@ -1225,9 +1321,18 @@ class SaveResolutionViewTest(BaseViewTestCase):
     """Tests for SaveResolutionView."""
 
     def setUp(self):
-        """Set up profile."""
+        """Set up a profile and a preview of the rows the tests resolve."""
+        from dcim.models import Site
+
         super().setUp()
         self.profile = _make_profile("ResProfile")
+        _store_workspace_rows(
+            self.client,
+            self.user,
+            self.profile,
+            Site.objects.create(name="ResSite", slug="res-site"),
+            [{"source_id": source_id, "device_name": "some-device"} for source_id in ("SRC-X", "SRC-Y", "SRC-LIST")],
+        )
 
     def test_save_resolution_creates_record(self):
         """POST to save-resolution creates a SourceResolution."""
@@ -1237,7 +1342,7 @@ class SaveResolutionViewTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "SRC-X",
                 "source_column": "Name",
                 "original_value": "some-device",
@@ -1245,7 +1350,7 @@ class SaveResolutionViewTest(BaseViewTestCase):
                 "next": "/",
             },
         )
-        self.assertIn(resp.status_code, [200, 302])
+        self.assertEqual(resp.status_code, 302)
         self.assertTrue(
             SourceResolution.objects.filter(profile=self.profile, source_id="SRC-X", source_column="Name").exists()
         )
@@ -1261,11 +1366,12 @@ class SaveResolutionViewTest(BaseViewTestCase):
             original_value="old",
             resolved_fields={"device_name": "old-name"},
         )
+        _reread(self.client)
         url = reverse("plugins:netbox_data_import:save_resolution")
         self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "SRC-Y",
                 "source_column": "Name",
                 "original_value": "new",
@@ -1281,7 +1387,7 @@ class SaveResolutionViewTest(BaseViewTestCase):
         response = self.client.post(
             reverse("plugins:netbox_data_import:save_resolution"),
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "SRC-LIST",
                 "source_column": "Name",
                 "original_value": "some-device",
@@ -1727,13 +1833,32 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
 
     def setUp(self):
         super().setUp()
-        self.profile = ImportProfile.objects.create(name="Quick Role Profile")
+        self.profile = _make_profile("Quick Role Profile")
+        _open_preview(self.client, self.user, self.profile)
 
     def _url(self):
         return reverse("plugins:netbox_data_import:quick_create_role")
 
     def _post(self, payload):
-        return self.client.post(self._url(), {"profile_id": self.profile.pk, **payload})
+        return self.client.post(self._url(), {**preview_claim(self.client), **payload})
+
+    def test_a_retired_adapter_preserves_the_coordinator_refusal(self):
+        """A policy refusal states its own reason and writes no role or preview revision."""
+        from dcim.models import DeviceRole
+
+        coordinator = preview_coordinator(self.client)
+        revision = coordinator.revision
+        ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired_adapter")
+
+        with self.assertNoLogs("netbox_data_import.views", level="ERROR"):
+            response = self._post({"name": "Refused Role", "slug": "refused-role"})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("retired_adapter", response.json()["error"])
+        self.assertFalse(DeviceRole.objects.filter(slug="refused-role").exists())
+        coordinator.refresh_from_db()
+        self.assertEqual(coordinator.revision, revision)
 
     def test_creates_role(self):
         """POST creates a new DeviceRole and returns JSON with its id."""
@@ -1783,6 +1908,7 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
 
     def test_missing_devicerole_permission_returns_403(self):
         """User without dcim.add_devicerole gets a 403 JSON response."""
+        from dcim.models import Site
         from django.contrib.contenttypes.models import ContentType
         from users.models import ObjectPermission
 
@@ -1795,7 +1921,11 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         )
         permission.object_types.add(ContentType.objects.get_for_model(ImportProfile))
         permission.users.add(non_super)
+        site_view = ObjectPermission.objects.create(name="limited site view", actions=["view"])
+        site_view.object_types.add(ContentType.objects.get_for_model(Site))
+        site_view.users.add(non_super)
         self.client.login(username="limited", password="pw")
+        _open_preview(self.client, non_super, self.profile)
         resp = self._post({"name": "NoPerm", "slug": "noperm"})
         self.assertEqual(resp.status_code, 403)
 
@@ -1833,12 +1963,13 @@ class QuickCreateDeviceRoleDatabaseFailureTest(TransactionTestCase):
         self.user = User.objects.create_superuser("role-failure-user", "role-failure@example.invalid", "testpass")
         self.client = Client()
         self.client.force_login(self.user)
-        self.profile = ImportProfile.objects.create(name="Quick Role Database Failure Profile")
+        self.profile = _make_profile("Quick Role Database Failure Profile")
+        _open_preview(self.client, self.user, self.profile)
 
     def _post(self, payload):
         return self.client.post(
             reverse("plugins:netbox_data_import:quick_create_role"),
-            {"profile_id": self.profile.pk, **payload},
+            {**preview_claim(self.client), **payload},
         )
 
     def test_integrity_error_is_sanitized(self):
@@ -1921,22 +2052,23 @@ class QuickResolveManufacturerViewTest(BaseViewTestCase):
         """Set up profile."""
         super().setUp()
         self.profile = _make_profile("QRMfgProfile")
+        _open_preview(self.client, self.user, self.profile)
 
     def test_creates_manufacturer_mapping(self):
         """POST creates a ManufacturerMapping."""
         url = reverse("plugins:netbox_data_import:quick_resolve_manufacturer")
         resp = self.client.post(
             url,
-            {"profile_id": self.profile.pk, "source_make": "Dell EMC", "netbox_mfg_slug": "dell"},
+            {**preview_claim(self.client), "source_make": "Dell EMC", "netbox_mfg_slug": "dell"},
         )
-        self.assertIn(resp.status_code, [200, 302])
+        self.assertEqual(resp.status_code, 302)
         self.assertTrue(ManufacturerMapping.objects.filter(profile=self.profile, source_make="Dell EMC").exists())
 
     def test_missing_fields_redirects(self):
         """POST without required fields redirects without crash."""
         url = reverse("plugins:netbox_data_import:quick_resolve_manufacturer")
-        resp = self.client.post(url, {"profile_id": self.profile.pk})
-        self.assertIn(resp.status_code, [200, 302])
+        resp = self.client.post(url, preview_claim(self.client))
+        self.assertEqual(resp.status_code, 302)
 
 
 class QuickResolveDeviceTypeViewTest(BaseViewTestCase):
@@ -1946,6 +2078,7 @@ class QuickResolveDeviceTypeViewTest(BaseViewTestCase):
         """Set up profile."""
         super().setUp()
         self.profile = _make_profile("QRDTProfile")
+        _open_preview(self.client, self.user, self.profile)
 
     def test_creates_device_type_mapping(self):
         """POST with action=map creates a DeviceTypeMapping."""
@@ -1953,7 +2086,7 @@ class QuickResolveDeviceTypeViewTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_make": "Cisco",
                 "source_model": "C9500",
                 "netbox_mfg_slug": "cisco",
@@ -1961,7 +2094,7 @@ class QuickResolveDeviceTypeViewTest(BaseViewTestCase):
                 "action": "map",
             },
         )
-        self.assertIn(resp.status_code, [200, 302])
+        self.assertEqual(resp.status_code, 302)
         self.assertTrue(
             DeviceTypeMapping.objects.filter(profile=self.profile, source_make="Cisco", source_model="C9500").exists()
         )
@@ -1974,7 +2107,7 @@ class QuickResolveDeviceTypeViewTest(BaseViewTestCase):
         response = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_make": "Juniper",
                 "source_model": "QFX5100",
                 "netbox_mfg_slug": "juniper",
@@ -2361,6 +2494,7 @@ class QuickResolveClassViewTest(BaseViewTestCase):
         """Set up profile."""
         super().setUp()
         self.profile = _make_profile("QRCProfile")
+        _open_preview(self.client, self.user, self.profile)
 
     def test_post_creates_ignore_mapping(self):
         """POST creates a ClassRoleMapping with ignore=True."""
@@ -2368,7 +2502,7 @@ class QuickResolveClassViewTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_class": "PDU",
                 "mapping_action": "ignore",
             },
@@ -2382,7 +2516,7 @@ class QuickResolveClassViewTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_class": "Firewall",
                 "mapping_action": "role",
                 "role_slug": "firewall",
@@ -2401,7 +2535,7 @@ class QuickResolveClassViewTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_class": "Cabinet2",
                 "mapping_action": "rack",
                 "creates_rack": "1",
@@ -2415,7 +2549,7 @@ class QuickResolveClassViewTest(BaseViewTestCase):
     def test_post_missing_source_class_redirects(self):
         """POST without source_class redirects back to preview."""
         url = reverse("plugins:netbox_data_import:quick_add_class_mapping")
-        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        resp = self.client.post(url, preview_claim(self.client))
         self.assertEqual(resp.status_code, 302)
 
 
@@ -2449,7 +2583,7 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "SRC-MATCH-01",
                 "netbox_device_id": self.device.pk,
             },
@@ -2476,7 +2610,7 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
         response = self.client.post(
             reverse("plugins:netbox_data_import:match_existing_device"),
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "SRC-LONG-TAG",
                 "netbox_device_id": self.device.pk,
             },
@@ -2488,11 +2622,12 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
 
     def test_post_missing_source_id_redirects(self):
         """POST without source_id redirects to preview."""
+        _open_preview(self.client, self.user, self.profile)
         url = reverse("plugins:netbox_data_import:match_existing_device")
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "netbox_device_id": self.device.pk,
             },
         )
@@ -2500,30 +2635,17 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
 
     def test_post_nonexistent_device_redirects(self):
         """POST with invalid device ID redirects to preview."""
+        _open_preview(self.client, self.user, self.profile, [{"source_id": "SRC-NOPE"}])
         url = reverse("plugins:netbox_data_import:match_existing_device")
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "SRC-NOPE",
                 "netbox_device_id": 99999,
             },
         )
         self.assertEqual(resp.status_code, 302)
-
-    def test_post_invalid_profile_id_redirects_with_error(self):
-        """A malformed profile ID returns the normal validation response."""
-        from django.contrib.messages import get_messages
-
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:match_existing_device"),
-            {"profile_id": "not-a-number"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            [str(message) for message in get_messages(response.wsgi_request)], ["A valid import profile is required."]
-        )
 
 
 class AutoMatchDevicesViewTest(BaseViewTestCase):
@@ -2563,7 +2685,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
-        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        resp = self.client.post(url, preview_claim(self.client))
         self.assertEqual(resp.status_code, 302)
         self.assertTrue(
             DeviceExistingMatch.objects.filter(
@@ -2583,10 +2705,8 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         )
         self.client.force_login(user)
 
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:auto_match_devices"),
-            {"profile_id": self.profile.pk},
-        )
+        # The permission check runs before the claim, so this user needs no preview of its own.
+        response = self.client.post(reverse("plugins:netbox_data_import:auto_match_devices"), {})
 
         self.assertEqual(response.status_code, 403)
 
@@ -2602,32 +2722,16 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         )
         self.client.force_login(user)
 
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:auto_match_devices"),
-            {"profile_id": self.profile.pk},
-        )
+        # The permission check runs before the claim, so this user needs no preview of its own.
+        response = self.client.post(reverse("plugins:netbox_data_import:auto_match_devices"), {})
 
         self.assertEqual(response.status_code, 403)
 
     def test_post_automatch_empty_rows(self):
         """POST with no rows in session still succeeds."""
         url = reverse("plugins:netbox_data_import:auto_match_devices")
-        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        resp = self.client.post(url, preview_claim(self.client))
         self.assertEqual(resp.status_code, 302)
-
-    def test_post_invalid_profile_id_redirects_with_error(self):
-        """A malformed profile ID returns the normal validation response."""
-        from django.contrib.messages import get_messages
-
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:auto_match_devices"),
-            {"profile_id": "not-a-number"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            [str(message) for message in get_messages(response.wsgi_request)], ["A valid import profile is required."]
-        )
 
     def test_post_automatch_by_asset_tag(self):
         """POST with a row matching only by asset_tag creates a DeviceExistingMatch."""
@@ -2653,7 +2757,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
-        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        resp = self.client.post(url, preview_claim(self.client))
         self.assertEqual(resp.status_code, 302)
         self.assertTrue(
             DeviceExistingMatch.objects.filter(
@@ -2683,7 +2787,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
-        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        resp = self.client.post(url, preview_claim(self.client))
         self.assertEqual(resp.status_code, 302)
         self.assertTrue(
             DeviceExistingMatch.objects.filter(
@@ -2715,7 +2819,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
-        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        resp = self.client.post(url, preview_claim(self.client))
         self.assertEqual(resp.status_code, 302)
         self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="AMB-001").exists())
 
@@ -2742,7 +2846,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
-        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        resp = self.client.post(url, preview_claim(self.client))
         self.assertEqual(resp.status_code, 302)
         # Still exactly one match
         self.assertEqual(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="ALREADY-001").count(), 1)
@@ -2763,7 +2867,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
-        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        resp = self.client.post(url, preview_claim(self.client))
         self.assertEqual(resp.status_code, 302)
         self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
 
@@ -2789,7 +2893,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
-        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        resp = self.client.post(url, preview_claim(self.client))
         self.assertEqual(resp.status_code, 302)
         # Probable match doesn't auto-link
         self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="PROB-001").exists())
@@ -3496,6 +3600,7 @@ class QuickResolveDeviceTypeMissingFieldsTest(BaseViewTestCase):
         """Set up profile."""
         super().setUp()
         self.profile = _make_profile("QRDTMissingProfile")
+        _open_preview(self.client, self.user, self.profile)
 
     def test_missing_source_make_redirects(self):
         """POST without source_make shows error and redirects."""
@@ -3503,7 +3608,7 @@ class QuickResolveDeviceTypeMissingFieldsTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_make": "",
                 "source_model": "SomeModel",
                 "netbox_mfg_slug": "",
@@ -3519,7 +3624,7 @@ class QuickResolveDeviceTypeMissingFieldsTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_make": "Auto Mfg",
                 "source_model": "Auto Model",
                 "netbox_mfg_slug": "",  # will be auto-slugified
@@ -3527,7 +3632,7 @@ class QuickResolveDeviceTypeMissingFieldsTest(BaseViewTestCase):
                 "action": "map",
             },
         )
-        self.assertIn(resp.status_code, [200, 302])
+        self.assertEqual(resp.status_code, 302)
         self.assertTrue(
             DeviceTypeMapping.objects.filter(
                 profile=self.profile, source_make="Auto Mfg", source_model="Auto Model"
@@ -3572,7 +3677,7 @@ class AutoMatchNameScopeTest(BaseViewTestCase):
             ),
         )
         url = reverse("plugins:netbox_data_import:auto_match_devices")
-        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        resp = self.client.post(url, preview_claim(self.client))
         self.assertEqual(resp.status_code, 302)
         self.assertTrue(
             DeviceExistingMatch.objects.filter(
@@ -3590,6 +3695,7 @@ class SaveResolutionJsonErrorTest(BaseViewTestCase):
         """Set up profile."""
         super().setUp()
         self.profile = _make_profile("SaveResJsonProfile")
+        _open_preview(self.client, self.user, self.profile, [{"source_id": "JSONERR-001", "device_name": "old"}])
 
     def test_malformed_json_defaults_to_empty_dict(self):
         """POST with malformed resolved_fields JSON silently defaults to empty dict."""
@@ -3597,14 +3703,14 @@ class SaveResolutionJsonErrorTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_id": "JSONERR-001",
                 "source_column": "Name",
                 "original_value": "old",
                 "resolved_fields": "THIS IS NOT JSON {{{{",
             },
         )
-        self.assertIn(resp.status_code, [200, 302])
+        self.assertEqual(resp.status_code, 302)
         # Resolution should still be saved (with empty resolved_fields)
         from netbox_data_import.models import SourceResolution
 
@@ -3652,7 +3758,7 @@ class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
         )
         response = self.client.post(
             reverse("plugins:netbox_data_import:auto_match_devices"),
-            {"profile_id": self.profile.pk},
+            preview_claim(self.client),
         )
 
         self.assertEqual(response.status_code, 302)
@@ -4260,6 +4366,7 @@ class RackTypeFeatureTest(BaseViewTestCase):
         from dcim.models import Manufacturer, RackType
 
         self.profile = _make_profile("RackTypeProfile")
+        _open_preview(self.client, self.user, self.profile)
         self.mfg = Manufacturer.objects.create(name="RackVendor", slug="rackvendor")
         self.rack_type = RackType.objects.create(
             manufacturer=self.mfg,
@@ -4284,7 +4391,7 @@ class RackTypeFeatureTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_class": "Enclosure",
                 "mapping_action": "rack",
                 "creates_rack": "1",
@@ -4302,7 +4409,7 @@ class RackTypeFeatureTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_class": "Cage",
                 "mapping_action": "rack",
                 "creates_rack": "1",
@@ -4319,7 +4426,7 @@ class RackTypeFeatureTest(BaseViewTestCase):
         resp = self.client.post(
             url,
             {
-                "profile_id": self.profile.pk,
+                **preview_claim(self.client),
                 "source_class": "Frame",
                 "mapping_action": "rack",
                 "creates_rack": "1",
@@ -4565,7 +4672,8 @@ class RolledBackSyncEventsTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         from netbox_data_import.tests.helpers import make_dcim_objects
 
-        self.client.force_login(User.objects.create_superuser("sync-events", "sync-events@example.invalid", "x"))
+        self.user = User.objects.create_superuser("sync-events", "sync-events@example.invalid", "x")
+        self.client.force_login(self.user)
         site, _manufacturer, device_type, role = make_dcim_objects("sync-events-")
         self.rack = Rack.objects.create(name="Events Rack", site=site, u_height=42)
         self.device = Device.objects.create(name="events-device", site=site, device_type=device_type, role=role)
@@ -4587,31 +4695,35 @@ class RolledBackSyncEventsTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             post_save.disconnect(refuse, sender=Device)
 
     def _assert_only_the_committed_sync_sends_an_event(self, url, data):
-        refused = self._refused_after_the_write(lambda posted: self.client.post(url, posted), data)
+        refused = self._refused_after_the_write(
+            lambda posted: self.client.post(url, posted, HTTP_ACCEPT="application/json"), data
+        )
 
         self.assertEqual(refused.status_code, 500, refused.content)
         self.assertEqual(queued_webhooks(), [], "an event was sent for a rolled-back write")
-        committed = self.client.post(url, data)
+        committed = self.client.post(url, data, HTTP_ACCEPT="application/json")
         self.assertTrue(committed.json()["ok"], committed.json())
         self.assertEqual(len(queued_webhooks()), 1)
 
     def test_a_refused_field_sync_sends_no_event(self):
+        row_number = _preview_matched_device(self.client, self.user, self.device, serial="SN-NEW")
         self._assert_only_the_committed_sync_sends_an_event(
             reverse("plugins:netbox_data_import:sync_device_field"),
-            {"device_id": self.device.pk, "field": "serial", "value": "SN-NEW"},
+            {**preview_claim(self.client), "row_number": row_number, "field": "serial"},
         )
 
     def test_a_refused_placement_sync_sends_no_event(self):
+        row_number = _preview_matched_device(self.client, self.user, self.device, rack_name=self.rack.name)
         self._assert_only_the_committed_sync_sends_an_event(
             reverse("plugins:netbox_data_import:sync_placement"),
-            {"device_id": self.device.pk, "rack_name": self.rack.name},
+            {**preview_claim(self.client), "row_number": row_number},
         )
 
 
 class SyncDeviceFieldLockTest(TransactionTestCase):
-    """The field sync writes from the row it locks, not from its first unlocked read."""
+    """The field sync reads the Device only under its row lock, so no write lands between read and save."""
 
-    def test_a_write_after_the_first_read_is_the_recorded_before_state(self):
+    def test_a_competing_write_waits_for_the_locked_sync(self):
         from django.db.models.signals import post_init
         from dcim.models import Device
 
@@ -4624,20 +4736,19 @@ class SyncDeviceFieldLockTest(TransactionTestCase):
             name="lock-device", site=site, device_type=device_type, role=role, serial="SN-OLD"
         )
 
+        row_number = _preview_matched_device(self.client, user, device, serial="SN-NEW")
+
         with competing_write_during(
             post_init, Device, lambda: Device.objects.filter(pk=device.pk).update(serial="SN-CONCURRENT")
         ) as (observed, blocked):
-            response = self.client.post(
-                reverse("plugins:netbox_data_import:sync_device_field"),
-                {"device_id": device.pk, "field": "serial", "value": "SN-NEW"},
+            response = _post_row_sync(
+                self.client, reverse("plugins:netbox_data_import:sync_device_field"), row_number, field="serial"
             )
 
-        self.assertEqual((observed, blocked), ([True], []), "the competing write did not land after the first read")
+        self.assertEqual((observed, blocked), ([True], [True]), "the first Device read did not hold the row lock")
         self.assertTrue(response.json()["ok"], response.json())
         (change,) = recorded_updates(device)
-        self.assertEqual(
-            (change.prechange_data["serial"], change.postchange_data["serial"]), ("SN-CONCURRENT", "SN-NEW")
-        )
+        self.assertEqual((change.prechange_data["serial"], change.postchange_data["serial"]), ("SN-OLD", "SN-NEW"))
 
 
 class SyncDeviceFieldViewTests(TestCase):
@@ -4669,10 +4780,17 @@ class SyncDeviceFieldViewTests(TestCase):
         )
         self.url = reverse("plugins:netbox_data_import:sync_device_field")
 
+    def _sync(self, field, value, **row):
+        """Preview one row whose *field* holds *value*, then sync that field from it."""
+        row_number = _preview_matched_device(self.client, self.user, self.device, **{field: value, **row})
+        return _post_row_sync(self.client, self.url, row_number, field=field)
+
     def test_an_unexpected_value_error_is_not_reported_to_the_operator(self):
         """Only a message this plugin writes reaches the response; a bug reads as an internal error."""
         from dcim.models import Device
         from django.db.models.signals import pre_save
+
+        row_number = _preview_matched_device(self.client, self.user, self.device, serial="SN-12345")
 
         def fail_internally(sender, instance, **kwargs):
             raise ValueError("internal detail from a library")
@@ -4681,20 +4799,21 @@ class SyncDeviceFieldViewTests(TestCase):
         self.addCleanup(pre_save.disconnect, fail_internally, sender=Device)
 
         with self.assertLogs("netbox_data_import.views", level="ERROR"):
-            response = self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "SN-12345"})
+            response = _post_row_sync(self.client, self.url, row_number, field="serial")
 
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json()["error"], "An internal error occurred.")
 
     def test_a_refused_field_value_still_states_its_reason(self):
         """The narrowed handler keeps the operator-facing reason this plugin raises itself."""
-        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "status", "value": "not-a-status"})
+        response = self._sync("primary_ip4", "198.18.0.31")
 
-        self.assertEqual(response.json()["error"], "Unknown status value 'not-a-status'")
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("Model Sync", response.json()["error"])
 
     def test_sync_serial(self):
         """Set serial on device via SyncDeviceFieldView."""
-        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "SN-12345"})
+        response = self._sync("serial", "SN-12345")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["ok"])
@@ -4706,7 +4825,7 @@ class SyncDeviceFieldViewTests(TestCase):
         self.device.serial = "SN-OLD"
         self.device.save()
 
-        self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "SN-NEW"})
+        self._sync("serial", "SN-NEW")
 
         (change,) = recorded_updates(self.device)
         self.assertEqual((change.prechange_data["serial"], change.postchange_data["serial"]), ("SN-OLD", "SN-NEW"))
@@ -4719,9 +4838,7 @@ class SyncDeviceFieldViewTests(TestCase):
         interface = Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
         address = IPAddress.objects.create(address="198.18.0.30/32")
 
-        response = self.client.post(
-            self.url, {"device_id": self.device.pk, "field": "primary_ip4", "value": "198.18.0.30"}
-        )
+        response = self._sync("primary_ip4", "198.18.0.30")
 
         self.assertTrue(response.json()["ok"], response.json())
         (moved,) = recorded_updates(address)
@@ -4737,51 +4854,52 @@ class SyncDeviceFieldViewTests(TestCase):
 
     def test_sync_asset_tag(self):
         """Set asset_tag on device via SyncDeviceFieldView."""
-        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "asset_tag", "value": "AT-001"})
+        response = self._sync("asset_tag", "AT-001")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["ok"])
         self.device.refresh_from_db()
         self.assertEqual(self.device.asset_tag, "AT-001")
 
-    def test_sync_device_name(self):
-        """Rename device via SyncDeviceFieldView."""
-        response = self.client.post(
-            self.url, {"device_id": self.device.pk, "field": "device_name", "value": "renamed-device"}
-        )
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertTrue(data["ok"])
+    def test_sync_device_name_is_refused(self):
+        """The import never renames a matched Device, so the name is not a syncable field at all."""
+        response = self._sync("device_name", "renamed-device")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.json()["ok"])
         self.device.refresh_from_db()
-        self.assertEqual(self.device.name, "renamed-device")
+        self.assertEqual(self.device.name, "sync-device")
 
     def test_sync_u_position(self):
         """Set u_position on device via SyncDeviceFieldView."""
-        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_position", "value": "5"})
+        response = self._sync("u_position", "5", rack_name=self.rack.name, face="Front")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["ok"])
-        self.assertEqual(data["display"], "U5")
+        self.assertIn("U5", data["message"])
         self.device.refresh_from_db()
         self.assertEqual(self.device.position, 5)
 
     def test_sync_u_position_rejected_without_a_rack(self):
-        """NetBox refuses a rack position on a device with no rack, so the sync refuses it too."""
+        """NetBox refuses a rack position on a device with no rack, so the preview offers none to sync."""
         self.device.rack = None
-        self.device.face = None
+        self.device.face = ""
         self.device.save(update_fields=["rack", "face"])
 
-        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_position", "value": "5"})
+        response = self._sync("u_position", "5")
 
+        self.assertEqual(response.status_code, 409)
         data = response.json()
         self.assertFalse(data["ok"], data)
-        self.assertIn("rack", data["error"].lower())
         self.device.refresh_from_db()
         self.assertIsNone(self.device.position)
 
     def test_sync_status(self):
         """Set status to active via SyncDeviceFieldView."""
-        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "status", "value": "active"})
+        self.device.status = "planned"
+        self.device.save(update_fields=["status"])
+
+        response = self._sync("status", "active")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["ok"])
@@ -4789,45 +4907,65 @@ class SyncDeviceFieldViewTests(TestCase):
         self.assertEqual(self.device.status, "active")
 
     def test_sync_status_translates_a_source_word(self):
-        """The view takes the same source-word table the import does, so an alias resolves."""
+        """The preview takes the same source-word table the import does, so an alias resolves."""
         from dcim.choices import DeviceStatusChoices
 
-        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "status", "value": "live"})
+        self.device.status = "planned"
+        self.device.save(update_fields=["status"])
 
-        self.assertTrue(response.json()["ok"])
+        response = self._sync("status", "live")
+
+        self.assertTrue(response.json()["ok"], response.json())
         self.device.refresh_from_db()
         self.assertEqual(self.device.status, DeviceStatusChoices.STATUS_ACTIVE)
 
     def test_sync_u_height(self):
-        """u_height is not in _ALLOWED_FIELDS → ok=False with 'not syncable' error."""
-        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_height", "value": "2"})
-        self.assertEqual(response.status_code, 200)
+        """u_height is not in _ALLOWED_FIELDS, so the view refuses it before it reads a preview."""
+        response = self.client.post(self.url, {"row_number": "2", "field": "u_height"})
+        self.assertEqual(response.status_code, 400)
         data = response.json()
         self.assertFalse(data["ok"])
         self.assertIn("not syncable", data["error"].lower())
 
     def test_sync_invalid_field(self):
-        """Post invalid field name — expect ok=false."""
-        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "invalid", "value": "foo"})
-        self.assertEqual(response.status_code, 200)
+        """Post invalid field name: the view refuses it."""
+        response = self.client.post(self.url, {"row_number": "2", "field": "invalid"})
+        self.assertEqual(response.status_code, 400)
         data = response.json()
         self.assertFalse(data["ok"])
         self.assertIn("invalid", data["error"])
 
+    def test_sync_a_field_the_row_does_not_offer_is_refused(self):
+        """Only a field difference the stored preview shows can be synced."""
+        row_number = _preview_matched_device(self.client, self.user, self.device, serial="SN-12345")
+
+        response = _post_row_sync(self.client, self.url, row_number, field="asset_tag")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "preview_stale")
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.asset_tag)
+
     def test_sync_missing_device(self):
-        """Post non-existent device_id — expect ok=false."""
-        response = self.client.post(self.url, {"device_id": 99999, "field": "serial", "value": "foo"})
-        self.assertEqual(response.status_code, 200)
+        """A matched Device deleted after the preview was read is refused."""
+        from dcim.models import Device
+
+        row_number = _preview_matched_device(self.client, self.user, self.device, serial="SN-12345")
+        Device.objects.filter(pk=self.device.pk).delete()
+
+        response = _post_row_sync(self.client, self.url, row_number, field="serial")
+
+        self.assertEqual(response.status_code, 409)
         data = response.json()
         self.assertFalse(data["ok"])
-        self.assertIn("Device not found", data["error"])
+        self.assertEqual(data["error"], "The active preview row is no longer available.")
 
     def test_sync_requires_permission(self):
         """Authenticated user without dcim.change_device gets JSON 403."""
         User.objects.create_user("no_perm_sync", "noperm@example.com", "testpass")
         no_perm_client = Client()
         no_perm_client.login(username="no_perm_sync", password="testpass")
-        response = no_perm_client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "X"})
+        response = no_perm_client.post(self.url, {"row_number": "2", "field": "serial"})
         self.assertEqual(response.status_code, 403)
         self.assertIn("application/json", response.get("Content-Type", ""))
         data = response.json()
@@ -4837,57 +4975,22 @@ class SyncDeviceFieldViewTests(TestCase):
     def test_sync_unauthenticated_gets_json_401(self):
         """Unauthenticated request receives JSON 401 (not an HTML redirect)."""
         c = Client()
-        response = c.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "X"})
+        response = c.post(self.url, {"row_number": "2", "field": "serial"})
         self.assertEqual(response.status_code, 401)
         self.assertIn("application/json", response.get("Content-Type", ""))
         data = response.json()
         self.assertFalse(data["ok"])
 
-    def test_sync_asset_tag_clear(self):
-        """Clearing asset_tag sets it to None (not empty string) to avoid UNIQUE violation."""
+    def test_a_blank_asset_tag_does_not_clear_the_stored_one(self):
+        """A blank source cell is no value, so the preview offers no change and the tag stays."""
         self.device.asset_tag = "EXISTING"
         self.device.save()
-        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "asset_tag", "value": ""})
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertTrue(data["ok"])
+
+        response = self._sync("asset_tag", "")
+
+        self.assertEqual(response.status_code, 409, response.content)
         self.device.refresh_from_db()
-        self.assertIsNone(self.device.asset_tag)
-
-    def test_sync_device_name_collision(self):
-        """Renaming a device to an already-taken name in the same site returns ok=false."""
-        from dcim.models import Device
-
-        Device.objects.create(
-            name="taken-name",
-            site=self.device.site,
-            device_type=self.device.device_type,
-            role=self.device.role,
-        )
-        response = self.client.post(
-            self.url, {"device_id": self.device.pk, "field": "device_name", "value": "taken-name"}
-        )
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertFalse(data["ok"])
-        self.assertIn("already exists", data["error"])
-
-    def test_sync_device_name_collision_by_name_identity(self):
-        """A name of the same identity is taken too, although no exact spelling matches."""
-        from dcim.models import Device
-
-        Device.objects.create(
-            name="taken\u00a0name",
-            site=self.device.site,
-            device_type=self.device.device_type,
-            role=self.device.role,
-        )
-        response = self.client.post(
-            self.url, {"device_id": self.device.pk, "field": "device_name", "value": "TAKEN  NAME"}
-        )
-
-        self.assertFalse(response.json()["ok"], response.json())
-        self.assertIn("already exists", response.json()["error"])
+        self.assertEqual(self.device.asset_tag, "EXISTING")
 
 
 class SyncAirflowAndIPTests(TestCase):
@@ -4912,7 +5015,8 @@ class SyncAirflowAndIPTests(TestCase):
         self.url = reverse("plugins:netbox_data_import:sync_device_field")
 
     def _sync(self, field, value):
-        return self.client.post(self.url, {"device_id": self.device.pk, "field": field, "value": value})
+        row_number = _preview_matched_device(self.client, self.user, self.device, **{field: value})
+        return _post_row_sync(self.client, self.url, row_number, field=field)
 
     def _add_interface(self, name, *, mgmt_only=False):
         from dcim.models import Interface
@@ -4937,10 +5041,13 @@ class SyncAirflowAndIPTests(TestCase):
         self.assertEqual(self.device.airflow, "front-to-rear")
 
     def test_an_unknown_airflow_value_is_refused(self):
+        """The preview offers no airflow it cannot translate, so nothing is written."""
         response = self._sync("airflow", "sideways")
 
+        self.assertEqual(response.status_code, 409)
         self.assertFalse(response.json()["ok"])
-        self.assertIn("sideways", response.json()["error"])
+        self.device.refresh_from_db()
+        self.assertFalse(self.device.airflow)
 
     def test_the_ip_lands_on_the_management_interface_first(self):
         """A management interface is what an address off the source file usually belongs on."""
@@ -4953,7 +5060,7 @@ class SyncAirflowAndIPTests(TestCase):
         self.device.refresh_from_db()
         self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.10/32")
         self.assertEqual(self.device.primary_ip4.assigned_object, mgmt)
-        self.assertIn("mgmt0", response.json()["display"])
+        self.assertIn("mgmt0", response.json()["message"])
 
     def test_the_ip_falls_back_to_the_only_interface_there_is(self):
         """A device type that marks nothing as management still has somewhere to put it."""
@@ -5047,7 +5154,7 @@ class SyncAirflowAndIPTests(TestCase):
         existing.refresh_from_db()
         self.assertEqual(existing.assigned_object, data_iface, "the address must not move interface")
         self.assertEqual(IPAddress.objects.filter(address="192.0.2.20/32").count(), 1)
-        self.assertIn("eth1", response.json()["display"])
+        self.assertIn("eth1", response.json()["message"])
 
     def test_an_address_the_device_holds_as_its_out_of_band_ip_is_reused(self):
         """The same address can be the OOB IP and the primary; it is still one IPAddress row."""
@@ -5085,7 +5192,7 @@ class SyncAirflowAndIPTests(TestCase):
         self.assertEqual(IPAddress.objects.filter(address__net_host="192.0.2.24").count(), 1)
 
     def test_an_address_the_field_already_carries_is_a_no_op(self):
-        """Nothing to write, and the answer has to say so rather than report a change."""
+        """Nothing to write, so the preview offers no sync and nothing changes."""
         from ipam.models import IPAddress
 
         iface = self._add_interface("mgmt0", mgmt_only=True)
@@ -5095,7 +5202,7 @@ class SyncAirflowAndIPTests(TestCase):
 
         response = self._sync("primary_ip4", "192.0.2.22/32")
 
-        self.assertTrue(response.json()["ok"], response.json())
+        self.assertEqual(response.status_code, 409, "the preview offers no change to sync")
         self.device.refresh_from_db()
         self.assertEqual(self.device.primary_ip4.pk, existing.pk)
         self.assertEqual(IPAddress.objects.filter(address="192.0.2.22/32").count(), 1)
@@ -5155,22 +5262,56 @@ class SyncIPSafetyTests(TestCase):
         self.url = reverse("plugins:netbox_data_import:sync_device_field")
 
     def _sync(self, field, value):
-        return self.client.post(self.url, {"device_id": self.device.pk, "field": field, "value": value})
+        row_number = _preview_matched_device(self.client, self.user, self.device, **{field: value})
+        return _post_row_sync(self.client, self.url, row_number, field=field)
+
+    def test_an_ip_write_outside_object_scope_hides_the_permission_identifier(self):
+        """A real scoped IPAM denial rolls back the address and exposes only its public refusal."""
+        from dcim.models import Device, DeviceRole, DeviceType, Interface, Manufacturer, Site
+        from ipam.models import IPAddress
+
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        self.user = user_with_object_permission(
+            "restricted-ip-writer",
+            [
+                (ImportProfile, ("view", "change"), None),
+                (Site, ("view",), None),
+                (Device, ("view", "change"), {"pk": self.device.pk}),
+                (DeviceRole, ("view",), None),
+                (DeviceType, ("view",), None),
+                (Manufacturer, ("view",), None),
+                (Interface, ("view",), {"device_id": self.device.pk}),
+                (IPAddress, ("view", "add"), {"address": "198.18.0.254/32"}),
+            ],
+        )
+        self.client.force_login(self.user)
+
+        response = self._sync("primary_ip4", "198.18.0.23/32")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Permission denied: cannot assign this IP address.")
+        self.assertNotIn("ipam.add_ipaddress", response.json()["error"])
+        self.assertFalse(IPAddress.objects.filter(address="198.18.0.23/32").exists())
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.primary_ip4)
 
     def test_an_ipv6_address_is_refused_for_the_ipv4_field(self):
         """NetBox stores the family in the field name; this would persist a v6 value in it."""
         response = self._sync("primary_ip4", "2001:db8::1")
 
+        self.assertEqual(response.status_code, 409, "the preview offers no address of the wrong family")
         self.assertFalse(response.json()["ok"])
-        self.assertIn("IPv4", response.json()["error"])
         self.device.refresh_from_db()
         self.assertIsNone(self.device.primary_ip4)
 
     def test_an_ipv4_address_is_refused_for_the_ipv6_field(self):
         response = self._sync("primary_ip6", "192.0.2.1")
 
+        self.assertEqual(response.status_code, 409, "the preview offers no address of the wrong family")
         self.assertFalse(response.json()["ok"])
-        self.assertIn("IPv6", response.json()["error"])
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.primary_ip6)
 
     def test_the_out_of_band_field_takes_either_family(self):
         """NetBox puts no family on this field, so neither does the sync."""
@@ -5292,12 +5433,26 @@ class SyncRackAndPlacementTests(TestCase):
         self.field_url = reverse("plugins:netbox_data_import:sync_device_field")
         self.placement_url = reverse("plugins:netbox_data_import:sync_placement")
 
+    def _placement(self, device, **row):
+        """Preview one row bound to *device* with this placement, then sync its placement."""
+        row_number = _preview_matched_device(self.client, self.user, device, **row)
+        return _post_row_sync(self.client, self.placement_url, row_number)
+
+    def _assert_refused_without_a_rack(self, response, device):
+        """Assert the sync of a blocked row is refused as stale and leaves the Device unracked."""
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertEqual(response.json()["code"], "preview_stale")
+        device.refresh_from_db()
+        self.assertIsNone(device.rack_id)
+
+    def _field(self, device, field, value, **row):
+        """Preview one row bound to *device* whose *field* holds *value*, then sync that field."""
+        row_number = _preview_matched_device(self.client, self.user, device, **{field: value, **row})
+        return _post_row_sync(self.client, self.field_url, row_number, field=field)
+
     def test_rack_name_sync_site_only(self):
         """Device with no location matches rack with no location in same site (via placement)."""
-        resp = self.client.post(
-            self.placement_url,
-            {"device_id": self.device_no_loc.pk, "rack_name": "R1"},
-        )
+        resp = self._placement(self.device_no_loc, rack_name="R1")
         data = resp.json()
         self.assertTrue(data["ok"], data)
         self.device_no_loc.refresh_from_db()
@@ -5305,7 +5460,7 @@ class SyncRackAndPlacementTests(TestCase):
 
     def test_rack_name_sync_finds_the_rack_by_name_identity(self):
         """The planner matches racks by name identity, so the placement sync does too."""
-        resp = self.client.post(self.placement_url, {"device_id": self.device_no_loc.pk, "rack_name": " r1 "})
+        resp = self._placement(self.device_no_loc, rack_name=" r1 ")
 
         self.assertTrue(resp.json()["ok"], resp.json())
         self.device_no_loc.refresh_from_db()
@@ -5313,10 +5468,7 @@ class SyncRackAndPlacementTests(TestCase):
 
     def test_a_placement_sync_records_the_stored_placement(self):
         """The changelog shows the device before it was racked, not an empty before-state."""
-        self.client.post(
-            self.placement_url,
-            {"device_id": self.device_no_loc.pk, "rack_name": "R1", "u_position": "5", "face": "front"},
-        )
+        self._placement(self.device_no_loc, rack_name="R1", u_position="5", face="front")
 
         (change,) = recorded_updates(self.device_no_loc)
         self.assertEqual(
@@ -5329,97 +5481,61 @@ class SyncRackAndPlacementTests(TestCase):
 
     def test_rack_name_sync_with_location(self):
         """Device with location matches rack in same location (via placement)."""
-        resp = self.client.post(
-            self.placement_url,
-            {"device_id": self.device_with_loc.pk, "rack_name": "R2"},
-        )
+        resp = self._placement(self.device_with_loc, rack_name="R2")
         data = resp.json()
         self.assertTrue(data["ok"], data)
         self.device_with_loc.refresh_from_db()
         self.assertEqual(self.device_with_loc.rack_id, self.rack_with_loc.pk)
 
     def test_rack_name_sync_location_mismatch_not_found(self):
-        """Device with location does NOT match a rack without location (and vice versa)."""
-        resp = self.client.post(
-            self.placement_url,
-            {"device_id": self.device_with_loc.pk, "rack_name": "R1"},
-        )
-        data = resp.json()
-        self.assertFalse(data["ok"])
-        self.assertIn("not found", data["error"])
+        """Device with location does NOT match a rack without location, so the row is blocked."""
+        resp = self._placement(self.device_with_loc, rack_name="R1")
+        self._assert_refused_without_a_rack(resp, self.device_with_loc)
 
     def test_rack_name_sync_not_found(self):
-        resp = self.client.post(
-            self.placement_url,
-            {"device_id": self.device_no_loc.pk, "rack_name": "DOESNOTEXIST"},
-        )
-        data = resp.json()
-        self.assertFalse(data["ok"])
-        self.assertIn("not found", data["error"])
+        """A rack the site does not hold blocks the row, so it has no placement to sync."""
+        resp = self._placement(self.device_no_loc, rack_name="DOESNOTEXIST")
+        self._assert_refused_without_a_rack(resp, self.device_no_loc)
 
     def test_rack_name_sync_ambiguous(self):
-        resp = self.client.post(
-            self.placement_url,
-            {"device_id": self.device_amb.pk, "rack_name": "DUP"},
-        )
-        data = resp.json()
-        self.assertFalse(data["ok"])
-        self.assertIn("Multiple", data["error"])
+        """Two racks of one name block the row, so the sync cannot pick one."""
+        resp = self._placement(self.device_amb, rack_name="DUP")
+        self._assert_refused_without_a_rack(resp, self.device_amb)
 
     def test_rack_name_sync_empty(self):
-        resp = self.client.post(
-            self.placement_url,
-            {"device_id": self.device_no_loc.pk, "rack_name": "   "},
-        )
+        resp = self._placement(self.device_no_loc, rack_name="   ")
         data = resp.json()
         self.assertFalse(data["ok"])
         self.assertIn("empty", data["error"].lower())
 
     def test_rack_name_field_no_longer_in_single_field_sync(self):
         """rack_name is not in _ALLOWED_FIELDS — use Sync Placement instead."""
-        resp = self.client.post(
-            self.field_url,
-            {"device_id": self.device_no_loc.pk, "field": "rack_name", "value": "R1"},
-        )
+        resp = self.client.post(self.field_url, {"row_number": "2", "field": "rack_name"})
         data = resp.json()
         self.assertFalse(data["ok"])
         self.assertIn("rack_name", data["error"])
 
     def test_face_blocked_when_no_rack(self):
-        """Syncing face on a device with no rack returns a clear error and does not save."""
+        """A face needs a rack, so the preview offers no face to sync and nothing is saved."""
         self.assertIsNone(self.device_no_loc.rack_id)
-        resp = self.client.post(
-            self.field_url,
-            {"device_id": self.device_no_loc.pk, "field": "face", "value": "front"},
-        )
+        resp = self._field(self.device_no_loc, "face", "front")
+        self.assertEqual(resp.status_code, 409)
         data = resp.json()
         self.assertFalse(data["ok"])
-        self.assertIn("no rack", data["error"].lower())
         self.device_no_loc.refresh_from_db()
         self.assertFalse(self.device_no_loc.face)
 
     def test_face_works_when_rack_assigned(self):
         self.device_no_loc.rack = self.rack_no_loc
         self.device_no_loc.save()
-        resp = self.client.post(
-            self.field_url,
-            {"device_id": self.device_no_loc.pk, "field": "face", "value": "front"},
-        )
+        resp = self._field(self.device_no_loc, "face", "front", rack_name="R1")
         data = resp.json()
         self.assertTrue(data["ok"], data)
         self.device_no_loc.refresh_from_db()
         self.assertEqual(self.device_no_loc.face, "front")
 
     def test_placement_happy_path(self):
-        resp = self.client.post(
-            self.placement_url,
-            {
-                "device_id": self.device_no_loc.pk,
-                "rack_name": "R1",
-                "u_position": "5",
-                "face": "front",
-            },
-        )
+        resp = self._placement(self.device_no_loc, rack_name="R1", u_position="5", face="front")
         data = resp.json()
         self.assertTrue(data["ok"], data)
         self.device_no_loc.refresh_from_db()
@@ -5428,21 +5544,11 @@ class SyncRackAndPlacementTests(TestCase):
         self.assertEqual(self.device_no_loc.face, "front")
 
     def test_placement_sets_rack_only_for_zero_u_device_type(self):
-        """A zero-U device type takes the rack and reports the skipped position and face."""
-        response = self.client.post(
-            self.placement_url,
-            {
-                "device_id": self.device_zero_u.pk,
-                "rack_name": "R1",
-                "u_position": "5",
-                "face": "front",
-            },
-        )
+        """A zero-U device type takes the rack only; the preview offers it no position or face."""
+        response = self._placement(self.device_zero_u, rack_name="R1", u_position="5", face="front")
 
         data = response.json()
         self.assertTrue(data["ok"], data)
-        self.assertIn("360-imV-CNTRLR", data["display"])
-        self.assertIn("0U", data["display"])
         self.device_zero_u.refresh_from_db()
         self.assertEqual(self.device_zero_u.rack_id, self.rack_no_loc.pk)
         self.assertIsNone(self.device_zero_u.position)
@@ -5455,10 +5561,7 @@ class SyncRackAndPlacementTests(TestCase):
         self.device_zero_u.face = "front"
         self.device_zero_u.save(update_fields=["rack", "position", "face"])
 
-        response = self.client.post(
-            self.placement_url,
-            {"device_id": self.device_zero_u.pk, "rack_name": "R1", "u_position": "5", "face": "front"},
-        )
+        response = self._placement(self.device_zero_u, rack_name="R1", u_position="5", face="front")
 
         data = response.json()
         self.assertTrue(data["ok"], data)
@@ -5471,14 +5574,11 @@ class SyncRackAndPlacementTests(TestCase):
         self.device_zero_u.rack = self.rack_no_loc
         self.device_zero_u.save(update_fields=["rack"])
 
-        response = self.client.post(
-            self.field_url,
-            {"device_id": self.device_zero_u.pk, "field": "u_position", "value": "5"},
-        )
+        response = self._field(self.device_zero_u, "u_position", "5", rack_name="R1")
 
+        self.assertEqual(response.status_code, 409, "the preview offers no position for a 0U device type")
         data = response.json()
         self.assertFalse(data["ok"], data)
-        self.assertIn("360-imV-CNTRLR", data["error"])
         self.device_zero_u.refresh_from_db()
         self.assertIsNone(self.device_zero_u.position)
 
@@ -5487,14 +5587,11 @@ class SyncRackAndPlacementTests(TestCase):
         self.device_zero_u.rack = self.rack_no_loc
         self.device_zero_u.save(update_fields=["rack"])
 
-        response = self.client.post(
-            self.field_url,
-            {"device_id": self.device_zero_u.pk, "field": "face", "value": "front"},
-        )
+        response = self._field(self.device_zero_u, "face", "front", rack_name="R1")
 
+        self.assertEqual(response.status_code, 409, "the preview offers no face for a 0U device type")
         data = response.json()
         self.assertFalse(data["ok"], data)
-        self.assertIn("360-imV-CNTRLR", data["error"])
         self.device_zero_u.refresh_from_db()
         self.assertFalse(self.device_zero_u.face)
 
@@ -5504,10 +5601,7 @@ class SyncRackAndPlacementTests(TestCase):
         self.device_no_loc.face = "front"
         self.device_no_loc.save(update_fields=["rack", "face"])
 
-        response = self.client.post(
-            self.field_url,
-            {"device_id": self.device_no_loc.pk, "field": "u_position", "value": "99"},
-        )
+        response = self._field(self.device_no_loc, "u_position", "99", rack_name="R1", face="front")
 
         data = response.json()
         self.assertFalse(data["ok"], data)
@@ -5522,15 +5616,7 @@ class SyncRackAndPlacementTests(TestCase):
         self.device_no_loc.oob_ip = oob_ip
         self.device_no_loc.save(update_fields=["oob_ip"])
 
-        response = self.client.post(
-            self.placement_url,
-            {
-                "device_id": self.device_no_loc.pk,
-                "rack_name": "R1",
-                "u_position": "5",
-                "face": "front",
-            },
-        )
+        response = self._placement(self.device_no_loc, rack_name="R1", u_position="5", face="front")
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["ok"], response.json())
@@ -5548,10 +5634,7 @@ class SyncRackAndPlacementTests(TestCase):
         self.device_no_loc.face = "rear"
         self.device_no_loc.save()
 
-        resp = self.client.post(
-            self.placement_url,
-            {"device_id": self.device_no_loc.pk, "rack_name": "R1"},
-        )
+        resp = self._placement(self.device_no_loc, rack_name="R1")
         data = resp.json()
         self.assertTrue(data["ok"], data)
         self.device_no_loc.refresh_from_db()
@@ -5564,15 +5647,7 @@ class SyncRackAndPlacementTests(TestCase):
         """If rack lookup fails, no fields are changed."""
         original_rack = self.device_no_loc.rack_id
         original_pos = self.device_no_loc.position
-        resp = self.client.post(
-            self.placement_url,
-            {
-                "device_id": self.device_no_loc.pk,
-                "rack_name": "DOESNOTEXIST",
-                "u_position": "5",
-                "face": "front",
-            },
-        )
+        resp = self._placement(self.device_no_loc, rack_name="DOESNOTEXIST", u_position="5", face="front")
         data = resp.json()
         self.assertFalse(data["ok"])
         self.device_no_loc.refresh_from_db()
@@ -5581,32 +5656,32 @@ class SyncRackAndPlacementTests(TestCase):
         self.assertFalse(self.device_no_loc.face)
 
     def test_placement_bad_face(self):
-        resp = self.client.post(
-            self.placement_url,
-            {"device_id": self.device_no_loc.pk, "rack_name": "R1", "face": "sideways"},
-        )
-        data = resp.json()
-        self.assertFalse(data["ok"])
-        self.assertIn("face", data["error"].lower())
+        """The sync writes the placement the preview shows, which carries no untranslatable face."""
+        resp = self._placement(self.device_no_loc, rack_name="R1", face="sideways")
+        self.assertTrue(resp.json()["ok"], resp.json())
         self.device_no_loc.refresh_from_db()
-        # All-or-nothing: rack also not set
-        self.assertIsNone(self.device_no_loc.rack_id)
+        self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
+        self.assertFalse(self.device_no_loc.face)
 
     def test_placement_missing_device(self):
-        resp = self.client.post(self.placement_url, {"device_id": 99999, "rack_name": "R1"})
+        """A matched Device deleted after the preview was read is refused."""
+        from dcim.models import Device
+
+        row_number = _preview_matched_device(self.client, self.user, self.device_no_loc, rack_name="R1")
+        Device.objects.filter(pk=self.device_no_loc.pk).delete()
+
+        resp = _post_row_sync(self.client, self.placement_url, row_number)
+        self.assertEqual(resp.status_code, 409)
         data = resp.json()
         self.assertFalse(data["ok"])
-        self.assertIn("Device not found", data["error"])
+        self.assertEqual(data["error"], "The active preview row is no longer available.")
 
     def test_placement_requires_permission(self):
         """Authenticated user without dcim.change_device gets JSON 403."""
         User.objects.create_user("no_perm_placement", "n@example.com", "testpass")
         c = Client()
         c.login(username="no_perm_placement", password="testpass")
-        resp = c.post(
-            self.placement_url,
-            {"device_id": self.device_no_loc.pk, "rack_name": "R1"},
-        )
+        resp = c.post(self.placement_url, {"row_number": "2"})
         self.assertEqual(resp.status_code, 403)
         self.assertIn("application/json", resp.get("Content-Type", ""))
         data = resp.json()
@@ -5616,33 +5691,25 @@ class SyncRackAndPlacementTests(TestCase):
     def test_placement_unauthenticated_gets_json_401(self):
         """Unauthenticated request receives JSON 401 (not an HTML redirect)."""
         c = Client()
-        resp = c.post(
-            self.placement_url,
-            {"device_id": self.device_no_loc.pk, "rack_name": "R1"},
-        )
+        resp = c.post(self.placement_url, {"row_number": "2"})
         self.assertEqual(resp.status_code, 401)
         self.assertIn("application/json", resp.get("Content-Type", ""))
         data = resp.json()
         self.assertFalse(data["ok"])
 
     def test_face_invalid_value_with_rack(self):
-        """Invalid face value with rack assigned hits the face mapping error path."""
+        """An untranslatable face is not offered for a sync, so nothing is written."""
         self.device_no_loc.rack = self.rack_no_loc
         self.device_no_loc.save()
-        resp = self.client.post(
-            self.field_url,
-            {"device_id": self.device_no_loc.pk, "field": "face", "value": "sideways"},
-        )
+        resp = self._field(self.device_no_loc, "face", "sideways", rack_name="R1")
+        self.assertEqual(resp.status_code, 409)
         data = resp.json()
         self.assertFalse(data["ok"])
-        self.assertIn("face", data["error"].lower())
         self.device_no_loc.refresh_from_db()
         self.assertFalse(self.device_no_loc.face)
 
     def test_lookup_rack_device_with_no_site(self):
-        """_lookup_rack_for_device returns an error when device has no site."""
-        from django.test import RequestFactory
-
+        """Rack lookup needs a site and uses the actor to find a visible Rack."""
         from netbox_data_import.views import _lookup_rack_for_device
 
         class _Stub:
@@ -5651,39 +5718,24 @@ class SyncRackAndPlacementTests(TestCase):
             site = None
             location = None
 
-        request = RequestFactory().post("/")
-        request.user = self.user
-        rack, err = _lookup_rack_for_device(request, _Stub(), "R1")
+        rack, err = _lookup_rack_for_device(self.user, _Stub(), "R1")
         self.assertIsNone(rack)
         self.assertIn("no site", err.lower())
+        rack, err = _lookup_rack_for_device(self.user, self.device_no_loc, "R1")
+        self.assertEqual(rack, self.rack_no_loc)
+        self.assertIsNone(err)
 
     def test_placement_bad_u_position(self):
-        """Non-integer u_position returns a clear error and does not save."""
-        resp = self.client.post(
-            self.placement_url,
-            {
-                "device_id": self.device_no_loc.pk,
-                "rack_name": "R1",
-                "u_position": "notanint",
-            },
-        )
-        data = resp.json()
-        self.assertFalse(data["ok"])
-        self.assertIn("u_position", data["error"])
+        """Non-integer u_position is not offered, so the sync writes only the previewed rack."""
+        resp = self._placement(self.device_no_loc, rack_name="R1", u_position="notanint")
+        self.assertTrue(resp.json()["ok"], resp.json())
         self.device_no_loc.refresh_from_db()
-        self.assertIsNone(self.device_no_loc.rack_id)
+        self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
+        self.assertIsNone(self.device_no_loc.position)
 
     def test_placement_validation_error(self):
         """A u_position outside the rack u_height range triggers full_clean ValidationError."""
-        resp = self.client.post(
-            self.placement_url,
-            {
-                "device_id": self.device_no_loc.pk,
-                "rack_name": "R1",
-                "u_position": "9999",
-                "face": "front",
-            },
-        )
+        resp = self._placement(self.device_no_loc, rack_name="R1", u_position="9999", face="front")
         self.assertEqual(resp.status_code, 400)
         data = resp.json()
         self.assertFalse(data["ok"])
@@ -5705,10 +5757,7 @@ class SyncRackAndPlacementTests(TestCase):
             return original_save(self, *a, **kw)
 
         with patch.object(Device, "save", boom):
-            resp = self.client.post(
-                self.placement_url,
-                {"device_id": self.device_no_loc.pk, "rack_name": "R1"},
-            )
+            resp = self._placement(self.device_no_loc, rack_name="R1")
         self.assertEqual(resp.status_code, 500)
         data = resp.json()
         self.assertFalse(data["ok"])
@@ -5738,7 +5787,7 @@ class UnlinkDeviceViewTest(TestCase):
             role=cls.role,
             site=cls.site,
         )
-        cls.profile = ImportProfile.objects.create(name="Profile1")
+        cls.profile = _make_profile("Profile1")
         cls.match = DeviceExistingMatch.objects.create(
             profile=cls.profile,
             source_id="SRC001",
@@ -5747,40 +5796,52 @@ class UnlinkDeviceViewTest(TestCase):
         )
         cls.url = reverse("plugins:netbox_data_import:unlink_device")
 
+    def _open_preview(self):
+        """Log in and preview the linked source row and one row with no link."""
+        self.client.force_login(self.user)
+        _open_preview(self.client, self.user, self.profile, [{"source_id": "SRC001"}, {"source_id": "NONEXISTENT"}])
+
     def test_unlink_removes_match(self):
         """Unlink successfully deletes the DeviceExistingMatch."""
         from netbox_data_import.models import DeviceExistingMatch
 
         self.assertTrue(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
-        self.client.force_login(self.user)
-        resp = self.client.post(self.url, {"profile_id": self.profile.pk, "source_id": "SRC001"})
+        self._open_preview()
+        resp = self.client.post(self.url, {**preview_claim(self.client), "source_id": "SRC001"})
         self.assertEqual(resp.status_code, 302)
         self.assertFalse(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
 
-    def test_unlink_missing_match_is_idempotent(self):
-        """Unlink with non-existent match is idempotent (no error)."""
+    def test_unlink_missing_match_is_refused(self):
+        """Unlink of a source row with no link is refused and keeps every other link."""
+        from django.contrib.messages import get_messages
+
         from netbox_data_import.models import DeviceExistingMatch
 
-        self.client.force_login(self.user)
-        resp = self.client.post(self.url, {"profile_id": self.profile.pk, "source_id": "NONEXISTENT"})
+        self._open_preview()
+        resp = self.client.post(self.url, {**preview_claim(self.client), "source_id": "NONEXISTENT"})
         self.assertEqual(resp.status_code, 302)
+        self.assertEqual(
+            [str(message) for message in get_messages(resp.wsgi_request)],
+            ["Source 'NONEXISTENT' has no device link to remove."],
+        )
         self.assertTrue(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
 
     def test_unlink_unauthenticated(self):
         """Unauthenticated requests get JSON 401 (not a redirect)."""
         from netbox_data_import.models import DeviceExistingMatch
 
-        resp = self.client.post(self.url, {"profile_id": self.profile.pk, "source_id": "SRC001"})
+        resp = self.client.post(self.url, {"source_id": "SRC001"})
         self.assertEqual(resp.status_code, 401)
         self.assertEqual(resp["Content-Type"], "application/json")
         self.assertIn("error", resp.json())
         self.assertTrue(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
 
     def test_unlink_missing_profile(self):
-        """Unlink returns 404 if profile not found."""
-        from netbox_data_import.models import DeviceExistingMatch
+        """Unlink returns 404 when the preview's profile was deleted after the page was read."""
+        self._open_preview()
+        claim = preview_claim(self.client)
+        ImportProfile.objects.filter(pk=self.profile.pk).delete()
 
-        self.client.force_login(self.user)
-        resp = self.client.post(self.url, {"profile_id": 99999, "source_id": "SRC001"})
+        resp = self.client.post(self.url, {**claim, "source_id": "SRC001"}, HTTP_ACCEPT="application/json")
         self.assertEqual(resp.status_code, 404)
-        self.assertTrue(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
+        self.assertEqual(resp.json()["error"], "The import profile is no longer available.")

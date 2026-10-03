@@ -6,14 +6,13 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import NamedTuple
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from core.signals import clear_events
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import DatabaseError, IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -60,6 +59,7 @@ from .import_engine import (
     operator_failure_message,
 )
 from .models import (
+    PreviewState,
     CableClassMapping,
     CableSegmentOverride,
     ClassRoleMapping,
@@ -90,23 +90,25 @@ from .object_permissions import (
     delete_permission_scoped_objects,
     save_permission_scoped_object,
 )
-from .plan import ImportPlan, PlanError, fingerprint_of, is_current_schema_version
-from .preview_row_actions import (
-    PREVIEW_DIRTY_SESSION_KEY,
-    PREVIEW_PLAN_SESSION_KEY,
-    PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
-    PreviewActionInvalid,
-    PreviewLocked,
-    assert_preview_may_move,
-    clear_preview_state,
-    current_preview_revision,
-    load_cached_preview,
-    mark_preview_dirty,
-    pending_preview_payload,
-    record_recalculated_preview,
-    retained_sync_block_reason,
-    retire_preview_revision,
-    start_new_preview,
+from .plan import Disposition, ImportPlan, PlanError
+from .preview_coordinator import (
+    RETAINED_SYNC_BLOCK_REASON,
+    SYNC_FINISHED,
+    UNREADABLE_PREVIEW,
+    CommandOutcome,
+    DiscardPreview,
+    PreviewClaim,
+    PreviewCommand,
+    PreviewCommandRefused,
+    QueueImport,
+    RereadPreview,
+    RestorePreview,
+    StalePreview,
+    StartPreview,
+    apply_preview_command,
+    read_preview,
+    setup_claim,
+    validate_preview_plan,
 )
 from .profile_yaml import (
     DuplicateYamlKeyError,
@@ -189,14 +191,6 @@ def _name_resolution_response(request, url):
     return _navigation_response(request, url)
 
 
-def _parse_posted_profile_id(request):
-    """Return the posted integer profile ID, or None when it is invalid."""
-    try:
-        return int(request.POST.get("profile_id", ""))
-    except (TypeError, ValueError):
-        return None
-
-
 def _row_key(unit) -> str:
     """Return the key the sync modal looks a row up by.
 
@@ -245,21 +239,13 @@ def _candidate_values(extra_data):
     return candidate_values
 
 
-def _contact_candidate_context(request, profile_id, source_id):
-    """Return Contact candidates and row state for one active preview row."""
-    plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY) or {}
-    try:
-        workspace = ReviewWorkspace.from_dict(plan_data, request.user)
-    except PlanError as exc:
-        raise ValidationError("The active Import Plan is no longer readable.") from exc
+def _contact_candidate_context(workspace, source_id):
+    """Return Contact candidates and row state for one row of the active preview."""
     result_rows = [
         row for row in workspace.units if str(row.source_id) == str(source_id) and row.object_type == "device"
     ]
-    context = request.session.get("import_context") or {}
-    source_rows = [
-        row for row in (request.session.get("import_rows") or []) if str(row.get("source_id")) == str(source_id)
-    ]
-    if str(context.get("profile_id")) != str(profile_id) or len(source_rows) != 1 or len(result_rows) != 1:
+    source_rows = [row for row in workspace.source_rows if str(row.get("source_id")) == str(source_id)]
+    if len(source_rows) != 1 or len(result_rows) != 1:
         raise ValidationError("The candidate resolution does not identify one active preview row.")
 
     candidates = _candidate_values(result_rows[0].extra_data).get("contact", {})
@@ -376,7 +362,7 @@ def _saved_resolution_report(contact_write, contact_note):
     is reported whether or not the assignment moved.
     """
     if contact_write is None:
-        return "Resolution saved. Recalculate the preview to apply it." + contact_note, contact_note.strip()
+        return "Resolution saved." + contact_note, contact_note.strip()
     detail = (
         f"Contact '{contact_write.contact['name']}' was created in NetBox."
         if contact_write.contact_created
@@ -510,9 +496,7 @@ def _fuzzy_match_netbox_field(column_name: str) -> str | None:
 
 logger = logging.getLogger(__name__)
 
-# An Import Plan error can name session data, so a response states one fixed sentence instead.
-UNREADABLE_PREVIEW = "This preview cannot be read. Re-read the preview."
-UNREADABLE_PREVIEW_ENDED = "This preview cannot be read. Start a new import."
+# An Import Plan error can name stored preview data, so a response states one fixed sentence instead.
 UNPLANNABLE_IMPORT = "This import could not be planned. The server log names the reason."
 UPLOAD_NOT_UTF8 = "The uploaded file is not UTF-8 text."
 UPLOAD_UNREADABLE = "Could not read the uploaded file. The server log names the reason."
@@ -678,7 +662,7 @@ def _validate_model_instance(instance, label):
             msg = "; ".join(f"{f}: {', '.join(es)}" for f, es in exc.message_dict.items())
         else:
             msg = "; ".join(exc.messages)
-        raise PreviewActionInvalid(f"Validation error in {label}: {msg}") from exc
+        raise PreviewCommandRefused(f"Validation error in {label}: {msg}") from exc
 
 
 def _get_or_init(model_class, **lookup):
@@ -997,7 +981,7 @@ def _review_workspace_url(profile):
 
 
 # These views intentionally use raw django.views.View rather than a NetBox
-# generic view base.  The wizard is a three-step, session-backed state machine
+# generic view base.  The wizard is a three-step state machine, kept by the Preview Coordinator
 # (setup → preview → run → results) that does not correspond to any single
 # NetBox generic view pattern (ObjectEditView, ObjectListView, etc.).  Using a
 # raw View keeps the control flow explicit and avoids fighting ObjectEditView's
@@ -1018,65 +1002,40 @@ class ImportSetupView(PermissionRequiredMixin, View):
         return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
     def post(self, request):
-        """Store the uploaded file, plan it, and redirect to the preview step."""
+        """Store the uploaded file, plan it, and make it the session's preview."""
         form = ImportSetupForm(request.POST, request.FILES, user=request.user)
         if not form.is_valid():
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
         profile = form.cleaned_data["profile"]
         excel_file = form.cleaned_data["excel_file"]
-        site = form.cleaned_data["site"]
-        location = form.cleaned_data.get("location")
-        tenant = form.cleaned_data.get("tenant")
-
-        context_data = {
-            "profile_id": profile.pk,
-            "site_id": site.pk,
-            "location_id": location.pk if location else None,
-            "tenant_id": tenant.pk if tenant else None,
-            "filename": excel_file.name,
-        }
-        document = SourceDocument.store(
+        command = StartPreview(
             profile=profile,
             content=excel_file.read(),
             filename=excel_file.name,
-            uploaded_by=request.user,
+            site=form.cleaned_data["site"],
+            location=form.cleaned_data.get("location"),
+            tenant=form.cleaned_data.get("tenant"),
         )
-        context_data["source_document_id"] = document.pk
-        planning_context = {
-            "site_id": context_data["site_id"],
-            "location_id": context_data["location_id"],
-            "tenant_id": context_data["tenant_id"],
-        }
         try:
-            plan = ImportEngine.plan(profile, document, request.user, planning_context)
+            apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        except StalePreview as exc:
+            return _stale_response(request, exc, reverse("plugins:netbox_data_import:import_setup"))
+        except ImportProfile.DoesNotExist:
+            # The form validated the profile, and the setup lock found it deleted since then.
+            raise Http404("The import profile is no longer available.") from None
         except (adapters.SourceUnreadable, adapters.UnknownSourceAdapter, PlanningTargetUnavailable) as exc:
-            document.delete()
-            messages.error(request, f"Failed to parse file: {exc}")
+            logger.warning("ImportSetupView: source planning refused", exc_info=True)
+            messages.error(request, f"Failed to parse file: {operator_failure_message(exc)}")
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
         except PlanError:
             logger.warning("ImportSetupView: planning produced an unreadable Import Plan.", exc_info=True)
-            document.delete()
             messages.error(request, UNPLANNABLE_IMPORT)
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
-
-        workspace = ReviewWorkspace(plan, request.user)
-        start_new_preview(request.session, plan)
-        request.session["import_rows"] = workspace.source_rows
-        request.session["import_context"] = context_data
-        request.session["import_preview_pending"] = True
-        review_url = _review_workspace_url(profile)
-        if review_url == reverse("plugins:netbox_data_import:import_preview"):
-            request.session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
-        else:
-            request.session.pop(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, None)
-        request.session.pop("import_preview_source_job_id", None)
-        _clear_restored_import_job(request)
-        request.session["import_unused_columns"] = {
-            column["name"]: {"count": column["count"], "samples": column["samples"]}
-            for column in workspace.unused_columns
-        }
-        return redirect(review_url)
+        except PreviewCommandRefused as exc:
+            messages.error(request, exc.operator_message)
+            return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
+        return redirect(_review_workspace_url(profile))
 
 
 _DEVICE_CONFLICT_ROW_LIST_KEYS = (
@@ -1201,90 +1160,128 @@ def _preview_rows_with_conflict_comparisons(workspace, source_rows, profile):
     return preview_rows
 
 
+TARGET_GONE = "The saved import target is no longer available. Start a new preview."
+CONCURRENT_WRITE = "A row this command writes changed while it was processed. Try again."
+
+
+def _unregistered_adapter_reason(profile):
+    """Return why this release cannot plan for the profile's adapter, or None."""
+    try:
+        validate_registered_adapter(profile)
+        # Planning raises the same error for a registered adapter no Target Module implements.
+        validate_adapter_target_module(profile.source_adapter)
+    except ValidationError as exc:
+        return "; ".join(exc.messages)
+    return None
+
+
+def _review_snapshot(request, *, profile_action="change"):
+    """Return the active preview a review page shows, or the response that sends the operator elsewhere.
+
+    A page load only reads (ADR 0004), so a preview it cannot show stays until a command replaces it.
+    """
+    snapshot = read_preview(request, profile_action=profile_action)
+    setup = redirect(reverse("plugins:netbox_data_import:import_setup"))
+    if snapshot.state == PreviewState.EXPIRED or snapshot.expired:
+        messages.warning(request, "This import preview expired. Start a new import.")
+        return None, setup
+    if snapshot.state not in PreviewState.ACTIVE:
+        messages.warning(request, "No import in progress. Please start a new import.")
+        return None, setup
+    if snapshot.profile is None:
+        messages.warning(request, "Import profile not found.")
+        return None, setup
+    if reason := _unregistered_adapter_reason(snapshot.profile):
+        messages.error(request, reason)
+        return None, setup
+    if snapshot.document is None:
+        messages.warning(request, "The stored source is no longer available. Upload it again.")
+        return None, setup
+    if snapshot.state == PreviewState.SUBMITTED:
+        from core.models import Job
+
+        if not Job.objects.filter(pk=snapshot.job_id).exists():
+            return None, render(
+                request,
+                "netbox_data_import/preview_notice.html",
+                {
+                    "title": "Import Job is no longer available",
+                    "message": "The import Job was removed. Re-read this preview before the next decision.",
+                    "preview_claim": snapshot.claim,
+                    "offer_reread": True,
+                    "next_url": request.get_full_path(),
+                },
+            )
+        return None, redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": snapshot.job_id}))
+    return snapshot, None
+
+
+def _retained_sync_reason(snapshot) -> str:
+    """Return why the preview's own trace sync holds it, for a page that has to say so."""
+    if snapshot.state != PreviewState.SYNC_PENDING:
+        return ""
+    from core.choices import JobStatusChoices
+    from core.models import Job
+
+    from .jobs import IMPORT_TASK_LOST, import_job_abandoned
+
+    job = Job.objects.filter(pk=snapshot.job_id, status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES).first()
+    if job is None:
+        return SYNC_FINISHED
+    return IMPORT_TASK_LOST if import_job_abandoned(job) else RETAINED_SYNC_BLOCK_REASON
+
+
+def _live_plan(snapshot, actor):
+    """Return the plan live NetBox states right now for the preview's source, or None once its target is gone."""
+    try:
+        return ImportEngine.plan(snapshot.profile, snapshot.document, actor, snapshot.planning_context)
+    except PlanningTargetUnavailable:
+        return None
+
+
+def _unreadable_preview_page(request, snapshot):
+    """Show the recovery a preview whose stored plan this release cannot read still has: re-read it."""
+    logger.warning("The stored Import Plan of this preview is unreadable.")
+    return render(
+        request,
+        "netbox_data_import/preview_notice.html",
+        {
+            "title": "Preview needs a re-read",
+            "message": "This preview was planned by an earlier release. Re-read it from its stored source.",
+            "preview_claim": snapshot.claim,
+            "offer_reread": True,
+            "next_url": request.get_full_path(),
+        },
+    )
+
+
 class ImportPreviewView(PermissionRequiredMixin, View):
-    """Step 2: show dry-run results, let user confirm or go back."""
+    """Step 2: show the stored preview, let user confirm or go back."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request):
         """Render the current preview URL."""
-        use_materialized_result = request.session.pop(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, False) is True
-        return self.render_preview(
-            request,
-            request.get_full_path(),
-            use_materialized_result=use_materialized_result,
-        )
+        return self.render_preview(request, request.get_full_path())
 
-    def _replanned_preview(self, request, profile, document, planning_context):
-        """Return the freshly planned preview, or the response that ends this request instead."""
+    def render_preview(self, request, preview_url):
+        """Render the session's stored preview and say whether live NetBox has moved under it."""
+        snapshot, refusal = _review_snapshot(request)
+        if refusal is not None:
+            return refusal
+        profile = snapshot.profile
         try:
-            plan = ImportEngine.plan(profile, document, request.user, planning_context)
-        except PlanningTargetUnavailable:
-            _discard_import_preview(request)
-            messages.warning(request, "The saved import target is no longer available. Start a new preview.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        try:
-            record_recalculated_preview(request.session, plan, user=request.user)
-        except PreviewLocked as exc:
-            # A sync started after the caller's check, so this fresh plan must not replace the stored one.
-            messages.warning(request, str(exc))
-            return redirect(reverse("plugins:netbox_data_import:trace_workspace"))
-        return plan
-
-    def render_preview(self, request, preview_url, *, use_materialized_result=False):
-        """Replan the stored source and render the Review Workspace."""
-        ctx = request.session.get("import_context", {})
-        if not ctx:
-            messages.warning(request, "No import in progress. Please start a new import.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-
-        profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=ctx.get("profile_id")).first()
-        if not profile:
-            _discard_import_preview(request)
-            messages.warning(request, "Import profile not found.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-
-        # The session outlives an upgrade, so the stored profile can name a retired adapter.
-        try:
-            validate_registered_adapter(profile)
-            validate_adapter_target_module(profile.source_adapter)
-        except ValidationError as exc:
-            _discard_import_preview(request)
-            messages.error(request, "; ".join(exc.messages))
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-
-        document = SourceDocument.objects.filter(pk=ctx.get("source_document_id"), profile=profile).first()
-        if document is None:
-            _discard_import_preview(request)
-            messages.warning(request, "The stored source is no longer available. Upload it again.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-
-        # A retained sync is mid-write, so NetBox is not authoritative and the plan must not move.
-        retained_reason = _retained_sync_block_reason(request)
-        if retained_reason:
+            result = snapshot.workspace(request.user)
+        except PlanError:
+            logger.warning("ImportPreviewView: the stored Import Plan is unreadable.", exc_info=True)
+            return _unreadable_preview_page(request, snapshot)
+        if retained_reason := _retained_sync_reason(snapshot):
             messages.warning(request, retained_reason)
-        stored_plan = request.session.get(PREVIEW_PLAN_SESSION_KEY)
-        if (use_materialized_result or retained_reason) and isinstance(stored_plan, dict):
-            try:
-                plan = ImportPlan.from_dict(stored_plan)
-            except PlanError:
-                logger.warning("ImportPreviewView: the stored Import Plan is unreadable.", exc_info=True)
-                _discard_import_preview(request)
-                messages.error(request, UNREADABLE_PREVIEW_ENDED)
-                return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        else:
-            planning_context = {
-                "site_id": ctx.get("site_id"),
-                "location_id": ctx.get("location_id"),
-                "tenant_id": ctx.get("tenant_id"),
-            }
-            planned = self._replanned_preview(request, profile, document, planning_context)
-            if not isinstance(planned, ImportPlan):
-                return planned
-            plan = planned
-        result = ReviewWorkspace(plan, request.user)
+        live = _live_plan(snapshot, request.user)
+        if live is None:
+            messages.warning(request, TARGET_GONE)
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
         rows = result.source_rows
-        request.session["import_rows"] = rows
 
         # Build existing resolutions map for the split-name modal preview
         import json as _json
@@ -1352,7 +1349,6 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 if candidate_values:
                     candidate_values_by_row[_row_key(row)] = candidate_values
         except ValidationError as exc:
-            _discard_import_preview(request)
             messages.error(request, "; ".join(exc.messages))
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         contact_suggestions_by_row = {
@@ -1389,8 +1385,8 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             {
                 "result": result,
                 "preview_rows": preview_rows,
-                "filename": ctx.get("filename", ""),
-                "profile_id": ctx.get("profile_id"),
+                "filename": snapshot.context.get("filename", ""),
+                "profile_id": profile.pk,
                 "profile": profile,
                 "preview_url": preview_url,
                 "view_mode": view_mode,
@@ -1423,7 +1419,8 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "no_rack_filter_value": no_rack_filter_value,
                 "split_field_values_by_source_id": split_field_values_by_source_id,
                 "non_card_error_rows": non_card_error_rows,
-                "preview_revision": current_preview_revision(request.session),
+                "preview_claim": snapshot.claim,
+                "drift": live.fingerprint != result.plan.fingerprint,
             },
         )
 
@@ -1439,197 +1436,97 @@ def _user_import_jobs(request):
 
 
 def _import_setup_context(request, form):
-    """Return the setup form and the most relevant resumable import state."""
-    resume_job = _resume_import_job(request)
-    preview_rows = request.session.get("import_rows")
-    preview_context = request.session.get("import_context")
-    resume_preview = (
-        request.session.get("import_preview_pending") is True
-        and isinstance(preview_rows, list)
-        and bool(preview_rows)
-        and isinstance(preview_context, dict)
-        and bool(preview_context.get("profile_id"))
-        and bool(preview_context.get("site_id"))
-    )
-    return {"form": form, "resume_job": resume_job, "resume_preview": resume_preview}
+    """Return the setup form, the claim it posts, and the most relevant resumable import state."""
+    setup_claim(request)
+    snapshot = read_preview(request, include_plan=False)
+    resumable = snapshot.active and snapshot.state in (PreviewState.READY, PreviewState.SYNC_PENDING)
+    return {
+        "form": form,
+        "preview_claim": snapshot.claim,
+        "resume_job": _resume_import_job(request, snapshot),
+        "resume_preview_url": _review_workspace_url(snapshot.profile) if resumable else "",
+        "discardable": snapshot.state in PreviewState.ACTIVE,
+    }
 
 
-def _discard_import_preview(request):
-    """Remove session data that belongs only to an unsubmitted preview."""
-    for key in ("import_context", "import_idempotency_key", "import_rows", "import_unused_columns"):
-        request.session.pop(key, None)
-    clear_preview_state(request.session)
-    request.session["import_preview_pending"] = False
-    request.session.pop(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, None)
-    request.session.pop("import_preview_source_job_id", None)
-
-
-def _clear_restored_import_job(request):
-    """Remove an audit result restored beside a pending preview."""
-    request.session.pop("import_restored_execution_id", None)
-
-
-def _resume_import_job(request):
-    """Return the session Job or the user's latest active import Job."""
+def _resume_import_job(request, snapshot):
+    """Return the preview's own active Job, or the user's latest active import Job."""
     from core.choices import JobStatusChoices
 
     jobs = _user_import_jobs(request).filter(status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES)
-    if (job_pk := request.session.get("import_background_job_id")) and (job := jobs.filter(pk=job_pk).first()):
+    if snapshot.job_id is not None and (job := jobs.filter(pk=snapshot.job_id).first()):
         return job
     return jobs.first()
 
 
-def _import_source_rows_available(request, job):
+def _import_source_rows_available(job):
     """Return whether one Job's stored source is still available."""
     source_document_id = (job.data or {}).get("source_document_id")
     return bool(source_document_id and SourceDocument.objects.filter(pk=source_document_id).exists())
 
 
-def _import_job_progress(job, preview_blocked=False, source_rows_available=False):
-    """Return current row progress from native Job data and RQ metadata."""
+def _import_job_progress(request, job):
+    """Return current progress from native Job data and RQ metadata, and what the operator can do next.
+
+    A failed final import offers its preview back only while the session's preview is still the one
+    that submitted it; a newer preview is never replaced from here.
+    """
     from core.choices import JobStatusChoices
+    from .jobs import IMPORT_TASK_LOST, import_job_abandoned, import_queue_task
 
     data = job.data or {}
     processed = int(data.get("processed") or 0)
     total = int(data.get("total") or 0)
     if job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES:
-        import django_rq
-
-        try:
-            queue = django_rq.get_queue(job.queue_name or "default")
-        except KeyError:
-            rq_job = None
-        else:
-            rq_job = queue.fetch_job(str(job.job_id))
+        rq_job = import_queue_task(job)
         if rq_job is not None:
             processed = int(rq_job.meta.get("processed", processed) or 0)
             total = int(rq_job.meta.get("total", total) or 0)
     percentage = round(processed * 100 / total) if total else 0
+    abandoned = import_job_abandoned(job)
+    is_failed = abandoned or job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED)
+    snapshot = read_preview(request, include_plan=False)
+    restorable = (
+        is_failed
+        and snapshot.state == PreviewState.SUBMITTED
+        and snapshot.job_id == job.pk
+        and snapshot.active
+        and _import_source_rows_available(job)
+    )
+    execution_id = data.get("import_execution_id")
     return {
         "job": job,
         "processed": processed,
         "total": total,
         "percentage": percentage,
-        "is_active": job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES,
+        "is_active": not abandoned and job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES,
         "is_completed": job.status == JobStatusChoices.STATUS_COMPLETED,
-        "is_failed": job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED),
-        "preview_available": isinstance(data.get("context_data"), dict) and source_rows_available,
-        "preview_blocked": preview_blocked,
-        "message": data.get("message") or "",
+        "is_failed": is_failed,
+        "restore_claim": snapshot.claim if restorable else None,
+        "preview_replaced": (
+            is_failed and not restorable and isinstance(data.get("context_data"), dict) and snapshot.job_id != job.pk
+        ),
+        "results_url": (
+            reverse("plugins:netbox_data_import:import_results", kwargs={"pk": execution_id}) if execution_id else ""
+        ),
+        "message": IMPORT_TASK_LOST if abandoned else data.get("message") or "",
     }
 
 
-def _restore_import_session(request, job):
-    """Restore preview or audit state when a user returns to a Job URL."""
-    from core.choices import JobStatusChoices
-
-    data = job.data or {}
-    if request.session.get("import_background_job_id") != job.pk:
-        request.session["import_background_job_id"] = job.pk
-    preview_is_pending = request.session.get("import_preview_pending") is True
-    failed_preview_available = (
-        job.status
-        in (
-            JobStatusChoices.STATUS_FAILED,
-            JobStatusChoices.STATUS_ERRORED,
-        )
-        and isinstance(data.get("context_data"), dict)
-        and _import_source_rows_available(request, job)
-    )
-    if failed_preview_available and not preview_is_pending:
-        clear_preview_state(request.session)
-        request.session["import_context"] = data["context_data"]
-        request.session["import_preview_pending"] = True
-        request.session["import_preview_source_job_id"] = job.pk
-        retire_preview_revision(request.session)
-        preview_is_pending = True
-    if data.get("import_execution_id"):
-        if preview_is_pending:
-            request.session["import_restored_execution_id"] = data["import_execution_id"]
-        else:
-            _clear_restored_import_job(request)
-            request.session["import_execution_id"] = data["import_execution_id"]
-            request.session["import_preview_pending"] = False
-    return data
-
-
-def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, selection, *, keep_preview=False):
-    """Queue one accepted Import Plan for the given selection and hand over its progress page.
-
-    A per-trace command runs several times against one preview, so it keys each execution on the
-    selection it queues. Reusing the wizard's own key would return the first execution and apply
-    nothing. It also keeps the preview, which the operator returns to for the next trace.
-    """
-    from core.choices import JobNotificationChoices, JobStatusChoices
-    from core.models import Job
-
-    from .jobs import ImportJobRunner
-
-    if keep_preview:
-        # `ImportPlan.revision` never advances, so the plan's own content is what tells two apart.
-        idempotency_key = fingerprint_of({"plan": plan_data, "selection": sorted(selection)})
-    else:
-        idempotency_key = request.session.get("import_idempotency_key") or uuid.uuid4().hex
-        request.session["import_idempotency_key"] = idempotency_key
-    from .cable_disclosure import redact_deleted_cables
-
-    execution_plan_data = redact_deleted_cables(plan_data)
-    _clear_restored_import_job(request)
-    job = None
-    try:
-        # The profile row orders the check against every competing enqueue, so two cannot both pass it.
-        with locked_profile_policy(profile.pk):
-            # The second writer that can break the invariant: a queue while one is already retained.
-            assert_preview_may_move(request.session, request.user)
-            job = ImportJobRunner.enqueue(
-                name=ImportJobRunner.name,
-                user=request.user,
-                notifications=JobNotificationChoices.NOTIFICATION_NEVER,
-                job_timeout=3600,
-                profile_id=profile.pk,
-                source_document_id=document.pk,
-                accepted_plan=execution_plan_data,
-                selection=selection,
-                idempotency_key=idempotency_key,
-            )
-            job.data = {
-                "job_type": ImportJobRunner.job_type,
-                "phase": "queued",
-                "processed": 0,
-                "total": 0,
-                "filename": ctx_data.get("filename", ""),
-                "profile_id": profile.pk,
-                "profile_name": profile.name,
-                "source_document_id": document.pk,
-                "context_data": ctx_data,
-                # What makes this Job hold the preview, so the guard finds it without the session.
-                "keeps_preview": keep_preview,
-            }
-            job.save(update_fields=["data"])
-    except Exception:
-        # The queue push runs on commit, so a Job no worker will run must not hold the preview.
-        if job is not None:
-            Job.objects.filter(pk=job.pk, status=JobStatusChoices.STATUS_PENDING).update(
-                status=JobStatusChoices.STATUS_ERRORED
-            )
-        raise
-
-    request.session["import_background_job_id"] = job.pk
-    if keep_preview:
-        # The write just made the reviewed plan stale, so the next command has to re-read first.
-        mark_preview_dirty(request.session)
-    else:
-        request.session["import_preview_pending"] = False
-        request.session.pop("import_preview_source_job_id", None)
-    return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}))
-
-
-class _PermissionScopedWriteMixin:
-    """Mark preview writers and render the refusals their policy writes raise in one place."""
+class _PreviewCommandMixin:
+    """Render the refusals a preview command raises, the same way for every command view."""
 
     def dispatch(self, request, *args, **kwargs):
         try:
             return super().dispatch(request, *args, **kwargs)
+        except (StalePreview, ProfilePolicyMoved) as exc:
+            return _stale_response(request, exc, self.refusal_url(request), json=self._answers_json(request))
+        except PreviewCommandRefused as exc:
+            return self._refusal(request, exc.operator_message, exc.status)
+        except StaleSourceDocument as exc:
+            return self._refusal(request, exc.operator_message, 409, reverse("plugins:netbox_data_import:import_setup"))
+        except PlanningTargetUnavailable:
+            return self._refusal(request, TARGET_GONE, 409, reverse("plugins:netbox_data_import:import_setup"))
         except ObjectPermissionDenied as exc:
             # The permission names an object the caller may not be allowed to know exists.
             logger.warning("%s: write refused outside the caller's object scope: %s", type(self).__name__, exc)
@@ -1639,78 +1536,125 @@ class _PermissionScopedWriteMixin:
                 403,
             )
         except ImportProfile.DoesNotExist:
-            # Every policy write locks its profile, which can be deleted after the view looked it up.
+            # Every policy write locks its profile, which can be deleted after the page was rendered.
             return self._refusal(request, "The import profile is no longer available.", 404)
+        except IntegrityError:
+            return self._refusal(request, CONCURRENT_WRITE, 409)
+        except ValidationError as exc:
+            # A model refused a value the command derived from the plan, so the command wrote nothing.
+            return self._refusal(request, "; ".join(exc.messages), 400)
 
-    def _refusal(self, request, error, status):
-        """Render one refused write the way this caller asked for its answer."""
-        if getattr(self, "permission_denied_response_format", "redirect") == "json" or _wants_json(request):
+    def _answers_json(self, request) -> bool:
+        return getattr(self, "permission_denied_response_format", "redirect") == "json" or _wants_json(request)
+
+    def _refusal(self, request, error, status, url=None):
+        """Render one refused command the way this caller asked for its answer."""
+        if self._answers_json(request):
             return JsonResponse({"ok": False, "error": error}, status=status)
         messages.error(request, error)
-        return redirect(self.refusal_url(request))
+        return _navigation_response(request, url or self.refusal_url(request))
 
     def refusal_url(self, request):
-        """Return the page a refused form write goes back to."""
+        """Return the page a refused form command goes back to."""
         return _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
 
-class ImportRunView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+def _stale_json(exc):
+    """Refuse a stale preview read or command in the JSON envelope every preview script reads."""
+    return JsonResponse({"ok": False, "error": exc.operator_message, "code": "preview_stale"}, status=409)
+
+
+def _stale_response(request, exc, url, *, json=False):
+    """Refuse a command made against a preview that is not the active one, with HTTP 409 in every format."""
+    message = exc.operator_message
+    if json or _wants_json(request):
+        return _stale_json(exc)
+    if request.headers.get("HX-Request") == "true":
+        # htmx follows this header before it decides whether a 409 swaps, so the page reloads and says why.
+        messages.error(request, message)
+        response = HttpResponse(status=409)
+        response["HX-Redirect"] = url
+        return response
+    return render(
+        request,
+        "netbox_data_import/preview_notice.html",
+        {"title": "This preview changed", "message": message, "next_url": url},
+        status=409,
+    )
+
+
+class FinalImport(QueueImport):
+    """Queue every actionable unit of the reviewed plan, which submits the preview."""
+
+    def selection_for(self, preview):
+        """Refuse a plan with errors or with nothing to apply; otherwise select every actionable unit."""
+        if preview.workspace.has_errors:
+            raise PreviewCommandRefused("Resolve every preview error before importing.")
+        selection = [unit.identity for unit in preview.plan.units if unit.disposition == Disposition.ACTIONABLE]
+        if not selection:
+            raise PreviewCommandRefused("The accepted Import Plan has no changes to apply.")
+        return selection
+
+
+class ImportRunView(_PreviewCommandMixin, PermissionRequiredMixin, View):
     """Step 3: queue the accepted Import Plan."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Queue the accepted plan and redirect to its progress page."""
-        ctx_data = request.session.get("import_context")
-        plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY)
-        if not isinstance(ctx_data, dict) or not isinstance(plan_data, dict):
-            messages.warning(request, "No import in progress.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        if request.session.get("import_preview_pending") is not True:
-            if job_pk := request.session.get("import_background_job_id"):
-                return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job_pk}))
-            messages.warning(request, "No import in progress.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
-            messages.warning(request, "Recalculate and review the saved preview changes before importing.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), FinalImport())
+        return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": result.outcome.job_id}))
 
-        profile = get_object_or_404(
-            ImportProfile.objects.restrict(request.user, "change"),
-            pk=ctx_data["profile_id"],
-        )
-        try:
-            validate_registered_adapter(profile)
-        except ValidationError as exc:
-            _discard_import_preview(request)
-            messages.error(request, "; ".join(exc.messages))
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-        document = SourceDocument.objects.filter(pk=ctx_data.get("source_document_id"), profile=profile).first()
-        if document is None:
-            _discard_import_preview(request)
-            messages.error(request, "The stored source is no longer available. Upload it again.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        try:
-            accepted = ImportPlan.from_dict(plan_data)
-        except PlanError:
-            logger.warning("ImportRunView: the stored Import Plan is unreadable.", exc_info=True)
-            _discard_import_preview(request)
-            messages.error(request, UNREADABLE_PREVIEW_ENDED)
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        if ReviewWorkspace(accepted, request.user).has_errors:
-            messages.warning(request, "Resolve every preview error before importing.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        selection = [unit.identity for unit in accepted.units if unit.disposition == "actionable"]
-        if not selection:
-            messages.info(request, "The accepted Import Plan has no changes to apply.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+class PreviewRereadView(_PreviewCommandMixin, PermissionRequiredMixin, View):
+    """Re-read the preview from its stored source against live NetBox, which also recovers a plan of an older schema."""
 
-        try:
-            return _queue_accepted_plan(request, profile, document, ctx_data, plan_data, selection)
-        except PreviewLocked as exc:
-            messages.warning(request, str(exc))
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Replan the preview and go back to the page that asked."""
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), RereadPreview())
+        messages.success(request, result.outcome.message)
+        return redirect(self.refusal_url(request))
+
+    def refusal_url(self, request):
+        """Return the posted page, so a re-read keeps the trace and the view the operator was on."""
+        return _safe_next_url(request, "plugins:netbox_data_import:import_preview")
+
+
+class PreviewDiscardView(_PreviewCommandMixin, PermissionRequiredMixin, View):
+    """Discard the session's preview."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """End the preview and go back to setup."""
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), DiscardPreview())
+        messages.success(request, result.outcome.message)
+        return redirect(reverse("plugins:netbox_data_import:import_setup"))
+
+    def refusal_url(self, request):
+        """Return the setup page, which shows whatever preview is active now."""
+        return reverse("plugins:netbox_data_import:import_setup")
+
+
+class ImportRestoreView(_PreviewCommandMixin, PermissionRequiredMixin, View):
+    """Return to the preview whose final import failed."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request, pk):
+        """Re-read the failed import's preview and open it."""
+        get_object_or_404(_user_import_jobs(request), pk=pk)
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), RestorePreview(pk))
+        messages.success(request, result.outcome.message)
+        profile = ImportProfile.objects.filter(pk=result.profile_id).first()
+        return redirect(_review_workspace_url(profile) if profile is not None else self.refusal_url(request))
+
+    def refusal_url(self, request):
+        """Return the progress page the command came from."""
+        return reverse("plugins:netbox_data_import:import_progress", kwargs=request.resolver_match.kwargs)
 
 
 class ImportProgressView(PermissionRequiredMixin, View):
@@ -1721,20 +1665,7 @@ class ImportProgressView(PermissionRequiredMixin, View):
     def get(self, request, pk):
         """Render the full progress page."""
         job = get_object_or_404(_user_import_jobs(request), pk=pk)
-        preview_was_pending = (
-            request.session.get("import_preview_pending") is True
-            and request.session.get("import_preview_source_job_id") != job.pk
-        )
-        _restore_import_session(request, job)
-        return render(
-            request,
-            "netbox_data_import/import_progress.html",
-            _import_job_progress(
-                job,
-                preview_blocked=preview_was_pending,
-                source_rows_available=_import_source_rows_available(request, job),
-            ),
-        )
+        return render(request, "netbox_data_import/import_progress.html", _import_job_progress(request, job))
 
 
 class ImportProgressStatusView(PermissionRequiredMixin, View):
@@ -1745,55 +1676,28 @@ class ImportProgressStatusView(PermissionRequiredMixin, View):
     def get(self, request, pk):
         """Return the current Job state."""
         job = get_object_or_404(_user_import_jobs(request), pk=pk)
-        preview_was_pending = (
-            request.session.get("import_preview_pending") is True
-            and request.session.get("import_preview_source_job_id") != job.pk
-        )
-        data = _restore_import_session(request, job)
-        if job.status == "completed" and data.get("import_execution_id"):
+        progress = _import_job_progress(request, job)
+        if progress["is_completed"] and progress["results_url"]:
             response = HttpResponse(status=204)
-            response["HX-Redirect"] = reverse("plugins:netbox_data_import:import_results")
+            response["HX-Redirect"] = progress["results_url"]
             return response
-        return render(
-            request,
-            "netbox_data_import/_import_progress.html",
-            _import_job_progress(
-                job,
-                preview_blocked=preview_was_pending,
-                source_rows_available=_import_source_rows_available(request, job),
-            ),
-        )
+        return render(request, "netbox_data_import/_import_progress.html", progress)
 
 
 class ImportResultsView(PermissionRequiredMixin, View):
-    """Step 4: show the Import Execution audit outcome."""
+    """Step 4: show one Import Execution audit outcome."""
 
     permission_required = "netbox_data_import.view_importexecution"
 
-    def get(self, request):
-        """Render the results page for the most recent Import Execution."""
-        restored_execution_id = request.session.get("import_restored_execution_id")
-        execution_id = restored_execution_id or request.session.get("import_execution_id")
-        if not execution_id:
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-
+    def get(self, request, pk):
+        """Render the results page for one Import Execution this operator ran."""
         execution = (
             ImportExecution.objects.select_related("profile", "source_document")
-            .filter(
-                pk=execution_id,
-                actor=request.user,
-            )
+            .filter(pk=pk, actor=request.user)
             .first()
         )
         if execution is None or not request.user.has_perm(self.permission_required, execution):
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        if restored_execution_id is None:
-            request.session.pop("import_background_job_id", None)
-            request.session["import_preview_pending"] = False
-            request.session.pop("import_preview_source_job_id", None)
-            for key in ("import_rows", "import_context", "import_unused_columns"):
-                request.session.pop(key, None)
-            clear_preview_state(request.session)
         return render(
             request,
             "netbox_data_import/import_results.html",
@@ -1850,119 +1754,38 @@ class ColumnTransformRuleDeleteView(_ProfileChildDeleteView):
 # ---------------------------------------------------------------------------
 
 
-class IgnoreDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
-    """Mark a specific device (by source_id) as ignored for a profile."""
-
-    permission_required = "netbox_data_import.change_importprofile"
-
-    def post(self, request):
-        """Add the specified device to the profile's ignore list."""
-        from .models import IgnoredDevice
-
-        profile_id = _parse_posted_profile_id(request)
-        source_id = request.POST.get("source_id")
-        device_name = request.POST.get("device_name", "")
-        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
-
-        if profile_id is None:
-            messages.error(request, "A valid import profile is required.")
-        elif source_id:
-            profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
-            ignored = _get_or_init(IgnoredDevice, profile=profile, source_id=source_id)
-            if ignored.pk is None:
-                ignored.device_name = device_name
-                try:
-                    _validate_model_instance(ignored, f"ignored device '{source_id}'")
-                except PreviewActionInvalid as exc:
-                    messages.error(request, str(exc))
-                    return redirect(next_url)
-            save_permission_scoped_object(
-                request.user,
-                IgnoredDevice,
-                {"profile": profile, "source_id": source_id},
-                {"device_name": device_name},
-                on_existing="keep",
-            )
-            messages.success(request, f"Device '{device_name or source_id}' added to ignore list.")
-        return redirect(next_url)
-
-
-class UnignoreDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
-    """Remove a device from the ignore list."""
-
-    permission_required = "netbox_data_import.change_importprofile"
-
-    def post(self, request):
-        """Remove the specified device from the profile's ignore list."""
-        from .models import IgnoredDevice
-
-        profile_id = _parse_posted_profile_id(request)
-        source_id = request.POST.get("source_id")
-        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
-
-        if profile_id is None:
-            messages.error(request, "A valid import profile is required.")
-        elif source_id:
-            profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
-            # Serialize against an executing import, which holds the same profile row.
-            with locked_profile_policy(profile.pk):
-                count = delete_permission_scoped_objects(
-                    request.user,
-                    IgnoredDevice.objects.filter(profile=profile, source_id=source_id),
-                )
-            if count:
-                messages.success(request, "Device removed from ignore list.")
-            else:
-                messages.warning(request, "Device was not on the ignore list (may be ignored by class mapping).")
-        return redirect(next_url)
-
-
 def _wants_json(request) -> bool:
     """Return whether one preview action expects a JSON response."""
     return "application/json" in request.headers.get("Accept", "")
 
 
-def _session_holds_a_preview(request) -> bool:
-    """Answer whether this save belongs to a preview at all, rather than standing alone."""
-    return bool(request.session.get("import_rows") or request.session.get("import_context"))
+def _command_response(request, result, next_url, *, row_number=None, detail="", **extra):
+    """Report one committed preview command: JSON for a script, a message and a redirect for a form.
 
-
-def _preview_is_active(request) -> bool:
-    """Answer whether a preview is still on screen and able to receive a decision."""
-    return request.session.get("import_preview_pending") is True
-
-
-def _preview_accepts_decisions(request) -> bool:
-    """Answer whether the posted decision belongs to the preview that is still active."""
-    return _preview_is_active(request) and request.POST.get("preview_revision") == current_preview_revision(
-        request.session
-    )
-
-
-def _preview_action_error(request, next_url, message, *, status=409):
-    """Return one preview-action error through JSON or the form fallback."""
+    The coordinator replanned and advanced the revision, so the page loads again to show both.
+    """
+    message = result.outcome.message
+    # The page loads again after every command, so the message waits for that load in both formats.
+    messages.success(request, f"{message} {detail}" if detail and detail not in message else message)
     if _wants_json(request):
-        # A JSON caller renders the reason itself, so a queued message would surface later
-        # on an unrelated page.
-        return JsonResponse({"ok": False, "error": message}, status=status)
-    messages.error(request, message)
+        return JsonResponse(
+            {
+                "ok": True,
+                "row_number": row_number,
+                "preview_state": "replanned",
+                "message": message,
+                "detail": detail,
+                **extra,
+            }
+        )
     return redirect(next_url)
 
 
-def _saved_preview_action_response(request, next_url, message):
-    """Report a saved preview decision without rebuilding its materialized plan."""
-    mark_preview_dirty(request.session)
-    if _wants_json(request):
-        return JsonResponse(pending_preview_payload(None, message))
-    messages.success(request, message)
-    return redirect(next_url)
+def _resolved_import_target(planning_context, user):
+    """Return the engine context the preview names, or None once that target went stale.
 
-
-def _resolved_import_target(ctx_data, user):
-    """Return the engine context the saved import names, or None once that target went stale.
-
-    The session outlives a permission change, so each request re-reads the target in the operator's
-    own scope: a revoked ObjectPermission has to make the target unavailable, not merely unlisted.
+    A preview outlives a permission change, so each command re-reads the target in the operator's own
+    scope: a revoked ObjectPermission has to make the target unavailable, not merely unlisted.
     """
     from dcim.models import Location, Site
     from tenancy.models import Tenant
@@ -1970,144 +1793,134 @@ def _resolved_import_target(ctx_data, user):
     sites = Site.objects.restrict(user, "view")
     locations = Location.objects.restrict(user, "view")
     tenants = Tenant.objects.restrict(user, "view")
-    site = sites.filter(pk=ctx_data.get("site_id")).first()
-    location = locations.filter(pk=ctx_data.get("location_id")).first() if ctx_data.get("location_id") else None
-    tenant = tenants.filter(pk=ctx_data.get("tenant_id")).first() if ctx_data.get("tenant_id") else None
+    site = sites.filter(pk=planning_context.get("site_id")).first()
+    location_id, tenant_id = planning_context.get("location_id"), planning_context.get("tenant_id")
+    location = locations.filter(pk=location_id).first() if location_id else None
+    tenant = tenants.filter(pk=tenant_id).first() if tenant_id else None
     if (
         site is None
-        or (ctx_data.get("location_id") and (location is None or location.site_id != site.pk))
-        or (ctx_data.get("tenant_id") and tenant is None)
+        or (location_id and (location is None or location.site_id != site.pk))
+        or (tenant_id and tenant is None)
     ):
         return None
     return {"site": site, "location": location, "tenant": tenant}
 
 
-def _stale_preview_reason(request):
-    """Return why the preview can no longer take a decision, or None."""
-    if not _session_holds_a_preview(request):
-        return None
-    if not _preview_is_active(request):
-        return "The import already started, so this preview can no longer take a decision."
-    # A second tab can recalculate between opening the modal and saving it.
-    if not _preview_accepts_decisions(request):
-        return "This preview is no longer the current one. Reload the preview and choose again."
-    return None
+def _source_row(workspace, source_id) -> dict:
+    """Return the one row of the active preview that carries this source ID, or refuse the command."""
+    rows = [row for row in workspace.source_rows if source_text(row.get("source_id")) == source_id]
+    if not source_id or len(rows) != 1:
+        raise PreviewCommandRefused("The source ID must identify exactly one row in the active import.")
+    return rows[0]
 
 
-class _PreviewRowDecision(NamedTuple):
-    """The request state a preview row decision has to establish before it may write."""
+def _posted_row_number(request) -> int:
+    """Return the posted source row number, or refuse the command."""
+    try:
+        return int(request.POST.get("row_number", ""))
+    except (TypeError, ValueError):
+        raise PreviewCommandRefused("A valid source row is required.") from None
 
-    profile: object
-    ctx_data: dict
-    rows: list
-    row_number: int
+
+@dataclass(frozen=True)
+class _IgnoreDevice(PreviewCommand):
+    """Add one source row of the preview to the profile's ignore list."""
+
     source_id: str
-    source_row: dict
-    next_url: str
+    device_name: str
+
+    def apply(self, preview):
+        """Store the ignore row, keeping one that already exists."""
+        from .models import IgnoredDevice
+
+        _source_row(preview.workspace, self.source_id)
+        ignored = _get_or_init(IgnoredDevice, profile=preview.profile, source_id=self.source_id)
+        if ignored.pk is None:
+            ignored.device_name = self.device_name
+            _validate_model_instance(ignored, f"ignored device '{self.source_id}'")
+        save_permission_scoped_object(
+            preview.actor,
+            IgnoredDevice,
+            {"profile": preview.profile, "source_id": self.source_id},
+            {"device_name": self.device_name},
+            on_existing="keep",
+        )
+        return CommandOutcome(message=f"Device '{self.device_name or self.source_id}' added to ignore list.")
 
 
-def _preview_row_decision(request):
-    """Return the validated state for a preview row decision, or the response that refuses it.
+@dataclass(frozen=True)
+class _UnignoreDevice(PreviewCommand):
+    """Remove one source row of the preview from the profile's ignore list."""
 
-    Both decisions guard the same preview, so they read these preconditions from here: two copies
-    drift, and a gate that is missing on one of them is a write the operator never authorized.
-    """
-    ctx_data = request.session.get("import_context") or {}
-    rows = request.session.get("import_rows") or []
-    next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
-    profile_id = _parse_posted_profile_id(request)
-    if profile_id is None:
-        messages.error(request, "A valid import profile is required.")
-        return None, _name_resolution_response(request, next_url)
-    if str(ctx_data.get("profile_id")) != str(profile_id):
-        messages.error(request, "The selected profile is not the active import profile.")
-        return None, _name_resolution_response(request, next_url)
+    source_id: str
 
-    profile = get_object_or_404(
-        ImportProfile.objects.restrict(request.user, "change"),
-        pk=profile_id,
-    )
-    stale_reason = _stale_preview_reason(request)
-    if stale_reason is not None:
-        # An inline render would replace the preview that the queued import has frozen.
-        messages.error(request, stale_reason)
-        return None, _navigation_response(request, next_url)
-    try:
-        row_number = int(request.POST.get("row_number", ""))
-    except (TypeError, ValueError):
-        messages.error(request, "A valid source row is required.")
-        return None, _name_resolution_response(request, next_url)
+    def apply(self, preview):
+        """Delete the ignore row, refusing when there is none to delete."""
+        from .models import IgnoredDevice
 
-    source_id = source_text(request.POST.get("source_id"))
-    source_rows = [
-        row for row in rows if row.get("_row_number") == row_number and source_text(row.get("source_id")) == source_id
+        _source_row(preview.workspace, self.source_id)
+        rows = IgnoredDevice.objects.filter(profile=preview.profile, source_id=self.source_id)
+        if not delete_permission_scoped_objects(preview.actor, rows):
+            raise PreviewCommandRefused("Device was not on the ignore list (may be ignored by class mapping).")
+        return CommandOutcome(message="Device removed from ignore list.")
+
+
+class IgnoreDeviceView(_PreviewCommandMixin, PermissionRequiredMixin, View):
+    """Mark a specific device (by source_id) as ignored for a profile."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Add the specified device to the profile's ignore list."""
+        command = _IgnoreDevice(
+            source_id=source_text(request.POST.get("source_id")), device_name=request.POST.get("device_name", "")
+        )
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, self.refusal_url(request))
+
+
+class UnignoreDeviceView(_PreviewCommandMixin, PermissionRequiredMixin, View):
+    """Remove a device from the ignore list."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Remove the specified device from the profile's ignore list."""
+        command = _UnignoreDevice(source_id=source_text(request.POST.get("source_id")))
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, self.refusal_url(request))
+
+
+def _row_decision_source(workspace, row_number, source_id) -> dict:
+    """Return the source row a row decision names, refusing one the active preview does not show."""
+    rows = [
+        row
+        for row in workspace.source_rows
+        if row.get("_row_number") == row_number and source_text(row.get("source_id")) == source_id
     ]
-    if not source_id or len(source_rows) != 1:
-        messages.error(request, "The source ID and row must identify one active import row.")
-        return None, _name_resolution_response(request, next_url)
-
-    return _PreviewRowDecision(profile, ctx_data, rows, row_number, source_id, source_rows[0], next_url), None
+    if not source_id or len(rows) != 1:
+        raise PreviewCommandRefused("The source ID and row must identify one active import row.")
+    return rows[0]
 
 
-def _field_review_row(request):
-    """Return the current row and target field for a review POST."""
-    preview = load_cached_preview(request)
-    if preview is None:
-        return None
-    profile, result = preview
-    try:
-        row_number = int(request.POST.get("row_number", ""))
-    except (TypeError, ValueError):
-        return None
-    target_field = request.POST.get("target_field", "").strip()
-    row = next(
+def _device_unit(workspace, row_number):
+    """Return the Device unit the preview shows on one row, for a field or placement command."""
+    return next(
         (
             item
-            for item in result.units
+            for item in workspace.units
             if item.row_number == row_number and item.object_type == "device" and item.action in {"update", "error"}
         ),
         None,
     )
-    if row is None or DeviceFieldReviewer.definition(target_field) is None:
-        return None
-    if not source_text(row.source_id):
-        return None
-    return profile, result, row, target_field
 
 
-def _preview_device_action(request):
-    """Return the cached row and permitted Device for one preview action."""
-    preview = load_cached_preview(request)
-    if preview is None:
-        return None
-    _profile, result = preview
-    try:
-        row_number = int(request.POST.get("row_number", ""))
-    except (TypeError, ValueError):
-        return None
-    row = next(
-        (
-            item
-            for item in result.units
-            if item.row_number == row_number and item.object_type == "device" and item.action in {"update", "error"}
-        ),
-        None,
-    )
-    device_id = row.extra_data.get("netbox_device_id") if row is not None else None
-    if not device_id:
-        return None
-
-    from dcim.models import Device
-
-    device = (
-        Device.objects.restrict(request.user, "change")
-        .select_related("device_type__manufacturer", "rack__location", "role", "tenant", "location")
-        .filter(pk=device_id)
-        .first()
-    )
-    if device is None:
-        return None
-    return row, device
+def _field_review_row(workspace, row_number, target_field):
+    """Return the row a field-review command names, or refuse one the preview no longer shows."""
+    row = _device_unit(workspace, row_number)
+    if row is None or DeviceFieldReviewer.definition(target_field) is None or not source_text(row.source_id):
+        raise StalePreview("The selected field difference is no longer current. Re-read the preview and try again.")
+    return row
 
 
 def _offered_difference(row, target_field) -> bool:
@@ -2121,31 +1934,14 @@ def _offered_difference(row, target_field) -> bool:
     )
 
 
-def _preview_field_intent(request, target_field):
-    """Return one authoritative field value after checking its NetBox baseline."""
-    action = _preview_device_action(request)
-    if action is None:
-        return None, "The active preview row is no longer available."
-    row, device = action
-    if target_field not in row.extra_data.get("field_diff", {}):
-        return None, "The selected field difference is no longer present."
-    snapshots = row.extra_data.get("field_review_snapshots", {}).get(target_field)
-    if not isinstance(snapshots, dict):
-        return None, "The selected field has no authoritative preview value."
-    error = _field_baseline_error(row, device, target_field)
-    if error:
-        return None, error
-    return (row, device, snapshots.get("file", {}).get("canonical", "")), None
-
-
 def _field_baseline_error(row, device, target_field) -> str | None:
     """Return why *device* no longer holds the preview baseline of one field, or None when it does."""
     snapshots = row.extra_data["field_review_snapshots"][target_field]
     current = DeviceFieldReviewer.current_snapshot(device, target_field)
     if current is None or current.get("canonical") != snapshots.get("netbox", {}).get("canonical"):
-        return "The matched NetBox value changed. Recalculate the preview and try again."
+        return "The matched NetBox value changed. Re-read the preview and try again."
     if target_field in {"u_position", "face"} and not _placement_matches_preview(device, row):
-        return "The matched NetBox placement changed. Recalculate the preview and try again."
+        return "The matched NetBox placement changed. Re-read the preview and try again."
     return None
 
 
@@ -2163,13 +1959,13 @@ def _placement_matches_preview(device, row) -> bool:
     )
 
 
-def _locked_device_for_update(request, device_pk):
+def _locked_device_for_update(actor, device_pk):
     """Return the Device row locked and snapshotted for update, or None when it is gone or not permitted."""
     from dcim.models import Device
 
     # PostgreSQL refuses FOR UPDATE on a nullable outer join, so `of` locks the Device row alone.
     device = (
-        Device.objects.restrict(request.user, "change")
+        Device.objects.restrict(actor, "change")
         .select_for_update(of=("self",))
         .select_related("site", "location", "rack", "device_type")
         .filter(pk=device_pk)
@@ -2180,245 +1976,130 @@ def _locked_device_for_update(request, device_pk):
     return device
 
 
-def _placement_action_intent(request):
-    """Return authoritative placement inputs for preview and direct actions."""
-    from dcim.models import Device
-
-    if request.POST.get("row_number"):
-        action = _preview_device_action(request)
-        if action is None:
-            return None, "The active preview row is no longer available.", 409
-        row, device = action
-        if not _placement_matches_preview(device, row):
-            return (
-                None,
-                "The matched NetBox placement changed. Recalculate the preview and try again.",
-                409,
-            )
-        return (
-            {
-                "row": row,
-                "device": device,
-                "rack_name": row.rack_name,
-                "u_position": row.extra_data.get("u_position", ""),
-                "face": row.extra_data.get("face", ""),
-            },
-            None,
-            None,
-        )
-
-    try:
-        device = (
-            Device.objects.restrict(request.user, "change")
-            .select_related("site", "location", "rack", "device_type")
-            .get(pk=request.POST.get("device_id"))
-        )
-    except (Device.DoesNotExist, ValueError, TypeError):
-        return None, "Device not found", 200
-    return (
-        {
-            "row": None,
-            "device": device,
-            "rack_name": request.POST.get("rack_name", ""),
-            "u_position": request.POST.get("u_position", ""),
-            "face": request.POST.get("face", ""),
-        },
-        None,
-        None,
+def _field_review_binding(actor, profile, row, device) -> None:
+    """Persist the confirmed source-to-device identity a field review rests on, or refuse."""
+    allowed, error = _ensure_field_review_device_match(
+        actor, profile, row.source_id, device, source_text(row.extra_data.get("asset_tag"))[:50]
     )
+    if not allowed:
+        raise PreviewCommandRefused(
+            "Permission denied: cannot persist the source-to-device field-review match."
+            if error == "permission"
+            else "The source row or device is already linked elsewhere.",
+            409,
+        )
 
 
-class IgnoreFieldDifferenceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+@dataclass(frozen=True)
+class _IgnoreFieldDifference(PreviewCommand):
+    """Ignore one exact current field difference of one matched Device."""
+
+    row_number: int
+    target_field: str
+
+    def apply(self, preview):
+        """Save the current snapshots of the difference the preview showed."""
+        from dcim.models import Device
+
+        row = _field_review_row(preview.workspace, self.row_number, self.target_field)
+        if not _offered_difference(row, self.target_field):
+            raise StalePreview("The selected field difference is no longer present. Re-read the preview.")
+        snapshots = row.extra_data.get("field_review_snapshots", {}).get(self.target_field)
+        device_id = row.extra_data.get("netbox_device_id")
+        if not isinstance(snapshots, dict) or not device_id:
+            raise PreviewCommandRefused("The selected field difference has no current matched device.", 409)
+        device = Device.objects.restrict(preview.actor, "view").filter(pk=device_id).first()
+        if device is None:
+            raise PreviewCommandRefused("The matched NetBox device is no longer available.", 409)
+        current = DeviceFieldReviewer.current_snapshot(device, self.target_field)
+        if current is None or current.get("canonical") != snapshots.get("netbox", {}).get("canonical"):
+            raise PreviewCommandRefused("The matched NetBox value changed. Re-read the preview and try again.", 409)
+        _field_review_binding(preview.actor, preview.profile, row, device)
+        try:
+            save_permission_scoped_object(
+                preview.actor,
+                IgnoredFieldDifference,
+                {
+                    "profile": preview.profile,
+                    "source_id": row.source_id,
+                    "netbox_device_id": device.pk,
+                    "target_field": self.target_field,
+                },
+                {"file_snapshot": snapshots.get("file", {}), "netbox_snapshot": snapshots.get("netbox", {})},
+            )
+        except ObjectPermissionDenied as exc:
+            raise PreviewCommandRefused("Permission denied: cannot create or change this field review.", 409) from exc
+        except ValidationError as exc:
+            raise PreviewCommandRefused("; ".join(exc.messages)) from exc
+        return CommandOutcome(message=f"Ignored the current {self.target_field} difference.")
+
+
+@dataclass(frozen=True)
+class _UnignoreFieldDifference(PreviewCommand):
+    """Remove one exact current field-difference review of one matched Device."""
+
+    row_number: int
+    target_field: str
+
+    def apply(self, preview):
+        """Delete only the review the preview showed."""
+        from dcim.models import Device
+
+        row = _field_review_row(preview.workspace, self.row_number, self.target_field)
+        if self.target_field not in row.extra_data.get("field_ignored", {}):
+            raise StalePreview("The selected field review is no longer current. Re-read the preview.")
+        device = (
+            Device.objects.restrict(preview.actor, "view").filter(pk=row.extra_data.get("netbox_device_id")).first()
+        )
+        if device is None:
+            raise PreviewCommandRefused("The matched NetBox device is no longer available.", 409)
+        record = (
+            IgnoredFieldDifference.objects.select_for_update()
+            .filter(
+                profile=preview.profile,
+                source_id=row.source_id,
+                netbox_device_id=device.pk,
+                target_field=self.target_field,
+            )
+            .first()
+        )
+        if record is None:
+            raise StalePreview("The selected field review is no longer current. Re-read the preview.")
+        if not preview.actor.has_perm("netbox_data_import.delete_ignoredfielddifference", record):
+            raise PreviewCommandRefused("Permission denied: cannot remove this field review.", 409)
+        _field_review_binding(preview.actor, preview.profile, row, device)
+        record.delete()
+        return CommandOutcome(message=f"Showing the {self.target_field} difference again.")
+
+
+class IgnoreFieldDifferenceView(_PreviewCommandMixin, PermissionRequiredMixin, View):
     """Ignore one exact current field difference for a matched Device."""
 
     permission_required = "netbox_data_import.add_ignoredfielddifference"
 
     def post(self, request):
-        """Save current snapshots from a fresh active preview."""
-        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
-        review = _field_review_row(request)
-        if review is None:
-            return _preview_action_error(
-                request,
-                next_url,
-                "The selected field difference is no longer current. Recalculate the preview and try again.",
-            )
-        profile, _result, row, target_field = review
-        if not _offered_difference(row, target_field):
-            return _preview_action_error(
-                request,
-                next_url,
-                "The selected field difference is no longer present. Refresh the preview.",
-            )
-        snapshots = row.extra_data.get("field_review_snapshots", {}).get(target_field)
-        device_id = row.extra_data.get("netbox_device_id")
-        if not isinstance(snapshots, dict) or not device_id:
-            return _preview_action_error(
-                request,
-                next_url,
-                "The selected field difference has no current matched device.",
-            )
-
-        from dcim.models import Device
-
-        device = Device.objects.restrict(request.user, "view").filter(pk=device_id).first()
-        if device is None:
-            return _preview_action_error(request, next_url, "The matched NetBox device is no longer available.")
-        current_snapshot = DeviceFieldReviewer.current_snapshot(device, target_field)
-        if current_snapshot is None or current_snapshot.get("canonical") != snapshots.get("netbox", {}).get(
-            "canonical"
-        ):
-            return _preview_action_error(
-                request,
-                next_url,
-                "The matched NetBox value changed. Recalculate the preview and try again.",
-            )
-        lookup = {
-            "profile": profile,
-            "source_id": row.source_id,
-            "netbox_device_id": device.pk,
-            "target_field": target_field,
-        }
-        defaults = {
-            "file_snapshot": snapshots.get("file", {}),
-            "netbox_snapshot": snapshots.get("netbox", {}),
-        }
-        try:
-            with transaction.atomic():
-                binding_allowed, binding_error = _ensure_field_review_device_match(
-                    request.user,
-                    profile,
-                    row.source_id,
-                    device,
-                    source_text(row.extra_data.get("asset_tag"))[:50],
-                )
-                if not binding_allowed:
-                    message = (
-                        "Permission denied: cannot persist the source-to-device field-review match."
-                        if binding_error == "permission"
-                        else "The source row or device is already linked elsewhere."
-                    )
-                    # atomic-exit-safe: binding-refused-before-write
-                    return _preview_action_error(request, next_url, message)
-                # A denial raises, so the binding written above unwinds with the block.
-                save_permission_scoped_object(
-                    request.user,
-                    IgnoredFieldDifference,
-                    lookup,
-                    defaults,
-                )
-        except ObjectPermissionDenied:
-            return _preview_action_error(
-                request,
-                next_url,
-                "Permission denied: cannot create or change this field review.",
-            )
-        except ValidationError as exc:
-            return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
-        except IntegrityError:
-            return _preview_action_error(
-                request,
-                next_url,
-                "The field review or device link changed while this request was being processed. Try again.",
-            )
-        messages.success(request, f"Ignored the current {target_field} difference.")
-        mark_preview_dirty(request.session)
-        if _wants_json(request):
-            return JsonResponse(
-                pending_preview_payload(
-                    row.row_number,
-                    f"Ignored the current {target_field} difference.",
-                )
-            )
-        return redirect(next_url)
+        """Save current snapshots from the active preview."""
+        row_number = _posted_row_number(request)
+        command = _IgnoreFieldDifference(
+            row_number=row_number, target_field=request.POST.get("target_field", "").strip()
+        )
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, self.refusal_url(request), row_number=row_number)
 
 
-class UnignoreFieldDifferenceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+class UnignoreFieldDifferenceView(_PreviewCommandMixin, PermissionRequiredMixin, View):
     """Remove one exact current field-difference review for a matched Device."""
 
     permission_required = "netbox_data_import.delete_ignoredfielddifference"
 
     def post(self, request):
-        """Delete only the review represented by the fresh active preview."""
-        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
-        review = _field_review_row(request)
-        if review is None:
-            return _preview_action_error(
-                request,
-                next_url,
-                "The selected field review is no longer current. Recalculate the preview and try again.",
-            )
-        profile, _result, row, target_field = review
-        if target_field not in row.extra_data.get("field_ignored", {}):
-            return _preview_action_error(
-                request,
-                next_url,
-                "The selected field review is no longer current. Refresh the preview.",
-            )
-        device_id = row.extra_data.get("netbox_device_id")
-        from dcim.models import Device
-
-        device = Device.objects.restrict(request.user, "view").filter(pk=device_id).first()
-        if device is None:
-            return _preview_action_error(request, next_url, "The matched NetBox device is no longer available.")
-        try:
-            with transaction.atomic():
-                record = (
-                    IgnoredFieldDifference.objects.select_for_update()
-                    .filter(
-                        profile=profile,
-                        source_id=row.source_id,
-                        netbox_device_id=device.pk,
-                        target_field=target_field,
-                    )
-                    .first()
-                )
-                if record is None:
-                    # atomic-exit-safe: record-absent-before-write
-                    return _preview_action_error(
-                        request,
-                        next_url,
-                        "The selected field review is no longer current. Refresh the preview.",
-                    )
-                if not request.user.has_perm("netbox_data_import.delete_ignoredfielddifference", record):
-                    # atomic-exit-safe: delete-denied-before-write
-                    return _preview_action_error(
-                        request,
-                        next_url,
-                        "Permission denied: cannot remove this field review.",
-                    )
-                binding_allowed, binding_error = _ensure_field_review_device_match(
-                    request.user,
-                    profile,
-                    row.source_id,
-                    device,
-                    source_text(row.extra_data.get("asset_tag"))[:50],
-                )
-                if not binding_allowed:
-                    message = (
-                        "Permission denied: cannot persist the source-to-device field-review match."
-                        if binding_error == "permission"
-                        else "The source row or device is already linked elsewhere."
-                    )
-                    # atomic-exit-safe: binding-refused-before-delete
-                    return _preview_action_error(request, next_url, message)
-                record.delete()
-        except IntegrityError:
-            return _preview_action_error(
-                request,
-                next_url,
-                "The field review or device link changed while this request was being processed. Try again.",
-            )
-        messages.success(request, f"Showing the {target_field} difference again.")
-        mark_preview_dirty(request.session)
-        if _wants_json(request):
-            return JsonResponse(
-                pending_preview_payload(
-                    row.row_number,
-                    f"Showing the {target_field} difference again.",
-                )
-            )
-        return redirect(next_url)
+        """Delete only the review represented by the active preview."""
+        row_number = _posted_row_number(request)
+        command = _UnignoreFieldDifference(
+            row_number=row_number, target_field=request.POST.get("target_field", "").strip()
+        )
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, self.refusal_url(request), row_number=row_number)
 
 
 class RemoveExtraIpView(PermissionRequiredMixin, View):
@@ -2537,95 +2218,77 @@ class ContactSuggestionView(_AjaxPermissionView):
 
     def get(self, request):
         """Recompute one row's suggestion, so a Contact created on another row is offered here."""
-        from django.http import JsonResponse
-
         try:
-            profile_id = int(request.GET.get("profile_id", ""))
-        except (TypeError, ValueError):
-            profile_id = None
-        source_id = request.GET.get("source_id", "")
-        if profile_id is None or not source_id:
-            return JsonResponse({"error": "A valid import profile and source row are required."}, status=400)
-        profile = ImportProfile.objects.filter(pk=profile_id).first()
-        if profile is None:
-            return JsonResponse({"error": "A valid import profile is required."}, status=400)
+            snapshot = read_preview(request, expected=PreviewClaim.posted(request.GET), profile_action="view")
+        except StalePreview as exc:
+            return _stale_json(exc)
+        if not snapshot.active:
+            return _stale_json(StalePreview("No current import preview matches this request."))
+        # The open picker outlives an upgrade, so the stored profile can name a retired adapter.
+        if reason := _unregistered_adapter_reason(snapshot.profile):
+            return JsonResponse({"error": reason}, status=400)
         try:
-            # The open picker outlives an upgrade, so the stored profile can name a retired adapter.
-            validate_registered_adapter(profile)
-            candidates, _source_row, _result_row = _contact_candidate_context(request, profile.pk, source_id)
+            candidates, _source_row, _result_row = _contact_candidate_context(
+                snapshot.workspace(request.user), request.GET.get("source_id", "")
+            )
+        except PlanError:
+            return JsonResponse({"error": UNREADABLE_PREVIEW}, status=409)
         except ValidationError as exc:
             return JsonResponse({"error": "; ".join(exc.messages)}, status=400)
-        return JsonResponse({"suggestion": PrimaryContactResolver.suggest(candidates, profile, request.user)})
+        return JsonResponse({"suggestion": PrimaryContactResolver.suggest(candidates, snapshot.profile, request.user)})
 
 
-class SyncDeviceFieldView(_AjaxPermissionView):
+@dataclass(frozen=True)
+class _SyncDeviceField(PreviewCommand):
+    """Apply one previewed field value of one row to its matched Device."""
+
+    row_number: int
+    field: str
+
+    def apply(self, preview):
+        """Write the file value the preview showed onto the locked Device, after rechecking its baseline."""
+        row = _device_unit(preview.workspace, self.row_number)
+        device_id = row.extra_data.get("netbox_device_id") if row is not None else None
+        if not device_id:
+            raise StalePreview("The active preview row is no longer available.")
+        if self.field not in row.extra_data.get("field_diff", {}):
+            raise StalePreview("The selected field difference is no longer present.")
+        snapshots = row.extra_data.get("field_review_snapshots", {}).get(self.field)
+        if not isinstance(snapshots, dict):
+            raise PreviewCommandRefused("The selected field has no authoritative preview value.", 409)
+        device = _locked_device_for_update(preview.actor, device_id)
+        if device is None:
+            raise PreviewCommandRefused("Device not found", 409)
+        if error := _field_baseline_error(row, device, self.field):
+            raise PreviewCommandRefused(error, 409)
+        value = snapshots.get("file", {}).get("canonical", "")
+        try:
+            display = SyncDeviceFieldView._apply_field(device, self.field, value, status_map(), preview.actor)
+        except PreviewCommandRefused:
+            raise
+        except Exception as exc:
+            logger.exception("SyncDeviceFieldView failed for device_id=%s field=%s", device.pk, self.field)
+            raise PreviewCommandRefused("An internal error occurred.", 500) from exc
+        return CommandOutcome(message=f"Updated {self.field} to {display}.")
+
+
+class SyncDeviceFieldView(_PreviewCommandMixin, _AjaxPermissionView):
     """Apply a single field value from the import file to an existing NetBox device."""
 
     permission_required = "dcim.change_device"
 
     _IP_FIELDS = ("primary_ip4", "primary_ip6", "oob_ip")
-    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "serial", "asset_tag", "face", "airflow", *_IP_FIELDS}
+    _ALLOWED_FIELDS = {"u_position", "status", "serial", "asset_tag", "face", "airflow", *_IP_FIELDS}
 
     def post(self, request):
         """Apply one previewed field value to its matched Device."""
-        from dcim.models import Device
-        from django.http import JsonResponse
-
         field = request.POST.get("field", "")
-
         if not field or field not in self._ALLOWED_FIELDS:
-            return JsonResponse({"ok": False, "error": f"Field '{field}' is not syncable"})
-
-        is_preview_action = bool(request.POST.get("row_number"))
-        if is_preview_action:
-            intent, error = _preview_field_intent(request, field)
-            if error:
-                return JsonResponse({"ok": False, "error": error}, status=409)
-            row, device, value = intent
-        else:
-            device_id = request.POST.get("device_id")
-            value = request.POST.get("value", "")
-            try:
-                device = Device.objects.restrict(request.user, "change").select_related("device_type").get(pk=device_id)
-            except (Device.DoesNotExist, ValueError, TypeError):
-                return JsonResponse({"ok": False, "error": "Device not found"})
-
-        try:
-            try:
-                # Nothing wraps this request, and a receiver on the model can require a transaction.
-                with transaction.atomic():
-                    # The read above was unlocked, so the write and its snapshot use the locked row.
-                    locked = _locked_device_for_update(request, device.pk)
-                    if locked is None:
-                        # atomic-exit-safe: device-gone-before-write
-                        return JsonResponse({"ok": False, "error": "Device not found"}, status=409)
-                    if is_preview_action and (error := _field_baseline_error(row, locked, field)):
-                        # atomic-exit-safe: baseline-moved-before-write
-                        return JsonResponse({"ok": False, "error": error}, status=409)
-                    display = self._apply_field(locked, field, value, status_map(), request.user)
-            except Exception:
-                # The block rolled back, so NetBox must not send the events its writes queued.
-                clear_events.send(sender=self)
-                raise
-        except PreviewActionInvalid as exc:
-            return JsonResponse({"ok": False, "error": str(exc)})
-        except Exception:
-            logger.exception(
-                "SyncDeviceFieldView failed for device_id=%s field=%s",
-                device.pk,
-                field,
-            )
-            return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
-
-        if is_preview_action:
-            mark_preview_dirty(request.session)
-            return JsonResponse(
-                pending_preview_payload(
-                    row.row_number,
-                    f"Updated {field} to {display}.",
-                )
-            )
-        return JsonResponse({"ok": True, "display": display})
+            return JsonResponse({"ok": False, "error": f"Field '{field}' is not syncable"}, status=400)
+        row_number = _posted_row_number(request)
+        command = _SyncDeviceField(row_number=row_number, field=field)
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, self.refusal_url(request), row_number=row_number)
 
     @staticmethod
     def _writer_safe_text(device, label, model_field, value):
@@ -2633,48 +2296,36 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         text = str(value)
         limit = type(device)._meta.get_field(model_field).max_length
         if len(text) > limit:
-            raise PreviewActionInvalid(f"The {label} is {len(text)} characters; NetBox allows {limit}.")
+            raise PreviewCommandRefused(f"The {label} is {len(text)} characters; NetBox allows {limit}.")
         return text
 
-    def _apply_field(self, device, field, value, status_map, user):
+    @classmethod
+    def _apply_field(cls, device, field, value, status_map, user):
         """Write one previewed value onto the locked and snapshotted device, through that field's own writer."""
-        if field in self._IP_FIELDS:
-            return self._apply_ip_field(device, field, value, user)
+        if field in cls._IP_FIELDS:
+            return cls._apply_ip_field(device, field, value, user)
         writer = {
-            "airflow": lambda: self._apply_airflow(device, value),
-            "device_name": lambda: self._apply_device_name(device, value),
-            "u_position": lambda: self._apply_u_position(device, value),
-            "status": lambda: self._apply_status(device, value, status_map),
-            "serial": lambda: self._apply_serial(device, value),
-            "asset_tag": lambda: self._apply_asset_tag(device, value),
-            "face": lambda: self._apply_face(device, value),
+            "airflow": lambda: cls._apply_airflow(device, value),
+            "u_position": lambda: cls._apply_u_position(device, value),
+            "status": lambda: cls._apply_status(device, value, status_map),
+            "serial": lambda: cls._apply_serial(device, value),
+            "asset_tag": lambda: cls._apply_asset_tag(device, value),
+            "face": lambda: cls._apply_face(device, value),
         }.get(field)
         if writer is None:
-            raise PreviewActionInvalid(f"Field '{field}' is not syncable")
+            raise PreviewCommandRefused(f"Field '{field}' is not syncable")
         return writer()
 
-    def _apply_device_name(self, device, value):
-        new_name = self._writer_safe_text(device, "device name", "name", value)
-        if (
-            type(device)
-            .objects.filter(identity_in("name", [identity_text(new_name)]), site=device.site)
-            .exclude(pk=device.pk)
-            .exists()
-        ):
-            raise PreviewActionInvalid(f"A device named '{new_name}' already exists in site '{device.site}'")
-        device.name = new_name
-        device.save(update_fields=["name"])
-        return new_name
-
-    def _apply_u_position(self, device, value):
+    @classmethod
+    def _apply_u_position(cls, device, value):
         pos = source_position(value)
         if pos is None:
-            raise PreviewActionInvalid(f"Cannot parse '{value}' as a finite number for u_position")
+            raise PreviewCommandRefused(f"Cannot parse '{value}' as a finite number for u_position")
         zero_u_type = _zero_u_device_type(device)
         if zero_u_type:
-            raise PreviewActionInvalid(f"Cannot set a rack position: the device type '{zero_u_type}' is 0U.")
+            raise PreviewCommandRefused(f"Cannot set a rack position: the device type '{zero_u_type}' is 0U.")
         device.position = pos
-        self._reject_invalid_placement(device)
+        cls._reject_invalid_placement(device)
         device.save(update_fields=["position"])
         return f"U{device.position}"
 
@@ -2684,34 +2335,37 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         # A NetBox status slug is accepted directly too (for example "active", "offline").
         mapped = status_map.get(text) or (text if text in set(status_map.values()) else None)
         if mapped is None:
-            raise PreviewActionInvalid(f"Unknown status value '{value}'")
+            raise PreviewCommandRefused(f"Unknown status value '{value}'")
         device.status = mapped
         device.save(update_fields=["status"])
         return device.status
 
-    def _apply_serial(self, device, value):
-        device.serial = self._writer_safe_text(device, "serial", "serial", value)
+    @classmethod
+    def _apply_serial(cls, device, value):
+        device.serial = cls._writer_safe_text(device, "serial", "serial", value)
         device.save(update_fields=["serial"])
         return device.serial
 
-    def _apply_asset_tag(self, device, value):
-        device.asset_tag = self._writer_safe_text(device, "asset tag", "asset_tag", value) if value else None
+    @classmethod
+    def _apply_asset_tag(cls, device, value):
+        device.asset_tag = cls._writer_safe_text(device, "asset tag", "asset_tag", value) if value else None
         device.save(update_fields=["asset_tag"])
         return device.asset_tag
 
-    def _apply_face(self, device, value):
+    @classmethod
+    def _apply_face(cls, device, value):
         if device.rack_id is None:
-            raise PreviewActionInvalid(
+            raise PreviewCommandRefused(
                 "Cannot set face: device has no rack assigned. Sync rack first, or use Sync Placement."
             )
         zero_u_type = _zero_u_device_type(device)
         if zero_u_type:
-            raise PreviewActionInvalid(f"Cannot set a rack face: the device type '{zero_u_type}' is 0U.")
+            raise PreviewCommandRefused(f"Cannot set a rack face: the device type '{zero_u_type}' is 0U.")
         mapped = _FACE_MAP.get(str(value).strip().lower())
         if mapped is None:
-            raise PreviewActionInvalid(f"Unknown face value '{value}' — expected 'front' or 'rear'")
+            raise PreviewCommandRefused(f"Unknown face value '{value}' — expected 'front' or 'rear'")
         device.face = mapped
-        self._reject_invalid_placement(device)
+        cls._reject_invalid_placement(device)
         device.save(update_fields=["face"])
         return device.face
 
@@ -2725,17 +2379,18 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         if mapped is None and text in set(airflow_map.values()):
             mapped = text
         if mapped is None:
-            raise PreviewActionInvalid(f"Unknown airflow value '{value}'")
+            raise PreviewCommandRefused(f"Unknown airflow value '{value}'")
         device.airflow = mapped
         device.save(update_fields=["airflow"])
         return device.airflow
 
-    def _apply_ip_field(self, device, field, value, user):
+    @classmethod
+    def _apply_ip_field(cls, device, field, value, user):
         """Point one of the device's IP fields at the address the source row carries."""
         try:
             target = ip_assignment.resolve(device, field, value)
         except ip_assignment.IPAssignmentError as exc:
-            raise PreviewActionInvalid(str(exc)) from exc
+            raise PreviewCommandRefused(exc.operator_message) from exc
 
         if target.already_held:
             # The device carries it already, so only the field moves. No IPAM row is written.
@@ -2748,9 +2403,9 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         try:
             address = ip_assignment.apply(target, user)
         except ValidationError as exc:
-            raise PreviewActionInvalid("; ".join(exc.messages)) from exc
+            raise PreviewCommandRefused("; ".join(exc.messages)) from exc
         except ObjectPermissionDenied as exc:
-            raise PreviewActionInvalid(f"Permission denied: {exc} for this IP address.") from exc
+            raise PreviewCommandRefused("Permission denied: cannot assign this IP address.") from exc
         setattr(device, field, address)
         device.save(update_fields=[field])
         return f"{address.address} on {target.interface.name}"
@@ -2761,10 +2416,10 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         try:
             _validate_device_placement(device)
         except ValidationError as exc:
-            raise PreviewActionInvalid(_placement_error_text(exc)) from exc
+            raise PreviewCommandRefused(_placement_error_text(exc)) from exc
 
 
-def _lookup_rack_for_device(request, device, value):
+def _lookup_rack_for_device(actor, device, value):
     """Look up a Rack by name within ``device.site``, honoring ``device.location``.
 
     If the device has a location set, the rack must be in the same location. If the
@@ -2782,9 +2437,7 @@ def _lookup_rack_for_device(request, device, value):
         return None, "Rack name is empty"
     if device.site_id is None:
         return None, "Device has no site; cannot resolve rack"
-    qs = Rack.objects.restrict(request.user, "view").filter(
-        identity_in("name", [identity_text(name)]), site=device.site
-    )
+    qs = Rack.objects.restrict(actor, "view").filter(identity_in("name", [identity_text(name)]), site=device.site)
     if device.location_id is not None:
         qs = qs.filter(location=device.location)
         loc_str = f" / location '{device.location}'"
@@ -2870,7 +2523,56 @@ def _set_rack_placement(device, u_position, face, zero_u_type):
     return update_fields, skipped, None
 
 
-class SyncPlacementView(_AjaxPermissionView):
+@dataclass(frozen=True)
+class _SyncPlacement(PreviewCommand):
+    """Apply one row's previewed rack, position and face to its matched Device, all or nothing."""
+
+    row_number: int
+
+    def apply(self, preview):
+        """Recheck the placement baseline under the Device lock, then write the previewed placement."""
+        row = _device_unit(preview.workspace, self.row_number)
+        device_id = row.extra_data.get("netbox_device_id") if row is not None else None
+        if not device_id:
+            raise StalePreview("The active preview row is no longer available.")
+        device = _locked_device_for_update(preview.actor, device_id)
+        if device is None:
+            raise PreviewCommandRefused("Device not found", 409)
+        if not _placement_matches_preview(device, row):
+            raise PreviewCommandRefused("The matched NetBox placement changed. Re-read the preview and try again.", 409)
+        rack, error = _lookup_rack_for_device(preview.actor, device, row.rack_name)
+        if error:
+            raise PreviewCommandRefused(error)
+        device.rack = rack
+        # NetBox rejects a rack position on a zero-U device type, so sync the rack alone.
+        zero_u_type = _zero_u_device_type(device)
+        placement_fields, skipped, error = _set_rack_placement(
+            device, row.extra_data.get("u_position", ""), row.extra_data.get("face", ""), zero_u_type
+        )
+        if error:
+            raise PreviewCommandRefused(error)
+        update_fields = ["rack", *placement_fields]
+        try:
+            _validate_device_placement(device)
+        except ValidationError as exc:
+            raise PreviewCommandRefused(f"Validation failed: {_placement_error_text(exc)}") from exc
+        try:
+            device.save(update_fields=update_fields)
+        except Exception as exc:
+            logger.exception("SyncPlacementView save failed for device_id=%s", device.pk)
+            raise PreviewCommandRefused("An internal error occurred.", 500) from exc
+        parts = [f"rack={rack.name}"]
+        if "position" in update_fields and device.position is not None:
+            parts.append(f"U{device.position}")
+        if "face" in update_fields and device.face:
+            parts.append(device.face)
+        display = ", ".join(parts)
+        if skipped:
+            display += f" (0U device type {zero_u_type} takes no {' or '.join(skipped)})"
+        return CommandOutcome(message=f"Updated placement to {display}.")
+
+
+class SyncPlacementView(_PreviewCommandMixin, _AjaxPermissionView):
     """Atomically sync rack + (optional) u_position + (optional) face for a device.
 
     All-or-nothing: if the rack lookup fails, nothing is saved.
@@ -2880,88 +2582,9 @@ class SyncPlacementView(_AjaxPermissionView):
 
     def post(self, request):
         """Apply the previewed placement to its matched Device."""
-        from django.http import JsonResponse
-
-        intent, error, status = _placement_action_intent(request)
-        if error:
-            return JsonResponse({"ok": False, "error": error}, status=status)
-        row = intent["row"]
-        device = intent["device"]
-        rack_name = intent["rack_name"]
-        u_position = intent["u_position"]
-        face = intent["face"]
-
-        with transaction.atomic():
-            # The baseline check above read the Device unlocked, so recheck it under the row lock.
-            device = _locked_device_for_update(request, device.pk)
-            if device is None:
-                # atomic-exit-safe: device-gone-before-write
-                return JsonResponse({"ok": False, "error": "Device not found"}, status=409)
-            if row is not None and not _placement_matches_preview(device, row):
-                # atomic-exit-safe: baseline-moved-before-write
-                return JsonResponse(
-                    {
-                        "ok": False,
-                        "error": "The matched NetBox placement changed. Recalculate the preview and try again.",
-                    },
-                    status=409,
-                )
-
-            rack, err = _lookup_rack_for_device(request, device, rack_name)
-            if err:
-                # atomic-exit-safe: rack-unresolved-before-write
-                return JsonResponse({"ok": False, "error": err})
-
-            device.rack = rack
-            # NetBox rejects a rack position on a zero-U device type, so sync the rack alone.
-            zero_u_type = _zero_u_device_type(device)
-            placement_fields, skipped, error = _set_rack_placement(device, u_position, face, zero_u_type)
-            if error:
-                # atomic-exit-safe: placement-value-refused-before-write
-                return JsonResponse({"ok": False, "error": error})
-            update_fields = ["rack", *placement_fields]
-
-            try:
-                _validate_device_placement(device)
-            except ValidationError as exc:
-                # full_clean sends post_clean, whose receivers may write before raising.
-                transaction.set_rollback(True)
-                clear_events.send(sender=self)
-                return JsonResponse(
-                    {"ok": False, "error": f"Validation failed: {_placement_error_text(exc)}"}, status=400
-                )
-            except Exception:
-                logger.exception("SyncPlacementView full_clean failed for device_id=%s", device.pk)
-                transaction.set_rollback(True)
-                clear_events.send(sender=self)
-                return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
-
-            try:
-                device.save(update_fields=update_fields)
-            except Exception:
-                logger.exception("SyncPlacementView save failed for device_id=%s", device.pk)
-                # A receiver raising after the UPDATE would otherwise commit a write reported as failed.
-                transaction.set_rollback(True)
-                clear_events.send(sender=self)
-                return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
-
-        parts = [f"rack={rack.name}"]
-        if "position" in update_fields and device.position is not None:
-            parts.append(f"U{device.position}")
-        if "face" in update_fields and device.face:
-            parts.append(device.face)
-        display = ", ".join(parts)
-        if skipped:
-            display += f" (0U device type {zero_u_type} takes no {' or '.join(skipped)})"
-        if row is not None:
-            mark_preview_dirty(request.session)
-            return JsonResponse(
-                pending_preview_payload(
-                    row.row_number,
-                    f"Updated placement to {display}.",
-                )
-            )
-        return JsonResponse({"ok": True, "display": display})
+        row_number = _posted_row_number(request)
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), _SyncPlacement(row_number))
+        return _command_response(request, result, self.refusal_url(request), row_number=row_number)
 
 
 # ---------------------------------------------------------------------------
@@ -2991,69 +2614,73 @@ def _device_name_already_claimed(effective_rows, row_number, new_name, target):
     return None
 
 
-class ResolveDuplicateNameView(PermissionRequiredMixin, View):
-    """Save a unique device name for one duplicate source row."""
+class _RowDecisionView(_PreviewCommandMixin, PermissionRequiredMixin, View):
+    """A preview row decision: a refused one renders the preview in place for HTMX, as a saved one does."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
+    def _refusal(self, request, error, status, url=None):
+        if self._answers_json(request):
+            return JsonResponse({"ok": False, "error": error}, status=status)
+        messages.error(request, error)
+        return _name_resolution_response(request, url or self.refusal_url(request))
+
+    def decide(self, request, command):
+        """Run one row decision and answer with the preview it leaves behind."""
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        messages.success(request, result.outcome.message)
+        return _name_resolution_response(request, self.refusal_url(request))
+
+
+@dataclass(frozen=True)
+class _ResolveDuplicateName(PreviewCommand):
+    """Save a unique device name for one duplicate source row."""
+
+    row_number: int
+    source_id: str
+    new_name: str
+
+    def apply(self, preview):
+        """Check the name against the other rows and the import target, then save it."""
+        source_row = _row_decision_source(preview.workspace, self.row_number, self.source_id)
+        target = _resolved_import_target(preview.planning_context, preview.actor)
+        if target is None:
+            raise PreviewCommandRefused(TARGET_GONE, 409)
+        # The claims are read under the locks, so two rows cannot both resolve to one device name.
+        refusal = _device_name_already_claimed(preview.workspace.source_rows, self.row_number, self.new_name, target)
+        if refusal is not None:
+            raise PreviewCommandRefused(refusal)
+        try:
+            save_permission_scoped_object(
+                preview.actor,
+                SourceResolution,
+                {"profile": preview.profile, "source_id": self.source_id, "source_column": "device_name"},
+                {
+                    "original_value": source_text(source_row.get("device_name")),
+                    "resolved_fields": {"device_name": self.new_name},
+                },
+            )
+        except ObjectPermissionDenied as exc:
+            raise PreviewCommandRefused("Permission denied: cannot create or change this saved name.", 403) from exc
+        except ValidationError as exc:
+            raise PreviewCommandRefused("; ".join(exc.messages)) from exc
+        return CommandOutcome(message=f"Source '{self.source_id}' will use device name '{self.new_name}'.")
+
+
+class ResolveDuplicateNameView(_RowDecisionView):
+    """Save a unique device name for one duplicate source row."""
+
     def post(self, request):
         """Validate and persist the replacement device name."""
-        decision, refused = _preview_row_decision(request)
-        if refused is not None:
-            return refused
-        profile = decision.profile
-        ctx_data = decision.ctx_data
-        rows = decision.rows
-        row_number = decision.row_number
-        source_id = decision.source_id
-        next_url = decision.next_url
-
         new_name = request.POST.get("new_name", "").strip()
         if not new_name or len(new_name) > 64:
-            messages.error(request, "The device name must contain 1 to 64 characters.")
-            return _name_resolution_response(request, next_url)
-
-        resolution_values = {
-            "original_value": source_text(decision.source_row.get("device_name")),
-            "resolved_fields": {"device_name": new_name},
-        }
-        refusal = None
-        try:
-            # Serialize against an executing import, which holds the same profile row.
-            with locked_profile_policy(profile.pk):
-                # Read the target and the claims under the lock: a name saved between the check and
-                # the write would otherwise let two source rows resolve to the same device name.
-                target = _resolved_import_target(ctx_data, request.user)
-                if target is None:
-                    refusal = "The saved import target is no longer available. Start a new preview."
-                else:
-                    refusal = _device_name_already_claimed(rows, row_number, new_name, target)
-                if refusal is None:
-                    save_permission_scoped_object(
-                        request.user,
-                        SourceResolution,
-                        {"profile": profile, "source_id": source_id, "source_column": "device_name"},
-                        resolution_values,
-                    )
-        except ImportProfile.DoesNotExist:
-            messages.error(request, "The import profile is no longer available.")
-            return _name_resolution_response(request, next_url)
-        except ObjectPermissionDenied:
-            messages.error(request, "Permission denied: cannot create or change this saved name.")
-            return _name_resolution_response(request, next_url)
-        except ValidationError as exc:
-            messages.error(request, "; ".join(exc.messages))
-            return _name_resolution_response(request, next_url)
-        except IntegrityError:
-            messages.error(request, "The saved name changed while this request was being processed. Try again.")
-            return _name_resolution_response(request, next_url)
-
-        if refusal is not None:
-            messages.error(request, refusal)
-            return _name_resolution_response(request, next_url)
-
-        messages.success(request, f"Source '{source_id}' will use device name '{new_name}'.")
-        return _name_resolution_response(request, next_url)
+            raise PreviewCommandRefused("The device name must contain 1 to 64 characters.")
+        command = _ResolveDuplicateName(
+            row_number=_posted_row_number(request),
+            source_id=source_text(request.POST.get("source_id")),
+            new_name=new_name,
+        )
+        return self.decide(request, command)
 
 
 def _duplicate_serial_shown(preview_rows, row_number) -> str:
@@ -3068,94 +2695,58 @@ def _duplicate_serial_shown(preview_rows, row_number) -> str:
     return ""
 
 
-class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
+@dataclass(frozen=True)
+class _IgnoreDuplicateSerial(PreviewCommand):
     """Drop the serial from one source row so the rows sharing it stop colliding."""
 
-    permission_required = "netbox_data_import.change_importprofile"
+    row_number: int
+    source_id: str
+
+    def apply(self, preview):
+        """Settle the collision the operator was shown, and only while live NetBox still has it."""
+        source_row = _row_decision_source(preview.workspace, self.row_number, self.source_id)
+        shown_serial = _duplicate_serial_shown(preview.workspace.units, self.row_number)
+        if not shown_serial:
+            raise PreviewCommandRefused("This row shows no duplicate serial in the current preview.")
+        original_serial = source_text(source_row.get("serial"))
+        if not original_serial:
+            raise PreviewCommandRefused("This row carries no serial to give up.")
+        held_since = time.monotonic()
+        current = ReviewWorkspace(
+            ImportEngine.plan(preview.profile, preview.document, preview.actor, preview.planning_context),
+            preview.actor,
+        )
+        # The dry run costs more as the file grows, and the import worker waits behind it.
+        logger.info(
+            "IgnoreDuplicateSerialView: held the profile policy lock for %.2fs over %d source rows.",
+            time.monotonic() - held_since,
+            len(preview.workspace.source_rows),
+        )
+        if _duplicate_serial_shown(current.units, self.row_number) != shown_serial:
+            raise PreviewCommandRefused(f"No other row this import creates still claims serial '{shown_serial}'.")
+        try:
+            save_permission_scoped_object(
+                preview.actor,
+                SourceResolution,
+                {"profile": preview.profile, "source_id": self.source_id, "source_column": "serial"},
+                {"original_value": original_serial, "resolved_fields": {"serial": ""}},
+            )
+        except ObjectPermissionDenied as exc:
+            raise PreviewCommandRefused("Permission denied: cannot create or change this saved serial.", 403) from exc
+        except ValidationError as exc:
+            raise PreviewCommandRefused("; ".join(exc.messages)) from exc
+        return CommandOutcome(message=f"Source '{self.source_id}' will import without serial '{shown_serial}'.")
+
+
+class IgnoreDuplicateSerialView(_RowDecisionView):
+    """Drop the serial from one source row so the rows sharing it stop colliding."""
 
     def post(self, request):
         """Persist an empty serial for the row the operator gives it up on."""
-        decision, refused = _preview_row_decision(request)
-        if refused is not None:
-            return refused
-        profile = decision.profile
-        ctx_data = decision.ctx_data
-        rows = decision.rows
-        row_number = decision.row_number
-        source_id = decision.source_id
-        next_url = decision.next_url
-
-        preview = load_cached_preview(request)
-        # The action settles the collision the operator was shown, on the serial it named.
-        shown_serial = _duplicate_serial_shown(preview[1].units, row_number) if preview is not None else ""
-        if not shown_serial:
-            messages.error(request, "This row shows no duplicate serial in the current preview.")
-            return _name_resolution_response(request, next_url)
-
-        original_serial = source_text(decision.source_row.get("serial"))
-        if not original_serial:
-            messages.error(request, "This row carries no serial to give up.")
-            return _name_resolution_response(request, next_url)
-
-        refusal = None
-        try:
-            # Serialize against an executing import, which holds the same profile row.
-            with locked_profile_policy(profile.pk):
-                held_since = time.monotonic()
-                document = SourceDocument.objects.filter(
-                    pk=ctx_data.get("source_document_id"),
-                    profile=profile,
-                ).first()
-                if document is None:
-                    refusal = "The stored source is no longer available. Upload it again."
-                else:
-                    current = ReviewWorkspace(
-                        ImportEngine.plan(
-                            profile,
-                            document,
-                            request.user,
-                            {
-                                "site_id": ctx_data.get("site_id"),
-                                "location_id": ctx_data.get("location_id"),
-                                "tenant_id": ctx_data.get("tenant_id"),
-                            },
-                        ),
-                        request.user,
-                    )
-                    if _duplicate_serial_shown(current.units, row_number) != shown_serial:
-                        refusal = f"No other row this import creates still claims serial '{shown_serial}'."
-                    else:
-                        save_permission_scoped_object(
-                            request.user,
-                            SourceResolution,
-                            {"profile": profile, "source_id": source_id, "source_column": "serial"},
-                            {"original_value": original_serial, "resolved_fields": {"serial": ""}},
-                        )
-                # The dry run costs more as the file grows, and the import worker waits behind it.
-                logger.info(
-                    "IgnoreDuplicateSerialView: held the profile policy lock for %.2fs over %d source rows.",
-                    time.monotonic() - held_since,
-                    len(rows),
-                )
-        except ImportProfile.DoesNotExist:
-            messages.error(request, "The import profile is no longer available.")
-            return _name_resolution_response(request, next_url)
-        except ObjectPermissionDenied:
-            messages.error(request, "Permission denied: cannot create or change this saved serial.")
-            return _name_resolution_response(request, next_url)
-        except ValidationError as exc:
-            messages.error(request, "; ".join(exc.messages))
-            return _name_resolution_response(request, next_url)
-        except IntegrityError:
-            messages.error(request, "The saved serial changed while this request was being processed. Try again.")
-            return _name_resolution_response(request, next_url)
-
-        if refusal is not None:
-            messages.error(request, refusal)
-            return _name_resolution_response(request, next_url)
-
-        messages.success(request, f"Source '{source_id}' will import without serial '{shown_serial}'.")
-        return _name_resolution_response(request, next_url)
+        command = _IgnoreDuplicateSerial(
+            row_number=_posted_row_number(request), source_id=source_text(request.POST.get("source_id"))
+        )
+        return self.decide(request, command)
 
 
 def _position_conflict_rows(units) -> set[int]:
@@ -3171,55 +2762,49 @@ def _position_conflict_rows(units) -> set[int]:
     return involved
 
 
-class IgnorePositionView(PermissionRequiredMixin, View):
+@dataclass(frozen=True)
+class _IgnorePosition(PreviewCommand):
     """Drop the rack position from one source row so the rows sharing the unit stop colliding."""
 
-    permission_required = "netbox_data_import.change_importprofile"
+    row_number: int
+    source_id: str
+
+    def apply(self, preview):
+        """Save an empty rack position for a row of a collision the preview shows."""
+        source_row = _row_decision_source(preview.workspace, self.row_number, self.source_id)
+        # Either row of the collision may give its position up, so the whole group is eligible.
+        if self.row_number not in _position_conflict_rows(preview.workspace.units):
+            raise PreviewCommandRefused("This row is not part of a rack position conflict in the current preview.")
+        original_position = source_text(source_row.get("u_position"))
+        if not original_position:
+            raise PreviewCommandRefused("This row carries no rack position to give up.")
+        try:
+            save_permission_scoped_object(
+                preview.actor,
+                SourceResolution,
+                {"profile": preview.profile, "source_id": self.source_id, "source_column": "u_position"},
+                {"original_value": original_position, "resolved_fields": {"u_position": None}},
+            )
+        except ObjectPermissionDenied as exc:
+            raise PreviewCommandRefused(
+                "Permission denied: cannot create or change this saved rack position.", 403
+            ) from exc
+        except ValidationError as exc:
+            raise PreviewCommandRefused("; ".join(exc.messages)) from exc
+        return CommandOutcome(
+            message=f"Source '{self.source_id}' will import into its rack without position U{original_position}."
+        )
+
+
+class IgnorePositionView(_RowDecisionView):
+    """Drop the rack position from one source row so the rows sharing the unit stop colliding."""
 
     def post(self, request):
         """Persist an empty rack position for the row the operator unplaces."""
-        decision, refused = _preview_row_decision(request)
-        if refused is not None:
-            return refused
-        profile = decision.profile
-        row_number = decision.row_number
-        source_id = decision.source_id
-        next_url = decision.next_url
-
-        preview = load_cached_preview(request)
-        # Either row of the collision may give its position up, so the whole group is eligible.
-        if preview is None or row_number not in _position_conflict_rows(preview[1].units):
-            messages.error(request, "This row is not part of a rack position conflict in the current preview.")
-            return _name_resolution_response(request, next_url)
-
-        original_position = source_text(decision.source_row.get("u_position"))
-        if not original_position:
-            messages.error(request, "This row carries no rack position to give up.")
-            return _name_resolution_response(request, next_url)
-
-        try:
-            # The saver locks this profile itself, because a Source Resolution is a policy row.
-            save_permission_scoped_object(
-                request.user,
-                SourceResolution,
-                {"profile": profile, "source_id": source_id, "source_column": "u_position"},
-                {"original_value": original_position, "resolved_fields": {"u_position": None}},
-            )
-        except ObjectPermissionDenied:
-            messages.error(request, "Permission denied: cannot create or change this saved rack position.")
-            return _name_resolution_response(request, next_url)
-        except ImportProfile.DoesNotExist:
-            # The saver takes the profile lock itself, so it still reports a profile deleted since the gate.
-            messages.error(request, "The import profile is no longer available.")
-            return _name_resolution_response(request, next_url)
-        except ValidationError as exc:
-            messages.error(request, "; ".join(exc.messages))
-            return _name_resolution_response(request, next_url)
-
-        messages.success(
-            request, f"Source '{source_id}' will import into its rack without position U{original_position}."
+        command = _IgnorePosition(
+            row_number=_posted_row_number(request), source_id=source_text(request.POST.get("source_id"))
         )
-        return _name_resolution_response(request, next_url)
+        return self.decide(request, command)
 
 
 # The split modal sends each part to one of these Target Fields, and a part can replace the row's value.
@@ -3242,38 +2827,15 @@ def _split_field_values(unit) -> dict[str, str]:
     }
 
 
-def _carried_split_values(request, profile_id, source_id) -> dict[str, str]:
-    """Return one active preview row's split values, or no values for a standalone policy save."""
-    if not _session_holds_a_preview(request):
-        return {}
-    if str((request.session.get("import_context") or {}).get("profile_id")) != str(profile_id):
-        raise ValidationError("The selected profile is not the active import profile.")
-    plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY)
-    if not plan_data:
-        raise ValidationError("The active Import Plan is no longer readable.")
-    try:
-        workspace = ReviewWorkspace.from_dict(plan_data, request.user)
-    except PlanError as exc:
-        raise ValidationError("The active Import Plan is no longer readable.") from exc
-    rows = [unit for unit in workspace.units if unit.object_type == "device" and str(unit.source_id) == str(source_id)]
-    if len(rows) != 1:
-        raise ValidationError("The source ID must identify one active import row.")
-    return _split_field_values(rows[0])
+def _unacknowledged_replacement(workspace, source_id, source_column, resolved_fields, acknowledged) -> str:
+    """Return why a split replaces a value the current preview row carries without the operator's acknowledgement.
 
-
-def _unacknowledged_replacement(request, profile_id, source_id, source_column, resolved_fields) -> str:
-    """Return why a split replaces a value the preview row carries without the operator's acknowledgement."""
-    import json
-
+    The row is read from the plan at the claimed revision, so a second save compares against the first.
+    """
     if source_column not in SPLIT_TARGET_FIELDS:
         return ""
-    try:
-        acknowledged = json.loads(request.POST.get("acknowledged_fields") or "[]")
-    except json.JSONDecodeError:
-        return ACKNOWLEDGEMENT_INVALID
-    if not isinstance(acknowledged, list) or not all(isinstance(field, str) for field in acknowledged):
-        return ACKNOWLEDGEMENT_INVALID
-    carried = _carried_split_values(request, profile_id, source_id)
+    rows = [unit for unit in workspace.units if unit.object_type == "device" and str(unit.source_id) == str(source_id)]
+    carried = _split_field_values(rows[0]) if len(rows) == 1 else {}
     for field, value in resolved_fields.items():
         if field == source_column or field not in SPLIT_TARGET_FIELDS or field in acknowledged:
             continue
@@ -3293,117 +2855,115 @@ def _unacknowledged_replacement(request, profile_id, source_id, source_column, r
     return ""
 
 
-class SaveResolutionView(_PermissionScopedWriteMixin, _AjaxPermissionView):
+def _posted_acknowledgement(request) -> tuple[str, ...]:
+    """Return the field names the operator acknowledged a split replaces, or refuse a malformed list."""
+    import json
+
+    try:
+        acknowledged = json.loads(request.POST.get("acknowledged_fields") or "[]")
+    except json.JSONDecodeError:
+        raise PreviewCommandRefused(ACKNOWLEDGEMENT_INVALID) from None
+    if not isinstance(acknowledged, list) or not all(isinstance(field, str) for field in acknowledged):
+        raise PreviewCommandRefused(ACKNOWLEDGEMENT_INVALID)
+    return tuple(acknowledged)
+
+
+@dataclass(frozen=True)
+class _SaveResolution(PreviewCommand):
+    """Save one manual field resolution of one preview row for rerere replay."""
+
+    source_id: str
+    source_column: str
+    original_value: str
+    resolved_fields: Mapping
+    acknowledged: tuple[str, ...]
+
+    def apply(self, preview):
+        """Validate the decision against the current row, write the Contact it names, then save it."""
+        import json
+
+        workspace = preview.workspace
+        _source_row(workspace, self.source_id)
+        refusal = _unacknowledged_replacement(
+            workspace, self.source_id, self.source_column, self.resolved_fields, self.acknowledged
+        )
+        if refusal:
+            raise PreviewCommandRefused(refusal)
+        contact_context = None
+        candidates = {}
+        original_value = self.original_value
+        try:
+            if self.source_column == "candidate:contact":
+                candidates, source_row, result_row = _contact_candidate_context(workspace, self.source_id)
+                validate_contact_candidate_resolution(
+                    self.resolved_fields, preview.profile.adapter_settings.primary_contact_lookup_field, candidates
+                )
+                original_value = json.dumps(candidates, sort_keys=True)
+                contact_context = (source_row, result_row)
+            validate_source_resolution_fields(preview.profile, self.source_column, self.resolved_fields)
+            decision = _persist_contact_decision(
+                preview.profile, self.resolved_fields, candidates, contact_context, preview.actor
+            )
+            save_permission_scoped_object(
+                preview.actor,
+                SourceResolution,
+                {"profile": preview.profile, "source_id": self.source_id, "source_column": self.source_column},
+                {"original_value": original_value or "", "resolved_fields": decision.resolved_fields},
+            )
+        except ValidationError as exc:
+            raise PreviewCommandRefused("; ".join(exc.messages)) from exc
+        message, detail = _saved_resolution_report(decision.write, decision.note)
+        return CommandOutcome(
+            message=message,
+            payload={
+                "row_number": contact_context[1].row_number if contact_context else None,
+                "detail": detail,
+                # The page keeps its own copy of the decision, so it is given the saved one.
+                "resolution": {
+                    "original_value": original_value or "",
+                    "resolved_fields": decision.resolved_fields,
+                    "contact": decision.contact,
+                },
+            },
+        )
+
+
+class SaveResolutionView(_PreviewCommandMixin, _AjaxPermissionView):
     """Save a manual field resolution for rerere replay."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Persist a manual field resolution for rerere replay."""
+        """Persist a manual field resolution of the active preview."""
         import json
 
-        profile_id = _parse_posted_profile_id(request)
-        source_id = request.POST.get("source_id")
+        source_id = source_text(request.POST.get("source_id"))
         source_column = request.POST.get("source_column")
-        original_value = request.POST.get("original_value")
-        resolved_fields_json = request.POST.get("resolved_fields", "{}")
-        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
-        if profile_id is None:
-            return _preview_action_error(request, next_url, "A valid import profile is required.", status=400)
-
         try:
-            resolved_fields = json.loads(resolved_fields_json)
+            resolved_fields = json.loads(request.POST.get("resolved_fields", "{}"))
         except (json.JSONDecodeError, TypeError):
             resolved_fields = {}
         if not isinstance(resolved_fields, Mapping):
-            return _preview_action_error(
-                request,
-                next_url,
-                "Resolved fields must be a JSON object.",
-                status=400,
-            )
-
-        if profile_id and source_id and source_column:
-            profile = get_object_or_404(
-                ImportProfile.objects.restrict(request.user, "change"),
-                pk=profile_id,
-            )
-            stale_reason = _stale_preview_reason(request)
-            if stale_reason is not None:
-                return _preview_action_error(request, next_url, stale_reason, status=409)
-
-            try:
-                refusal = _unacknowledged_replacement(request, profile.pk, source_id, source_column, resolved_fields)
-            except ValidationError as exc:
-                return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
-            if refusal:
-                return _preview_action_error(request, next_url, refusal, status=400)
-            contact_context = None
-            candidates = {}
-            if source_column == "candidate:contact":
-                try:
-                    validate_registered_adapter(profile)
-                    candidates, source_row, result_row = _contact_candidate_context(request, profile.pk, source_id)
-                    validate_contact_candidate_resolution(
-                        resolved_fields,
-                        profile.adapter_settings.primary_contact_lookup_field,
-                        candidates,
-                    )
-                except ValidationError as exc:
-                    return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
-                original_value = json.dumps(candidates, sort_keys=True)
-                contact_context = (source_row, result_row)
-            try:
-                validate_source_resolution_fields(profile, source_column, resolved_fields)
-                # Serialize against an executing import, which holds the same profile row.
-                with locked_profile_policy(profile.pk):
-                    decision = _persist_contact_decision(
-                        profile, resolved_fields, candidates, contact_context, request.user
-                    )
-                    resolved_fields = decision.resolved_fields
-                    save_permission_scoped_object(
-                        request.user,
-                        SourceResolution,
-                        {"profile": profile, "source_id": source_id, "source_column": source_column},
-                        {
-                            "original_value": original_value or "",
-                            "resolved_fields": resolved_fields,
-                        },
-                    )
-            except IntegrityError:
-                return _preview_action_error(
-                    request,
-                    next_url,
-                    "The resolution changed while this request was being processed. Try again.",
-                )
-            except ObjectPermissionDenied as exc:
-                logger.warning("SaveResolutionView: write refused outside the caller's object scope: %s", exc)
-                return _preview_action_error(
-                    request,
-                    next_url,
-                    "Permission denied: this action is outside your NetBox object permissions.",
-                    status=403,
-                )
-            except ValidationError as exc:
-                return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
-            saved_message, contact_detail = _saved_resolution_report(decision.write, decision.note)
-            # The rendered row keeps the action it had before this decision, so the page must
-            # ask for a recalculation whichever path saved it.
-            mark_preview_dirty(request.session)
-            if _wants_json(request):
-                row_number = contact_context[1].row_number if contact_context else None
-                # The page keeps its own copy of the decision, so it is given the saved one.
-                resolution = {
-                    "original_value": original_value or "",
-                    "resolved_fields": resolved_fields,
-                    "contact": decision.contact,
-                }
-                return JsonResponse(
-                    pending_preview_payload(row_number, saved_message, contact_detail, resolution=resolution)
-                )
-            messages.success(request, saved_message)
-            return redirect(next_url)
-        return _preview_action_error(request, next_url, "A source row and column are required.", status=400)
+            raise PreviewCommandRefused("Resolved fields must be a JSON object.")
+        if not source_id or not source_column:
+            raise PreviewCommandRefused("A source row and column are required.")
+        command = _SaveResolution(
+            source_id=source_id,
+            source_column=source_column,
+            original_value=request.POST.get("original_value") or "",
+            resolved_fields=resolved_fields,
+            acknowledged=_posted_acknowledgement(request),
+        )
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        payload = result.outcome.payload
+        return _command_response(
+            request,
+            result,
+            self.refusal_url(request),
+            row_number=payload["row_number"],
+            detail=payload["detail"],
+            resolution=payload["resolution"],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3787,14 +3347,6 @@ def _trace_sync_block_reason(reviewed_plan: ImportPlan, live_plan: ImportPlan) -
     return ""
 
 
-def _retained_sync_block_reason(request) -> str:
-    """Return why the retained trace sync holds this preview, for a page that has to say so.
-
-    Refusing is the writers' job, in `preview_row_actions`. This read only routes and renders.
-    """
-    return retained_sync_block_reason(request.session, request.user)
-
-
 def _with_blocked_sync(trace, reason: str):
     """Refuse the sync action the view would reject, so the page cannot offer what the POST refuses."""
     actions = tuple(
@@ -4052,125 +3604,25 @@ def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]
     return unique
 
 
-def _rebuild_schema_rejected_preview(request) -> None:
-    """Replace a cached plan this release cannot read, keeping the preview the operator is inside.
-
-    A plan schema change makes every cached plan unreadable at once. The stored Source Document is
-    still the authority, so the preview is rebuilt from it instead of ending at setup. The rebuilt
-    plan carries a new revision, so a command posted against the old one is refused rather than
-    replayed.
-    """
-    stored = request.session.get(PREVIEW_PLAN_SESSION_KEY)
-    if request.session.get("import_preview_pending") is not True or not isinstance(stored, dict):
-        return
-    # Any other unreadable plan is refused by `load_cached_preview`, which parses it anyway.
-    if is_current_schema_version(stored.get("schema_version")):
-        return
-    context = request.session.get("import_context") or {}
-    profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=context.get("profile_id")).first()
-    # A deleted profile leaves its Source Document behind, so the document alone proves nothing.
-    if profile is None:
-        return
-    document = SourceDocument.objects.filter(pk=context.get("source_document_id"), profile=profile).first()
-    # A retained sync is mid-write, so NetBox is not authoritative and the plan must not move.
-    if document is None or _retained_sync_block_reason(request):
-        return
-    planning_context = {
-        "site_id": context.get("site_id"),
-        "location_id": context.get("location_id"),
-        "tenant_id": context.get("tenant_id"),
-    }
-    # A profile this release cannot plan for keeps its unreadable plan, and the view refuses it.
-    if _TraceWorkspaceMixin.unregistered_adapter_reason(profile) is not None:
-        return
-    try:
-        plan = ImportEngine.plan(profile, document, request.user, planning_context)
-    except (PlanError, PlanningTargetUnavailable, ValidationError):
-        return
-    try:
-        record_recalculated_preview(request.session, plan, user=request.user)
-    except PreviewLocked:
-        # A sync took the preview while this replan ran, so the stale plan stays where it is.
-        return
-    messages.info(request, "This preview was recalculated, because the plan format changed.")
-
-
-class _TraceWorkspaceMixin:
-    """Load the reviewed preview a trace workspace request acts on."""
-
-    preview_profile_action = "change"
-    requires_preview_revision = False
-
-    def reviewed_preview(self, request):
-        """Return the profile, the stored document and the reviewed workspace, or None."""
-        _rebuild_schema_rejected_preview(request)
-        preview = load_cached_preview(
-            request,
-            profile_action=self.preview_profile_action,
-            require_revision=self.requires_preview_revision,
-        )
-        if preview is None:
-            return None
-        profile, workspace = preview
-        context = request.session.get("import_context") or {}
-        document = SourceDocument.objects.filter(pk=context.get("source_document_id"), profile=profile).first()
-        if document is None:
-            return None
-        planning_context = {
-            "site_id": context.get("site_id"),
-            "location_id": context.get("location_id"),
-            "tenant_id": context.get("tenant_id"),
-        }
-        return profile, document, workspace, planning_context
+class _TraceWorkspaceMixin(_PreviewCommandMixin):
+    """A trace workspace command: a refusal goes back to the trace it came from."""
 
     def refusal_url(self, request):
-        """Return the trace a refused workspace write came from, so the selection survives."""
+        """Return the trace a refused workspace command came from, so the selection survives."""
         return _trace_workspace_url(request.POST.get("trace", ""))
 
-    def discard_unavailable_target(self, request):
-        """Return the response that ends a request whose saved import target is gone."""
-        _discard_import_preview(request)
-        messages.warning(request, "The saved import target is no longer available. Start a new preview.")
-        return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-    @staticmethod
-    def unregistered_adapter_reason(profile):
-        """Return why this release cannot plan for the profile's adapter, or None."""
-        try:
-            validate_registered_adapter(profile)
-            # Planning raises the same error for a registered adapter no Target Module implements.
-            validate_adapter_target_module(profile.source_adapter)
-        except ValidationError as exc:
-            return "; ".join(exc.messages)
-        return None
-
-    def refuse_unregistered_adapter(self, request, profile):
-        """Return the response that ends a request this release cannot plan for, or None.
-
-        Planning raises UnknownSourceAdapter, so a request that reaches it without this gate answers
-        a 500. The preview is discarded because no release-side decision revives it.
-        """
-        reason = self.unregistered_adapter_reason(profile)
-        if reason is None:
-            return None
-        _discard_import_preview(request)
-        messages.warning(request, reason)
-        return redirect(reverse("plugins:netbox_data_import:import_setup"))
-
-    @staticmethod
-    def live_plan(profile, document, request, planning_context):
-        """Return the plan live NetBox states right now, or None when the target is gone."""
-        try:
-            return ImportEngine.plan(profile, document, request.user, planning_context)
-        except PlanningTargetUnavailable:
-            return None
+def _claimed_snapshot(request, *, profile_action="change"):
+    """Return the preview a read answers for, which must be exactly the one its page displays."""
+    snapshot = read_preview(request, expected=PreviewClaim.posted(request.GET), profile_action=profile_action)
+    if not snapshot.active:
+        raise StalePreview("No current import preview matches this request.")
+    return snapshot
 
 
-def _trace_reader(request, profile, planning_context):
+def _trace_reader(actor, profile, planning_context):
     """Return the operator's scoped reader for the import target of one trace preview."""
-    return NetBoxReader.for_actor(request.user).for_planning_context(
-        planning_context, output_kinds=profile.output_kinds
-    )
+    return NetBoxReader.for_actor(actor).for_planning_context(planning_context, output_kinds=profile.output_kinds)
 
 
 def _trace_workspace_url(identity: str) -> str:
@@ -4180,28 +3632,29 @@ def _trace_workspace_url(identity: str) -> str:
     return f"{url}?{urlencode({'trace': identity.strip()})}" if identity.strip() else url
 
 
-class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
     """Section 10.2: one review workspace page per preview, for the traces it planned."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request):
         """Render the reviewed traces and say whether live NetBox has moved under them."""
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            messages.warning(request, "No import preview in progress. Start a new import.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        profile, document, workspace, planning_context = loaded
-        refusal = self.refuse_unregistered_adapter(request, profile)
+        snapshot, refusal = _review_snapshot(request)
         if refusal is not None:
             return refusal
-        live = self.live_plan(profile, document, request, planning_context)
+        profile = snapshot.profile
+        try:
+            workspace = snapshot.workspace(request.user)
+        except PlanError:
+            return _unreadable_preview_page(request, snapshot)
+        live = _live_plan(snapshot, request.user)
         if live is None:
-            return self.discard_unavailable_target(request)
+            messages.warning(request, TARGET_GONE)
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
         # Section 10.2: compared on each full load and on the re-read action, never polled.
         sync_block_reason = _trace_sync_block_reason(workspace.plan, live)
         drift = bool(sync_block_reason)
-        retained_reason = _retained_sync_block_reason(request)
+        retained_reason = _retained_sync_reason(snapshot)
         block_reason = retained_reason or sync_block_reason
         traces = (
             [_with_blocked_sync(trace, block_reason) for trace in workspace.traces]
@@ -4217,13 +3670,14 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             model.objects.restrict(request.user, "view").filter(profile=profile).count()
             for model in (TerminationResolution, TraceDeviceResolution, TraceLocationResolution)
         )
-        summary["preview_state"] = self._preview_state(request, drift)
+        summary["preview_state"] = "changed in NetBox" if drift else "current"
         from .proposal_presentation import ProposalPresentation, group_terminations
 
         try:
-            reader = _trace_reader(request, profile, planning_context)
+            reader = _trace_reader(request.user, profile, snapshot.planning_context)
         except PlanningTargetUnavailable:
-            return self.discard_unavailable_target(request)
+            messages.warning(request, TARGET_GONE)
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
         # The picker reads Locations a page at a time, so the page only asks whether any is visible.
         has_locations = site_locations(reader).exists()
         location_mappings = present_location_mappings(
@@ -4320,102 +3774,46 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "import_location_unavailable": reader.location_unavailable,
                 "drift": drift,
                 "retained_sync_reason": retained_reason,
-                "preview_revision": current_preview_revision(request.session),
+                "preview_claim": snapshot.claim,
+                "sync_running": retained_reason == RETAINED_SYNC_BLOCK_REASON,
+                "reread_next": _trace_workspace_url(selected.identity if selected else ""),
                 "plugin_version": _plugin_version,
             },
         )
 
-    @staticmethod
-    def _preview_state(request, drift: bool) -> str:
-        """Return what the strip says about the preview the operator is reviewing."""
-        if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
-            return "recalculation required"
-        return "changed in NetBox" if drift else "current"
+
+@dataclass(frozen=True)
+class _TraceSync(QueueImport):
+    """Queue one Source Trace with the units its changes depend on, keeping the preview pending on it."""
+
+    identity: str
+    keeps_preview = True
+
+    def selection_for(self, preview):
+        """Refuse a sync live NetBox has moved under, or a trace with nothing to synchronize."""
+        live = ImportEngine.plan(preview.profile, preview.document, preview.actor, preview.planning_context)
+        if reason := _trace_sync_block_reason(preview.plan, live):
+            raise PreviewCommandRefused(reason, 409)
+        selection = preview.workspace.sync_selection(self.identity)
+        if not selection:
+            raise PreviewCommandRefused("That trace has no changes to synchronize.")
+        return list(selection)
 
 
-class TraceWorkspaceRereadView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
-    """Adopt the plan live NetBox states now, which is what clears the drift strip."""
-
-    permission_required = "netbox_data_import.change_importprofile"
-
-    def post(self, request):
-        """Replace the reviewed preview with a freshly read one."""
-        next_url = _trace_workspace_url(request.POST.get("trace", ""))
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            messages.warning(request, "No import preview in progress. Start a new import.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        profile, document, _workspace, planning_context = loaded
-        stale_reason = _stale_preview_reason(request)
-        if stale_reason is not None:
-            messages.warning(request, stale_reason)
-            return redirect(next_url)
-        refusal = self.refuse_unregistered_adapter(request, profile)
-        if refusal is not None:
-            return refusal
-        # Refuse before reading: a sync that ends mid-request would let a pre-write plan land clean.
-        if retained_reason := _retained_sync_block_reason(request):
-            messages.warning(request, retained_reason)
-            return redirect(next_url)
-        live = self.live_plan(profile, document, request, planning_context)
-        if live is None:
-            return self.discard_unavailable_target(request)
-        try:
-            record_recalculated_preview(request.session, live, user=request.user)
-        except PreviewLocked as exc:
-            messages.warning(request, str(exc))
-            return redirect(next_url)
-        messages.success(request, "The workspace was re-read from NetBox.")
-        return redirect(next_url)
-
-
-class TraceSyncView(_PermissionScopedWriteMixin, _TraceWorkspaceMixin, PermissionRequiredMixin, View):
+class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     """Synchronize one Source Trace together with the units its changes depend on."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Queue the reviewed plan for one trace's own selection."""
-        next_url = _trace_workspace_url(request.POST.get("identity", ""))
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            messages.warning(request, "No import preview in progress. Start a new import.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        profile, document, workspace, planning_context = loaded
-        stale_reason = _stale_preview_reason(request)
-        if stale_reason is not None:
-            messages.warning(request, stale_reason)
-            return redirect(next_url)
-        if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
-            messages.warning(request, "Recalculate and review the saved preview changes before importing.")
-            return redirect(next_url)
-        refusal = self.refuse_unregistered_adapter(request, profile)
-        if refusal is not None:
-            return refusal
-        live = self.live_plan(profile, document, request, planning_context)
-        if live is None:
-            return self.discard_unavailable_target(request)
-        sync_block_reason = _trace_sync_block_reason(workspace.plan, live)
-        if sync_block_reason:
-            messages.warning(request, sync_block_reason)
-            return redirect(next_url)
-        selection = workspace.sync_selection(request.POST.get("identity", "").strip())
-        if not selection:
-            messages.warning(request, "That trace has no changes to synchronize.")
-            return redirect(next_url)
-        try:
-            return _queue_accepted_plan(
-                request,
-                profile,
-                document,
-                request.session.get("import_context") or {},
-                request.session.get(PREVIEW_PLAN_SESSION_KEY),
-                list(selection),
-                keep_preview=True,
-            )
-        except PreviewLocked as exc:
-            messages.warning(request, str(exc))
-            return redirect(next_url)
+        command = _TraceSync(identity=request.POST.get("identity", "").strip())
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": result.outcome.job_id}))
+
+    def refusal_url(self, request):
+        """Return the trace the sync was asked for."""
+        return _trace_workspace_url(request.POST.get("identity", ""))
 
 
 CANDIDATE_LIMIT_INVALID = f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}."
@@ -4451,17 +3849,20 @@ def _candidate_page(params) -> CandidatePage:
     return CandidatePage(limit=limit, offset=offset)
 
 
-class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+class TraceTerminationCandidatesView(PermissionRequiredMixin, View):
     """Serve one page of eligible terminations for the workspace picker."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request):
         """Return the eligible candidates and the uncapped total the count states."""
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            return JsonResponse({"ok": False, "error": "No import preview in progress."}, status=409)
-        profile, _document, workspace, planning_context = loaded
+        try:
+            snapshot = _claimed_snapshot(request)
+            workspace = snapshot.workspace(request.user)
+        except StalePreview as exc:
+            return _stale_json(exc)
+        except PlanError:
+            return JsonResponse({"ok": False, "error": UNREADABLE_PREVIEW}, status=409)
         field_key = request.GET.get("field_key", "").strip()
         # A review read answers a question this preview asked, never one the caller invented.
         if field_key not in workspace.termination_sources:
@@ -4475,8 +3876,14 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
             return JsonResponse({"ok": False, "error": page.error}, status=400)
         limit, offset = page.limit, page.offset
         try:
-            found = self._eligible(
-                request, profile, planning_context, field_key, request.GET.get("search", ""), limit, offset
+            reader = _trace_reader(request.user, snapshot.profile, snapshot.planning_context)
+            found = eligible_terminations(
+                field_key,
+                reader,
+                profile=snapshot.profile,
+                search=request.GET.get("search", ""),
+                limit=limit,
+                offset=offset,
             )
         except (PlanningTargetUnavailable, ValueError):
             return JsonResponse({"ok": False, "error": TERMINATION_UNRESOLVABLE}, status=400)
@@ -4501,25 +3908,21 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
             }
         )
 
-    @staticmethod
-    def _eligible(request, profile, planning_context, field_key, search, limit, offset):
-        """Return the eligible page, inside the caller's own read scope."""
-        reader = _trace_reader(request, profile, planning_context)
-        return eligible_terminations(field_key, reader, profile=profile, search=search, limit=limit, offset=offset)
 
-
-class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+class TraceDeviceCandidatesView(PermissionRequiredMixin, View):
     """Serve one bounded page of visible Device candidates for a plan-authored question."""
 
     permission_required = "netbox_data_import.change_importprofile"
-    requires_preview_revision = True
 
     def get(self, request):
         """Return permission-scoped candidates and their source-evidence explanations."""
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            return JsonResponse({"ok": False, "error": "No current import preview matches this request."}, status=409)
-        profile, _document, workspace, planning_context = loaded
+        try:
+            snapshot = _claimed_snapshot(request)
+            workspace = snapshot.workspace(request.user)
+        except StalePreview as exc:
+            return _stale_json(exc)
+        except PlanError:
+            return JsonResponse({"ok": False, "error": UNREADABLE_PREVIEW}, status=409)
         device_key = source_device_key(request.GET.get("device_key", ""))
         question = _workspace_device_questions(workspace).get(device_key)
         if question is None:
@@ -4536,9 +3939,9 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
         except (TypeError, ValueError):
             return JsonResponse({"ok": False, "error": "That Device cannot be resolved here."}, status=400)
         try:
-            reader = _trace_reader(request, profile, planning_context)
+            reader = _trace_reader(request.user, snapshot.profile, snapshot.planning_context)
             found = eligible_trace_devices(
-                profile=profile, reader=reader, evidence=evidence, search=search, limit=limit, offset=offset
+                profile=snapshot.profile, reader=reader, evidence=evidence, search=search, limit=limit, offset=offset
             )
         except PlanningTargetUnavailable:
             return JsonResponse({"ok": False, "error": "That Device cannot be resolved here."}, status=400)
@@ -4566,105 +3969,89 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
         )
 
 
-class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+@dataclass(frozen=True)
+class _ResolveTraceDevice(PreviewCommand):
+    """Save one plan-authored source Device decision; the coordinator stores the replan it returns."""
+
+    device_key: str
+    device_id: int
+    search: str
+    limit: int
+    offset: int
+
+    def apply(self, preview):
+        """Recheck the offered Device, save it under the profile policy lock, and replan."""
+        question = _workspace_device_questions(preview.workspace).get(self.device_key)
+        if question is None:
+            raise PreviewCommandRefused("This preview asked no question about that Device.")
+        try:
+            evidence = DeviceEvidence.from_dict(question)
+        except (TypeError, ValueError):
+            raise PreviewCommandRefused("That Device is not one of the eligible candidates.") from None
+        try:
+            plan, chosen = save_trace_device_resolution_and_replan(
+                profile=preview.profile,
+                source_document=preview.document,
+                actor=preview.actor,
+                planning_context=preview.planning_context,
+                evidence=evidence,
+                selected_device_id=self.device_id,
+                search=self.search,
+                limit=self.limit,
+                offset=self.offset,
+                reviewed_fingerprint=preview.reviewed_fingerprint,
+            )
+        except IneligibleDeviceSelection:
+            raise PreviewCommandRefused("That Device is not one of the eligible candidates.") from None
+        return CommandOutcome(message=f"Source Device resolved to '{chosen}'.", plan=plan)
+
+
+class TraceResolveDeviceView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     """Save one plan-authored source Device decision and replan the workspace."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Recheck the offered Device, save it under the profile policy lock, and replan."""
-        next_url = _trace_workspace_url(request.POST.get("trace", ""))
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            messages.warning(request, "No import preview in progress. Start a new import.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        profile, document, workspace, planning_context = loaded
-        if stale_reason := _stale_preview_reason(request):
-            return _preview_action_error(request, next_url, stale_reason, status=409)
-        if retained_reason := _retained_sync_block_reason(request):
-            return _preview_action_error(request, next_url, retained_reason, status=409)
-        refusal = self.refuse_unregistered_adapter(request, profile)
-        if refusal is not None:
-            return refusal
-        device_key = source_device_key(request.POST.get("device_key", ""))
-        question = _workspace_device_questions(workspace).get(device_key)
-        if question is None:
-            return _preview_action_error(
-                request,
-                next_url,
-                "This preview asked no question about that Device.",
-                status=400,
-            )
+        """Run the decision as one coordinated command."""
         search = request.POST.get("search", "")
         if len(search) > 200:
-            return _preview_action_error(
-                request,
-                next_url,
-                "Device search must be 200 characters or fewer.",
-                status=400,
-            )
+            raise PreviewCommandRefused("Device search must be 200 characters or fewer.")
         try:
             device_id = int(request.POST.get("device_id", ""))
-            evidence = DeviceEvidence.from_dict(question)
         except (TypeError, ValueError):
-            return _preview_action_error(
-                request,
-                next_url,
-                "That Device is not one of the eligible candidates.",
-                status=400,
-            )
+            raise PreviewCommandRefused("That Device is not one of the eligible candidates.") from None
         # The write rechecks the page that made the offer.
         page = _candidate_page(request.POST)
         if page.error:
-            return _preview_action_error(request, next_url, page.error, status=400)
-        limit, offset = page.limit, page.offset
-        try:
-            with transaction.atomic():
-                plan, chosen = save_trace_device_resolution_and_replan(
-                    profile=profile,
-                    source_document=document,
-                    actor=request.user,
-                    planning_context=planning_context,
-                    evidence=evidence,
-                    selected_device_id=device_id,
-                    search=search,
-                    limit=limit,
-                    offset=offset,
-                    reviewed_fingerprint=workspace.plan.profile_fingerprint,
-                )
-                record_recalculated_preview(request.session, plan, user=request.user)
-        except ProfilePolicyMoved as exc:
-            return _preview_action_error(request, next_url, str(exc), status=409)
-        except IneligibleDeviceSelection:
-            return _preview_action_error(
-                request,
-                next_url,
-                "That Device is not one of the eligible candidates.",
-                status=400,
-            )
-        except PlanningTargetUnavailable:
-            return self.discard_unavailable_target(request)
-        except PreviewLocked as exc:
-            return _preview_action_error(request, next_url, str(exc), status=409)
-        messages.success(request, f"Source Device resolved to '{chosen}'.")
-        return redirect(next_url)
+            raise PreviewCommandRefused(page.error)
+        command = _ResolveTraceDevice(
+            device_key=source_device_key(request.POST.get("device_key", "")),
+            device_id=device_id,
+            search=search,
+            limit=page.limit,
+            offset=page.offset,
+        )
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, self.refusal_url(request))
 
 
 LOCATION_CHOICE_REFUSED = "Choose a visible Location in the selected Site."
 
 
-class TraceLocationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+class TraceLocationCandidatesView(PermissionRequiredMixin, View):
     """Serve one bounded page of the selected Site's visible Locations for one source Location path."""
 
     permission_required = "netbox_data_import.change_importprofile"
-    requires_preview_revision = True
 
     def get(self, request):
         """Return the searched page and the uncapped total the picker counts."""
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            return JsonResponse({"ok": False, "error": "No current import preview matches this request."}, status=409)
-        profile, _document, workspace, planning_context = loaded
+        try:
+            snapshot = _claimed_snapshot(request)
+            workspace = snapshot.workspace(request.user)
+        except StalePreview as exc:
+            return _stale_json(exc)
+        except PlanError:
+            return JsonResponse({"ok": False, "error": UNREADABLE_PREVIEW}, status=409)
         # A review read answers a question this preview asked, never one the caller invented.
         if source_location_key(request.GET.get("location_key", "")) not in _workspace_location_paths(workspace):
             return JsonResponse(
@@ -4679,7 +4066,10 @@ class TraceLocationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin,
         limit, offset = page.limit, page.offset
         try:
             found = eligible_trace_locations(
-                _trace_reader(request, profile, planning_context), search=search, limit=limit, offset=offset
+                _trace_reader(request.user, snapshot.profile, snapshot.planning_context),
+                search=search,
+                limit=limit,
+                offset=offset,
             )
         except PlanningTargetUnavailable:
             return JsonResponse({"ok": False, "error": "The import target is no longer available."}, status=400)
@@ -4698,291 +4088,264 @@ class TraceLocationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin,
         )
 
 
-class TraceLocationMappingView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+@dataclass(frozen=True)
+class _MapTraceLocation(PreviewCommand):
+    """Map one source Location path the reviewed preview carries, or clear its mapping."""
+
+    location_key: str
+    location_id: int | None
+
+    def apply(self, preview):
+        """Write the decision under the profile lock; the coordinator stores the replan it returns."""
+        paths = _workspace_location_paths(preview.workspace)
+        # A review command answers a question this preview asked, never one the caller invented.
+        if self.location_key not in paths:
+            raise PreviewCommandRefused("This preview carries no such source Location path.")
+        try:
+            if self.location_id is None:
+                plan = clear_trace_location_resolution_and_replan(
+                    profile=preview.profile,
+                    source_document=preview.document,
+                    actor=preview.actor,
+                    planning_context=preview.planning_context,
+                    source_location_key=self.location_key,
+                    reviewed_fingerprint=preview.reviewed_fingerprint,
+                )
+            else:
+                plan = save_trace_location_resolution_and_replan(
+                    profile=preview.profile,
+                    source_document=preview.document,
+                    actor=preview.actor,
+                    planning_context=preview.planning_context,
+                    source_location_path=paths[self.location_key],
+                    selected_location_id=self.location_id,
+                    reviewed_fingerprint=preview.reviewed_fingerprint,
+                )
+        except UnacceptablePolicyDecision as exc:
+            raise PreviewCommandRefused("; ".join(exc.errors)) from exc
+        except IneligibleLocationSelection:
+            raise PreviewCommandRefused(LOCATION_CHOICE_REFUSED) from None
+        settled = "saved for" if self.location_id is not None else "cleared for"
+        return CommandOutcome(message=f"Location mapping {settled} '{paths[self.location_key]}'.", plan=plan)
+
+
+class TraceLocationMappingView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     """Map one source Location path the reviewed preview carries, or clear its mapping, then replan."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Write the decision under the profile lock, so it and its replan commit together."""
-        next_url = _trace_workspace_url(request.POST.get("trace", ""))
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            messages.warning(request, "No import preview in progress. Start a new import.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        profile, document, workspace, planning_context = loaded
-        if stale_reason := _stale_preview_reason(request):
-            return _preview_action_error(request, next_url, stale_reason, status=409)
-        if retained_reason := _retained_sync_block_reason(request):
-            return _preview_action_error(request, next_url, retained_reason, status=409)
-        refusal = self.refuse_unregistered_adapter(request, profile)
-        if refusal is not None:
-            return refusal
-        key = source_location_key(request.POST.get("location_key", ""))
-        paths = _workspace_location_paths(workspace)
-        # A review command answers a question this preview asked, never one the caller invented.
-        if key not in paths:
-            return _preview_action_error(
-                request, next_url, "This preview carries no such source Location path.", status=400
-            )
-        clearing = bool(request.POST.get("clear"))
+        """Run the save or the clear as one coordinated command."""
         location_id = None
-        if not clearing:
+        if not request.POST.get("clear"):
             try:
                 location_id = int(request.POST.get("location_id", ""))
             except (TypeError, ValueError):
-                return _preview_action_error(request, next_url, LOCATION_CHOICE_REFUSED, status=400)
+                raise PreviewCommandRefused(LOCATION_CHOICE_REFUSED) from None
+        command = _MapTraceLocation(
+            location_key=source_location_key(request.POST.get("location_key", "")), location_id=location_id
+        )
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, self.refusal_url(request))
+
+
+@dataclass(frozen=True)
+class _SetCablePolicy(PreviewCommand):
+    """Set the Cable policy for one CableClass the reviewed preview states."""
+
+    cable_class: str
+    data: Mapping
+
+    def apply(self, preview):
+        """Save the policy under the profile lock; the coordinator stores the replan it returns."""
+        # A review command answers a question this preview asked, never one the caller invented.
+        if self.cable_class not in _workspace_cable_classes(preview.workspace):
+            raise PreviewCommandRefused("This preview states no segment with that CableClass.")
         try:
-            with transaction.atomic():
-                if clearing:
-                    plan = clear_trace_location_resolution_and_replan(
-                        profile=profile,
-                        source_document=document,
-                        actor=request.user,
-                        planning_context=planning_context,
-                        source_location_key=key,
-                        reviewed_fingerprint=workspace.plan.profile_fingerprint,
-                    )
-                else:
-                    plan = save_trace_location_resolution_and_replan(
-                        profile=profile,
-                        source_document=document,
-                        actor=request.user,
-                        planning_context=planning_context,
-                        source_location_path=paths[key],
-                        selected_location_id=location_id,
-                        reviewed_fingerprint=workspace.plan.profile_fingerprint,
-                    )
-                record_recalculated_preview(request.session, plan, user=request.user)
-        except ProfilePolicyMoved as exc:
-            return _preview_action_error(request, next_url, str(exc), status=409)
+            plan = save_cable_class_mapping_and_replan(
+                profile=preview.profile,
+                source_document=preview.document,
+                actor=preview.actor,
+                planning_context=preview.planning_context,
+                cable_class=self.cable_class,
+                data=dict(self.data),
+                reviewed_fingerprint=preview.reviewed_fingerprint,
+            )
         except UnacceptablePolicyDecision as exc:
-            return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
-        except IneligibleLocationSelection:
-            return _preview_action_error(request, next_url, LOCATION_CHOICE_REFUSED, status=400)
-        except PlanningTargetUnavailable:
-            return self.discard_unavailable_target(request)
-        except PreviewLocked as exc:
-            return _preview_action_error(request, next_url, str(exc), status=409)
-        settled = "cleared for" if clearing else "saved for"
-        messages.success(request, f"Location mapping {settled} '{paths[key]}'.")
-        return redirect(next_url)
+            raise PreviewCommandRefused("; ".join(exc.errors)) from exc
+        return CommandOutcome(message=f"Cable policy saved for CableClass '{self.cable_class}'.", plan=plan)
 
 
-class TraceCablePolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+class TraceCablePolicyView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     """Set the Cable policy for one CableClass the reviewed preview states, then replan."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the policy under the profile lock, so the decision and its replan commit together."""
-        next_url = _trace_workspace_url(request.POST.get("trace", ""))
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            messages.warning(request, "No import preview in progress. Start a new import.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        profile, document, workspace, planning_context = loaded
-        if stale_reason := _stale_preview_reason(request):
-            return _preview_action_error(request, next_url, stale_reason, status=409)
-        if retained_reason := _retained_sync_block_reason(request):
-            return _preview_action_error(request, next_url, retained_reason, status=409)
-        refusal = self.refuse_unregistered_adapter(request, profile)
-        if refusal is not None:
-            return refusal
-        cable_class = request.POST.get("cable_class", "").strip()
+        """Run the policy save as one coordinated command."""
+        command = _SetCablePolicy(
+            cable_class=request.POST.get("cable_class", "").strip(),
+            data={
+                "cable_type": request.POST.get("cable_type", ""),
+                "cable_profile": request.POST.get("cable_profile", ""),
+            },
+        )
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, self.refusal_url(request))
+
+
+@dataclass(frozen=True)
+class _SetSegmentPolicy(PreviewCommand):
+    """Force one planned segment to its own Cable policy, or clear the override again."""
+
+    trace: str
+    segment: str
+    clearing: bool
+    data: Mapping
+
+    def apply(self, preview):
+        """Write the decision under the profile lock; the coordinator stores the replan it returns."""
+        trace, segment = _workspace_segment(preview.workspace, self.trace, self.segment)
         # A review command answers a question this preview asked, never one the caller invented.
-        if cable_class not in _workspace_cable_classes(workspace):
-            return _preview_action_error(
-                request, next_url, "This preview states no segment with that CableClass.", status=400
-            )
+        if segment is None or not segment["segment_key"]:
+            raise PreviewCommandRefused("This preview resolved no segment there.")
+        # An override cannot decide a Cable the plan keeps, but the operator can still remove it.
+        if segment["retained"] and not self.clearing:
+            raise PreviewCommandRefused(RETAINED_SEGMENT_REASON)
         try:
-            with transaction.atomic():
-                plan = save_cable_class_mapping_and_replan(
-                    profile=profile,
-                    source_document=document,
-                    actor=request.user,
-                    planning_context=planning_context,
-                    cable_class=cable_class,
-                    data={
-                        "cable_type": request.POST.get("cable_type", ""),
-                        "cable_profile": request.POST.get("cable_profile", ""),
-                    },
-                    reviewed_fingerprint=workspace.plan.profile_fingerprint,
+            if self.clearing:
+                plan = clear_cable_segment_override_and_replan(
+                    profile=preview.profile,
+                    source_document=preview.document,
+                    actor=preview.actor,
+                    planning_context=preview.planning_context,
+                    segment_key=segment["segment_key"],
+                    reviewed_fingerprint=preview.reviewed_fingerprint,
                 )
-                record_recalculated_preview(request.session, plan, user=request.user)
-        except ProfilePolicyMoved as exc:
-            return _preview_action_error(request, next_url, str(exc), status=409)
+            else:
+                plan = save_cable_segment_override_and_replan(
+                    profile=preview.profile,
+                    source_document=preview.document,
+                    actor=preview.actor,
+                    planning_context=preview.planning_context,
+                    segment_key=segment["segment_key"],
+                    trace_identity=trace.trace_identity,
+                    segment_index=segment["index"],
+                    cable_class=segment["cable_class"],
+                    data=dict(self.data),
+                    reviewed_fingerprint=preview.reviewed_fingerprint,
+                )
         except UnacceptablePolicyDecision as exc:
-            return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
-        except PlanningTargetUnavailable:
-            return self.discard_unavailable_target(request)
-        except PreviewLocked as exc:
-            return _preview_action_error(request, next_url, str(exc), status=409)
-        messages.success(request, f"Cable policy saved for CableClass '{cable_class}'.")
-        return redirect(next_url)
+            raise PreviewCommandRefused("; ".join(exc.errors)) from exc
+        settled = "cleared on" if self.clearing else "forced on"
+        return CommandOutcome(message=f"Cable policy {settled} segment {segment['index'] + 1}.", plan=plan)
 
 
-class TraceCableSegmentPolicyView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+class TraceCableSegmentPolicyView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     """Force one planned segment to its own Cable policy, or clear the override again."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Write the decision under the profile lock, so it and its replan commit together."""
-        next_url = _trace_workspace_url(request.POST.get("trace", ""))
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            messages.warning(request, "No import preview in progress. Start a new import.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        profile, document, workspace, planning_context = loaded
-        if stale_reason := _stale_preview_reason(request):
-            return _preview_action_error(request, next_url, stale_reason, status=409)
-        if retained_reason := _retained_sync_block_reason(request):
-            return _preview_action_error(request, next_url, retained_reason, status=409)
-        refusal = self.refuse_unregistered_adapter(request, profile)
-        if refusal is not None:
-            return refusal
-        trace, segment = _workspace_segment(workspace, request.POST.get("trace", ""), request.POST.get("segment", ""))
+        """Run the override save or clear as one coordinated command."""
+        command = _SetSegmentPolicy(
+            trace=request.POST.get("trace", ""),
+            segment=request.POST.get("segment", ""),
+            clearing=bool(request.POST.get("clear")),
+            data={
+                "cable_type": request.POST.get("cable_type", ""),
+                "cable_profile": request.POST.get("cable_profile", ""),
+            },
+        )
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, self.refusal_url(request))
+
+
+@dataclass(frozen=True)
+class _ResolveTermination(PreviewCommand):
+    """Record one operator termination decision the picker offered."""
+
+    field_key: str
+    object_type: str
+    object_id: int
+    search: str
+    limit: int
+    offset: int
+
+    def apply(self, preview):
+        """Recheck the offer, save the selection, and return the replan the coordinator stores."""
+        from core.models import ObjectType
+
+        workspace = preview.workspace
         # A review command answers a question this preview asked, never one the caller invented.
-        if segment is None or not segment["segment_key"]:
-            return _preview_action_error(request, next_url, "This preview resolved no segment there.", status=400)
-        clearing = bool(request.POST.get("clear"))
-        # An override cannot decide a Cable the plan keeps, but the operator can still remove it.
-        if segment["retained"] and not clearing:
-            return _preview_action_error(request, next_url, RETAINED_SEGMENT_REASON, status=400)
+        if self.field_key not in workspace.termination_sources:
+            raise PreviewCommandRefused("This preview asked no question about that termination.")
+        if workspace.termination_sources[self.field_key] is None:
+            raise PreviewCommandRefused(TERMINATION_UNRESOLVABLE)
         try:
-            with transaction.atomic():
-                if clearing:
-                    plan = clear_cable_segment_override_and_replan(
-                        profile=profile,
-                        source_document=document,
-                        actor=request.user,
-                        planning_context=planning_context,
-                        segment_key=segment["segment_key"],
-                        reviewed_fingerprint=workspace.plan.profile_fingerprint,
-                    )
-                else:
-                    plan = save_cable_segment_override_and_replan(
-                        profile=profile,
-                        source_document=document,
-                        actor=request.user,
-                        planning_context=planning_context,
-                        segment_key=segment["segment_key"],
-                        trace_identity=trace.trace_identity,
-                        segment_index=segment["index"],
-                        cable_class=segment["cable_class"],
-                        data={
-                            "cable_type": request.POST.get("cable_type", ""),
-                            "cable_profile": request.POST.get("cable_profile", ""),
-                        },
-                        reviewed_fingerprint=workspace.plan.profile_fingerprint,
-                    )
-                record_recalculated_preview(request.session, plan, user=request.user)
-        except ProfilePolicyMoved as exc:
-            return _preview_action_error(request, next_url, str(exc), status=409)
-        except UnacceptablePolicyDecision as exc:
-            return _preview_action_error(request, next_url, "; ".join(exc.errors), status=400)
-        except PlanningTargetUnavailable:
-            return self.discard_unavailable_target(request)
-        except PreviewLocked as exc:
-            return _preview_action_error(request, next_url, str(exc), status=409)
-        settled = "cleared on" if clearing else "forced on"
-        messages.success(request, f"Cable policy {settled} segment {segment['index'] + 1}.")
-        return redirect(next_url)
-
-
-class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
-    """Record one operator termination decision and ask for a fresh Import Plan."""
-
-    permission_required = "netbox_data_import.change_importprofile"
-
-    def post(self, request):
-        """Save the selection the picker offered, then replan the preview against it."""
-        next_url = _trace_workspace_url(request.POST.get("trace", ""))
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            messages.warning(request, "No import preview in progress. Start a new import.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        profile, document, workspace, planning_context = loaded
-        stale_reason = _stale_preview_reason(request)
-        if stale_reason is not None:
-            return _preview_action_error(request, next_url, stale_reason, status=409)
-        # Refuse before writing: the decision and its replan commit together.
-        if retained_reason := _retained_sync_block_reason(request):
-            return _preview_action_error(request, next_url, retained_reason, status=409)
-        refusal = self.refuse_unregistered_adapter(request, profile)
-        if refusal is not None:
-            return refusal
-        field_key = request.POST.get("field_key", "").strip()
-        object_type = request.POST.get("object_type", "").strip()
-        try:
-            object_id = int(request.POST.get("object_id", ""))
-        except (TypeError, ValueError):
-            return _preview_action_error(request, next_url, "A termination selection names one object.", status=400)
-        # A review command answers a question this preview asked, never one the caller invented.
-        if field_key not in workspace.termination_sources:
-            return _preview_action_error(
-                request, next_url, "This preview asked no question about that termination.", status=400
-            )
-        if workspace.termination_sources[field_key] is None:
-            return _preview_action_error(request, next_url, TERMINATION_UNRESOLVABLE, status=400)
-        page = _candidate_page(request.POST)
-        if page.error:
-            return _preview_action_error(request, next_url, page.error, status=400)
-        limit, offset = page.limit, page.offset
-        try:
-            reader = _trace_reader(request, profile, planning_context)
+            reader = _trace_reader(preview.actor, preview.profile, preview.planning_context)
             # The recheck repeats the query that made the offer, so a searched or paged candidate still counts.
             found = eligible_terminations(
-                field_key,
+                self.field_key,
                 reader,
-                profile=profile,
-                search=request.POST.get("search", ""),
-                limit=limit,
-                offset=offset,
+                profile=preview.profile,
+                search=self.search,
+                limit=self.limit,
+                offset=self.offset,
             )
         except (PlanningTargetUnavailable, ValueError):
-            return _preview_action_error(request, next_url, TERMINATION_UNRESOLVABLE, status=400)
+            raise PreviewCommandRefused(TERMINATION_UNRESOLVABLE) from None
         # The picker is the only legal source of a choice, so the write rechecks the offer.
         chosen = next(
             (
                 candidate
                 for candidate in found.candidates
-                if candidate.pk == object_id and candidate._meta.label_lower == object_type
+                if candidate.pk == self.object_id and candidate._meta.label_lower == self.object_type
             ),
             None,
         )
         if chosen is None:
-            return _preview_action_error(
-                request, next_url, "That termination is not one of the eligible candidates.", status=400
-            )
-        from core.models import ObjectType
+            raise PreviewCommandRefused("That termination is not one of the eligible candidates.")
+        plan = save_termination_resolution_and_replan(
+            profile=preview.profile,
+            source_document=preview.document,
+            actor=preview.actor,
+            planning_context=preview.planning_context,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=self.field_key,
+            source=workspace.termination_sources[self.field_key],
+            selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
+            selected_object_id=chosen.pk,
+            selected_display_name=str(chosen),
+            reviewed_fingerprint=preview.reviewed_fingerprint,
+        )
+        return CommandOutcome(message=f"Termination resolved to '{chosen}'.", plan=plan)
 
+
+class TraceResolveTerminationView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Record one operator termination decision and replan the preview against it."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Run the decision as one coordinated command."""
         try:
-            # One transaction: a failed replan or preview reservation rolls the saved decision back.
-            with transaction.atomic():
-                plan = save_termination_resolution_and_replan(
-                    profile=profile,
-                    source_document=document,
-                    actor=request.user,
-                    planning_context=planning_context,
-                    task_type=SELECT_TERMINATION_TASK,
-                    field_key=field_key,
-                    source=workspace.termination_sources[field_key],
-                    selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
-                    selected_object_id=chosen.pk,
-                    selected_display_name=str(chosen),
-                    reviewed_fingerprint=workspace.plan.profile_fingerprint,
-                )
-                record_recalculated_preview(request.session, plan, user=request.user)
-        except ProfilePolicyMoved as exc:
-            return _preview_action_error(request, next_url, str(exc), status=409)
-        except PlanningTargetUnavailable:
-            return self.discard_unavailable_target(request)
-        except PreviewLocked as exc:
-            return _preview_action_error(request, next_url, str(exc), status=409)
-        messages.success(request, f"Termination resolved to '{chosen}'.")
-        return redirect(next_url)
+            object_id = int(request.POST.get("object_id", ""))
+        except (TypeError, ValueError):
+            raise PreviewCommandRefused("A termination selection names one object.") from None
+        page = _candidate_page(request.POST)
+        if page.error:
+            raise PreviewCommandRefused(page.error)
+        command = _ResolveTermination(
+            field_key=request.POST.get("field_key", "").strip(),
+            object_type=request.POST.get("object_type", "").strip(),
+            object_id=object_id,
+            search=request.POST.get("search", ""),
+            limit=page.limit,
+            offset=page.offset,
+        )
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, self.refusal_url(request))
 
 
 class InvalidProposalId(ValueError):
@@ -4997,22 +4360,9 @@ INVALID_PROPOSAL_ID_ERROR = "Enter a valid proposal_id integer."
 
 
 class _TraceProposalMixin(_TraceWorkspaceMixin):
-    """Bind proposal operations to the acting operator's preview and inventory scope."""
+    """Answer every proposal command and read in the workspace JSON envelope."""
 
-    requires_preview_revision = True
-
-    def proposal_preview(self, request):
-        """Return the reviewed context, refusing requests without a preview."""
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            raise PreviewActionInvalid("No import preview in progress.")
-        return loaded
-
-    def proposal_context(self, request):
-        """Return the preview and scoped reader, refusing requests without a preview."""
-        profile, document, workspace, planning_context = self.proposal_preview(request)
-        reader = _trace_reader(request, profile, planning_context)
-        return profile, document, workspace, planning_context, reader
+    permission_denied_response_format = "json"
 
     def dispatch(self, request, *args, **kwargs):
         """Translate domain refusals into the workspace JSON envelope."""
@@ -5025,43 +4375,31 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
             return super().dispatch(request, *args, **kwargs)
         except InvalidProposalId:
             return JsonResponse({"ok": False, "error": INVALID_PROPOSAL_ID_ERROR}, status=400)
-        except Http404:
+        except (Http404, ResolutionProposal.DoesNotExist):
             return JsonResponse({"ok": False, "error": "That proposal is no longer available."}, status=404)
-        except ImportProfile.DoesNotExist:
-            return JsonResponse({"ok": False, "error": "The import profile is no longer available."}, status=404)
-        except ResolutionProposal.DoesNotExist:
-            return JsonResponse({"ok": False, "error": "That proposal is no longer available."}, status=404)
-        except (PreviewActionInvalid, ActiveProposalExists, ProfilePolicyMoved) as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=409)
+        except ActiveProposalExists as exc:
+            return JsonResponse({"ok": False, "error": exc.operator_message}, status=409)
         except UnusableCandidateSet as exc:
-            return JsonResponse({"ok": False, "error": str(exc), "reason": exc.reason}, status=400)
-        except ObjectPermissionDenied as exc:
-            logger.warning(
-                "%s: proposal action refused outside the caller's object scope: %s", type(self).__name__, exc
-            )
-            return JsonResponse(
-                {"ok": False, "error": "Permission denied: this action is outside your NetBox object permissions."},
-                status=403,
-            )
-        except (
-            InvalidProposalTarget,
-            InvalidProposalCandidate,
-            PlanningTargetUnavailable,
-            UnsupportedProposalRole,
-        ) as exc:
+            return JsonResponse({"ok": False, "error": exc.operator_message, "reason": exc.reason}, status=400)
+        except (InvalidProposalTarget, InvalidProposalCandidate, UnsupportedProposalRole) as exc:
             logger.warning("%s: termination refused: %s", type(self).__name__, exc)
             return JsonResponse({"ok": False, "error": TERMINATION_UNRESOLVABLE}, status=400)
         except ValidationError as exc:
             return JsonResponse({"ok": False, "error": "; ".join(exc.messages)}, status=400)
 
 
-class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
-    """Freeze one unresolved field's evidence before dispatching inference."""
+@dataclass(frozen=True)
+class _RequestProposal(PreviewCommand):
+    """Freeze one unresolved field's evidence and queue its inference; the plan itself does not change."""
 
-    permission_required = "netbox_data_import.change_importprofile"
+    field_key: str
+    replans = False
+    reviews_policy = False
 
-    def post(self, request):
-        """Create the attempt row, then enqueue a job carrying its id alone."""
+    def apply(self, preview):
+        """Recheck the field against live NetBox, create the attempt row, and queue its Job."""
+        from core.choices import JobStatusChoices
+        from core.models import Job
         from core.models import ObjectType
 
         from .cable_target import UNRESOLVED
@@ -5081,98 +4419,110 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             request_proposal,
         )
 
-        profile, document, workspace, planning_context, reader = self.proposal_context(request)
-        reason = self.unregistered_adapter_reason(profile)
-        if reason is not None:
-            _discard_import_preview(request)
-            return JsonResponse({"ok": False, "error": reason}, status=409)
-        field_key = request.POST.get("field_key", "").strip()
-        if field_key not in workspace.termination_sources:
+        profile, actor, field_key = preview.profile, preview.actor, self.field_key
+        if field_key not in preview.workspace.termination_sources:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
-        if workspace.termination_sources[field_key] is None:
+        if preview.workspace.termination_sources[field_key] is None:
             raise InvalidProposalTarget(TERMINATION_UNRESOLVABLE)
+        reader = _trace_reader(actor, profile, preview.planning_context)
         task = proposal_task(SELECT_TERMINATION_TASK)
-        with locked_profile_policy(profile.pk):
-            live = ImportEngine.plan(profile, document, request.user, planning_context)
-            field = next(
-                (
-                    item
-                    for trace in ReviewWorkspace(live, request.user).traces
-                    for item in trace.terminations
-                    if item["field_key"] == field_key
-                ),
-                None,
-            )
-            if field is None:
-                raise InvalidProposalTarget("This field is no longer in the preview.")
-            if field["state"] != UNRESOLVED:
-                raise PreviewActionInvalid("This termination is already resolved.")
-            # Refuse on the observed predecessor, not on the index: see active_proposal_exists.
-            if active_proposal_exists(profile=profile, task_type=SELECT_TERMINATION_TASK, field_key=field_key):
-                raise ActiveProposalExists("This field already has an active Resolution Proposal.")
-            inventory = task.inventory(
-                profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_eligible_set_limit()
-            )
-            device = inventory.resolved_device
-            if device is None:
-                raise PreviewActionInvalid("The resolved Device is unavailable or outside your view permission.")
-            if inventory.candidate_error is not None:
-                raise inventory.candidate_error
-            snapshot = inventory.candidate_snapshot
-            if snapshot is None:
-                raise PreviewActionInvalid("The eligible candidates are no longer available.")
-            # A dense Device is searched in turns, from after the last page that used itself up.
-            snapshot = snapshot.with_page(
-                offset=next_page_offset(
-                    profile=profile,
-                    task_type=SELECT_TERMINATION_TASK,
-                    field_key=field_key,
-                    inventory=inventory,
-                ),
-                size=proposal_candidate_limit(),
-            )
-            proposal = request_proposal(
-                profile=profile,
-                task_type=SELECT_TERMINATION_TASK,
-                field_key=field_key,
-                source_evidence={**parse_termination_field_key(field_key), "label": field["label"]},
-                resolved_device_type=ObjectType.objects.get_for_model(device),
-                resolved_device_id=device.pk,
-                prompt_version=PROMPT_VERSION,
-                response_schema_version=RESPONSE_SCHEMA_VERSION,
-                candidate_snapshot=snapshot,
-                requested_by=request.user,
-            )
-        try:
-            job = ResolutionProposalJob.enqueue(
-                name=ResolutionProposalJob.Meta.name, user=request.user, proposal_id=proposal.pk
-            )
-        except (RedisConnectionError, RedisTimeoutError):
+        live = ImportEngine.plan(profile, preview.document, actor, preview.planning_context)
+        field = next(
+            (
+                item
+                for trace in ReviewWorkspace(live, actor).traces
+                for item in trace.terminations
+                if item["field_key"] == field_key
+            ),
+            None,
+        )
+        if field is None:
+            raise InvalidProposalTarget("This field is no longer in the preview.")
+        if field["state"] != UNRESOLVED:
+            raise PreviewCommandRefused("This termination is already resolved.", 409)
+        # Refuse on the observed predecessor, not on the index: see active_proposal_exists.
+        if active_proposal_exists(profile=profile, task_type=SELECT_TERMINATION_TASK, field_key=field_key):
+            raise ActiveProposalExists("This field already has an active Resolution Proposal.")
+        inventory = task.inventory(
+            profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_eligible_set_limit()
+        )
+        device = inventory.resolved_device
+        if device is None:
+            raise PreviewCommandRefused("The resolved Device is unavailable or outside your view permission.", 409)
+        if inventory.candidate_error is not None:
+            raise inventory.candidate_error
+        snapshot = inventory.candidate_snapshot
+        if snapshot is None:
+            raise PreviewCommandRefused("The eligible candidates are no longer available.", 409)
+        # A dense Device is searched in turns, from after the last page that used itself up.
+        snapshot = snapshot.with_page(
+            offset=next_page_offset(
+                profile=profile, task_type=SELECT_TERMINATION_TASK, field_key=field_key, inventory=inventory
+            ),
+            size=proposal_candidate_limit(),
+        )
+        proposal = request_proposal(
+            profile=profile,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=field_key,
+            source_evidence={**parse_termination_field_key(field_key), "label": field["label"]},
+            resolved_device_type=ObjectType.objects.get_for_model(device),
+            resolved_device_id=device.pk,
+            prompt_version=PROMPT_VERSION,
+            response_schema_version=RESPONSE_SCHEMA_VERSION,
+            candidate_snapshot=snapshot,
+            requested_by=actor,
+        )
+        job = ResolutionProposalJob.enqueue(name=ResolutionProposalJob.Meta.name, user=actor, proposal_id=proposal.pk)
+        record_proposal_job(proposal.pk, job)
+
+        def compensate():
+            # The push runs after commit, so the attempt fails on its own row rather than staying queued.
             fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)
-            logger.exception("Failed to enqueue resolution proposal_id=%s", proposal.pk)
+            Job.objects.filter(pk=job.pk, status=JobStatusChoices.STATUS_PENDING).update(
+                status=JobStatusChoices.STATUS_ERRORED
+            )
+
+        return CommandOutcome(
+            payload={"proposal_id": proposal.pk, "status": proposal.status, "job_id": job.pk},
+            compensate=compensate,
+        )
+
+
+class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
+    """Freeze one unresolved field's evidence before dispatching inference."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Create the attempt row, then queue a job carrying its id alone."""
+        command = _RequestProposal(field_key=request.POST.get("field_key", "").strip())
+        try:
+            result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        except (RedisConnectionError, RedisTimeoutError):
+            logger.exception("Failed to enqueue a resolution proposal")
             return JsonResponse(
                 {"ok": False, "error": "The proposal queue is unavailable. Try again later."},
                 status=503,
             )
-        except Exception:
-            fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)
-            raise
-        record_proposal_job(proposal.pk, job)
-        return JsonResponse({"ok": True, "proposal_id": proposal.pk, "status": proposal.status, "job_id": job.pk})
+        return JsonResponse({"ok": True, **result.outcome.payload})
 
 
 class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
     """Read all attempts for a field, independent of their originating plans."""
 
     permission_required = "netbox_data_import.view_importprofile"
-    preview_profile_action = "view"
 
     def get(self, request):
         """Return the current proposal and name each freshness trigger."""
         from .field_keys import parse_termination_field_key
         from .proposal_presentation import ProposalPresentation
 
-        profile, _document, workspace, planning_context = self.proposal_preview(request)
+        snapshot = _claimed_snapshot(request, profile_action="view")
+        try:
+            workspace = snapshot.workspace(request.user)
+        except PlanError:
+            raise StalePreview(UNREADABLE_PREVIEW) from None
         field_key = request.GET.get("field_key", "").strip()
         parse_termination_field_key(field_key)
         field = next(
@@ -5180,67 +4530,74 @@ class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
             {"field_key": field_key, "state": "", "offered": False},
         )
         try:
-            reader = _trace_reader(request, profile, planning_context)
+            reader = _trace_reader(request.user, snapshot.profile, snapshot.planning_context)
         except PlanningTargetUnavailable:
             reader = None
         field = {**field, "source_ambiguous": workspace.termination_sources.get(field_key) is None}
-        presentation = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
+        presentation = ProposalPresentation(profile=snapshot.profile, actor=request.user, reader=reader)
         return JsonResponse(presentation.fields([field])[field_key])
 
 
-class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, View):
-    """Locate a proposal within this preview's profile before applying a decision."""
+@dataclass(frozen=True)
+class _ProposalAction(PreviewCommand):
+    """Apply one operator action to a proposal of this preview's profile."""
 
-    permission_required = "netbox_data_import.change_importprofile"
-    requires_reader = True
+    proposal_id: int
+    replans = False
+    reviews_policy = False
 
-    def post(self, request):
-        """Refuse an unavailable attempt or a transition that another operator already took."""
+    def apply(self, preview):
+        """Refuse an unavailable attempt or a transition another operator already took."""
         from .models import ResolutionProposal
 
-        if self.requires_reader:
-            profile, _document, workspace, _context, reader = self.proposal_context(request)
-        else:
-            profile, _document, workspace, _context = self.proposal_preview(request)
-            reader = None
+        proposal = ResolutionProposal.objects.get(
+            pk=self.proposal_id, profile=preview.profile, task_type=SELECT_TERMINATION_TASK
+        )
+        if proposal.field_key not in preview.workspace.termination_sources:
+            raise InvalidProposalTarget("This preview asked no question about that termination.")
+        if not self.decide(proposal, preview):
+            raise PreviewCommandRefused(
+                "This proposal no longer permits that action. Re-read it before continuing.", 409
+            )
+        proposal.refresh_from_db()
+        return CommandOutcome(
+            payload={"proposal_id": proposal.pk, "status": proposal.status, "decision": proposal.decision}
+        )
+
+    def decide(self, proposal, preview) -> bool:
+        """Apply the action, returning whether this caller moved the proposal."""
+        raise NotImplementedError
+
+
+class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, View):
+    """Run one proposal action as a coordinated command."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+    command_class: type[_ProposalAction]
+
+    def post(self, request):
+        """Answer the JSON envelope the proposal card reads, then the card reloads the workspace."""
         try:
             proposal_id = int(request.POST.get("proposal_id", ""))
         except ValueError:
             raise InvalidProposalId(INVALID_PROPOSAL_ID_ERROR) from None
-        proposal = get_object_or_404(
-            ResolutionProposal,
-            pk=proposal_id,
-            profile=profile,
-            task_type=SELECT_TERMINATION_TASK,
-        )
-        if proposal.field_key not in workspace.termination_sources:
-            raise InvalidProposalTarget("This preview asked no question about that termination.")
-        if not self.apply(proposal, request, reader, workspace):
-            raise PreviewActionInvalid("This proposal no longer permits that action. Re-read it before continuing.")
-        proposal.refresh_from_db()
-        payload = {"ok": True, "proposal_id": proposal.pk, "status": proposal.status, "decision": proposal.decision}
-        if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
-            payload["preview_state"] = "recalculation_required"
-        return JsonResponse(payload)
-
-    def apply(self, proposal, request, reader, workspace):
-        """Apply the action implemented by the concrete endpoint."""
-        raise NotImplementedError
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), self.command_class(proposal_id))
+        return JsonResponse({"ok": True, **result.outcome.payload})
 
 
-class TraceCancelProposalView(_TraceProposalActionView):
-    """Allow any operator with preview and resolved Device access to cancel active work."""
+@dataclass(frozen=True)
+class _CancelProposal(_ProposalAction):
+    """Cancel active work, for any operator with preview and resolved Device access."""
 
-    def apply(self, proposal, request, reader, workspace):
+    def decide(self, proposal, preview):
         """Cancel through the lifecycle's conditional transition."""
         from .proposal_tasks import proposal_task
         from .resolution_proposals import cancel_proposal
 
+        reader = _trace_reader(preview.actor, preview.profile, preview.planning_context)
         if (
             proposal_task(proposal.task_type).resolved_device(
-                profile=proposal.profile,
-                field_key=proposal.field_key,
-                netbox_reader=reader,
+                profile=proposal.profile, field_key=proposal.field_key, netbox_reader=reader
             )
             is None
         ):
@@ -5248,341 +4605,355 @@ class TraceCancelProposalView(_TraceProposalActionView):
         return cancel_proposal(proposal.pk)
 
 
-class TraceAcceptProposalView(_TraceProposalActionView):
-    """Accept through the existing transaction; the operator replans their own preview."""
+@dataclass(frozen=True)
+class _AcceptProposal(_ProposalAction):
+    """Write the accepted resolution; the coordinator replans in the same transaction."""
 
-    def apply(self, proposal, request, reader, workspace):
-        """Record the accepted resolution and require an explicit preview recalculation."""
+    replans = True
+    reviews_policy = True
+
+    def decide(self, proposal, preview):
+        """Record the accepted resolution through the existing acceptance transaction."""
         from .proposal_decisions import accept_proposal
 
-        if workspace.termination_sources[proposal.field_key] is None:
+        if preview.workspace.termination_sources[proposal.field_key] is None:
             raise InvalidProposalTarget(TERMINATION_UNRESOLVABLE)
-        accepted = accept_proposal(
+        return accept_proposal(
             proposal.pk,
-            source=workspace.termination_sources[proposal.field_key],
-            operator=request.user,
-            netbox_reader=reader,
-            reviewed_fingerprint=workspace.plan.profile_fingerprint,
+            source=preview.workspace.termination_sources[proposal.field_key],
+            operator=preview.actor,
+            netbox_reader=_trace_reader(preview.actor, preview.profile, preview.planning_context),
+            reviewed_fingerprint=preview.reviewed_fingerprint,
         )
-        if accepted:
-            mark_preview_dirty(request.session)
-        return accepted
+
+
+@dataclass(frozen=True)
+class _RejectProposal(_ProposalAction):
+    """Record the explicit rejection without binding it to the requesting operator."""
+
+    profile_action = "view"
+
+    def decide(self, proposal, preview):
+        """Reject through the permission-checked decision service."""
+        from .proposal_decisions import reject_proposal
+
+        return reject_proposal(proposal.pk, operator=preview.actor)
+
+
+class TraceCancelProposalView(_TraceProposalActionView):
+    """Allow any operator with preview and resolved Device access to cancel active work."""
+
+    command_class = _CancelProposal
+
+
+class TraceAcceptProposalView(_TraceProposalActionView):
+    """Accept a proposal and replan the preview in one coordinated transaction."""
+
+    command_class = _AcceptProposal
 
 
 class TraceRejectProposalView(_TraceProposalActionView):
     """Record the explicit rejection without binding it to the requesting operator."""
 
     permission_required = "netbox_data_import.view_importprofile"
-    preview_profile_action = "view"
-    requires_reader = False
-
-    def apply(self, proposal, request, reader, workspace):
-        """Reject through the permission-checked decision service."""
-        from .proposal_decisions import reject_proposal
-
-        return reject_proposal(proposal.pk, operator=request.user)
+    command_class = _RejectProposal
 
 
-class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+@dataclass(frozen=True)
+class _MapManufacturer(PreviewCommand):
+    """Save a ManufacturerMapping (source make to NetBox manufacturer slug) from the preview page."""
+
+    source_make: str
+    netbox_mfg_slug: str
+
+    def apply(self, preview):
+        """Validate and save the mapping."""
+        mapping = _get_or_init(ManufacturerMapping, profile=preview.profile, source_make=self.source_make)
+        mapping.netbox_manufacturer_slug = self.netbox_mfg_slug
+        _validate_model_instance(mapping, f"manufacturer mapping '{self.source_make}'")
+        result = save_permission_scoped_object(
+            preview.actor,
+            ManufacturerMapping,
+            {"profile": preview.profile, "source_make": self.source_make},
+            {"netbox_manufacturer_slug": self.netbox_mfg_slug},
+        )
+        verb = "Created" if result.created else "Updated"
+        return CommandOutcome(message=f"{verb} manufacturer mapping: '{self.source_make}' → {self.netbox_mfg_slug}")
+
+
+class QuickResolveManufacturerView(_PreviewCommandMixin, PermissionRequiredMixin, View):
     """Save a ManufacturerMapping (source make → NetBox manufacturer slug) from the preview page."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the manufacturer mapping and report the pending preview change."""
-        next_url = reverse("plugins:netbox_data_import:import_preview")
-        profile_id = _parse_posted_profile_id(request)
-        if profile_id is None:
-            return _preview_action_error(
-                request,
-                next_url,
-                "A valid import profile is required. Reload the preview and try again.",
-                status=400,
-            )
-        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
-        stale_reason = _stale_preview_reason(request)
-        if stale_reason is not None:
-            return _preview_action_error(request, next_url, stale_reason, status=409)
+        """Save the manufacturer mapping and replan the preview."""
         source_make = " ".join(request.POST.get("source_make", "").split())
         netbox_mfg_slug = request.POST.get("netbox_mfg_slug", "").strip()
         if not source_make or not netbox_mfg_slug:
-            return _preview_action_error(
-                request,
-                next_url,
-                "Source make and NetBox manufacturer slug are required.",
-                status=400,
-            )
-        mapping = _get_or_init(ManufacturerMapping, profile=profile, source_make=source_make)
-        mapping.netbox_manufacturer_slug = netbox_mfg_slug
-        try:
-            _validate_model_instance(mapping, f"manufacturer mapping '{source_make}'")
-        except PreviewActionInvalid as exc:
-            return _preview_action_error(request, next_url, str(exc), status=400)
+            raise PreviewCommandRefused("Source make and NetBox manufacturer slug are required.")
+        command = _MapManufacturer(source_make=source_make, netbox_mfg_slug=netbox_mfg_slug)
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, reverse("plugins:netbox_data_import:import_preview"))
+
+    def refusal_url(self, request):
+        """Return the preview the quick fix came from."""
+        return reverse("plugins:netbox_data_import:import_preview")
+
+
+@dataclass(frozen=True)
+class _MapDeviceType(PreviewCommand):
+    """Save a DeviceTypeMapping (source make and model to NetBox slugs) from the preview page."""
+
+    source_make: str
+    source_model: str
+    netbox_mfg_slug: str
+    netbox_dt_slug: str
+
+    def apply(self, preview):
+        """Validate and save the mapping."""
+        mapping = _get_or_init(
+            DeviceTypeMapping, profile=preview.profile, source_make=self.source_make, source_model=self.source_model
+        )
+        mapping.netbox_manufacturer_slug = self.netbox_mfg_slug
+        mapping.netbox_device_type_slug = self.netbox_dt_slug
+        _validate_model_instance(mapping, f"device type mapping '{self.source_make} / {self.source_model}'")
         result = save_permission_scoped_object(
-            request.user,
-            ManufacturerMapping,
-            {"profile": profile, "source_make": source_make},
-            {"netbox_manufacturer_slug": netbox_mfg_slug},
+            preview.actor,
+            DeviceTypeMapping,
+            {"profile": preview.profile, "source_make": self.source_make, "source_model": self.source_model},
+            {"netbox_manufacturer_slug": self.netbox_mfg_slug, "netbox_device_type_slug": self.netbox_dt_slug},
         )
-        verb = "Created" if result.created else "Updated"
-        return _saved_preview_action_response(
-            request,
-            next_url,
-            f"{verb} manufacturer mapping: '{source_make}' → {netbox_mfg_slug}",
+        verb = "created" if result.created else "updated"
+        return CommandOutcome(
+            message=(
+                f"DeviceType mapping {verb}: '{self.source_make} / {self.source_model}' "
+                f"→ {self.netbox_mfg_slug}/{self.netbox_dt_slug}"
+            )
         )
 
 
-class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+class QuickResolveDeviceTypeView(_PreviewCommandMixin, PermissionRequiredMixin, View):
     """Save a DeviceTypeMapping (source make/model → NetBox slugs) from the preview page."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the device type mapping and report the pending preview change."""
+        """Save the device type mapping and replan the preview."""
         from .device_identity import default_identity_slugs
 
-        next_url = reverse("plugins:netbox_data_import:import_preview")
-        profile_id = _parse_posted_profile_id(request)
-        if profile_id is None:
-            return _preview_action_error(
-                request,
-                next_url,
-                "A valid import profile is required. Reload the preview and try again.",
-                status=400,
-            )
-        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
-        stale_reason = _stale_preview_reason(request)
-        if stale_reason is not None:
-            return _preview_action_error(request, next_url, stale_reason, status=409)
         source_make = " ".join(request.POST.get("source_make", "").split())
         source_model = " ".join(request.POST.get("source_model", "").split())
-        netbox_mfg_slug = request.POST.get("netbox_mfg_slug", "").strip()
-        netbox_dt_slug = request.POST.get("netbox_dt_slug", "").strip()
-        action = request.POST.get("action", "map")
-
         if not source_make or not source_model:
-            return _preview_action_error(request, next_url, "Source make and model are required.", status=400)
-        if action != "map":
-            return _preview_action_error(
-                request, next_url, "The requested Device Type action is not supported.", status=400
-            )
-
+            raise PreviewCommandRefused("Source make and model are required.")
+        if request.POST.get("action", "map") != "map":
+            raise PreviewCommandRefused("The requested Device Type action is not supported.")
         # The importer derives both slugs the same way, so a default that differs maps to nothing.
         default_mfg_slug, default_dt_slug = default_identity_slugs(source_make, source_model)
-        if not netbox_mfg_slug:
-            netbox_mfg_slug = default_mfg_slug
-        if not netbox_dt_slug:
-            netbox_dt_slug = default_dt_slug
-
-        try:
-            mapping = _get_or_init(
-                DeviceTypeMapping,
-                profile=profile,
-                source_make=source_make,
-                source_model=source_model,
-            )
-            mapping.netbox_manufacturer_slug = netbox_mfg_slug
-            mapping.netbox_device_type_slug = netbox_dt_slug
-            _validate_model_instance(
-                mapping,
-                f"device type mapping '{source_make} / {source_model}'",
-            )
-            mapping_result = save_permission_scoped_object(
-                request.user,
-                DeviceTypeMapping,
-                {"profile": profile, "source_make": source_make, "source_model": source_model},
-                {
-                    "netbox_manufacturer_slug": netbox_mfg_slug,
-                    "netbox_device_type_slug": netbox_dt_slug,
-                },
-            )
-        except PreviewActionInvalid as exc:
-            return _preview_action_error(request, next_url, str(exc), status=400)
-
-        verb = "created" if mapping_result.created else "updated"
-        saved_message = (
-            f"DeviceType mapping {verb}: '{source_make} / {source_model}' → {netbox_mfg_slug}/{netbox_dt_slug}"
+        command = _MapDeviceType(
+            source_make=source_make,
+            source_model=source_model,
+            netbox_mfg_slug=request.POST.get("netbox_mfg_slug", "").strip() or default_mfg_slug,
+            netbox_dt_slug=request.POST.get("netbox_dt_slug", "").strip() or default_dt_slug,
         )
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, reverse("plugins:netbox_data_import:import_preview"))
 
-        return _saved_preview_action_response(request, next_url, saved_message)
+    def refusal_url(self, request):
+        """Return the preview the quick fix came from."""
+        return reverse("plugins:netbox_data_import:import_preview")
 
 
-class QuickAddClassRoleMappingView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+@dataclass(frozen=True)
+class _MapClassRole(PreviewCommand):
+    """Save a ClassRoleMapping (ignore, role or rack) from an error row of the preview."""
+
+    source_class: str
+    mapping_action: str
+    role_slug: str
+    rack_type_id: int | None
+
+    def apply(self, preview):
+        """Validate and save the mapping."""
+        from dcim.models import RackType
+
+        rack_type = None
+        if self.rack_type_id is not None:
+            rack_type = RackType.objects.filter(pk=self.rack_type_id).first()
+            if rack_type is None:
+                raise PreviewCommandRefused(
+                    f"Invalid rack type selected for class '{self.source_class}'. Please choose a valid rack type."
+                )
+        values = {
+            "ignore": self.mapping_action == "ignore",
+            "creates_rack": self.mapping_action == "rack",
+            "rack_type": rack_type,
+            "role_slug": self.role_slug if self.mapping_action == "role" else "",
+        }
+        mapping = _get_or_init(ClassRoleMapping, profile=preview.profile, source_class=self.source_class)
+        for field_name, value in values.items():
+            setattr(mapping, field_name, value)
+        _validate_model_instance(mapping, f"class role mapping '{self.source_class}'")
+        result = save_permission_scoped_object(
+            preview.actor,
+            ClassRoleMapping,
+            {"profile": preview.profile, "source_class": self.source_class},
+            values,
+        )
+        verb = "Created" if result.created else "Updated"
+        if self.mapping_action == "ignore":
+            action_label = "ignore"
+        elif self.mapping_action == "rack":
+            action_label = f"creates rack{f' (type: {rack_type})' if rack_type else ''}"
+        else:
+            action_label = f"role '{self.role_slug}'"
+        return CommandOutcome(message=f"{verb} mapping: class '{self.source_class}' → {action_label}")
+
+
+class QuickAddClassRoleMappingView(_PreviewCommandMixin, PermissionRequiredMixin, View):
     """Quickly add a ClassRoleMapping (ignore / role) directly from an error row in preview."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the class-to-role mapping and report the pending preview change."""
-        from dcim.models import RackType
-
-        next_url = reverse("plugins:netbox_data_import:import_preview")
-        profile_id = _parse_posted_profile_id(request)
-        if profile_id is None:
-            return _preview_action_error(
-                request,
-                next_url,
-                "A valid import profile is required. Reload the preview and try again.",
-                status=400,
-            )
-        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
-        stale_reason = _stale_preview_reason(request)
-        if stale_reason is not None:
-            return _preview_action_error(request, next_url, stale_reason, status=409)
+        """Save the class-to-role mapping and replan the preview."""
         source_class = request.POST.get("source_class", "").strip()
         mapping_action = request.POST.get("mapping_action", "ignore")  # "ignore", "role", or "rack"
         role_slug = request.POST.get("role_slug", "").strip()
-        creates_rack = mapping_action == "rack"
-        rack_type_id = request.POST.get("rack_type_id", "").strip()
-
-        rack_type = None
-        if creates_rack and rack_type_id:
+        raw_rack_type = request.POST.get("rack_type_id", "").strip()
+        rack_type_id = None
+        if mapping_action == "rack" and raw_rack_type:
             try:
-                rack_type = RackType.objects.get(pk=int(rack_type_id))
-            except (RackType.DoesNotExist, ValueError, TypeError):
-                return _preview_action_error(
-                    request,
-                    next_url,
-                    f"Invalid rack type selected for class '{source_class}'. Please choose a valid rack type.",
-                    status=400,
-                )
-
+                rack_type_id = int(raw_rack_type)
+            except (TypeError, ValueError):
+                raise PreviewCommandRefused(
+                    f"Invalid rack type selected for class '{source_class}'. Please choose a valid rack type."
+                ) from None
         if not source_class:
-            return _preview_action_error(request, next_url, "Source class is required.", status=400)
-
-        _valid_actions = ("ignore", "role", "rack")
-        if mapping_action not in _valid_actions:
-            return _preview_action_error(
-                request,
-                next_url,
-                f"Invalid mapping action '{mapping_action}'. Must be one of: {', '.join(_valid_actions)}.",
-                status=400,
+            raise PreviewCommandRefused("Source class is required.")
+        valid_actions = ("ignore", "role", "rack")
+        if mapping_action not in valid_actions:
+            raise PreviewCommandRefused(
+                f"Invalid mapping action '{mapping_action}'. Must be one of: {', '.join(valid_actions)}."
             )
-
         if mapping_action == "role" and not role_slug:
-            return _preview_action_error(
-                request,
-                next_url,
-                "A role slug is required when mapping action is 'role'.",
-                status=400,
+            raise PreviewCommandRefused("A role slug is required when mapping action is 'role'.")
+        command = _MapClassRole(
+            source_class=source_class, mapping_action=mapping_action, role_slug=role_slug, rack_type_id=rack_type_id
+        )
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, reverse("plugins:netbox_data_import:import_preview"))
+
+    def refusal_url(self, request):
+        """Return the preview the quick fix came from."""
+        return reverse("plugins:netbox_data_import:import_preview")
+
+
+@dataclass(frozen=True)
+class _MapColumn(PreviewCommand):
+    """Map one unmapped source column to a NetBox target field from the preview panel."""
+
+    source_column: str
+    target_field: str
+
+    def apply(self, preview):
+        """Validate and save the mapping, replacing the column that supplied a direct target before."""
+        if not CATALOG.is_valid(self.target_field, output_kinds=preview.profile.output_kinds):
+            raise PreviewCommandRefused("Valid source column and target field are required.")
+        # The catalog accepts any non-empty name after a family prefix, so it cannot bound length.
+        # Validate before the displaced row is deleted: an invalid write must strand nothing.
+        _validate_model_instance(
+            ColumnMapping(profile=preview.profile, source_column=self.source_column, target_field=self.target_field),
+            f"column mapping '{self.source_column}' -> {self.target_field}",
+        )
+        lookup = {"profile": preview.profile, "source_column": self.source_column, "target_field": self.target_field}
+        if self.target_field.startswith(CANDIDATE_TARGET_PREFIX):
+            result = save_permission_scoped_object(preview.actor, ColumnMapping, lookup, {}, on_existing="keep")
+            verb = "Created" if result.created else "Kept"
+            return CommandOutcome(message=f"{verb} candidate mapping: '{self.source_column}' → {self.target_field}")
+        # A quick direct mapping replaces the source column that supplied the target before it.
+        displaced = ColumnMapping.objects.filter(profile=preview.profile, target_field=self.target_field).exclude(
+            source_column=self.source_column
+        )
+        displaced_source = displaced.values_list("source_column", flat=True).first()
+        delete_permission_scoped_objects(preview.actor, displaced)
+        result = save_permission_scoped_object(preview.actor, ColumnMapping, lookup, {}, on_existing="keep")
+        if displaced_source:
+            return CommandOutcome(
+                message=(
+                    f"Reassigned: '{self.source_column}' → {self.target_field} "
+                    f"(previously mapped from '{displaced_source}')"
+                )
             )
-
-        values = {
-            "ignore": mapping_action == "ignore",
-            "creates_rack": creates_rack,
-            "rack_type": rack_type,
-            "role_slug": role_slug if mapping_action == "role" else "",
-        }
-        mapping = _get_or_init(ClassRoleMapping, profile=profile, source_class=source_class)
-        for field_name, value in values.items():
-            setattr(mapping, field_name, value)
-        try:
-            _validate_model_instance(mapping, f"class role mapping '{source_class}'")
-        except PreviewActionInvalid as exc:
-            return _preview_action_error(request, next_url, str(exc), status=400)
-        result = save_permission_scoped_object(
-            request.user,
-            ClassRoleMapping,
-            {"profile": profile, "source_class": source_class},
-            values,
-        )
-        verb = "Created" if result.created else "Updated"
-        if mapping_action == "ignore":
-            action_label = "ignore"
-        elif mapping_action == "rack":
-            rt_suffix = f" (type: {rack_type})" if rack_type else ""
-            action_label = f"creates rack{rt_suffix}"
-        else:
-            action_label = f"role '{role_slug}'"
-        return _saved_preview_action_response(
-            request,
-            next_url,
-            f"{verb} mapping: class '{source_class}' → {action_label}",
-        )
+        verb = "Created" if result.created else "Kept"
+        return CommandOutcome(message=f"{verb} mapping: '{self.source_column}' → {self.target_field}")
 
 
-class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+class QuickAddColumnMappingView(_PreviewCommandMixin, PermissionRequiredMixin, View):
     """Quickly map an unmapped source column to a NetBox target field from the preview panel."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the column mapping and report the pending preview change."""
-        next_url = reverse("plugins:netbox_data_import:import_preview")
-        profile_id = _parse_posted_profile_id(request)
-        if profile_id is None:
-            return _preview_action_error(
-                request,
-                next_url,
-                "A valid import profile is required. Reload the preview and try again.",
-                status=400,
-            )
-        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
-        stale_reason = _stale_preview_reason(request)
-        if stale_reason is not None:
-            return _preview_action_error(request, next_url, stale_reason, status=409)
+        """Save the column mapping and replan the preview."""
         source_column = request.POST.get("source_column", "").strip()
         target_field = request.POST.get("target_field", "").strip()
+        if not source_column or not target_field:
+            raise PreviewCommandRefused("Valid source column and target field are required.")
+        command = _MapColumn(source_column=source_column, target_field=target_field)
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, reverse("plugins:netbox_data_import:import_preview"))
 
-        if not source_column or not CATALOG.is_valid(target_field, output_kinds=profile.output_kinds):
-            return _preview_action_error(
-                request,
-                next_url,
-                "Valid source column and target field are required.",
-                status=400,
-            )
+    def refusal_url(self, request):
+        """Return the preview the quick fix came from."""
+        return reverse("plugins:netbox_data_import:import_preview")
 
-        # The catalog accepts any non-empty name after a family prefix, so it cannot bound length.
-        # Validate before the displaced row is deleted: an invalid write must strand nothing.
+
+@dataclass(frozen=True)
+class _MatchExistingDevice(PreviewCommand):
+    """Link one source row to an existing NetBox Device, so the next plan updates that Device."""
+
+    source_id: str
+    netbox_device_id: str
+
+    def apply(self, preview):
+        """Check the Device against the import site and the profile's other links, then save the link."""
+        from dcim.models import Device
+
+        source_row = _source_row(preview.workspace, self.source_id)
         try:
-            _validate_model_instance(
-                ColumnMapping(profile=profile, source_column=source_column, target_field=target_field),
-                f"column mapping '{source_column}' -> {target_field}",
+            device = Device.objects.restrict(preview.actor, "view").get(pk=int(self.netbox_device_id))
+        except (Device.DoesNotExist, ValueError):
+            raise PreviewCommandRefused(f"Device #{self.netbox_device_id} not found.") from None
+        if device.site_id != preview.planning_context["site_id"]:
+            raise PreviewCommandRefused("The selected device is outside the active import site.")
+        conflicting = preview.profile.device_matches.filter(netbox_device_id=device.pk).exclude(
+            source_id=self.source_id
+        )
+        if conflicting_match := conflicting.first():
+            raise PreviewCommandRefused(
+                f"Device '{device.name}' is already linked to source '{conflicting_match.source_id}'."
             )
-        except PreviewActionInvalid as exc:
-            return _preview_action_error(request, next_url, str(exc), status=400)
-
-        if target_field.startswith(CANDIDATE_TARGET_PREFIX):
-            result = save_permission_scoped_object(
-                request.user,
-                ColumnMapping,
-                {"profile": profile, "source_column": source_column, "target_field": target_field},
-                {},
-                on_existing="keep",
+        try:
+            save_permission_scoped_object(
+                preview.actor,
+                DeviceExistingMatch,
+                {"profile": preview.profile, "source_id": self.source_id},
+                {
+                    "netbox_device_id": device.pk,
+                    "device_name": device.name,
+                    "source_asset_tag": source_text(source_row.get("asset_tag"))[:50],
+                },
             )
-            verb = "Created" if result.created else "Kept"
-            saved_message = f"{verb} candidate mapping: '{source_column}' → {target_field}"
-        else:
-            # A quick direct mapping replaces the source column that supplied the target before it.
-            with locked_profile_policy(profile.pk):
-                displaced = ColumnMapping.objects.filter(profile=profile, target_field=target_field).exclude(
-                    source_column=source_column
-                )
-                displaced_source = displaced.values_list("source_column", flat=True).first()
-                delete_permission_scoped_objects(request.user, displaced)
-                result = save_permission_scoped_object(
-                    request.user,
-                    ColumnMapping,
-                    {"profile": profile, "source_column": source_column, "target_field": target_field},
-                    {},
-                    on_existing="keep",
-                )
-            if displaced_source:
-                saved_message = (
-                    f"Reassigned: '{source_column}' → {target_field} (previously mapped from '{displaced_source}')"
-                )
-            else:
-                verb = "Created" if result.created else "Kept"
-                saved_message = f"{verb} mapping: '{source_column}' → {target_field}"
-
-        return _saved_preview_action_response(request, next_url, saved_message)
+        except ObjectPermissionDenied as exc:
+            raise PreviewCommandRefused("Permission denied: cannot create or change this device link.", 403) from exc
+        except ValidationError as exc:
+            raise PreviewCommandRefused("; ".join(exc.messages)) from exc
+        return CommandOutcome(message=f"Source '{self.source_id}' linked to existing device '{device.name}'.")
 
 
-class MatchExistingDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
-    """Link a source row to an existing NetBox device (by device ID).
-
-    Saves a DeviceExistingMatch; on next preview re-run the row shows action='update'.
-    """
+class MatchExistingDeviceView(_PreviewCommandMixin, PermissionRequiredMixin, View):
+    """Link a source row to an existing NetBox device (by device ID)."""
 
     permission_required = (
         "netbox_data_import.change_importprofile",
@@ -5590,76 +4961,18 @@ class MatchExistingDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMix
     )
 
     def post(self, request):
-        """Save the device match and redirect back to preview."""
-        from dcim.models import Device
-
-        profile_id = _parse_posted_profile_id(request)
-        if profile_id is None:
-            messages.error(request, "A valid import profile is required.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
+        """Save the device match and go back to the replanned preview."""
         source_id = source_text(request.POST.get("source_id"))
         netbox_device_id = request.POST.get("netbox_device_id", "").strip()
-
         if not source_id or not netbox_device_id:
-            messages.error(request, "source_id and netbox_device_id are required.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            raise PreviewCommandRefused("source_id and netbox_device_id are required.")
+        command = _MatchExistingDevice(source_id=source_id, netbox_device_id=netbox_device_id)
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, reverse("plugins:netbox_data_import:import_preview"))
 
-        preview = load_cached_preview(request)
-        if preview is None or preview[0].pk != profile.pk:
-            messages.error(request, "The selected profile is not the active import profile.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        workspace = preview[1]
-        ctx_data = request.session.get("import_context") or {}
-        rows = workspace.source_rows
-        source_rows = [row for row in rows if source_text(row.get("source_id")) == source_id]
-        if len(source_rows) != 1:
-            messages.error(request, "The source ID must identify exactly one row in the active import.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-
-        try:
-            device = Device.objects.restrict(request.user, "view").get(pk=int(netbox_device_id))
-        except (Device.DoesNotExist, ValueError):
-            messages.error(request, f"Device #{netbox_device_id} not found.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-
-        if device.site_id != ctx_data.get("site_id"):
-            messages.error(request, "The selected device is outside the active import site.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        conflicting_match = (
-            profile.device_matches.filter(netbox_device_id=device.pk).exclude(source_id=source_id).first()
-        )
-        if conflicting_match:
-            messages.error(
-                request,
-                f"Device '{device.name}' is already linked to source '{conflicting_match.source_id}'.",
-            )
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-
-        binding_values = {
-            "netbox_device_id": device.pk,
-            "device_name": device.name,
-            "source_asset_tag": source_text(source_rows[0].get("asset_tag"))[:50],
-        }
-        try:
-            save_permission_scoped_object(
-                request.user,
-                DeviceExistingMatch,
-                {"profile": profile, "source_id": source_id},
-                binding_values,
-            )
-        except ObjectPermissionDenied:
-            messages.error(request, "Permission denied: cannot create or change this device link.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        except ValidationError as exc:
-            messages.error(request, "; ".join(exc.messages))
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        except IntegrityError:
-            messages.error(request, "The device link changed while this request was being processed. Try again.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-
-        messages.success(request, f"Source '{source_id}' linked to existing device '{device.name}'.")
-        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+    def refusal_url(self, request):
+        """Return the preview the link came from."""
+        return reverse("plugins:netbox_data_import:import_preview")
 
 
 def _device_name_filter(q: str):
@@ -5815,7 +5128,34 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
             )
 
 
-class QuickCreateDeviceRoleView(_PermissionScopedWriteMixin, _AjaxPermissionView):
+@dataclass(frozen=True)
+class _CreateDeviceRole(PreviewCommand):
+    """Create one DeviceRole from the Configure Class modal; no profile policy or plan changes."""
+
+    name: str
+    slug: str
+    color: str
+    replans = False
+    reviews_policy = False
+    reads_plan = False
+
+    def apply(self, preview):
+        """Create the role, or keep one that already holds the slug."""
+        from dcim.models import DeviceRole
+
+        role = _get_or_init(DeviceRole, slug=self.slug)
+        if role.pk is None:
+            role.name = self.name
+            role.color = self.color
+            role.full_clean(validate_unique=False)
+        result = save_permission_scoped_object(
+            preview.actor, DeviceRole, {"slug": self.slug}, {"name": self.name, "color": self.color}, on_existing="keep"
+        )
+        role = result.instance
+        return CommandOutcome(payload={"id": role.pk, "name": role.name, "slug": role.slug, "created": result.created})
+
+
+class QuickCreateDeviceRoleView(_PreviewCommandMixin, _AjaxPermissionView):
     """AJAX endpoint: create a new DeviceRole and return its details as JSON.
 
     Used by the Configure Class modal so operators can create missing roles
@@ -5826,64 +5166,50 @@ class QuickCreateDeviceRoleView(_PermissionScopedWriteMixin, _AjaxPermissionView
 
     def post(self, request):
         """Create the DeviceRole and return JSON {id, name, slug}."""
-        from dcim.models import DeviceRole
-        from django.http import JsonResponse
-
-        profile_id = _parse_posted_profile_id(request)
-        if profile_id is None:
-            return JsonResponse({"error": "A valid import profile is required."}, status=400)
-        get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
+        import re
 
         name = request.POST.get("name", "").strip()
         slug = request.POST.get("slug", "").strip()
         color = request.POST.get("color", "9e9e9e").strip() or "9e9e9e"
-
         if not name or not slug:
             return JsonResponse({"error": "Role name and slug are required."}, status=400)
-
-        import re
-
         if not re.match(r"^[-a-z0-9_]+$", slug):
             return JsonResponse(
                 {"error": "Slug may only contain lowercase letters, numbers, hyphens, and underscores."}, status=400
             )
-
         try:
-            role = _get_or_init(DeviceRole, slug=slug)
-            if role.pk is None:
-                role.name = name
-                role.color = color
-                _validate_model_instance(role, f"device role '{name}'")
-            result = save_permission_scoped_object(
-                request.user,
-                DeviceRole,
-                {"slug": slug},
-                {"name": name, "color": color},
-                on_existing="keep",
+            result = apply_preview_command(
+                request, PreviewClaim.posted(request.POST), _CreateDeviceRole(name=name, slug=slug, color=color)
             )
-            role = result.instance
-            created = result.created
         except IntegrityError:
             logger.exception("QuickCreateDeviceRoleView: integrity error creating role slug=%s", slug)
             return JsonResponse({"error": "A device role with that slug already exists."}, status=400)
-        except (ValueError, ValidationError):
+        except ValidationError:
             logger.exception("QuickCreateDeviceRoleView: validation error creating role slug=%s", slug)
             return JsonResponse({"error": "Invalid role data."}, status=400)
         except DatabaseError:
             logger.exception("QuickCreateDeviceRoleView: database error creating role slug=%s", slug)
             return JsonResponse({"error": "An internal error occurred."}, status=500)
-
-        return JsonResponse(
-            {
-                "id": role.pk,
-                "name": role.name,
-                "slug": role.slug,
-                "created": created,
-            }
-        )
+        messages.success(request, f"Device role '{result.outcome.payload['name']}' is available.")
+        return JsonResponse(dict(result.outcome.payload))
 
 
-class AutoMatchDevicesView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+@dataclass(frozen=True)
+class _AutoMatchDevices(PreviewCommand):
+    """Save every safe exact Device match for the preview's eligible source rows."""
+
+    def apply(self, preview):
+        """Match against the import target the preview names, as the operator sees it now."""
+        from .review_workspace import auto_match_devices
+
+        target = _resolved_import_target(preview.planning_context, preview.actor)
+        if target is None:
+            raise PreviewCommandRefused(TARGET_GONE, 409)
+        summary = auto_match_devices(preview.workspace, preview.profile, preview.actor, target)
+        return CommandOutcome(message=summary.message())
+
+
+class AutoMatchDevicesView(_PreviewCommandMixin, PermissionRequiredMixin, View):
     """Run the Review Workspace device auto-match command."""
 
     permission_required = (
@@ -5893,24 +5219,63 @@ class AutoMatchDevicesView(_PermissionScopedWriteMixin, PermissionRequiredMixin,
     )
 
     def post(self, request):
-        """Run auto-matching and redirect back to preview with a summary message."""
-        profile_id = _parse_posted_profile_id(request)
-        if profile_id is None:
-            messages.error(request, "A valid import profile is required.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        preview = load_cached_preview(request)
-        if preview is None or preview[0].pk != profile_id:
-            messages.error(request, "The selected profile is not the active import profile.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        profile, workspace = preview
-        ctx_data = request.session.get("import_context") or {}
-        target = _resolved_import_target(ctx_data, request.user)
-        if target is None:
-            messages.error(request, "The saved import target is no longer available. Start a new preview.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        summary = workspace.auto_match_devices(profile, request.user, target)
-        messages.success(request, summary.message())
-        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        """Run auto-matching and go back to the replanned preview with a summary message."""
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), _AutoMatchDevices())
+        return _command_response(request, result, reverse("plugins:netbox_data_import:import_preview"))
+
+    def refusal_url(self, request):
+        """Return the preview the command came from."""
+        return reverse("plugins:netbox_data_import:import_preview")
+
+
+@dataclass(frozen=True)
+class _SyncSingleRow(PreviewCommand):
+    """Execute one row's Synchronization Unit and replan inside the execution savepoint."""
+
+    row_number: int
+
+    def apply(self, preview):
+        """Run the selection; a failure keeps its audit row and leaves the preview as it was."""
+        unit = next(
+            (
+                unit
+                for unit in preview.workspace.units
+                if unit.row_number == self.row_number and unit.object_type in {"device", "rack"}
+            ),
+            None,
+        )
+        if unit is None:
+            raise PreviewCommandRefused("Row not found in current preview data")
+        if unit.action not in {"create", "update"}:
+            raise PreviewCommandRefused("Only 'create' and 'update' rows can be synced individually")
+        try:
+            _execution, plan = ImportEngine.execute_and_replan(
+                preview.profile,
+                preview.document,
+                preview.plan.to_dict(),
+                [unit.identity],
+                uuid.uuid4().hex,
+                preview.actor,
+                validate_replan=validate_preview_plan,
+            )
+        except Exception as exc:  # noqa: BLE001 - the coordinator commits the failed audit, then raises this
+            # The savepoint rolled back, so NetBox must not send the events its writes queued.
+            clear_events.send(sender=type(self))
+            return CommandOutcome(refusal=_RowWriteRefused(_refused_row_write_response(exc, self.row_number)))
+        verb = "created" if unit.action == "create" else "updated"
+        return CommandOutcome(
+            message="Synchronized.",
+            payload={"detail": f"{unit.object_type.capitalize()} '{unit.name}' was {verb} in NetBox."},
+            plan=plan,
+        )
+
+
+class _RowWriteRefused(Exception):
+    """A single-row execution that failed after its audit row was written, carrying the answer for it."""
+
+    def __init__(self, response):
+        super().__init__("The row synchronization was refused.")
+        self.response = response
 
 
 def _refused_row_write_response(exc, row_number):
@@ -5918,69 +5283,32 @@ def _refused_row_write_response(exc, row_number):
 
     The worker reports the same failures, so both read the message from one place.
     """
-    if isinstance(exc, DatabaseError):
-        logger.error("SyncSingleRowView: database error for row_number=%s", row_number, exc_info=exc)
-    return JsonResponse({"ok": False, "error": operator_failure_message(exc)}, status=400)
+    if isinstance(exc, PreviewCommandRefused):
+        return JsonResponse({"ok": False, "error": exc.operator_message}, status=exc.status)
+    if isinstance(exc, PlanError):
+        logger.warning("SyncSingleRowView: the Import Plan for row_number=%s is unreadable.", row_number, exc_info=exc)
+        return JsonResponse({"ok": False, "error": UNREADABLE_PREVIEW}, status=409)
+    if isinstance(exc, (PlanningTargetUnavailable, PreconditionFailed, SelectionError, StalePlan, StaleSourceDocument)):
+        return JsonResponse({"ok": False, "error": exc.operator_message}, status=409)
+    if isinstance(exc, (DatabaseError, ObjectPermissionDenied, ValidationError)):
+        if isinstance(exc, DatabaseError):
+            logger.error("SyncSingleRowView: database error for row_number=%s", row_number, exc_info=exc)
+        return JsonResponse({"ok": False, "error": operator_failure_message(exc)}, status=400)
+    logger.error("SyncSingleRowView: unexpected error for row_number=%s", row_number, exc_info=exc)
+    return JsonResponse({"ok": False, "error": "An unexpected error occurred. See server logs."}, status=500)
 
 
-class SyncSingleRowView(_AjaxPermissionView):
-    """AJAX endpoint: execute a single row from the current import session.
+class SyncSingleRowView(_PreviewCommandMixin, _AjaxPermissionView):
+    """AJAX endpoint: execute a single row of the active preview.
 
-    POST body: row_number=<int>
-    Returns the deferred preview-action JSON envelope.
+    POST body: the preview claim and row_number=<int>
+    Returns the preview-command JSON envelope.
     """
 
     permission_required = "netbox_data_import.change_importprofile"
 
-    def _execute_unit(self, profile, document, plan_data, identity, user) -> None:
-        """Execute one unit, and drop the events its writes queued when the engine rolls them back."""
-        try:
-            ImportEngine.execute(profile, document, plan_data, [identity], uuid.uuid4().hex, user)
-        except Exception:
-            clear_events.send(sender=self)
-            raise
-
-    def _execution_refusal(self, profile, document, plan_data, identity, user, row_number):
-        """Execute one unit, and return the response that refuses it, or None once it committed."""
-        try:
-            self._execute_unit(profile, document, plan_data, identity, user)
-        except PlanError:
-            logger.warning(
-                "SyncSingleRowView: the Import Plan for row_number=%s is unreadable.", row_number, exc_info=True
-            )
-            return JsonResponse({"ok": False, "error": UNREADABLE_PREVIEW}, status=409)
-        except (
-            PlanningTargetUnavailable,
-            PreconditionFailed,
-            SelectionError,
-            StalePlan,
-            StaleSourceDocument,
-        ) as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=409)
-        except (DatabaseError, ObjectPermissionDenied, ValidationError) as exc:
-            return _refused_row_write_response(exc, row_number)
-        except Exception:
-            logger.exception("SyncSingleRowView: unexpected error for row_number=%s", row_number)
-            return JsonResponse(
-                {"ok": False, "error": "An unexpected error occurred. See server logs."},
-                status=500,
-            )
-        return None
-
     def post(self, request):
         """Execute one selected Synchronization Unit and return JSON."""
-        ctx_data = request.session.get("import_context")
-        plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY)
-        if not isinstance(ctx_data, dict) or not isinstance(plan_data, dict):
-            return JsonResponse({"ok": False, "error": "No import in progress"}, status=400)
-        if stale_reason := _stale_preview_reason(request):
-            return JsonResponse({"ok": False, "error": stale_reason}, status=409)
-        if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
-            return JsonResponse(
-                {"ok": False, "error": "Recalculate the preview before synchronizing a row."},
-                status=409,
-            )
-
         raw_row_number = request.POST.get("row_number")
         if raw_row_number is None:
             return JsonResponse({"ok": False, "error": "row_number is required"}, status=400)
@@ -5988,103 +5316,64 @@ class SyncSingleRowView(_AjaxPermissionView):
             row_number = int(raw_row_number)
         except (TypeError, ValueError):
             return JsonResponse({"ok": False, "error": "Invalid row number"}, status=400)
-
-        profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=ctx_data.get("profile_id")).first()
-        if not profile:
-            return JsonResponse({"ok": False, "error": "Import profile not found"}, status=400)
         try:
-            validate_registered_adapter(profile)
-            validate_adapter_target_module(profile.source_adapter)
-        except ValidationError as exc:
-            return JsonResponse({"ok": False, "error": "; ".join(exc.messages)}, status=400)
-
-        try:
-            accepted = ImportPlan.from_dict(plan_data)
-        except PlanError:
-            logger.warning("SyncSingleRowView: the stored Import Plan is unreadable.", exc_info=True)
-            return JsonResponse({"ok": False, "error": UNREADABLE_PREVIEW}, status=409)
-        workspace = ReviewWorkspace(accepted, request.user)
-        preview_unit = next(
-            (
-                unit
-                for unit in workspace.units
-                if unit.row_number == row_number and unit.object_type in {"device", "rack"}
-            ),
-            None,
+            result = apply_preview_command(request, PreviewClaim.posted(request.POST), _SyncSingleRow(row_number))
+        except _RowWriteRefused as refused:
+            return refused.response
+        messages.success(request, f"{result.outcome.message} {result.outcome.payload['detail']}")
+        return JsonResponse(
+            {
+                "ok": True,
+                "row_number": row_number,
+                "preview_state": "replanned",
+                "message": result.outcome.message,
+                "detail": result.outcome.payload["detail"],
+            }
         )
-        if preview_unit is None:
-            return JsonResponse({"ok": False, "error": "Row not found in current preview data"}, status=400)
-        if preview_unit.action not in {"create", "update"}:
-            return JsonResponse(
-                {"ok": False, "error": "Only 'create' and 'update' rows can be synced individually"},
-                status=400,
+
+
+@dataclass(frozen=True)
+class _UnlinkDevice(PreviewCommand):
+    """Remove one source row's Device link, and the field reviews that rest on it."""
+
+    source_id: str
+
+    def apply(self, preview):
+        """Delete the link and its reviews under their row locks, refusing either the actor may not delete."""
+        _source_row(preview.workspace, self.source_id)
+        binding = (
+            DeviceExistingMatch.objects.select_for_update()
+            .filter(profile=preview.profile, source_id=self.source_id)
+            .first()
+        )
+        reviews = list(
+            IgnoredFieldDifference.objects.select_for_update().filter(profile=preview.profile, source_id=self.source_id)
+        )
+        if binding is not None and not preview.actor.has_perm("netbox_data_import.delete_deviceexistingmatch", binding):
+            raise PreviewCommandRefused("Permission denied: cannot delete this device link.", 403)
+        if any(not preview.actor.has_perm("netbox_data_import.delete_ignoredfielddifference", r) for r in reviews):
+            raise PreviewCommandRefused("Permission denied: cannot remove the dependent field reviews.", 403)
+        if binding is None and not reviews:
+            raise PreviewCommandRefused(f"Source '{self.source_id}' has no device link to remove.")
+        if reviews:
+            IgnoredFieldDifference.objects.filter(pk__in=[review.pk for review in reviews]).delete()
+        if binding is not None:
+            binding.delete()
+        if reviews:
+            return CommandOutcome(
+                message=f"Unlinked source '{self.source_id}' and removed {len(reviews)} field review(s)."
             )
-
-        document = SourceDocument.objects.filter(pk=ctx_data.get("source_document_id"), profile=profile).first()
-        if document is None:
-            return JsonResponse(
-                {"ok": False, "error": "The stored source is no longer available. Upload it again."},
-                status=400,
-            )
-
-        refusal = self._execution_refusal(profile, document, plan_data, preview_unit.identity, request.user, row_number)
-        if refusal is not None:
-            return refusal
-        mark_preview_dirty(request.session)
-        verb = "created" if preview_unit.action == "create" else "updated"
-        written = f"{preview_unit.object_type.capitalize()} '{preview_unit.name}' was {verb} in NetBox."
-        return JsonResponse(pending_preview_payload(row_number, "Synchronized.", written))
+        return CommandOutcome(message=f"Unlinked source '{self.source_id}'.")
 
 
-class UnlinkDeviceView(_AjaxPermissionView):
+class UnlinkDeviceView(_PreviewCommandMixin, _AjaxPermissionView):
     """Remove a DeviceExistingMatch (unlink a manually-linked device)."""
 
     permission_required = "netbox_data_import.delete_deviceexistingmatch"
+    permission_denied_response_format = "redirect"
 
     def post(self, request):
-        """Delete the DeviceExistingMatch and redirect back to preview."""
-        profile_id = request.POST.get("profile_id", "").strip()
-        source_id = request.POST.get("source_id", "").strip()
-        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
-
-        if profile_id and source_id:
-            profile = get_object_or_404(
-                ImportProfile.objects.restrict(request.user, "change"),
-                pk=profile_id,
-            )
-            with transaction.atomic():
-                binding = (
-                    DeviceExistingMatch.objects.select_for_update().filter(profile=profile, source_id=source_id).first()
-                )
-                dependent_reviews = list(
-                    IgnoredFieldDifference.objects.select_for_update().filter(
-                        profile=profile,
-                        source_id=source_id,
-                    )
-                )
-                if binding is not None and not request.user.has_perm(
-                    "netbox_data_import.delete_deviceexistingmatch",
-                    binding,
-                ):
-                    messages.error(request, "Permission denied: cannot delete this device link.")
-                elif any(
-                    not request.user.has_perm("netbox_data_import.delete_ignoredfielddifference", review)
-                    for review in dependent_reviews
-                ):
-                    messages.error(request, "Permission denied: cannot remove the dependent field reviews.")
-                else:
-                    if dependent_reviews:
-                        IgnoredFieldDifference.objects.filter(
-                            pk__in=[review.pk for review in dependent_reviews]
-                        ).delete()
-                    if binding is not None:
-                        binding.delete()
-                    if dependent_reviews:
-                        messages.success(
-                            request,
-                            f"Unlinked source '{source_id}' and removed {len(dependent_reviews)} field review(s).",
-                        )
-                    elif binding is not None:
-                        messages.success(request, f"Unlinked source '{source_id}'.")
-
-        return redirect(next_url)
+        """Delete the DeviceExistingMatch and go back to the replanned preview."""
+        command = _UnlinkDevice(source_id=source_text(request.POST.get("source_id")))
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, self.refusal_url(request))

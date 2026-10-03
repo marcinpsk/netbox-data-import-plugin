@@ -169,11 +169,11 @@
     }
   });
 
-  /* A recalculation reloads the whole page, so the filters and the place the operator was reading
-   * are carried across it. The entry is consumed on arrival, so only that reload is moved. */
+  /* A re-read or a row action reloads the whole page, so the filters and the place the operator was
+   * reading are carried across it. The entry is consumed on arrival, so only that reload is moved. */
   var VIEW_KEY = 'ndi-preview-view';
 
-  /* The first row still on screen. A recalculated preview can hold a different number of rows,
+  /* The first row still on screen. A replanned preview can hold a different number of rows,
    * so an offset alone would land somewhere else. */
   function rowInView() {
     var rows = document.querySelectorAll('#previewRowsBody > tr[data-action]');
@@ -212,7 +212,7 @@
         anchor: rowInView()
       }));
     } catch (error) {
-      /* The recalculation still runs. Only the restore is lost. */
+      /* The reload still runs. Only the restore is lost. */
     }
   }
 
@@ -245,9 +245,9 @@
   window.ndiRememberPreviewView = rememberView;
   window.ndiRestorePreviewView = restoreView;
 
-  // A direct press navigates without the row-action script, so the view is stored here too.
-  document.addEventListener('click', function (event) {
-    if (event.target.closest('.ndi-recalculate-preview')) rememberView();
+  // A re-read posts a plain form without the row-action script, so the view is stored here too.
+  document.addEventListener('submit', function (event) {
+    if (event.target.querySelector('#ndi-reread-preview')) rememberView();
   });
 
   if (document.readyState === 'loading') {

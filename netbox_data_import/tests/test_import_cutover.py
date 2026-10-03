@@ -25,20 +25,22 @@ from netbox_data_import.models import (
     FailureReason,
     ImportExecution,
     ImportProfile,
+    PreviewCoordinator,
+    PreviewState,
     SourceDocument,
 )
 from netbox_data_import.plan import ImportPlan
-from netbox_data_import.preview_row_actions import (
-    PREVIEW_PLAN_SESSION_KEY,
-    PREVIEW_REVISION_SESSION_KEY,
-    PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
-    retire_preview_revision,
-)
+from netbox_data_import.preview_coordinator import SUBMITTED_PREVIEW, UNREADABLE_PREVIEW
 from netbox_data_import.tests.helpers import (
+    preview_claim,
+    preview_coordinator,
     queued_webhooks,
     recorded_updates,
     run_on_separate_connection,
+    store_plan,
+    stored_plan,
     update_webhook_rule,
+    upload_preview,
     user_with_object_permission,
     workbook_bytes,
 )
@@ -68,8 +70,17 @@ class ImportJobRunnerMessageTest(SimpleTestCase):
             "First validation failure.; Second validation failure.",
         )
 
+    def test_an_unexpected_failure_keeps_internal_details_private(self):
+        """The public formatter refuses arbitrary exception text."""
+        error = RuntimeError("Internal storage failure in private_table")
+
+        self.assertEqual(
+            operator_failure_message(error),
+            "An unexpected error occurred. See server logs.",
+        )
+
     def test_import_plan_details_are_not_shown_to_the_operator(self):
-        """An Import Plan error can name session data, so a Job record states one fixed sentence."""
+        """An Import Plan error can name source data, so a Job record states one fixed sentence."""
         from netbox_data_import.import_engine import UNREADABLE_PLAN
         from netbox_data_import.plan import PlanInvalid
 
@@ -132,10 +143,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             _workbook(),
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        return self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-        )
+        return upload_preview(self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload})
 
     def test_the_preview_states_what_a_row_sync_would_change(self):
         """The sync confirmation reads this blob, so the rendered preview has to carry it."""
@@ -195,10 +203,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             ),
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-        )
+        upload_preview(self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload})
 
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
@@ -220,10 +225,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             ),
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-        )
+        upload_preview(self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload})
 
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
@@ -234,19 +236,29 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertEqual(response.context["rack_filter_options"], [{"value": "RACK-X", "label": "RACK-X"}])
         self.assertIn(b'data-rack-name="RACK-X"', response.content)
 
-    def _sync_single_row(self, data=None):
-        """Post an inline execution with the active preview revision when one exists."""
-        payload = dict(data or {})
-        if revision := self.client.session.get(PREVIEW_REVISION_SESSION_KEY):
-            payload.setdefault("preview_revision", revision)
+    def _claim(self):
+        """Return the claim of the session's preview, or no claim before the setup page made one."""
+        try:
+            return preview_claim(self.client)
+        except PreviewCoordinator.DoesNotExist:
+            return {}
+
+    def _sync_single_row(self, data=None, claim=None):
+        """Post an inline execution with the current claim, or with the given one."""
+        payload = {**(self._claim() if claim is None else claim), **(data or {})}
         return self.client.post(reverse("plugins:netbox_data_import:sync_single_row"), payload)
+
+    def _run(self, claim=None):
+        """Post the final import with the current claim, or with the given one."""
+        return self.client.post(
+            reverse("plugins:netbox_data_import:import_run"), self._claim() if claim is None else claim
+        )
 
     def _preview_action(self, row_number):
         """Return the action the current preview plans for one source row."""
-        from netbox_data_import.plan import ImportPlan
         from netbox_data_import.review_workspace import ReviewWorkspace
 
-        workspace = ReviewWorkspace(ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY]), self.actor)
+        workspace = ReviewWorkspace(ImportPlan.from_dict(stored_plan(self.client)), self.actor)
         return next(unit.action for unit in workspace.units if unit.row_number == row_number)
 
     def _job(self, *, status="pending", data=None, user=True, queue_name="default"):
@@ -261,7 +273,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         )
 
     def test_upload_stores_the_source_and_serialized_plan(self):
-        """The session references audit input and a schema-versioned plan, never result rows."""
+        """The coordinator references audit input and a schema-versioned plan; the session holds neither."""
         response = self._upload()
 
         self.assertRedirects(
@@ -270,13 +282,13 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             fetch_redirect_response=False,
         )
         document = SourceDocument.objects.get(profile=self.profile)
-        session = self.client.session
-        self.assertEqual(session["import_context"]["source_document_id"], document.pk)
-        plan = ImportPlan.from_dict(session[PREVIEW_PLAN_SESSION_KEY])
+        coordinator = preview_coordinator(self.client)
+        self.assertEqual((coordinator.state, coordinator.source_document_id), (PreviewState.READY, document.pk))
+        plan = ImportPlan.from_dict(coordinator.plan)
         self.assertEqual(plan.source_fingerprint, document.content_fingerprint)
         self.assertEqual(plan.actor, str(self.actor.pk))
         self.assertEqual(plan.planning_context["site_id"], self.site.pk)
-        self.assertNotIn("import_result", session)
+        self.assertEqual([key for key, _value in self.client.session.items() if key.startswith("import_")], [])
 
         preview = self.client.get(response["Location"])
 
@@ -291,7 +303,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self._upload()
 
-        response = self.client.post(reverse("plugins:netbox_data_import:import_run"))
+        response = self._run()
 
         job = Job.objects.get(data__job_type="netbox_data_import.import")
         self.assertRedirects(
@@ -299,6 +311,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}),
             fetch_redirect_response=False,
         )
+        coordinator = preview_coordinator(self.client)
+        self.assertEqual((coordinator.state, coordinator.job_id), (PreviewState.SUBMITTED, job.pk))
         self.run_rq_jobs()
 
         self.assertTrue(Rack.objects.filter(site=self.site, name="rack-a").exists())
@@ -321,10 +335,11 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             reverse("plugins:netbox_data_import:import_progress_status", kwargs={"pk": job.pk}),
             HTTP_HX_REQUEST="true",
         )
+        results_url = reverse("plugins:netbox_data_import:import_results", kwargs={"pk": execution.pk})
         self.assertEqual(status.status_code, 204)
-        self.assertEqual(status.headers["HX-Redirect"], reverse("plugins:netbox_data_import:import_results"))
+        self.assertEqual(status.headers["HX-Redirect"], results_url)
 
-        results = self.client.get(reverse("plugins:netbox_data_import:import_results"))
+        results = self.client.get(results_url)
         self.assertContains(results, "Import Complete")
         self.assertContains(results, "cutover.xlsx")
 
@@ -353,7 +368,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         existing, before, after = self._existing_server()
         update_webhook_rule(Device)
         self._upload()
-        self.client.post(reverse("plugins:netbox_data_import:import_run"))
+        self._run()
         job = Job.objects.get(data__job_type=ImportJobRunner.job_type)
 
         self.run_rq_jobs()
@@ -374,85 +389,75 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         (sent,) = [item for item in ran if item.func_name == "extras.webhooks.send_webhook"]
         self.assertEqual((sent.kwargs["request"].id, sent.kwargs["request"].user), (job.job_id, self.actor))
 
-    def test_run_requires_an_active_clean_preview(self):
-        """Missing, submitted, and dirty preview states never enqueue another Job."""
-        run_url = reverse("plugins:netbox_data_import:import_run")
+    def test_run_requires_an_active_unsubmitted_preview(self):
+        """A missing, stale, or submitted preview never enqueues another Job."""
+        run_jobs = Job.objects.filter(data__job_type=ImportJobRunner.job_type)
 
-        response = self.client.post(run_url)
-        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
+        self.assertEqual(self._run().status_code, 409)
+        self.client.get(reverse("plugins:netbox_data_import:import_setup"))
+        self.assertEqual(self._run().status_code, 409, "the empty setup preview has nothing to import")
+        self.assertFalse(run_jobs.exists())
 
         self._upload()
-        session = self.client.session
-        session["import_preview_pending"] = False
-        session.save()
-        response = self.client.post(run_url)
-        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
+        reviewed = preview_claim(self.client)
+        self.assertEqual(self._run(reviewed).status_code, 302)
+        self.assertEqual(run_jobs.count(), 1)
 
-        job = self._job()
-        session = self.client.session
-        session["import_background_job_id"] = job.pk
-        session.save()
-        response = self.client.post(run_url)
-        self.assertRedirects(
-            response,
-            reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}),
-        )
+        stale = self._run(reviewed)
+        submitted = self._run()
 
-        session = self.client.session
-        session["import_preview_pending"] = True
-        session["import_preview_dirty"] = True
-        session.save()
-        response = self.client.post(run_url)
-        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_preview"))
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(submitted.status_code, 409)
+        self.assertContains(submitted, SUBMITTED_PREVIEW, status_code=409)
+        self.assertEqual(run_jobs.count(), 1)
 
     def test_run_refuses_a_missing_source_and_a_corrupt_plan(self):
         """A queued write always refers to readable source bytes and a valid plan schema."""
-        run_url = reverse("plugins:netbox_data_import:import_run")
+        run_jobs = Job.objects.filter(data__job_type=ImportJobRunner.job_type)
         self._upload()
-        document = SourceDocument.objects.get(profile=self.profile)
-        document.delete()
+        SourceDocument.objects.get(profile=self.profile).delete()
 
-        response = self.client.post(run_url)
+        response = self._run()
 
-        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
-        self.assertFalse(self.client.session["import_preview_pending"])
+        self.assertRedirects(
+            response, reverse("plugins:netbox_data_import:import_setup"), fetch_redirect_response=False
+        )
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.READY)
 
         self._upload()
-        session = self.client.session
-        session[PREVIEW_PLAN_SESSION_KEY]["schema_version"] = 999
-        session.save()
+        store_plan(self.client, {**stored_plan(self.client), "schema_version": 999})
 
-        response = self.client.post(run_url)
+        response = self._run()
 
-        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
-        self.assertFalse(self.client.session["import_preview_pending"])
+        self.assertContains(response, UNREADABLE_PREVIEW, status_code=409)
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.READY)
+        self.assertFalse(run_jobs.exists())
 
     def test_run_refuses_plan_errors_and_a_plan_with_no_changes(self):
         """The final action requires an error-free selection with at least one write."""
-        run_url = reverse("plugins:netbox_data_import:import_run")
         self._upload()
-        session = self.client.session
-        first = session[PREVIEW_PLAN_SESSION_KEY]["units"][0]
+        plan = stored_plan(self.client)
+        first = plan["units"][0]
         first["disposition"] = "invalid"
         first["changes"] = []
         first["diagnostics"] = [
             {"code": "rack.example", "severity": "error", "identities": [first["identity"]], "display": {}}
         ]
-        session.save()
+        store_plan(self.client, plan)
 
-        response = self.client.post(run_url)
+        response = self._run()
 
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_preview"))
         self.assertFalse(Job.objects.filter(data__job_type=ImportJobRunner.job_type).exists())
 
-        session = self.client.session
-        for unit in session[PREVIEW_PLAN_SESSION_KEY]["units"]:
+        plan = stored_plan(self.client)
+        for unit in plan["units"]:
             unit["disposition"] = "no-op"
             unit["changes"] = []
             unit["diagnostics"] = []
-        session.save()
+        store_plan(self.client, plan)
 
-        response = self.client.post(run_url)
+        response = self._run()
 
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_preview"))
         self.assertFalse(Job.objects.filter(data__job_type=ImportJobRunner.job_type).exists())
@@ -462,7 +467,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         from django_rq import get_queue
 
         self._upload()
-        self.client.post(reverse("plugins:netbox_data_import:import_run"))
+        self._run()
         job = Job.objects.get(data__job_type=ImportJobRunner.job_type)
         rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
         rq_job.meta.update({"processed": 1, "total": 4, "phase": "importing"})
@@ -483,42 +488,150 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         progress = self.client.get(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": removed.pk}))
         self.assertContains(progress, "Completed 3 of 8 plan steps")
 
-    def test_failed_job_restores_its_plan_without_replacing_a_newer_preview(self):
-        """A failed Job replans its stored source only when another preview is not pending."""
+    def test_a_missing_task_offers_explicit_restore_without_get_mutations(self):
+        from datetime import timedelta
+        from core.choices import JobStatusChoices
+        from django.utils import timezone
+        from django_rq import get_queue
+
         self._upload()
-        accepted_plan = self.client.session[PREVIEW_PLAN_SESSION_KEY]
-        context_data = self.client.session["import_context"]
-        document_id = context_data["source_document_id"]
-        failed = self._job(
-            status="failed",
-            data={
-                "context_data": context_data,
-                "source_document_id": document_id,
-                "message": "The accepted plan changed.",
-            },
+        self._run()
+        job = Job.objects.get(data__job_type=ImportJobRunner.job_type)
+        queue = get_queue(job.queue_name)
+        rq_job = queue.fetch_job(str(job.job_id))
+        # Remove only the task hash. A mutating queue fetch would also remove its queue ID.
+        queue.connection.delete(rq_job.key)
+        Job.objects.filter(pk=job.pk).update(created=timezone.now() - timedelta(minutes=2))
+        queue_before = {key: queue.connection.dump(key) for key in queue.connection.scan_iter()}
+        before = preview_coordinator(self.client)
+
+        progress = self.client.get(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}))
+
+        self.assertContains(progress, "Review preview")
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_PENDING)
+        self.assertEqual({key: queue.connection.dump(key) for key in queue.connection.scan_iter()}, queue_before)
+        self.assertEqual(preview_coordinator(self.client).revision, before.revision)
+        restored = self.client.post(
+            reverse("plugins:netbox_data_import:import_restore", kwargs={"pk": job.pk}), preview_claim(self.client)
+        )
+        self.assertEqual(restored.status_code, 302, restored.content)
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_ERRORED)
+        self.assertIsNotNone(job.completed)
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.state, after.job_id), (PreviewState.READY, None))
+        self.assertEqual(after.revision, before.revision + 1)
+
+    def test_a_deleted_final_job_offers_a_coordinated_reread(self):
+        self._upload()
+        self._run()
+        Job.objects.get(data__job_type=ImportJobRunner.job_type).delete()
+        before = preview_coordinator(self.client)
+
+        page = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertContains(page, "Re-read the preview")
+        self.assertEqual(preview_coordinator(self.client).revision, before.revision)
+        restored = self.client.post(reverse("plugins:netbox_data_import:preview_reread"), preview_claim(self.client))
+        self.assertEqual(restored.status_code, 302, restored.content)
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.state, after.job_id), (PreviewState.READY, None))
+        self.assertEqual(after.revision, before.revision + 1)
+
+    def _failed_final_import(self):
+        """Upload, queue the final import, and fail its Job before a worker runs it."""
+        self._upload()
+        self._run()
+        job = Job.objects.get(data__job_type=ImportJobRunner.job_type)
+        Job.objects.filter(pk=job.pk).update(status="failed")
+        return job
+
+    def test_failed_job_restores_its_plan_through_the_restore_command(self):
+        """The progress page only offers the return; the POST with the claim replans the stored source."""
+        job = self._failed_final_import()
+        accepted_plan = stored_plan(self.client)
+        restore_url = reverse("plugins:netbox_data_import:import_restore", kwargs={"pk": job.pk})
+        before = preview_coordinator(self.client)
+
+        progress = self.client.get(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}))
+
+        self.assertContains(progress, restore_url)
+        self.assertContains(progress, "Review preview")
+        unchanged = preview_coordinator(self.client)
+        self.assertEqual((unchanged.revision, unchanged.state), (before.revision, PreviewState.SUBMITTED))
+
+        restored = self.client.post(restore_url, preview_claim(self.client))
+
+        self.assertRedirects(
+            restored, reverse("plugins:netbox_data_import:import_preview"), fetch_redirect_response=False
+        )
+        coordinator = preview_coordinator(self.client)
+        self.assertEqual((coordinator.state, coordinator.job_id), (PreviewState.READY, None))
+        self.assertGreater(coordinator.revision, before.revision)
+        self.assertEqual(coordinator.plan["source_fingerprint"], accepted_plan["source_fingerprint"])
+        self.assertEqual(self.client.get(reverse("plugins:netbox_data_import:import_preview")).status_code, 200)
+
+    def test_failed_job_cannot_replace_a_newer_preview(self):
+        """A newer upload detaches the failed import, and its restore is refused without a write."""
+        job = self._failed_final_import()
+        self._upload()
+        newer = preview_coordinator(self.client)
+
+        progress = self.client.get(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}))
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:import_restore", kwargs={"pk": job.pk}), preview_claim(self.client)
         )
 
-        blocked = self.client.get(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": failed.pk}))
-        self.assertContains(blocked, "Finish the current preview before reviewing this failed import.")
-        self.assertNotEqual(self.client.session.get("import_preview_source_job_id"), failed.pk)
-
-        session = self.client.session
-        session["import_preview_pending"] = False
-        session.pop(PREVIEW_PLAN_SESSION_KEY, None)
-        session.save()
-        restored = self.client.get(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": failed.pk}))
-
-        self.assertContains(restored, "Review preview")
-        self.assertEqual(self.client.session["import_preview_source_job_id"], failed.pk)
-        self.assertNotIn(PREVIEW_PLAN_SESSION_KEY, self.client.session)
-        review = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
-        self.assertEqual(review.status_code, 200)
+        self.assertContains(progress, "A newer preview replaced this import's preview.")
+        self.assertNotContains(progress, "Review preview")
+        self.assertEqual(refused.status_code, 409)
+        current = preview_coordinator(self.client)
         self.assertEqual(
-            self.client.session[PREVIEW_PLAN_SESSION_KEY]["source_fingerprint"], accepted_plan["source_fingerprint"]
+            (current.preview_token, current.revision, current.state),
+            (newer.preview_token, newer.revision, PreviewState.READY),
         )
 
-    def test_progress_restores_an_execution_beside_a_newer_preview(self):
-        """An older result remains available without destroying an unsubmitted preview."""
+    def test_failed_job_with_a_deleted_source_does_not_report_a_replaced_preview(self):
+        """A missing source prevents restoration without changing which Job owns the preview."""
+        job = self._failed_final_import()
+        SourceDocument.objects.filter(pk=job.data["source_document_id"]).delete()
+        before = preview_coordinator(self.client)
+
+        for route in ("import_progress", "import_progress_status"):
+            with self.subTest(route=route):
+                progress = self.client.get(reverse(f"plugins:netbox_data_import:{route}", kwargs={"pk": job.pk}))
+
+                self.assertContains(progress, "The import failed.")
+                self.assertContains(progress, "Start a new import")
+                self.assertNotContains(progress, "A newer preview replaced this import's preview.")
+                self.assertNotContains(progress, "Review preview")
+                self.assertFalse(progress.context["preview_replaced"])
+                self.assertIsNone(progress.context["restore_claim"])
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.state, after.job_id), (PreviewState.SUBMITTED, job.pk))
+        self.assertEqual(after.revision, before.revision)
+
+    def test_restore_refuses_its_own_job_while_it_is_still_queued(self):
+        """Matching ownership cannot restore a Job whose real queue task is still pending."""
+        self._upload()
+        self._run()
+        job = Job.objects.get(data__job_type=ImportJobRunner.job_type)
+        before = preview_coordinator(self.client)
+
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:import_restore", kwargs={"pk": job.pk}), preview_claim(self.client)
+        )
+
+        self.assertContains(refused, "This preview does not belong to that failed import.", status_code=409)
+        job.refresh_from_db()
+        self.assertEqual(job.status, "pending")
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.state, after.job_id), (PreviewState.SUBMITTED, job.pk))
+        self.assertEqual(after.revision, before.revision)
+
+    def test_progress_links_an_execution_beside_a_newer_preview(self):
+        """An older result stays reachable from its Job without touching an unsubmitted preview."""
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
         execution = ImportExecution.objects.create(
@@ -528,12 +641,16 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             outcome=ExecutionOutcome.FAILED,
         )
         completed = self._job(status="completed", data={"import_execution_id": execution.pk})
+        before = preview_coordinator(self.client)
+        results_url = reverse("plugins:netbox_data_import:import_results", kwargs={"pk": execution.pk})
 
-        self.client.get(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": completed.pk}))
+        progress = self.client.get(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": completed.pk}))
 
-        self.assertEqual(self.client.session["import_restored_execution_id"], execution.pk)
-        results = self.client.get(reverse("plugins:netbox_data_import:import_results"))
+        self.assertContains(progress, results_url)
+        results = self.client.get(results_url)
         self.assertEqual(results.context["execution"], execution)
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.revision, after.state), (before.revision, PreviewState.READY))
 
     def test_results_accept_the_execution_view_permission(self):
         """The audit result has its own permission boundary, independent of profile access."""
@@ -550,11 +667,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         )
         client = Client()
         client.force_login(actor)
-        session = client.session
-        session["import_execution_id"] = execution.pk
-        session.save()
 
-        response = client.get(reverse("plugins:netbox_data_import:import_results"))
+        response = client.get(reverse("plugins:netbox_data_import:import_results", kwargs={"pk": execution.pk}))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["execution"], execution)
@@ -574,11 +688,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         )
         client = Client()
         client.force_login(actor)
-        session = client.session
-        session["import_execution_id"] = execution.pk
-        session.save()
 
-        response = client.get(reverse("plugins:netbox_data_import:import_results"))
+        response = client.get(reverse("plugins:netbox_data_import:import_results", kwargs={"pk": execution.pk}))
 
         self.assertIn(response.status_code, (302, 403))
 
@@ -597,11 +708,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         )
         client = Client()
         client.force_login(actor)
-        session = client.session
-        session["import_execution_id"] = execution.pk
-        session.save()
 
-        response = client.get(reverse("plugins:netbox_data_import:import_results"))
+        response = client.get(reverse("plugins:netbox_data_import:import_results", kwargs={"pk": execution.pk}))
 
         self.assertRedirects(
             response,
@@ -610,9 +718,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         )
 
     def test_results_redirect_for_missing_or_foreign_execution(self):
-        """A session cannot expose an absent audit row or another actor's result."""
-        results_url = reverse("plugins:netbox_data_import:import_results")
-        response = self.client.get(results_url)
+        """The results page cannot expose an absent audit row or another actor's result."""
+        response = self.client.get(reverse("plugins:netbox_data_import:import_results", kwargs={"pk": 999999}))
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
 
         self._upload()
@@ -628,11 +735,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             actor=other,
             outcome=ExecutionOutcome.FAILED,
         )
-        session = self.client.session
-        session["import_execution_id"] = execution.pk
-        session.save()
-
-        response = self.client.get(results_url)
+        response = self.client.get(reverse("plugins:netbox_data_import:import_results", kwargs={"pk": execution.pk}))
 
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
 
@@ -685,7 +788,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         corrupt.refresh_from_db()
         self.assertEqual(corrupt.data["phase"], "failed")
 
-        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        accepted = ImportPlan.from_dict(stored_plan(self.client))
         selected = accepted.units[0].identity
         retry_job = self._job()
         failed, created = ImportExecution.reserve(
@@ -716,7 +819,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         """A duplicate delivery cannot report a still-running execution as complete."""
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        accepted = ImportPlan.from_dict(stored_plan(self.client))
         selected = accepted.units[0].identity
         job = self._job()
         pending, created = ImportExecution.reserve(
@@ -751,7 +854,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        accepted = ImportPlan.from_dict(stored_plan(self.client))
         selected = accepted.units[0].identity
         job = self._job()
         deleted = []
@@ -788,7 +891,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        accepted = ImportPlan.from_dict(stored_plan(self.client))
         selected = accepted.units[0].identity
         job = self._job()
         retired = []
@@ -826,7 +929,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        accepted = ImportPlan.from_dict(stored_plan(self.client))
         selected = accepted.units[0].identity
         job = self._job()
         section = catalog._SECTIONS_BY_KEY.pop("source_resolutions")
@@ -843,20 +946,21 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         job.refresh_from_db()
         self.assertEqual(job.data["phase"], "failed")
-        self.assertIn("source_resolutions", job.data["message"])
+        self.assertEqual(job.data["message"], "An unexpected error occurred. See server logs.")
+        self.assertNotIn("source_resolutions", job.data["message"])
 
     def test_job_runner_reports_source_policy_that_changed_before_the_lock(self):
         """A source that the locked policy can no longer read leaves an operator-facing failure."""
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        accepted = ImportPlan.from_dict(stored_plan(self.client))
         selected = accepted.units[0].identity
         job = self._job()
         ImportProfile.objects.filter(pk=self.profile.pk).update(
             adapter_config={**self.profile.adapter_config, "sheet_name": "Missing"}
         )
 
-        with self.assertRaises(JobFailed):
+        with self.assertLogs("netbox_data_import.jobs", level="ERROR") as captured, self.assertRaises(JobFailed):
             ImportJobRunner(job).run(
                 self.profile.pk,
                 document.pk,
@@ -867,13 +971,15 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         job.refresh_from_db()
         self.assertEqual(job.data["phase"], "failed")
-        self.assertIn("Missing", job.data["message"])
+        self.assertEqual(job.data["message"], "The source file cannot be read. Check the file and the import profile.")
+        self.assertNotIn("Missing", job.data["message"])
+        self.assertTrue(any("Missing" in record for record in captured.output))
 
     def test_job_runner_keeps_the_execution_id_when_the_target_disappears(self):
         """A target failure after reservation still links the failed audit row to its Job."""
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        accepted = ImportPlan.from_dict(stored_plan(self.client))
         selected = accepted.units[0].identity
         job = self._job()
         self.site.delete()
@@ -926,7 +1032,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.addCleanup(target_modules.MODULE_RUNTIMES.__setitem__, "device", runtime)
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        accepted = ImportPlan.from_dict(stored_plan(self.client))
         job = self._job()
 
         with self.assertRaises(KeyError):
@@ -941,65 +1047,56 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         job.refresh_from_db()
         self.assertEqual(job.data["phase"], "validating")
 
-    def test_single_row_sync_rejects_invalid_session_and_row_inputs(self):
-        """Inline execution requires a readable plan, profile, source, and create unit."""
-        self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
+    def test_single_row_sync_rejects_invalid_claim_and_row_inputs(self):
+        """Inline execution requires a claim on a readable plan, its profile and source, and a create unit."""
+        no_preview = self._sync_single_row({"row_number": 2})
+        self.assertEqual((no_preview.status_code, no_preview.json()["code"]), (409, "preview_stale"))
 
         self._upload()
         self.assertEqual(self._sync_single_row().status_code, 400)
         self.assertEqual(self._sync_single_row({"row_number": "invalid"}).status_code, 400)
         self.assertEqual(self._sync_single_row({"row_number": 999}).status_code, 400)
-
-        session = self.client.session
-        session["import_context"]["profile_id"] = 999999
-        session.save()
-        self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
+        other_profile = {**preview_claim(self.client), "preview_profile": "999999"}
+        self.assertEqual(self._sync_single_row({"row_number": 2}, claim=other_profile).status_code, 409)
 
         self._upload()
-        session = self.client.session
-        session[PREVIEW_PLAN_SESSION_KEY]["schema_version"] = 999
-        session.save()
+        store_plan(self.client, {**stored_plan(self.client), "schema_version": 999})
         self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 409)
 
         self._upload()
-        SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"]).delete()
-        self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
+        SourceDocument.objects.get(pk=preview_coordinator(self.client).source_document_id).delete()
+        self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 409)
+        self.assertFalse(ImportExecution.objects.exists())
 
-    def test_an_unreadable_session_plan_answers_one_fixed_sentence(self):
+    def test_an_unreadable_stored_plan_answers_one_fixed_sentence(self):
         """Code scanning taints every caught exception, so no Import Plan error text reaches a response."""
-        from django.contrib.messages import get_messages
-
         from netbox_data_import.plan import PlanError
 
-        setup_url = reverse("plugins:netbox_data_import:import_setup")
         corruptions = (("wrong schema version", {"schema_version": 999}), ("malformed units", {"units": "not units"}))
         for label, changes in corruptions:
             for view in ("preview", "run", "sync"):
                 with self.subTest(label=label, view=view):
                     self._upload()
-                    session = self.client.session
-                    session[PREVIEW_PLAN_SESSION_KEY].update(changes)
-                    session.save()
+                    store_plan(self.client, {**stored_plan(self.client), **changes})
                     with self.assertRaises(PlanError) as raised:
-                        ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+                        ImportPlan.from_dict(stored_plan(self.client))
                     detail = str(raised.exception)
 
                     if view == "sync":
                         response = self._sync_single_row({"row_number": 2})
                         self.assertEqual(response.status_code, 409)
                         self.assertEqual(
-                            response.json(), {"ok": False, "error": "This preview cannot be read. Re-read the preview."}
+                            response.json(), {"ok": False, "error": UNREADABLE_PREVIEW, "code": "preview_stale"}
                         )
-                        self.assertNotIn(detail, response.content.decode())
-                        continue
-                    if view == "preview":
+                    elif view == "preview":
+                        # A page load stays read-only and offers the re-read that recovers the plan.
                         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+                        self.assertContains(response, reverse("plugins:netbox_data_import:preview_reread"))
+                        self.assertContains(response, "Re-read it from its stored source.")
                     else:
-                        response = self.client.post(reverse("plugins:netbox_data_import:import_run"))
-                    self.assertRedirects(response, setup_url, fetch_redirect_response=False)
-                    shown = [str(message) for message in get_messages(response.wsgi_request)]
-                    self.assertIn("This preview cannot be read. Start a new import.", shown)
-                    self.assertFalse([message for message in shown if detail in message], shown)
+                        response = self._run()
+                        self.assertContains(response, UNREADABLE_PREVIEW, status_code=409)
+                    self.assertNotIn(detail, response.content.decode())
 
     def test_single_row_sync_executes_an_update_row(self):
         """Per-row sync runs the same engine step 3 runs, for a row that updates a device."""
@@ -1074,7 +1171,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         with catalog_module.declared_modules_override(without_cable):
             response = self._sync_single_row({"row_number": 2})
 
-        self.assertEqual(response.status_code, 400, response.content)
+        # No command can replan this profile, so the coordinator refuses it before any write.
+        self.assertEqual(response.status_code, 409, response.content)
         self.assertEqual(
             response.json(),
             {"ok": False, "error": "This release cannot import from the 'trace_workbook' source adapter yet."},
@@ -1107,24 +1205,16 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
     def test_single_row_sync_does_not_echo_why_the_stored_plan_is_unreadable(self):
         """A malformed stored plan answers one fixed sentence and logs the Python error."""
-        message = "This preview cannot be read. Re-read the preview."
-        cases = (("units", None, "KeyError"), ("display", float("nan"), "nan"))
-        for field, value, detail in cases:
-            with self.subTest(field=field):
-                self._upload()
-                session = self.client.session
-                plan = session[PREVIEW_PLAN_SESSION_KEY]
-                if field == "units":
-                    del plan["units"]
-                else:
-                    plan["units"][0]["display"]["broken"] = value
-                session.save()
+        self._upload()
+        plan = stored_plan(self.client)
+        del plan["units"]
+        store_plan(self.client, plan)
 
-                with self.assertLogs("netbox_data_import.plan", level="WARNING") as logs:
-                    response = self._sync_single_row({"row_number": 2})
+        with self.assertLogs("netbox_data_import.plan", level="WARNING") as logs:
+            response = self._sync_single_row({"row_number": 2})
 
-                self.assertEqual((response.status_code, response.json()["error"]), (409, message))
-                self.assertIn(detail, "\n".join(logs.output))
+        self.assertEqual((response.status_code, response.json()["error"]), (409, UNREADABLE_PREVIEW))
+        self.assertIn("KeyError", "\n".join(logs.output))
 
     def test_single_row_sync_reports_a_refused_save_as_readable_text(self):
         """A NetBox validator's reason reads as its own text, not as the repr of a list."""
@@ -1148,38 +1238,29 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             FailureReason.VALIDATION,
         )
 
-    def test_single_row_sync_rejects_a_queued_or_dirty_preview(self):
-        """Inline execution cannot use a plan after import starts or a review changes it."""
+    def test_single_row_sync_rejects_a_submitted_or_stale_preview(self):
+        """Inline execution cannot use a plan after import starts or after another command replanned it."""
         from dcim.models import Rack
 
-        for session_state in (
-            {"import_preview_pending": False},
-            {"import_preview_pending": True, "import_preview_dirty": True},
-        ):
-            with self.subTest(session_state=session_state):
-                self._upload()
-                session = self.client.session
-                session.update(session_state)
-                session.save()
+        self._upload()
+        self._run()
 
-                response = self._sync_single_row({"row_number": 2})
+        submitted = self._sync_single_row({"row_number": 2})
 
-                self.assertEqual(response.status_code, 409)
-                self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
+        self.assertEqual(submitted.status_code, 409)
+        self.assertEqual(submitted.json()["error"], SUBMITTED_PREVIEW)
+        self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
 
         self._upload()
-        session = self.client.session
-        previous_revision = session[PREVIEW_REVISION_SESSION_KEY]
-        retire_preview_revision(session)
-        session.save()
+        previous = preview_claim(self.client)
+        reread = self.client.post(reverse("plugins:netbox_data_import:preview_reread"), previous)
+        self.assertEqual(reread.status_code, 302)
 
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:sync_single_row"),
-            {"row_number": 2, "preview_revision": previous_revision},
-        )
+        stale = self._sync_single_row({"row_number": 2}, claim=previous)
 
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual((stale.status_code, stale.json()["code"]), (409, "preview_stale"))
         self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
+        self.assertFalse(ImportExecution.objects.exists())
 
     def test_single_row_sync_classifies_an_unexpected_engine_failure(self):
         """Inline execution returns a bounded response for an unexpected coordinator failure."""
@@ -1210,7 +1291,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         from netbox_data_import.import_engine import UNMERGEABLE_SELECTION
 
         self._upload()
-        plan = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
+        plan = ImportPlan.from_dict(stored_plan(self.client))
         rack_change = next(
             change.identity for unit in plan.units for change in unit.changes if "rack" in change.identity
         )
@@ -1318,48 +1399,222 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         response = self._sync_single_row({"row_number": 2})
 
         self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(
+            response.json()["error"], "Permission denied: this action is outside your NetBox object permissions."
+        )
+        self.assertNotIn("dcim.add_rack", response.json()["error"])
         self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
         self.assertEqual(
             ImportExecution.objects.latest("pk").failure_detail["reason"],
             FailureReason.PERMISSION,
         )
 
-    def test_single_row_sync_marks_the_materialized_preview_stale(self):
-        """A selective execution returns immediately and leaves recalculation to the operator."""
+    def test_single_row_sync_replans_the_preview_in_the_same_command(self):
+        """A selective execution stores the replanned preview and advances the revision."""
         from dcim.models import Rack
 
         self._upload()
-        accepted_plan = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        before = preview_coordinator(self.client)
+        self.assertEqual(self._preview_action(2), "create")
 
         response = self._sync_single_row({"row_number": 2})
 
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(response.json()["preview_state"], "recalculation_required")
-        self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], accepted_plan)
-        self.assertTrue(self.client.session["import_preview_dirty"])
+        self.assertEqual(response.json()["preview_state"], "replanned")
         self.assertTrue(Rack.objects.filter(site=self.site, name="rack-a").exists())
+        after = preview_coordinator(self.client)
+        self.assertEqual(after.revision, before.revision + 1)
+        self.assertNotEqual(after.plan, before.plan)
+        self.assertNotEqual(self._preview_action(2), "create", "the stored plan still offers the written rack")
 
-    def test_single_row_sync_refuses_a_second_sync_until_recalculation(self):
-        """The first inline create makes the materialized preview too stale for another sync."""
+    def test_single_row_sync_refuses_a_second_sync_from_the_same_page(self):
+        """The first inline create advances the revision, so the page's claim cannot run it again."""
+        from dcim.models import Rack
+
         self._upload()
+        page_claim = preview_claim(self.client)
 
-        first = self._sync_single_row({"row_number": 2})
-        second = self._sync_single_row({"row_number": 2})
+        first = self._sync_single_row({"row_number": 2}, claim=page_claim)
+        second = self._sync_single_row({"row_number": 2}, claim=page_claim)
 
         self.assertEqual(first.status_code, 200, first.content)
-        self.assertEqual(second.status_code, 409)
-        self.assertIn("Recalculate the preview", second.json()["error"])
+        self.assertEqual((second.status_code, second.json()["code"]), (409, "preview_stale"))
+        self.assertEqual(ImportExecution.objects.count(), 1)
+        self.assertEqual(Rack.objects.filter(site=self.site, name="rack-a").count(), 1)
 
-    def test_device_type_mapping_leaves_the_materialized_preview_stale(self):
-        """A quick mapping saves without rebuilding the active preview."""
+    def test_a_failed_replan_keeps_the_failed_audit_and_rolls_back_the_row(self):
+        """The write and the replan share one savepoint, so a replan fault undoes the Device it wrote."""
+        from dcim.models import Device, Rack
+        from django.db import connection
+
+        Rack.objects.create(name="rack-a", site=self.site, u_height=42)
         self._upload()
-        accepted_plan = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        self.assertEqual(self._preview_action(3), "create", "the fixture does not produce a Device create")
+        before = preview_coordinator(self.client)
+        device_table, document_table = f'"{Device._meta.db_table}"', f'"{SourceDocument._meta.db_table}"'
+        wrote_device, faulted = [], []
+
+        def fail_the_replan(execute, sql, params, many, context):
+            statement = sql.lstrip().upper()
+            if statement.startswith(("INSERT", "UPDATE")) and device_table in sql:
+                wrote_device.append(True)
+            elif wrote_device and not faulted and statement.startswith("SELECT") and document_table in sql:
+                faulted.append(True)
+                raise DatabaseError("injected fault while the replan reads the stored source")
+            return execute(sql, params, many, context)
+
+        with self.assertLogs("netbox_data_import.views", level="ERROR"):
+            with connection.execute_wrapper(fail_the_replan):
+                response = self._sync_single_row({"row_number": 3})
+
+        self.assertEqual((wrote_device[:1], faulted), ([True], [True]), "the fault never reached the replan")
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertFalse(response.json()["ok"])
+        self.assertFalse(Device.objects.filter(name="server-a").exists())
+        execution = ImportExecution.objects.get(profile=self.profile)
+        self.assertEqual(execution.outcome, ExecutionOutcome.FAILED)
+        self.assertEqual(execution.failure_detail["reason"], FailureReason.DATABASE)
+        # No change failed and the written ones rolled back: the fault hit the replan, not a write.
+        self.assertIsNone(execution.failure_detail["failed_change"])
+        self.assertTrue(execution.failure_detail["rolled_back"])
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.revision, after.plan), (before.revision, before.plan))
+
+    def test_a_plan_size_refusal_keeps_the_failed_row_sync_audit(self):
+        from dcim.models import Device, Rack
+        from django.db import connection
+
+        from netbox_data_import.tests.plugins_config import override_plugins_config
+
+        Rack.objects.create(name="rack-a", site=self.site, u_height=42)
+        self._upload()
+        before = preview_coordinator(self.client)
+        writes = []
+
+        def record_device_write(execute, sql, params, many, context):
+            if sql.lstrip().upper().startswith("INSERT") and f'"{Device._meta.db_table}"' in sql:
+                writes.append(True)
+            return execute(sql, params, many, context)
+
+        with override_plugins_config(netbox_data_import={"preview_max_plan_bytes": 16}):
+            with connection.execute_wrapper(record_device_write):
+                response = self._sync_single_row({"row_number": 3})
+
+        self.assertEqual(writes, [True], "the refusal never reached a real Device write")
+        self.assertEqual(response.status_code, 413, response.content)
+        self.assertFalse(Device.objects.filter(name="server-a").exists())
+        execution = ImportExecution.objects.get(profile=self.profile)
+        self.assertEqual(execution.outcome, ExecutionOutcome.FAILED)
+        self.assertTrue(execution.failure_detail["rolled_back"])
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.revision, after.plan), (before.revision, before.plan))
+
+    def _assert_cached_device_review_hidden(self, *, diagnostic=False):
+        from django.contrib.contenttypes.models import ContentType
+        from dcim.models import Device, DeviceRole, DeviceType, Rack
+        from users.models import ObjectPermission
+
+        rack = Rack.objects.create(name="rack-a", site=self.site, u_height=42)
+        device = Device.objects.create(
+            name="server-a",
+            site=self.site,
+            rack=rack,
+            device_type=DeviceType.objects.get(slug="example-model"),
+            role=DeviceRole.objects.get(slug="server"),
+            serial="PRIVATE-SERIAL",
+        )
+        ColumnMapping.objects.create(profile=self.profile, source_column="Serial", target_field="serial")
+        self.actor.is_superuser = False
+        self.actor.save(update_fields=["is_superuser"])
+        device_type = ContentType.objects.get_for_model(Device)
+        grants = ObjectPermission.objects.create(name="Flat preview grants", actions=["view", "change", "add"])
+        grants.object_types.set(ContentType.objects.exclude(pk=device_type.pk))
+        grants.users.add(self.actor)
+        device_grant = ObjectPermission.objects.create(name="Flat device grant", actions=["view", "change"])
+        device_grant.object_types.add(device_type)
+        device_grant.users.add(self.actor)
+        if diagnostic:
+            from netbox_data_import.models import DeviceExistingMatch
+
+            DeviceExistingMatch.objects.create(
+                profile=self.profile, source_id="D-OTHER", netbox_device_id=device.pk, device_name=device.name
+            )
+            device_grant.actions = ["view"]
+            device_grant.save(update_fields=["actions"])
+        upload = SimpleUploadedFile(
+            "serial.xlsx",
+            workbook_bytes(
+                ["Source ID", "Class", "Name", "Rack", "Make", "Model", "Serial"],
+                [["D-1", "Server", "server-a", "rack-a", "Example", "Model", "SOURCE-SERIAL"]],
+            ),
+        )
+        setup = upload_preview(self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload})
+        self.assertEqual(setup.status_code, 302, setup.content)
+        url = reverse("plugins:netbox_data_import:import_preview")
+        self.assertContains(self.client.get(url), device.serial)
+        before = preview_coordinator(self.client)
+        if diagnostic:
+            self.assertEqual(
+                [item["code"] for item in before.plan["units"][0]["diagnostics"]],
+                ["device.already_bound", "device.change_permission"],
+            )
+        device_grant.actions = ["change"]
+        device_grant.save(update_fields=["actions"])
+
+        hidden = self.client.get(url)
+
+        self.assertNotContains(hidden, device.serial)
+        self.assertNotContains(hidden, device.get_absolute_url())
+        self.assertContains(hidden, "SOURCE-SERIAL")
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.revision, after.plan), (before.revision, before.plan))
+
+    def test_a_cached_device_review_hides_values_after_view_access_is_revoked(self):
+        self._assert_cached_device_review_hidden()
+
+    def test_a_diagnostic_device_review_hides_values_after_view_access_is_revoked(self):
+        self._assert_cached_device_review_hidden(diagnostic=True)
+
+    def test_a_cached_rack_row_hides_its_match_after_view_access_is_revoked(self):
+        from django.contrib.contenttypes.models import ContentType
+        from dcim.models import Rack
+        from users.models import ObjectPermission
+
+        rack = Rack.objects.create(name="rack-a", site=self.site, u_height=42)
+        self.actor.is_superuser = False
+        self.actor.save(update_fields=["is_superuser"])
+        rack_type = ContentType.objects.get_for_model(Rack)
+        grants = ObjectPermission.objects.create(name="Flat preview grants", actions=["view", "change", "add"])
+        grants.object_types.set(ContentType.objects.exclude(pk=rack_type.pk))
+        grants.users.add(self.actor)
+        rack_grant = ObjectPermission.objects.create(name="Flat rack grant", actions=["view", "change"])
+        rack_grant.object_types.add(rack_type)
+        rack_grant.users.add(self.actor)
+        self.assertEqual(self._upload().status_code, 302)
+        url = reverse("plugins:netbox_data_import:import_preview")
+        self.assertContains(self.client.get(url), rack.get_absolute_url())
+        before = preview_coordinator(self.client)
+        rack_grant.actions = ["change"]
+        rack_grant.save(update_fields=["actions"])
+
+        hidden = self.client.get(url)
+
+        self.assertNotContains(hidden, rack.get_absolute_url())
+        rows = hidden.context["preview_rows"]
+        self.assertEqual(next(row for row in rows if row.object_type == "rack").action, "error")
+        self.assertContains(hidden, "rack-a")
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.revision, after.plan), (before.revision, before.plan))
+
+    def test_device_type_mapping_replans_the_preview(self):
+        """A quick mapping saves and replans the active preview in one command."""
+        self._upload()
+        before = preview_coordinator(self.client)
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:quick_resolve_device_type"),
             {
-                "profile_id": self.profile.pk,
-                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+                **preview_claim(self.client),
                 "source_make": "Source Make",
                 "source_model": "Source Model",
                 "netbox_mfg_slug": "example",
@@ -1369,9 +1624,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         )
 
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(response.json()["preview_state"], "recalculation_required")
-        self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], accepted_plan)
-        self.assertTrue(self.client.session["import_preview_dirty"])
+        self.assertEqual(response.json()["preview_state"], "replanned")
+        self.assertEqual(preview_coordinator(self.client).revision, before.revision + 1)
         self.assertTrue(
             DeviceTypeMapping.objects.filter(
                 profile=self.profile,
@@ -1380,72 +1634,68 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             ).exists()
         )
 
-    def test_preview_discards_a_missing_source(self):
-        """Session state cannot keep a preview whose stored input is unavailable."""
-        preview_url = reverse("plugins:netbox_data_import:import_preview")
+    def test_preview_of_a_missing_source_sends_the_operator_to_setup(self):
+        """A page load cannot show a preview whose stored input is unavailable."""
         self._upload()
-        SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"]).delete()
-        response = self.client.get(preview_url)
+        SourceDocument.objects.get(pk=preview_coordinator(self.client).source_document_id).delete()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
 
-    def test_preview_discards_malformed_candidate_values(self):
+    def _store_device_candidate_values(self, candidate_values):
+        """Put malformed candidate values on the stored Device unit, as an older release could have."""
+        plan = stored_plan(self.client)
+        device_unit = next(unit for unit in plan["units"] if unit["display"].get("object_type") == "device")
+        device_unit["display"].setdefault("extra_data", {})["candidate_values"] = candidate_values
+        store_plan(self.client, plan)
+        return plan
+
+    def test_preview_refuses_malformed_candidate_values(self):
         """The renderer must reject malformed display data instead of raising an internal error."""
-        preview_url = reverse("plugins:netbox_data_import:import_preview")
         self._upload()
-        session = self.client.session
-        device_unit = next(
-            unit
-            for unit in session[PREVIEW_PLAN_SESSION_KEY]["units"]
-            if unit["display"].get("object_type") == "device"
-        )
-        device_unit["display"].setdefault("extra_data", {})["candidate_values"] = ["invalid"]
-        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
-        session.save()
+        plan = self._store_device_candidate_values(["invalid"])
 
-        response = self.client.get(preview_url)
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
-        self.assertNotIn(PREVIEW_PLAN_SESSION_KEY, self.client.session)
+        self.assertEqual(stored_plan(self.client), plan, "a page load must not change the stored preview")
 
-    def test_preview_discards_malformed_contact_candidate_values(self):
+    def test_preview_refuses_malformed_contact_candidate_values(self):
         """Contact suggestions require a source-column mapping, not any JSON value."""
+        self._upload()
+        plan = self._store_device_candidate_values({"contact": ["invalid"]})
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
+        self.assertEqual(stored_plan(self.client), plan, "a page load must not change the stored preview")
+
+    def test_a_plan_with_an_unknown_schema_is_recovered_by_a_reread(self):
+        """A page load cannot read the plan, so it offers the re-read, and the re-read replans it."""
         preview_url = reverse("plugins:netbox_data_import:import_preview")
         self._upload()
-        session = self.client.session
-        device_unit = next(
-            unit
-            for unit in session[PREVIEW_PLAN_SESSION_KEY]["units"]
-            if unit["display"].get("object_type") == "device"
+        current_version = stored_plan(self.client)["schema_version"]
+        store_plan(self.client, {**stored_plan(self.client), "schema_version": 999})
+
+        page = self.client.get(preview_url)
+
+        self.assertContains(page, reverse("plugins:netbox_data_import:preview_reread"))
+        self.assertEqual(stored_plan(self.client)["schema_version"], 999)
+
+        reread = self.client.post(
+            reverse("plugins:netbox_data_import:preview_reread"), {**preview_claim(self.client), "next": preview_url}
         )
-        device_unit["display"].setdefault("extra_data", {})["candidate_values"] = {"contact": ["invalid"]}
-        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
-        session.save()
 
-        response = self.client.get(preview_url)
+        self.assertRedirects(reread, preview_url, fetch_redirect_response=False)
+        self.assertEqual(stored_plan(self.client)["schema_version"], current_version)
+        self.assertEqual(self.client.get(preview_url).status_code, 200)
 
-        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
-        self.assertNotIn(PREVIEW_PLAN_SESSION_KEY, self.client.session)
-
-    def test_preview_discards_a_materialized_plan_with_an_unknown_schema(self):
-        """Session state cannot keep a materialized plan with an unreadable schema."""
-        preview_url = reverse("plugins:netbox_data_import:import_preview")
+    def test_preview_of_a_target_that_became_unavailable_sends_the_operator_to_setup(self):
+        """The page compares the stored plan with live NetBox, which refuses a target that is gone."""
         self._upload()
-        session = self.client.session
-        session[PREVIEW_PLAN_SESSION_KEY]["schema_version"] = 999
-        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
-        session.save()
-        response = self.client.get(preview_url)
-        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
+        self.site.delete()
 
-    def test_preview_discards_a_target_that_became_unavailable(self):
-        """Recalculation refuses the preview after its saved target disappears from scope."""
-        preview_url = reverse("plugins:netbox_data_import:import_preview")
-        self._upload()
-        self.client.get(preview_url)
-        session = self.client.session
-        session["import_context"]["site_id"] = 999999
-        session.save()
-
-        response = self.client.get(preview_url)
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))

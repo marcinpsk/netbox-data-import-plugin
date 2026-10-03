@@ -18,6 +18,7 @@ from .models import (
     index_digest,
 )
 from .proposal_tasks import CandidateSnapshot, proposal_inventory_staleness
+from .public_refusal import PublicRefusal
 
 __all__ = [
     "ActiveProposalExists",
@@ -35,7 +36,7 @@ __all__ = [
 ]
 
 
-class ActiveProposalExists(Exception):
+class ActiveProposalExists(PublicRefusal):
     """One key already has a queued or running proposal, which the partial unique index refuses."""
 
 

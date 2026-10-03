@@ -9,6 +9,7 @@ shape and a candidate retrieval, and changes nothing here.
 from dataclasses import dataclass, replace
 
 from .proposal_response import candidate_id_for, validate_candidate_ids
+from .public_refusal import PublicRefusal
 
 #: Why a request cannot be made, or why a snapshot cannot establish freshness.
 NO_CANDIDATES = "no_candidates"
@@ -35,7 +36,7 @@ class UnknownProposalTask(Exception):
     """No task type with that name is registered. The registry is closed on purpose."""
 
 
-class UnusableCandidateSet(Exception):
+class UnusableCandidateSet(PublicRefusal):
     """The eligible set cannot back a proposal. `reason` is one of the two module constants."""
 
     def __init__(self, reason, message):

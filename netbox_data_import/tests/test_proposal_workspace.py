@@ -3,6 +3,7 @@
 """Proposal workspace commands through real previews, permissions, and the job queue."""
 
 import uuid
+from contextlib import nullcontext
 from io import BytesIO
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
@@ -11,11 +12,12 @@ from core.choices import JobStatusChoices
 from core.models import Job, ObjectType
 from dcim.models import Device, Interface, PowerPort, Site
 from django.db import connection
-from django.test import Client, RequestFactory, SimpleTestCase, TestCase
+from django.test import Client, RequestFactory, SimpleTestCase, TestCase, TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
 from django.views import View
 from django_rq import get_queue
+from django_rq.queues import DjangoRQ
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
@@ -23,22 +25,31 @@ from netbox_data_import.inference_backend import proposal_eligible_set_limit
 from netbox_data_import.jobs import ImportJobRunner, ResolutionProposalJob
 from netbox_data_import.models import (
     ImportProfile,
+    PreviewCoordinator,
+    PreviewState,
     ProposalFailureReason,
     ProposalOutcome,
     ProposalStatus,
     ResolutionProposal,
+    SourceDocument,
     TerminationResolution,
 )
-from netbox_data_import.preview_row_actions import (
-    PREVIEW_DIRTY_SESSION_KEY,
-    PREVIEW_PLAN_SESSION_KEY,
-    PREVIEW_REVISION_SESSION_KEY,
-    retained_sync_block_reason,
-)
+from netbox_data_import.preview_coordinator import CLAIM_INVALID, RETAINED_SYNC_BLOCK_REASON, STALE_PREVIEW
 from netbox_data_import.proposal_tasks import CandidateSnapshot
 from netbox_data_import.review_workspace import TERMINATION_UNRESOLVABLE
+from netbox_data_import.views import TARGET_GONE
 from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, complete_proposal, fail_proposal
-from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes, user_with_object_permission
+from netbox_data_import.tests.helpers import (
+    retired_claim,
+    preview_claim,
+    preview_coordinator,
+    seed_preview,
+    stored_plan,
+    trace_termination,
+    trace_workbook_bytes,
+    upload_preview,
+    user_with_object_permission,
+)
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, PANEL_1_FRONT, direct_path, patched_path
 from netbox_data_import.tests.plugins_config import override_plugins_config
@@ -72,10 +83,8 @@ class ProposalErrorEnvelopeTest(SimpleTestCase):
             ProgrammingFailureView.as_view()(RequestFactory().get("/proposal"))
 
 
-class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCase):
-    @classmethod
-    def setUpTestData(cls):
-        cls.build_topology()
+class ProposalPreviewMixin:
+    """Open one trace preview with an unresolved termination and drive the proposal endpoints."""
 
     def setUp(self):
         super().setUp()
@@ -92,27 +101,66 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             )
         )
         upload.name = "traces.xlsx"
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-            follow=True,
+        response = upload_preview(
+            self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload}, follow=True
         )
         self.assertEqual(response.status_code, 200)
-        self.assertIn(PREVIEW_PLAN_SESSION_KEY, self.client.session)
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.READY)
 
-    def call(self, action, *, accept="application/json", **data):
-        data.setdefault("preview_revision", self.client.session.get(PREVIEW_REVISION_SESSION_KEY, ""))
-        if data["preview_revision"] is None:
-            data.pop("preview_revision")
+    def call(self, action, *, accept="application/json", claim=None, **data):
+        """Send one proposal read or command with the claim the page holds now, or with *claim*."""
+        data = {**(preview_claim(self.client) if claim is None else claim), **data}
         url = reverse(f"plugins:netbox_data_import:trace_{action}")
         method = self.client.get if action == "proposal" else self.client.post
-        with self.captureOnCommitCallbacks(execute=True):
+        # A TransactionTestCase commits for real, so only a TestCase holds callbacks to run.
+        capture = getattr(self, "captureOnCommitCallbacks", None)
+        with capture(execute=True) if capture else nullcontext():
             return method(url, data, headers={} if accept is None else {"accept": accept})
 
     def request_proposal(self):
         response = self.call("request_proposal", field_key=self.field_key)
         self.assertEqual(response.status_code, 200, response.content)
         return ResolutionProposal.objects.get(pk=response.json()["proposal_id"])
+
+
+class ProposalQueueFailureTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, CableTopologyMixin, TransactionTestCase):
+    """NetBox pushes a Job from `on_commit`, so a failed push meets an attempt row that already committed."""
+
+    def setUp(self):
+        self.build_topology()
+        super().setUp()
+
+    def test_enqueue_failure_fails_attempt_and_allows_retry(self):
+        with patch.object(DjangoRQ, "enqueue_call", autospec=True, side_effect=RedisConnectionError):
+            response = self.call("request_proposal", field_key=self.field_key)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(),
+            {"ok": False, "error": "The proposal queue is unavailable. Try again later."},
+        )
+        proposal = ResolutionProposal.objects.get(profile=self.profile, field_key=self.field_key)
+        self.assertEqual(proposal.status, ProposalStatus.FAILED)
+        self.assertEqual(proposal.failure_reason, ProposalFailureReason.QUEUE_UNAVAILABLE)
+        retry = self.request_proposal()
+        self.assertNotEqual(retry.pk, proposal.pk)
+        self.assertEqual(retry.status, ProposalStatus.QUEUED)
+
+    def test_unexpected_enqueue_failure_propagates_after_releasing_attempt(self):
+        with patch.object(DjangoRQ, "enqueue_call", autospec=True, side_effect=TypeError("Programming error.")):
+            with self.assertRaises(TypeError):
+                self.call("request_proposal", field_key=self.field_key)
+
+        proposal = ResolutionProposal.objects.get(profile=self.profile, field_key=self.field_key)
+        self.assertEqual(proposal.status, ProposalStatus.FAILED)
+        self.assertEqual(proposal.failure_reason, ProposalFailureReason.QUEUE_UNAVAILABLE)
+        self.assertNotEqual(self.request_proposal().pk, proposal.pk)
+
+
+class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, CableTopologyMixin, TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
 
     def completed(self, *, no_match=False):
         proposal = self.request_proposal()
@@ -148,20 +196,39 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.login_with_preview(actor)
         return actor
 
-    def reread(self):
+    def reread(self, **extra):
         """Adopt the plan live NetBox states now, as the workspace re-read action does."""
         response = self.client.post(
-            reverse("plugins:netbox_data_import:trace_workspace_reread"),
-            {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
+            reverse("plugins:netbox_data_import:preview_reread"),
+            {**preview_claim(self.client), "next": reverse("plugins:netbox_data_import:trace_workspace")},
+            **extra,
         )
-        self.assertEqual(response.status_code, 302)
+        if not extra:
+            self.assertEqual(response.status_code, 302)
+        return response
+
+    def stale_claim(self):
+        """Return the claim a successful re-read retired."""
+        return retired_claim(self.client)
 
     def login_with_preview(self, actor):
-        preview = {key: value for key, value in self.client.session.items() if key.startswith("import_")}
+        """Log *actor* in with this upload as its preview, planned before its permissions were narrowed."""
+        from netbox_data_import.import_engine import ImportEngine
+
+        coordinator = preview_coordinator(self.client)
+        document = SourceDocument.objects.get(pk=coordinator.source_document_id)
+        context = dict(coordinator.context)
+        planning_context = {key: context[key] for key in ("site_id", "location_id", "tenant_id")}
+        was_superuser = actor.is_superuser
+        actor.is_superuser = True
+        actor.save(update_fields=["is_superuser"])
+        try:
+            plan = ImportEngine.plan(self.profile, document, actor, planning_context)
+        finally:
+            actor.is_superuser = was_superuser
+            actor.save(update_fields=["is_superuser"])
         self.client.force_login(actor)
-        session = self.client.session
-        session.update(preview)
-        session.save()
+        seed_preview(self.client, profile=self.profile, document=document, plan=plan, context=context)
 
     def assert_unwritten(self, proposal):
         proposal.refresh_from_db()
@@ -171,28 +238,30 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertIsNone(proposal.written_resolution_id)
         self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
 
-    def test_request_without_accept_requires_preview_revision(self):
-        for revision in (None, "obsolete"):
-            with self.subTest(revision=revision):
-                response = self.call(
-                    "request_proposal", accept=None, field_key=self.field_key, preview_revision=revision
-                )
+    def stale_claims(self):
+        """Return each claim a page without the current preview can post, with the refusal it gets."""
+        return (({}, CLAIM_INVALID), (self.stale_claim(), STALE_PREVIEW))
+
+    def test_request_without_accept_requires_preview_claim(self):
+        for claim, error in self.stale_claims():
+            with self.subTest(claim=claim):
+                response = self.call("request_proposal", accept=None, field_key=self.field_key, claim=claim)
                 self.assertEqual(response.status_code, 409, response.content)
-                self.assertEqual(response.json(), {"ok": False, "error": "No import preview in progress."})
+                self.assertEqual(response.json(), {"ok": False, "error": error, "code": "preview_stale"})
                 self.assertFalse(ResolutionProposal.objects.exists())
 
-    def test_cancel_without_accept_requires_preview_revision(self):
+    def test_cancel_without_accept_requires_preview_claim(self):
         proposal = self.request_proposal()
-        for revision in (None, "obsolete"):
-            with self.subTest(revision=revision):
-                response = self.call("cancel_proposal", accept=None, proposal_id=proposal.pk, preview_revision=revision)
+        for claim, error in self.stale_claims():
+            with self.subTest(claim=claim):
+                response = self.call("cancel_proposal", accept=None, proposal_id=proposal.pk, claim=claim)
                 self.assertEqual(response.status_code, 409, response.content)
-                self.assertEqual(response.json(), {"ok": False, "error": "No import preview in progress."})
+                self.assertEqual(response.json(), {"ok": False, "error": error, "code": "preview_stale"})
                 proposal.refresh_from_db()
                 self.assertEqual(proposal.status, ProposalStatus.QUEUED)
                 self.assertEqual(ResolutionProposal.objects.count(), 1)
 
-    def test_request_and_cancel_without_accept_allow_current_preview_revision(self):
+    def test_request_and_cancel_without_accept_allow_current_preview_claim(self):
         response = self.call("request_proposal", accept=None, field_key=self.field_key)
         self.assertEqual(response.status_code, 200, response.content)
         proposal = ResolutionProposal.objects.get(pk=response.json()["proposal_id"])
@@ -216,8 +285,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.login_with_preview(actor)
         self.assertFalse(Site.objects.restrict(actor, "view").filter(pk=self.site.pk).exists())
         response = self.call("accept_proposal", proposal_id=proposal.pk)
-        self.assertEqual(response.status_code, 400, response.content)
-        self.assertEqual(response.json(), {"ok": False, "error": "That termination cannot be resolved here."})
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertEqual(response.json(), {"ok": False, "error": TARGET_GONE})
         self.assert_unwritten(proposal)
 
         response = self.call("reject_proposal", proposal_id=proposal.pk)
@@ -652,8 +721,9 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         response = self.call("proposal", field_key=self.field_key)
         self.assertEqual(response.json()["proposal"]["id"], retry.pk)
 
-    def test_request_refuses_retired_adapter_and_discards_preview(self):
+    def test_request_refuses_retired_adapter(self):
         ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired-adapter")
+        revision = preview_coordinator(self.client).revision
 
         response = self.call("request_proposal", field_key=self.field_key)
 
@@ -661,33 +731,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertFalse(response.json()["ok"])
         self.assertIn("retired-adapter", response.json()["error"])
         self.assertFalse(ResolutionProposal.objects.exists())
-        self.assertFalse(self.client.session["import_preview_pending"])
-
-    def test_enqueue_failure_fails_attempt_and_allows_retry(self):
-        with patch.object(ResolutionProposalJob, "enqueue", autospec=True, side_effect=RedisConnectionError):
-            response = self.call("request_proposal", field_key=self.field_key)
-
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(
-            response.json(),
-            {"ok": False, "error": "The proposal queue is unavailable. Try again later."},
-        )
-        proposal = ResolutionProposal.objects.get(profile=self.profile, field_key=self.field_key)
-        self.assertEqual(proposal.status, ProposalStatus.FAILED)
-        self.assertEqual(proposal.failure_reason, ProposalFailureReason.QUEUE_UNAVAILABLE)
-        retry = self.request_proposal()
-        self.assertNotEqual(retry.pk, proposal.pk)
-        self.assertEqual(retry.status, ProposalStatus.QUEUED)
-
-    def test_unexpected_enqueue_failure_propagates_after_releasing_attempt(self):
-        with patch.object(ResolutionProposalJob, "enqueue", autospec=True, side_effect=TypeError("Programming error.")):
-            with self.assertRaises(TypeError):
-                self.call("request_proposal", field_key=self.field_key)
-
-        proposal = ResolutionProposal.objects.get(profile=self.profile, field_key=self.field_key)
-        self.assertEqual(proposal.status, ProposalStatus.FAILED)
-        self.assertEqual(proposal.failure_reason, ProposalFailureReason.QUEUE_UNAVAILABLE)
-        self.assertNotEqual(self.request_proposal().pk, proposal.pk)
+        self.assertEqual(preview_coordinator(self.client).revision, revision)
 
     def test_proposal_actions_report_missing_or_non_numeric_ids(self):
         for action in ("cancel_proposal", "accept_proposal", "reject_proposal"):
@@ -857,16 +901,28 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         )
         self.assertFalse(ResolutionProposal.objects.exists())
 
-    def test_accept_by_another_operator_writes_resolution_and_requires_recalculation(self):
+    def accepted_field(self):
+        """Return the termination the stored plan shows for the field, without a re-read."""
+        from netbox_data_import.plan import ImportPlan
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
+        workspace = ReviewWorkspace(ImportPlan.from_dict(stored_plan(self.client)), self.actor)
+        return next(
+            item for trace in workspace.traces for item in trace.terminations if item["field_key"] == self.field_key
+        )
+
+    def test_accept_by_another_operator_writes_resolution_and_replans(self):
+        from netbox_data_import.cable_target import UNRESOLVED
+
         proposal = self.completed()
         actor = self.operator(decide=True)
         self.assertNotEqual(actor.pk, proposal.requested_by_id)
-        before = self.client.session[PREVIEW_PLAN_SESSION_KEY]
-        revision = self.client.session[PREVIEW_REVISION_SESSION_KEY]
+        self.assertEqual(self.accepted_field()["state"], UNRESOLVED)
+        revision = preview_coordinator(self.client).revision
         response = self.call("accept_proposal", proposal_id=proposal.pk)
         self.assertEqual(response.status_code, 200, response.content)
         proposal.refresh_from_db()
-        self.assertEqual(response.json()["preview_state"], "recalculation_required")
+        self.assertNotIn("preview_state", response.json())
         row = TerminationResolution.objects.get(profile=self.profile)
         self.assertEqual(row.selected_object_id, self.eth0.pk)
         self.assertEqual((row.source_device, row.source_cards, row.source_port), ("DEV-A", "", "absent-port"))
@@ -875,9 +931,13 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(proposal.decided_by_id, actor.pk)
         self.assertIsNotNone(proposal.decided_at)
         self.assertEqual(proposal.status, ProposalStatus.COMPLETED)
-        self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], before)
-        self.assertEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], revision)
-        self.assertTrue(self.client.session[PREVIEW_DIRTY_SESSION_KEY])
+        # The acceptance replanned in its own transaction, so the stored plan already uses the resolution.
+        self.assertEqual(preview_coordinator(self.client).revision, revision + 1)
+        self.assertNotEqual(self.accepted_field()["state"], UNRESOLVED)
+        self.assertEqual(self.accepted_field()["selected"], str(self.eth0))
+        page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertFalse(page.context["drift"])
+        self.assertEqual(page.context["proposal_fields"][self.field_key]["presentation"]["field_state"], "accepted")
 
     def test_accepting_a_power_port_that_shares_an_interface_id_saves_the_power_port(self):
         """The accept view writes the candidate's own model, never another model with the same numeric id."""
@@ -930,18 +990,14 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             )
         )
         upload.name = "traces.xlsx"
-        other.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-            follow=True,
-        )
+        upload_preview(other, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload}, follow=True)
         saved = other.post(
             reverse("plugins:netbox_data_import:trace_cable_policy"),
             {
                 "cable_class": "Patch",
                 "cable_type": "cat6a",
                 "cable_profile": "single-1c1p",
-                "preview_revision": other.session[PREVIEW_REVISION_SESSION_KEY],
+                **preview_claim(other),
             },
         )
         self.assertEqual(saved.status_code, 302)
@@ -1057,16 +1113,16 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         proposal = self.completed()
         self.eth0.name = "changed"
         self.eth0.save()
-        before = dict(self.client.session)
+        before = (preview_coordinator(self.client).revision, stored_plan(self.client))
         response = self.call("accept_proposal", proposal_id=proposal.pk)
         self.assertEqual(response.status_code, 409)
         self.assert_unwritten(proposal)
-        self.assertEqual(dict(self.client.session), before)
+        self.assertEqual((preview_coordinator(self.client).revision, stored_plan(self.client)), before)
 
-    def test_accept_preserves_retained_preview_and_sync_guard(self):
+    def test_accept_is_refused_while_a_trace_sync_holds_the_preview(self):
         proposal = self.completed()
-        context = self.client.session["import_context"]
-        Job.objects.create(
+        coordinator = preview_coordinator(self.client)
+        job = Job.objects.create(
             name=ImportJobRunner.name,
             user=self.actor,
             job_id=uuid.uuid4(),
@@ -1075,23 +1131,24 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
                 "job_type": ImportJobRunner.job_type,
                 "keeps_preview": True,
                 "profile_id": self.profile.pk,
-                "source_document_id": context["source_document_id"],
+                "source_document_id": coordinator.source_document_id,
             },
         )
-        before = self.client.session[PREVIEW_PLAN_SESSION_KEY]
-        self.assertTrue(retained_sync_block_reason(self.client.session, self.actor))
+        PreviewCoordinator.objects.filter(pk=coordinator.pk).update(state=PreviewState.SYNC_PENDING, job_id=job.pk)
+        before = stored_plan(self.client)
+
         response = self.call("accept_proposal", proposal_id=proposal.pk)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], before)
-        self.assertTrue(retained_sync_block_reason(self.client.session, self.actor))
-        self.assertTrue(self.client.session[PREVIEW_DIRTY_SESSION_KEY])
-        self.assertTrue(TerminationResolution.objects.exists())
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"], RETAINED_SYNC_BLOCK_REASON)
+        self.assert_unwritten(proposal)
+        self.assertEqual(stored_plan(self.client), before)
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.SYNC_PENDING)
 
     def test_all_endpoints_refuse_without_preview(self):
         proposal = self.completed()
-        session = self.client.session
-        session.pop("import_preview_pending")
-        session.save()
+        discarded = self.client.post(reverse("plugins:netbox_data_import:preview_discard"), preview_claim(self.client))
+        self.assertEqual(discarded.status_code, 302)
         for action in ("request_proposal", "proposal", "cancel_proposal", "accept_proposal", "reject_proposal"):
             with self.subTest(action=action):
                 response = self.call(action, field_key=self.field_key, proposal_id=proposal.pk)
@@ -1103,10 +1160,17 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
     def test_all_endpoints_enforce_profile_scope(self):
         proposal = self.completed()
         self.operator(decide=True, profile_scope=self.profile.pk + 1)
-        for action in ("request_proposal", "proposal", "cancel_proposal", "accept_proposal", "reject_proposal"):
+        # A read finds no preview it may show; a command finds no profile it may change.
+        for action, status in (
+            ("proposal", 409),
+            ("request_proposal", 404),
+            ("cancel_proposal", 404),
+            ("accept_proposal", 404),
+            ("reject_proposal", 404),
+        ):
             with self.subTest(action=action):
                 response = self.call(action, field_key=self.field_key, proposal_id=proposal.pk)
-                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.status_code, status)
         self.assert_unwritten(proposal)
 
     def test_commands_cannot_address_another_profiles_proposal(self):
@@ -1163,13 +1227,12 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(proposal.decision, "rejected")
         self.assertFalse(TerminationResolution.objects.exists())
 
-    def test_all_endpoints_refuse_a_stale_preview_revision(self):
+    def test_all_endpoints_refuse_a_stale_preview_claim(self):
         proposal = self.completed()
+        stale = self.stale_claim()
         for action in ("request_proposal", "proposal", "cancel_proposal", "accept_proposal", "reject_proposal"):
             with self.subTest(action=action):
-                response = self.call(
-                    action, field_key=self.field_key, proposal_id=proposal.pk, preview_revision="obsolete"
-                )
+                response = self.call(action, field_key=self.field_key, proposal_id=proposal.pk, claim=stale)
                 self.assertEqual(response.status_code, 409)
         self.assert_unwritten(proposal)
         self.assertEqual(ResolutionProposal.objects.count(), 1)
@@ -1331,7 +1394,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
     def test_proposal_survives_replanning_after_its_field_leaves_the_preview(self):
         """The attempt still reads, and its freshness reads NetBox from the field key alone."""
         proposal = self.completed()
-        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
+        before = preview_coordinator(self.client).preview_token
         self.client.force_login(self.actor)
         upload = BytesIO(
             trace_workbook_bytes(
@@ -1344,13 +1407,11 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             )
         )
         upload.name = "same-traces.xlsx"
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-            follow=True,
+        response = upload_preview(
+            self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload}, follow=True
         )
         self.assertEqual(response.status_code, 200)
-        self.assertNotEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], before)
+        self.assertNotEqual(preview_coordinator(self.client).preview_token, before)
         response = self.call("proposal", field_key=self.field_key)
         self.assertEqual(response.json()["proposal"]["id"], proposal.pk)
         self.assertFalse(response.json()["staleness"]["is_stale"])
@@ -1440,7 +1501,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
     def test_workspace_supplies_affordances_without_editing_the_plan(self):
         from netbox_data_import.tests.test_inference_backend import ALLOWLIST, FALLBACK
 
-        before = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        before = (preview_coordinator(self.client).revision, stored_plan(self.client))
         with override_plugins_config(
             netbox_data_import={
                 "inference_backend": FALLBACK,
@@ -1452,7 +1513,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(fields[self.field_key]["presentation"]["actions"][0]["reason"], "")
         resolved = termination_field_key(device="DEV-B", cards="", port="eth1", kind="interface")
         self.assertIn("already resolved", fields[resolved]["presentation"]["actions"][0]["reason"])
-        self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], before)
+        self.assertEqual((preview_coordinator(self.client).revision, stored_plan(self.client)), before)
         with override_plugins_config(netbox_data_import={}):
             self.assertIn("No Inference Backend", self.presentation()["actions"][0]["reason"])
 
@@ -1517,18 +1578,14 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(data["explanation"], "The candidate matches the source label.")
         self.assertFalse(data["pending"])
 
-    def test_accept_then_reread_presents_accepted_termination(self):
+    def test_accept_presents_the_accepted_termination_without_a_reread(self):
         proposal = self.completed()
+        before = preview_coordinator(self.client).revision
+
         self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 200)
-        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:trace_workspace_reread"),
-            {
-                "preview_revision": before,
-            },
-            follow=True,
-        )
-        self.assertNotEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], before)
+
+        self.assertEqual(preview_coordinator(self.client).revision, before + 1)
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         data = response.context["proposal_fields"][self.field_key]["presentation"]
         self.assertEqual(data["field_state"], "accepted")
         self.assertEqual(data["badge"], "Accepted")
@@ -1542,18 +1599,13 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 200)
         Interface.objects.create(device=self.device_a, name="eth9", type="1000base-t")
         self.eth0.delete()
-        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
         with override_plugins_config(
             netbox_data_import={
                 "inference_backend": FALLBACK,
                 "inference_backend_origin_allowlist": ALLOWLIST,
             }
         ):
-            response = self.client.post(
-                reverse("plugins:netbox_data_import:trace_workspace_reread"),
-                {"preview_revision": before},
-                follow=True,
-            )
+            response = self.reread(follow=True)
 
         data = response.context["proposal_fields"][self.field_key]["presentation"]
         self.assertEqual(data["field_state"], "unresolved")
@@ -1692,13 +1744,13 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             )
         )
         upload.name = "traces.xlsx"
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
+        response = upload_preview(
+            self.client,
             {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
             follow=True,
         )
         self.assertEqual(response.status_code, 200, response.content)
-        return ReviewWorkspace.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY], self.actor)
+        return ReviewWorkspace.from_dict(stored_plan(self.client), self.actor)
 
     def test_conflicting_source_spellings_refuse_preview_resolutions(self):
         """One canonical field cannot authorize a different spelling from the reviewed card."""
@@ -1733,7 +1785,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
                 self.assert_unwritten(proposal)
         candidates = self.client.get(
             reverse("plugins:netbox_data_import:trace_termination_candidates"),
-            {"field_key": self.field_key, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
+            {**preview_claim(self.client), "field_key": self.field_key},
         )
         self.assertEqual(candidates.status_code, 400, candidates.content)
         self.assertEqual(candidates.json()["error"], TERMINATION_UNRESOLVABLE)
@@ -1998,10 +2050,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
 
     def test_all_settled_terminations_explain_that_none_need_attention(self):
         Interface.objects.create(device=self.device_a, name="absent-port", type="1000base-t")
-        self.client.post(
-            reverse("plugins:netbox_data_import:trace_workspace_reread"),
-            {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
-        )
+        self.reread()
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         self.assertContains(response, "Every termination on this trace resolves to a NetBox port.")
         self.assertContains(response, "2 termination(s) resolved automatically by exact name match")

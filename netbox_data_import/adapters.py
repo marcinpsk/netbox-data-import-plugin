@@ -18,12 +18,13 @@ from typing import TYPE_CHECKING
 
 from .catalog import OutputKind, has_implemented_module
 from .identity import identity_text
+from .public_refusal import PublicRefusal
 
 if TYPE_CHECKING:
     from .source_trace import SourceTrace
 
 
-class UnknownSourceAdapter(Exception):
+class UnknownSourceAdapter(PublicRefusal):
     """A profile names a Source Adapter key this release does not register."""
 
 

@@ -38,7 +38,15 @@ export function completed(overrides = {}) {
   });
 }
 
-export function fixture(initial = payload()) {
+export function claimFields(revision = 4) {
+  return [
+    ['preview_token', 'token-1'], ['preview_revision', String(revision)],
+    ['preview_document', '11'], ['preview_profile', '3'],
+  ];
+}
+export const CLAIM = claimFields();
+
+function card(key, initial) {
   const actions = items => items.map(action => `
     <button type="button" data-proposal-action="${action.key}">${action.label}</button>
     <div data-proposal-reason="${action.key}" hidden></div>`).join('');
@@ -53,16 +61,25 @@ export function fixture(initial = payload()) {
     <details open data-proposal-history-disclosure><summary>Proposal history</summary>
       <ul data-proposal-history></ul><a data-proposal-history-link hidden>View all attempts</a></details>`;
   return `
-    <base href="http://preview.test/">
-    <style>[hidden] { display: none !important; }</style>
-    <form action="/reread/" method="post"><button id="traceWorkspaceReread">Re-read from NetBox</button></form>
-    <form id="traceTerminationForm"><input name="csrfmiddlewaretoken" value="fixture-token"></form>
-    <script type="application/json" id="traceProposalFields">${JSON.stringify({field: initial}).replaceAll('<', '\\u003c')}</script>
-    <div data-proposal-field="field" data-proposal-url="/proposal/" data-preview-revision="revision-1">
+    <div data-proposal-field="${key}" data-proposal-url="/proposal/">
       <span class="badge ndi-trace-state-unknown" data-proposal-state data-proposal-state-prefix="ndi-trace-state-"></span>
       <div data-proposal-content>${initial.proposal ? proposal : ''}</div>
       <template data-proposal-template>${proposal}</template>
       <div data-proposal-field-actions>${actions(initial.presentation.actions.slice(0, 2))}</div>
       <div data-proposal-error hidden></div>
     </div>`;
+}
+
+/* One card for `field`, plus one card for each further field key in `others`. */
+export function fixture(initial = payload(), others = {}, revision = 4) {
+  const fields = {field: initial, ...others};
+  const claim = claimFields(revision).map(([name, value]) => `<input type="hidden" name="${name}" value="${value}">`).join('');
+  return `
+    <base href="http://preview.test/">
+    <style>[hidden] { display: none !important; }</style>
+    <form id="ndi-preview-claim" hidden>${claim}</form>
+    <output id="ndi-revision">${revision}</output>
+    <form id="traceTerminationForm"><input name="csrfmiddlewaretoken" value="fixture-token"></form>
+    <script type="application/json" id="traceProposalFields">${JSON.stringify(fields).replaceAll('<', '\\u003c')}</script>
+    ${Object.entries(fields).map(([key, field]) => card(key, field)).join('')}`;
 }

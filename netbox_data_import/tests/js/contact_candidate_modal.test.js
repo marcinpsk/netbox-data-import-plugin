@@ -17,6 +17,18 @@ const controllerPath = resolve(
   "netbox_data_import/static/netbox_data_import/js/contact_candidate_modal.js",
 );
 const controllerSource = readFileSync(controllerPath, "utf8");
+const claimSource = readFileSync(
+  resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/preview_claim.js"),
+  "utf8",
+);
+
+const CLAIM = [
+  ["preview_token", "token-1"],
+  ["preview_revision", "4"],
+  ["preview_document", "11"],
+  ["preview_profile", "3"],
+];
+const CLAIM_QUERY = new URLSearchParams(CLAIM).toString();
 
 const candidates = {
   "device:first-row": {
@@ -70,30 +82,33 @@ function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/", s
   const lookupAttribute = lookupUrl === null ? "" : ` data-contact-lookup-url="${lookupUrl}"`;
   // Opt-in, so the tests that count lookup calls do not also see the suggestion call.
   const suggestionAttribute = suggestionUrl === null ? "" : ` data-contact-suggestion-url="${suggestionUrl}"`;
+  const claim = CLAIM.map(([name, value]) => `<input type="hidden" name="${name}" value="${value}">`).join("");
   document.body.innerHTML = `
+    <form id="ndi-preview-claim" hidden>${claim}</form>
     <div id="contactCandidateModal">
       <form id="contactCandidateForm" data-contact-lookup-field="email"${lookupAttribute}${suggestionAttribute}>
-        <input type="hidden" name="profile_id" value="7">
         <input type="hidden" id="contactCandidateSourceId">
         <input type="hidden" id="contactCandidateOriginalValue">
         <input type="hidden" id="contactCandidateResolvedFields">
         <input type="hidden" id="contactCandidateContactId">
-        <div id="contactCandidateSummary">
-          <div id="contactCandidateSummaryName"></div>
-          <div id="contactCandidateSummaryEmail"></div>
-          <div id="contactCandidateSummaryPhone"></div>
-          <button type="button" id="contactCandidateEditToggle" aria-expanded="false"></button>
-        </div>
-        <div id="contactCandidateProvenance"></div>
-        <div id="contactCandidateSuggestion" class="d-none"></div>
-        <div id="contactCandidateEdit" hidden>
-          <div id="contactCandidateValueRows"></div>
-          <button type="button" id="contactCandidateAddValue"></button>
-        </div>
-        <button type="button" id="contactCandidateLinkExisting" aria-expanded="false"></button>
-        <input type="checkbox" id="contactCandidateNone">
-        <div id="contactCandidateExistingWrap" hidden>
-          <select id="contactCandidateExisting"></select>
+        <div class="modal-body">
+          <div id="contactCandidateSummary">
+            <div id="contactCandidateSummaryName"></div>
+            <div id="contactCandidateSummaryEmail"></div>
+            <div id="contactCandidateSummaryPhone"></div>
+            <button type="button" id="contactCandidateEditToggle" aria-expanded="false"></button>
+          </div>
+          <div id="contactCandidateProvenance"></div>
+          <div id="contactCandidateSuggestion" class="d-none"></div>
+          <div id="contactCandidateEdit" hidden>
+            <div id="contactCandidateValueRows"></div>
+            <button type="button" id="contactCandidateAddValue"></button>
+          </div>
+          <button type="button" id="contactCandidateLinkExisting" aria-expanded="false"></button>
+          <input type="checkbox" id="contactCandidateNone">
+          <div id="contactCandidateExistingWrap" hidden>
+            <select id="contactCandidateExisting"></select>
+          </div>
         </div>
       </form>
     </div>
@@ -106,6 +121,7 @@ function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/", s
    * `window`, so the fixture initializes the select the same way its
    * initStaticSelects() does. */
   new TomSelect(document.getElementById("contactCandidateExisting"), { create: false, maxOptions: undefined });
+  window.eval(claimSource);
   window.eval(controllerSource);
 }
 
@@ -163,6 +179,7 @@ describe("contact candidate modal", () => {
 
   it("stores a refreshed suggestion under the composite row key", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
       json: () =>
         Promise.resolve({
           suggestion: { id: 62, name: "Refreshed Rack Contact", email: "rack@example.invalid", phone: "" },
@@ -186,7 +203,7 @@ describe("contact candidate modal", () => {
   it("ignores a held answer for another row that shares its source ID", async () => {
     let answer;
     const held = new Promise((resolve) => { answer = resolve; });
-    const fetchMock = vi.fn().mockResolvedValue({ json: () => held });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => held });
     vi.stubGlobal("fetch", fetchMock);
     addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
 
@@ -194,7 +211,7 @@ describe("contact candidate modal", () => {
     openRow("first-row", "shared-source", "device");
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    // A save for that same source lands, so the next row opens with a contact already selected.
+    // The next row of that same source opens with a contact already selected.
     window.EXISTING_RESOLUTIONS["shared-source"] = {
       "candidate:contact": { resolved_fields: { contact_id: "41" } },
     };
@@ -208,7 +225,7 @@ describe("contact candidate modal", () => {
   });
 
   it("deletes a stale suggestion under the composite row key", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ suggestion: null }) });
     vi.stubGlobal("fetch", fetchMock);
     addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
     openRow("first-row", "source-rack", "rack");
@@ -242,6 +259,7 @@ describe("contact candidate modal", () => {
 
   it("finds Contacts created after the page loaded through the lookup endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
       json: () =>
         Promise.resolve({
           results: [{ id: 92, name: "Fresh Contact", email: "fresh@example.invalid", phone: "" }],
@@ -298,8 +316,9 @@ describe("contact candidate modal", () => {
     });
   });
 
-  it("offers a Contact created since the page rendered, without a recalculation", async () => {
+  it("offers a Contact created since the page rendered, without a reload", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
       json: () =>
         Promise.resolve({
           suggestion: { id: 77, name: "Late Contact", email: "late@example.invalid", phone: "" },
@@ -314,14 +333,36 @@ describe("contact candidate modal", () => {
       expect(document.getElementById("contactCandidateExisting").tomselect.options["77"]).toBeDefined();
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      "/contact-suggestion/?profile_id=7&source_id=source-second",
+      "/contact-suggestion/?source_id=source-second&" + CLAIM_QUERY,
       expect.objectContaining({ headers: { Accept: "application/json" } }),
     );
     expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
   });
 
+  it("keeps the offer and shows why when the server refuses the page claim", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      json: () => Promise.resolve({ error: "A newer preview replaced this one." }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    openRow("first-row", "source-first");
+
+    await vi.waitFor(() => {
+      expect(document.getElementById("contactCandidateError")?.textContent).toBe(
+        "A newer preview replaced this one.",
+      );
+    });
+    expect(new URL(fetchMock.mock.calls[0][0], "http://preview.test/").search).toBe(
+      "?source_id=source-first&" + CLAIM_QUERY,
+    );
+    // A refusal says nothing about the Contact, so the offer the page rendered stays.
+    expect(document.getElementById("contactCandidateExisting").tomselect.options["41"]).toBeDefined();
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
+  });
+
   it("drops a suggestion the server no longer offers", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ suggestion: null }) });
     vi.stubGlobal("fetch", fetchMock);
     addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
     // The page's map still holds the Contact the preview found, which has since been deleted.
@@ -337,7 +378,7 @@ describe("contact candidate modal", () => {
     let answer;
     const fetchMock = vi.fn().mockReturnValue(
       new Promise((resolve) => {
-        answer = () => resolve({ json: () => Promise.resolve({ suggestion: null }) });
+        answer = () => resolve({ ok: true, json: () => Promise.resolve({ suggestion: null }) });
       }),
     );
     vi.stubGlobal("fetch", fetchMock);
@@ -359,7 +400,7 @@ describe("contact candidate modal", () => {
   });
 
   it("keeps the stale option when it is the Contact the operator selected", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ suggestion: null }) });
     vi.stubGlobal("fetch", fetchMock);
     addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
     openRow("first-row", "source-first");
@@ -378,6 +419,7 @@ describe("contact candidate modal", () => {
 
   it("replaces the offered Contact when the server names a different one", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
       json: () =>
         Promise.resolve({
           suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
@@ -404,6 +446,7 @@ describe("contact candidate modal", () => {
         new Promise((resolve) => {
           answerFirst = () =>
             resolve({
+              ok: true,
               json: () =>
                 Promise.resolve({
                   suggestion: { id: 41, name: "Existing First Contact", email: "first@example.invalid", phone: "" },
@@ -412,6 +455,7 @@ describe("contact candidate modal", () => {
         }),
       )
       .mockResolvedValue({
+        ok: true,
         json: () =>
           Promise.resolve({
             suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
@@ -441,6 +485,7 @@ describe("contact candidate modal", () => {
       new Promise((resolve) => {
         answer = () =>
           resolve({
+            ok: true,
             json: () =>
               Promise.resolve({
                 suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
@@ -471,6 +516,7 @@ describe("contact candidate modal", () => {
       new Promise((resolve) => {
         answerFirst = () =>
           resolve({
+            ok: true,
             json: () =>
               Promise.resolve({
                 suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
@@ -508,6 +554,7 @@ describe("contact candidate modal", () => {
       new Promise((resolve) => {
         answer = () =>
           resolve({
+            ok: true,
             json: () =>
               Promise.resolve({
                 suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
@@ -542,6 +589,7 @@ describe("contact candidate modal", () => {
       new Promise((resolve) => {
         answer = () =>
           resolve({
+            ok: true,
             json: () =>
               Promise.resolve({
                 suggestion: { id: 52, name: "Other Contact", email: "second@example.invalid", phone: "" },
@@ -576,6 +624,7 @@ describe("contact candidate modal", () => {
       new Promise((resolve) => {
         answer = () =>
           resolve({
+            ok: true,
             json: () =>
               Promise.resolve({
                 suggestion: { id: 41, name: "Existing First Contact", email: "first@example.invalid", phone: "" },
@@ -631,7 +680,7 @@ describe("contact candidate modal", () => {
   });
 
   it("does not bring the dropped suggestion back when the row is reopened", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ suggestion: null }) });
     vi.stubGlobal("fetch", fetchMock);
     addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
     openRow("first-row", "source-first");

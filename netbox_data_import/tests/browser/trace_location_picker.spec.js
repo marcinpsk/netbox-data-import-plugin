@@ -4,6 +4,7 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { claimForm, claimInputs, script } from "./preview_page.js";
 
 const pickerSource = readFileSync(
   resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_picker.js"),
@@ -12,6 +13,8 @@ const pickerSource = readFileSync(
 
 const fixture = `
   <base href="http://preview.test/">
+  ${claimForm()}
+  ${script("preview_claim.js")}
   <table>
     <tr><td><button type="button" data-trace-location-picker="region >> dh4"
                     data-trace-location-label="Region >> DH4">Choose Location</button></td></tr>
@@ -22,7 +25,7 @@ const fixture = `
     <form id="traceLocationForm" method="post"
           action="/plugins/data-import/trace-workspace/location-mapping/"
           data-candidates-url="/plugins/data-import/trace-workspace/location-candidates/">
-      <input type="hidden" name="preview_revision" value="rev-1">
+      ${claimInputs()}
       <input type="hidden" name="location_key" id="traceLocationKey">
       <input type="hidden" name="location_id" id="traceLocationId">
       <h5><span id="traceLocationLabel"></span></h5>

@@ -329,6 +329,22 @@ class PluginConfigStartupGateTest(SimpleTestCase):
     def test_a_valid_configuration_starts(self):
         self.validate(settings_with())
 
+    def test_an_invalid_preview_byte_limit_stops_startup(self):
+        from django.core.exceptions import ImproperlyConfigured
+
+        for limit in (0, -1, True, "16", 16.5, 64 * 1024 * 1024 + 1):
+            with self.subTest(limit=limit), self.assertRaises(ImproperlyConfigured):
+                self.validate({"preview_max_plan_bytes": limit})
+
+    def test_only_a_single_row_sync_promises_a_failed_execution_audit(self):
+        from pathlib import Path
+
+        guide = (Path(__file__).resolve().parents[2] / "docs" / "configuration.md").read_text(encoding="utf-8")
+        storage_guide = " ".join(guide.partition("## Preview storage limit")[2].partition("## ")[0].split())
+
+        self.assertIn("A single-row sync also keeps its failed execution audit.", storage_guide)
+        self.assertNotIn("rolls back its changes and keeps the failed execution audit", storage_guide)
+
     def test_a_malformed_allowlist_entry_stops_startup(self):
         from django.core.exceptions import ImproperlyConfigured
 

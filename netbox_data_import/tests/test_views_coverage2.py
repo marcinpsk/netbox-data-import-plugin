@@ -18,8 +18,16 @@ from netbox_data_import.models import (
     ImportProfile,
     SourceResolution,
 )
-from netbox_data_import.tests.helpers import set_import_source, workbook_bytes
-from netbox_data_import.views import _validate_model_instance
+from netbox_data_import.preview_coordinator import PreviewCommandRefused
+from netbox_data_import.tests.helpers import (
+    preview_claim,
+    seed_workbook_preview,
+    set_import_source,
+    upload_preview,
+    workbook_bytes,
+)
+from netbox_data_import.values import status_map
+from netbox_data_import.views import SyncDeviceFieldView, _validate_model_instance
 
 User = get_user_model()
 
@@ -39,6 +47,26 @@ def _make_superuser(username):
     return User.objects.create_superuser(username, f"{username}@example.invalid", "testpass")
 
 
+def _seed_serial_difference(client, device, source_serial):
+    """Make a preview whose row 2 matches the device by name and shows a serial difference."""
+    profile = _make_profile(f"{device.name}-profile")
+    for column, field in (("Id", "source_id"), ("Name", "device_name"), ("Class", "device_class")):
+        ColumnMapping.objects.create(profile=profile, source_column=column, target_field=field)
+    for column, field in (("Make", "make"), ("Model", "model"), ("Serial", "serial")):
+        ColumnMapping.objects.create(profile=profile, source_column=column, target_field=field)
+    ClassRoleMapping.objects.create(profile=profile, source_class="Server", role_slug=device.role.slug)
+    device_type = device.device_type
+    DeviceTypeMapping.objects.create(
+        profile=profile,
+        source_make=device_type.manufacturer.name,
+        source_model=device_type.model,
+        netbox_manufacturer_slug=device_type.manufacturer.slug,
+        netbox_device_type_slug=device_type.slug,
+    )
+    row = ["SRC-1", device.name, "Server", device_type.manufacturer.name, device_type.model, source_serial]
+    seed_workbook_preview(client, profile, device.site, ["Id", "Name", "Class", "Make", "Model", "Serial"], [row])
+
+
 class ValidateModelInstanceNonDictTest(TestCase):
     """Tests for _validate_model_instance — line 211: non-dict ValidationError."""
 
@@ -51,7 +79,7 @@ class ValidateModelInstanceNonDictTest(TestCase):
     def test_string_validation_error_joined_via_messages(self):
         """DjangoValidationError raised with a plain string uses exc.messages — line 211."""
         instance = self._StringErrorInstance()
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(PreviewCommandRefused) as cm:
             _validate_model_instance(instance, "test_label")
         self.assertIn("plain error message", str(cm.exception))
         self.assertIn("test_label", str(cm.exception))
@@ -148,23 +176,17 @@ class ImportPreviewViewProfileNotFoundTest(TestCase):
 
         self.site = Site.objects.create(name="PrevNF2-Site", slug="prev-nf2-site")
 
-    def test_session_with_nonexistent_profile_id_redirects(self):
-        """profile_id pointing to non-existent profile triggers warning + redirect — lines 713-714."""
-        session = self.client.session
-        session["import_rows"] = [{"_row_number": 1, "source_id": "X", "device_name": "d1"}]
-        session["import_context"] = {
-            "profile_id": 999999,
-            "site_id": self.site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "test.xlsx",
-        }
-        session.save()
-        url = reverse("plugins:netbox_data_import:import_preview")
-        resp = self.client.get(url)
+    def test_a_preview_of_a_deleted_profile_redirects(self):
+        """The preview names a profile that was deleted later: warn and go back to setup."""
+        profile = _make_profile("PrevNF2Profile")
+        seed_workbook_preview(self.client, profile, self.site, ["Id"], [["X"]])
+        profile.delete()
+
+        resp = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
         self.assertEqual(resp.status_code, 302)
-        expected = reverse("plugins:netbox_data_import:import_setup")
-        self.assertEqual(resp["Location"], expected)
+        self.assertEqual(resp["Location"], reverse("plugins:netbox_data_import:import_setup"))
+        self.assertIn("Import profile not found.", [str(m) for m in get_messages(resp.wsgi_request)])
 
 
 class ImportPreviewViewExistingResolutionsTest(TestCase):
@@ -211,10 +233,7 @@ class ImportPreviewViewExistingResolutionsTest(TestCase):
             [["RES2-001", "old-name", "Server", "TestMake", "TestModel"]],
         )
         upload = SimpleUploadedFile("test.xlsx", content)
-        setup = self.client.post(
-            reverse("plugins:netbox_data_import:import_setup"),
-            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-        )
+        setup = upload_preview(self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload})
         self.assertEqual(setup.status_code, 302, setup.content[:300])
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
@@ -337,12 +356,15 @@ class SyncDeviceFieldBareExceptionTest(TestCase):
 
     def test_unexpected_exception_returns_500(self):
         """RuntimeError inside _apply_field returns 500 JSON response — lines 1039-1045."""
-        from netbox_data_import.views import SyncDeviceFieldView
+        _seed_serial_difference(self.client, self.device, "SN-FILE")
+        payload = {**preview_claim(self.client), "row_number": "2", "field": "serial"}
 
         with patch.object(SyncDeviceFieldView, "_apply_field", autospec=True, side_effect=RuntimeError("unexpected")):
-            resp = self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "X"})
+            resp = self.client.post(self.url, payload, HTTP_ACCEPT="application/json")
         self.assertEqual(resp.status_code, 500)
         self.assertIn("internal", resp.json()["error"].lower())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.serial, "")
 
 
 class SyncDeviceFieldRunsInATransactionTest(TransactionTestCase):
@@ -379,7 +401,12 @@ class SyncDeviceFieldRunsInATransactionTest(TransactionTestCase):
         pre_save.connect(record_the_transaction_state, sender=Device)
         self.addCleanup(pre_save.disconnect, record_the_transaction_state, sender=Device)
 
-        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "SN-ATOMIC"})
+        _seed_serial_difference(self.client, self.device, "SN-ATOMIC")
+        response = self.client.post(
+            self.url,
+            {**preview_claim(self.client), "row_number": "2", "field": "serial"},
+            HTTP_ACCEPT="application/json",
+        )
 
         self.assertEqual(response.status_code, 200, response.content[:300])
         self.assertTrue(response.json().get("ok"), response.json())
@@ -405,50 +432,47 @@ class SyncDeviceFieldErrorPathsTest(TestCase):
         self.device = Device.objects.create(name="syncerr2-device", site=site, device_type=dt, role=role)
         self.url = reverse("plugins:netbox_data_import:sync_device_field")
 
+    def _apply(self, field, value):
+        self.device.snapshot()
+        return SyncDeviceFieldView._apply_field(self.device, field, value, status_map(), self.user)
+
     def test_u_position_non_integer_returns_error(self):
-        """u_position='not-a-number' raises ValueError → ok=False — lines 1061-1062."""
-        resp = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_position", "value": "not-a-number"})
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertFalse(data["ok"])
-        self.assertIn("parse", data["error"].lower())
+        """u_position='not-a-number' is refused by the position writer."""
+        with self.assertRaisesMessage(PreviewCommandRefused, "Cannot parse"):
+            self._apply("u_position", "not-a-number")
 
     def test_status_unknown_value_returns_error(self):
-        """Completely unknown status value raises ValueError → ok=False — line 1074."""
-        resp = self.client.post(
-            self.url, {"device_id": self.device.pk, "field": "status", "value": "completely-unknown-xyz"}
-        )
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertFalse(data["ok"])
-        self.assertIn("unknown", data["error"].lower())
+        """A completely unknown status value is refused by the status writer."""
+        with self.assertRaisesMessage(PreviewCommandRefused, "Unknown status value"):
+            self._apply("status", "completely-unknown-xyz")
 
     def test_u_height_not_syncable_returns_error(self):
-        """u_height is not in _ALLOWED_FIELDS → ok=False with explicit error — lines 1025-1026."""
-        resp = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_height", "value": "abc"})
-        self.assertEqual(resp.status_code, 200)
+        """u_height is not in _ALLOWED_FIELDS, so the view refuses it before it reads a claim."""
+        resp = self.client.post(self.url, {"field": "u_height", "row_number": "2"})
+        self.assertEqual(resp.status_code, 400)
         data = resp.json()
         self.assertFalse(data["ok"])
         self.assertIn("not syncable", data["error"].lower())
 
     def test_face_front_sets_face_and_returns_ok(self):
-        """face='front' is valid when device has a rack → ok=True."""
+        """face='front' is valid when device has a rack."""
         from dcim.models import Rack
 
         rack = Rack.objects.create(name="SyncErr2Rack", site=self.device.site, u_height=42)
         self.device.rack = rack
         self.device.save()
-        resp = self.client.post(self.url, {"device_id": self.device.pk, "field": "face", "value": "front"})
-        self.assertEqual(resp.status_code, 200)
-        self.assertTrue(resp.json()["ok"])
+        self._apply("face", "front")
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.face, "front")
 
     def test_face_invalid_value_returns_error(self):
-        """face='sideways' raises ValueError → ok=False — lines 1104-1105."""
-        resp = self.client.post(self.url, {"device_id": self.device.pk, "field": "face", "value": "sideways"})
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertFalse(data["ok"])
-        self.assertIn("face", data["error"].lower())
+        """face='sideways' is refused by the face writer."""
+        from dcim.models import Rack
+
+        self.device.rack = Rack.objects.create(name="SyncErr2Rack", site=self.device.site, u_height=42)
+        self.device.save()
+        with self.assertRaisesMessage(PreviewCommandRefused, "Unknown face value"):
+            self._apply("face", "sideways")
 
 
 class DeviceTypeAnalysisExistsInNetboxTest(TestCase):

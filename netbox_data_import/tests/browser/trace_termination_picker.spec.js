@@ -4,6 +4,7 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { claim, claimForm, claimInputs, script } from "./preview_page.js";
 
 const pickerSource = readFileSync(
   resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_picker.js"),
@@ -12,13 +13,15 @@ const pickerSource = readFileSync(
 
 const fixture = `
   <base href="http://preview.test/">
+  ${claimForm()}
+  ${script("preview_claim.js")}
   <button type="button" data-trace-picker="device:DEV-A|cards:|port:absent|kind:interface|role:termination"
           data-trace-label="DEV-A absent-port">Choose termination</button>
   <div class="modal" id="traceTerminationPicker">
     <form id="traceTerminationForm" method="post"
           action="/plugins/data-import/trace-workspace/resolve-termination/"
           data-candidates-url="/plugins/data-import/trace-workspace/candidates/">
-      <input type="hidden" name="preview_revision" value="rev-1">
+      ${claimInputs()}
       <input type="hidden" name="search" id="traceTerminationOfferedSearch">
       <input type="hidden" name="offset" id="traceTerminationOfferedOffset">
       <input type="hidden" name="field_key" id="traceTerminationKey">
@@ -129,7 +132,7 @@ test("a candidate that shares its id with another model saves its own object typ
   await expect(page.locator("#traceTerminationSubmit")).toBeEnabled();
 });
 
-test("the picker sends the preview revision, which the server checks before it answers", async ({ page }) => {
+test("the picker sends the page claim, which the server checks before it answers", async ({ page }) => {
   let asked = "";
   await page.route("**/trace-workspace/candidates/**", async (route) => {
     asked = route.request().url();
@@ -144,7 +147,8 @@ test("the picker sends the preview revision, which the server checks before it a
   await page.locator("[data-trace-picker]").click();
 
   await expect(page.locator("#traceTerminationCount")).toHaveText("0 of 0 eligible");
-  expect(new URL(asked).searchParams.get("preview_revision")).toBe("rev-1");
+  const query = new URL(asked).searchParams;
+  expect(Object.fromEntries(Object.keys(claim()).map((name) => [name, query.get(name)]))).toEqual(claim());
 });
 
 test("the search that produced the offer travels with the saved decision", async ({ page }) => {

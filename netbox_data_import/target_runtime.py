@@ -12,9 +12,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .plan import PlannedChange, SynchronizationUnit
+from .public_refusal import PublicRefusal
 
 
-class PreconditionFailed(Exception):
+class PreconditionFailed(PublicRefusal):
     """Target state moved between planning and the write, so the change no longer applies."""
 
 

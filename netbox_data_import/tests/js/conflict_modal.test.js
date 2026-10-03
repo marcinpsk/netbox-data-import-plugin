@@ -36,9 +36,9 @@ function render() {
     window.ndiConflictResolutionState.nextToken = 0;
   }
   window.ndiPostPreviewAction = vi.fn(() =>
-    Promise.resolve({ ok: true, preview_state: "recalculation_required", message: "Saved." }),
+    Promise.resolve({ ok: true, preview_state: "replanned", message: "Saved." }),
   );
-  window.ndiMarkPreviewStale = vi.fn();
+  window.ndiReloadPreview = vi.fn();
   document.body.innerHTML = `
     <button id="trigger" data-ndi-modal="#conflictModal" data-object-type="device" data-row-number="4" data-source-id="L1798">2 conflicts</button>
     <button id="other-trigger" data-ndi-modal="#conflictModal" data-object-type="device" data-row-number="5" data-source-id="L1799">1 conflict</button>
@@ -104,35 +104,33 @@ describe("conflict modal", () => {
     expect(document.getElementById("conflictModalBody").textContent).not.toContain("L1798");
   });
 
-  it("saves the value without navigating away from the preview", async () => {
-    buttons()[1].click();
-    await vi.waitFor(() => expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce());
+  it("saves the value through the row-action script and reloads the replanned preview", async () => {
+    const picked = buttons()[1];
+
+    picked.click();
+
+    await vi.waitFor(() => expect(window.ndiReloadPreview).toHaveBeenCalledOnce());
+    expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce();
     expect(submitted).toBe(0);
     expect(document.getElementById("conf_source_column").value).toBe("_merge_device_name");
     expect(JSON.parse(document.getElementById("conf_resolved_fields").value)).toEqual({
       device_name: "L1798",
     });
-    expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce();
+    // The page is leaving, so no choice is offered again.
+    expect(picked.textContent).toBe("Saved");
+    expect(buttons().every((button) => button.disabled)).toBe(true);
   });
 
-  it("keeps a successful save successful when the stale helper is unavailable", async () => {
-    window.ndiMarkPreviewStale = undefined;
+  it("shows a refusal on the chosen value and does not reload", async () => {
+    window.ndiPostPreviewAction.mockRejectedValueOnce(new Error("A newer preview replaced this one."));
     const picked = buttons()[1];
 
     picked.click();
 
-    await vi.waitFor(() => expect(picked.textContent).toBe("Saved"));
-    expect(window.ndiConflictResolutionState.activeToken).toBeNull();
-  });
-
-  it("uses a fallback tooltip when a successful response has no message", async () => {
-    window.ndiPostPreviewAction.mockResolvedValueOnce({ ok: true });
-    const picked = buttons()[1];
-
-    picked.click();
-
-    await vi.waitFor(() => expect(picked.textContent).toBe("Saved"));
-    expect(picked.title).toBe("Resolution saved.");
+    await vi.waitFor(() => expect(picked.textContent).toBe("Use this"));
+    expect(picked.title).toBe("A newer preview replaced this one.");
+    expect(buttons().every((button) => !button.disabled)).toBe(true);
+    expect(window.ndiReloadPreview).not.toHaveBeenCalled();
   });
 
   it("uses a fallback tooltip when a failed response has no message", async () => {
@@ -179,7 +177,7 @@ describe("conflict modal", () => {
     expect(submitted).toBe(0);
   });
 
-  it("does not apply an earlier success to a newly opened conflict", async () => {
+  it("reloads after an earlier success while another conflict is open", async () => {
     let resolveRequest;
     window.ndiPostPreviewAction.mockImplementationOnce(
       () =>
@@ -199,9 +197,10 @@ describe("conflict modal", () => {
     const currentButtons = buttons();
 
     resolveRequest({ message: "Saved." });
-    await vi.waitFor(() => expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(window.ndiReloadPreview).toHaveBeenCalledOnce());
 
-    expect(currentButtons.every((button) => !button.disabled)).toBe(true);
+    // The earlier save already changed the preview, so the open conflict waits for the reload.
+    expect(currentButtons.every((button) => button.disabled)).toBe(true);
     expect(currentButtons.every((button) => button.textContent === "Use this")).toBe(true);
   });
 
@@ -261,23 +260,26 @@ describe("conflict modal", () => {
     expect(reopenedButtons.every((button) => button.disabled)).toBe(true);
 
     resolveRequest({ message: "Saved." });
-    await vi.waitFor(() => expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce());
-    expect(reopenedButtons.every((button) => !button.disabled)).toBe(true);
+    await vi.waitFor(() => expect(window.ndiReloadPreview).toHaveBeenCalledOnce());
+    expect(reopenedButtons.every((button) => button.disabled)).toBe(true);
   });
 
-  it("releases a save after the preview removes its form", () => {
-    let completeRequest;
+  it("releases a failed save after the preview removes its form", () => {
+    let failRequest;
     window.ndiPostPreviewAction.mockReturnValueOnce({
-      then(handler) {
-        completeRequest = handler;
-        return { catch: vi.fn() };
+      then() {
+        return {
+          catch(handler) {
+            failRequest = handler;
+          },
+        };
       },
     });
 
     buttons()[1].click();
     document.getElementById("conflictForm").remove();
 
-    expect(() => completeRequest({ message: "Saved." })).not.toThrow();
+    expect(() => failRequest(new Error("A newer preview replaced this one."))).not.toThrow();
     expect(window.ndiConflictResolutionState.activeToken).toBeNull();
   });
 });
