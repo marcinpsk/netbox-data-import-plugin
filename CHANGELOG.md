@@ -2,6 +2,45 @@
 
 <!-- version list -->
 
+## v2.10.0 (2026-10-03)
+
+### Bug Fixes
+
+- Complete progress pages without execution results
+  ([`579fdc6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/579fdc6fa065951f4f53e08f28105d140db10eb8))
+
+- Preserve preview state and validate storage limits
+  ([`43093aa`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/43093aa2f5170259cd4684ab02baed83d89981bc))
+
+- Protect pending imports during queue publication
+  ([`c77fefa`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c77fefa969df0ba37282a03f854b149c0e746089))
+
+- Report preview replacement only for another job
+  ([`c1597a5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c1597a59203bf66ed40c968fb897b1244ec08e81))
+
+- Retain audit results for failed trace syncs
+  ([`a36cde4`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a36cde434ae939a0a0d2ae9c843d154692d93c96))
+
+- Separate public refusals from exception details
+  ([`becade7`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/becade7ffad38d93918b1a2065febf28eb73b426))
+
+### Features
+
+- Coordinate import previews in the database
+  ([`e96099f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e96099fd87e33d19ce8e46f2e78f7ef6df80b287))
+
+### Testing
+
+- Cover permission refusal privacy
+  ([`ebac1dc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ebac1dcc28aeb4c36347ddd011de6685fbf60c4c))
+
+- Keep preview storage guidance with plugin settings
+  ([`4b240c8`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4b240c888125f0f6eabf0d961abc3a9adbd0cda9))
+
+- Verify public refusal privacy and carrier checks
+  ([`993188d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/993188dd92b98757d3f4ceedd3124f06e3c310dc))
+
+
 ## v2.9.0 (2026-10-03)
 
 ### Bug Fixes
