@@ -5709,9 +5709,7 @@ class SyncRackAndPlacementTests(TestCase):
         self.assertFalse(self.device_no_loc.face)
 
     def test_lookup_rack_device_with_no_site(self):
-        """_lookup_rack_for_device returns an error when device has no site."""
-        from django.test import RequestFactory
-
+        """Rack lookup needs a site and uses the actor to find a visible Rack."""
         from netbox_data_import.views import _lookup_rack_for_device
 
         class _Stub:
@@ -5720,11 +5718,12 @@ class SyncRackAndPlacementTests(TestCase):
             site = None
             location = None
 
-        request = RequestFactory().post("/")
-        request.user = self.user
-        rack, err = _lookup_rack_for_device(request, _Stub(), "R1")
+        rack, err = _lookup_rack_for_device(self.user, _Stub(), "R1")
         self.assertIsNone(rack)
         self.assertIn("no site", err.lower())
+        rack, err = _lookup_rack_for_device(self.user, self.device_no_loc, "R1")
+        self.assertEqual(rack, self.rack_no_loc)
+        self.assertIsNone(err)
 
     def test_placement_bad_u_position(self):
         """Non-integer u_position is not offered, so the sync writes only the previewed rack."""
