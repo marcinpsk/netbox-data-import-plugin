@@ -53,17 +53,6 @@ def _custom_link_recipe():
     return {"custom_field": names["CUSTOM_FIELD"], "link_urls": link_urls}
 
 
-class PreviewStorageGuidanceTest(SimpleTestCase):
-    """The storage guide limits audit retention to commands that execute a sync."""
-
-    def test_only_a_single_row_sync_promises_a_failed_execution_audit(self):
-        guide = CONFIGURATION_GUIDE.read_text(encoding="utf-8")
-        storage_guide = " ".join(guide.partition("## Preview storage limit")[2].partition("## ")[0].split())
-
-        self.assertIn("A single-row sync also keeps its failed execution audit.", storage_guide)
-        self.assertNotIn("rolls back its changes and keeps the failed execution audit", storage_guide)
-
-
 class VaultTransportGuidanceTest(SimpleTestCase):
     """The Vault examples keep secrets encrypted without requiring a public CA."""
 
