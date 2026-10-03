@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import connection
+from django.db import connection, transaction
 from django.test import Client, TransactionTestCase, override_settings
 from django.urls import reverse
 
@@ -118,6 +118,21 @@ class _PausedRequest:
         if self.errors:
             raise self.errors[0]
         return self.responses[0]
+
+
+class _UnpublishedQueueRequest(_PausedRequest):
+    """Hold the committed Job before NetBox's next on-commit callback publishes its RQ task."""
+
+    def _hold(self, execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if sql.lstrip().startswith("INSERT") and self.table in sql:
+            transaction.on_commit(self._pause_before_push)
+        return result
+
+    def _pause_before_push(self):
+        self.paused.set()
+        if not self.release.wait(timeout=20):
+            raise AssertionError("the queue push was never released")
 
 
 class _Concurrent:
@@ -996,6 +1011,167 @@ class CommandOrderingTest(IsolatedRQQueueTestMixin, _FlatPreviewMixin, Transacti
 
         self.assertEqual(response.status_code, 409)
         self.assertFalse(IgnoredDevice.objects.exists())
+
+    def test_restore_does_not_fail_a_final_job_before_its_queue_push(self):
+        from core.choices import JobStatusChoices
+        from core.models import Job
+        from dcim.models import Device
+        from django_rq import get_queue
+        from netbox_data_import.models import PreviewState
+        from netbox_data_import.tests.helpers import preview_claim
+
+        queued = _UnpublishedQueueRequest(
+            self,
+            self.client,
+            Job._meta.db_table,
+            reverse("plugins:netbox_data_import:import_run"),
+            preview_claim(self.client),
+        )
+        queued.start()
+        try:
+            job = Job.objects.get(data__job_type="netbox_data_import.import")
+            self.assertIsNone(get_queue(job.queue_name).fetch_job(str(job.job_id)))
+            before = _coordinator(self.client)
+            refused = self.second_tab().post(
+                reverse("plugins:netbox_data_import:import_restore", kwargs={"pk": job.pk}),
+                preview_claim(self.client),
+            )
+            self.assertEqual(refused.status_code, 409)
+            job.refresh_from_db()
+            self.assertEqual(job.status, JobStatusChoices.STATUS_PENDING)
+            self.assertEqual(_coordinator(self.client).revision, before.revision)
+            self.assertEqual(_coordinator(self.client).state, PreviewState.SUBMITTED)
+        finally:
+            response = queued.finish()
+        self.assertEqual(response.status_code, 302)
+        self.run_rq_jobs()
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_COMPLETED, job.error)
+        self.assertEqual(set(Device.objects.values_list("name", flat=True)), {"server-a", "server-b"})
+        self.assertEqual(ImportExecution.objects.get(job=job).outcome, ExecutionOutcome.SUCCEEDED)
+
+
+class TraceQueueOrderingTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TransactionTestCase):
+    """Queue publication and Device resolution preserve one ordered preview."""
+
+    def setUp(self):
+        super().setUp()
+        self.build_topology()
+        self.client.force_login(self.actor)
+        from netbox_data_import.tests.helpers import upload_preview
+
+        upload = SimpleUploadedFile(
+            "direct.xlsx", trace_workbook_bytes(path_blocks=(direct_path(),)), content_type=XLSX
+        )
+        upload_preview(self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload})
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        self.identity = workspace.context["selected_trace"].identity
+
+    def second_tab(self):
+        tab = Client()
+        tab.cookies = self.client.cookies.copy()
+        return tab
+
+    def test_missing_task_recovery_distinguishes_job_age_and_status(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        from core.choices import JobStatusChoices
+        from core.models import Job
+        from django.utils import timezone
+        from netbox_data_import.jobs import ImportJobRunner, import_job_abandoned
+
+        now = timezone.now()
+        job = Job.objects.create(name=ImportJobRunner.name, user=self.actor, job_id=uuid4(), queue_name="default")
+        cases = (
+            (JobStatusChoices.STATUS_PENDING, 0, False),
+            (JobStatusChoices.STATUS_PENDING, 59, False),
+            (JobStatusChoices.STATUS_PENDING, 60, True),
+            (JobStatusChoices.STATUS_PENDING, 61, True),
+            (JobStatusChoices.STATUS_RUNNING, 0, True),
+            (JobStatusChoices.STATUS_COMPLETED, 61, False),
+        )
+        for status, seconds, abandoned in cases:
+            with self.subTest(status=status, seconds=seconds):
+                Job.objects.filter(pk=job.pk).update(status=status, created=now - timedelta(seconds=seconds))
+                job.refresh_from_db()
+                with patch("netbox_data_import.jobs.timezone.now", autospec=True, return_value=now):
+                    self.assertEqual(import_job_abandoned(job), abandoned)
+
+    def test_reread_does_not_fail_a_retained_sync_before_its_queue_push(self):
+        from core.choices import JobStatusChoices
+        from core.models import Job
+        from dcim.models import Cable
+        from django_rq import get_queue
+        from netbox_data_import.models import PreviewState
+        from netbox_data_import.preview_coordinator import RETAINED_SYNC_BLOCK_REASON
+        from netbox_data_import.tests.helpers import preview_claim
+
+        queued = _UnpublishedQueueRequest(
+            self,
+            self.client,
+            Job._meta.db_table,
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {**preview_claim(self.client), "identity": self.identity},
+        )
+        queued.start()
+        try:
+            job = Job.objects.get(data__job_type="netbox_data_import.import")
+            self.assertIsNone(get_queue(job.queue_name).fetch_job(str(job.job_id)))
+            before = _coordinator(self.client)
+            refused = self.second_tab().post(
+                reverse("plugins:netbox_data_import:preview_reread"),
+                preview_claim(self.client),
+            )
+            self.assertContains(refused, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+            job.refresh_from_db()
+            self.assertEqual(job.status, JobStatusChoices.STATUS_PENDING)
+            self.assertEqual(_coordinator(self.client).revision, before.revision)
+            self.assertEqual(_coordinator(self.client).state, PreviewState.SYNC_PENDING)
+        finally:
+            response = queued.finish()
+        self.assertEqual(response.status_code, 302)
+        self.run_rq_jobs()
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_COMPLETED, job.error)
+        self.assertEqual(Cable.objects.count(), 1)
+        self.assertEqual(ImportExecution.objects.get(job=job).outcome, ExecutionOutcome.SUCCEEDED)
+
+    def _race_resolution_and_sync(self, *, queue_first):
+        from core.models import Job
+        from netbox_data_import.models import TraceDeviceResolution
+        from netbox_data_import.tests.helpers import preview_claim
+
+        claim = preview_claim(self.client)
+        resolution = (
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {**claim, "device_key": "DEV-A", "device_id": self.device_a.pk, "search": "DEV-A"},
+            TraceDeviceResolution._meta.db_table,
+        )
+        sync = (
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {**claim, "identity": self.identity},
+            Job._meta.db_table,
+        )
+        first_args, rival_args = (sync, resolution) if queue_first else (resolution, sync)
+        first = _PausedRequest(self, self.client, first_args[2], first_args[0], first_args[1])
+        first.start()
+        try:
+            rival = _Concurrent(self.second_tab(), rival_args[0], rival_args[1])
+            rival.wait_until_done_or_blocked_by(first.pid)
+            self.assertFalse(rival.done.is_set(), "the rival finished before the first command committed")
+        finally:
+            winner = first.finish()
+        loser = rival.result()
+        self.assertLess(winner.status_code, 400, winner.content)
+        self.assertEqual(loser.status_code, 409, loser.content)
+        self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), int(queue_first))
+        self.assertEqual(TraceDeviceResolution.objects.filter(profile=self.profile).count(), int(not queue_first))
+
+    def test_device_resolution_waits_for_sync_queueing_and_is_refused(self):
+        self._race_resolution_and_sync(queue_first=True)
+
+    def test_sync_queueing_waits_for_device_resolution_and_is_refused(self):
+        self._race_resolution_and_sync(queue_first=False)
 
 
 class OldJobCompletionTest(IsolatedRQQueueTestMixin, _FlatPreviewMixin, TransactionTestCase):

@@ -4,6 +4,7 @@
 
 import copy
 import re
+from datetime import timedelta
 from io import BytesIO
 
 from dcim.models import Cable, Device, FrontPort, Interface, PortMapping, PowerOutlet, PowerPort, RearPort, Site
@@ -11,6 +12,7 @@ from django.db import connection
 from django.test import Client, TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.html import escape
 from extras.models import Tag
 
@@ -1103,6 +1105,7 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             Job.objects.filter(pk=job.pk).update(status=status)
             if status == JobStatusChoices.STATUS_PENDING:
                 queue.connection.delete(rq_job.key)
+                Job.objects.filter(pk=job.pk).update(created=timezone.now() - timedelta(minutes=2))
             for route in ("import_progress", "import_progress_status"):
                 with self.subTest(status=status, route=route):
                     progress = self.client.get(reverse(f"plugins:netbox_data_import:{route}", kwargs={"pk": job.pk}))
@@ -1476,6 +1479,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         job = Job.objects.get(data__job_type="netbox_data_import.import")
         rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
         rq_job.delete()
+        Job.objects.filter(pk=job.pk).update(created=timezone.now() - timedelta(minutes=2))
         before = preview_coordinator(self.client)
         self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         job.refresh_from_db()
@@ -1536,6 +1540,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
         arguments = rq_job.kwargs
         rq_job.delete()
+        Job.objects.filter(pk=job.pk).update(created=timezone.now() - timedelta(minutes=2))
         before = preview_coordinator(self.client)
 
         with override_plugins_config(netbox_data_import={"preview_max_plan_bytes": 16}):
@@ -1584,6 +1589,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
         arguments = rq_job.kwargs
         rq_job.delete()
+        Job.objects.filter(pk=job.pk).update(created=timezone.now() - timedelta(minutes=2))
         errors = []
 
         def deliver():
@@ -1664,6 +1670,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
         arguments = rq_job.kwargs
         rq_job.delete()
+        Job.objects.filter(pk=job.pk).update(created=timezone.now() - timedelta(minutes=2))
         errors = []
 
         def deliver():

@@ -3,6 +3,7 @@
 """Native NetBox background jobs for data imports."""
 
 import logging
+from datetime import timedelta
 
 from typing import NoReturn
 
@@ -47,6 +48,7 @@ _PROGRESS_REPORT_INTERVAL = 25
 logger = logging.getLogger(__name__)
 
 IMPORT_TASK_LOST = "The import task is no longer queued or running. Re-read its preview to recover."
+QUEUE_PUSH_GRACE = timedelta(minutes=1)
 
 
 def _import_job_lock(job):
@@ -78,7 +80,8 @@ def import_job_abandoned(job) -> bool:
         return False
     rq_job = import_queue_task(job)
     if rq_job is None:
-        return True
+        # The Job commits before its queue push, so a young pending Job may have no task yet.
+        return not (job.status == JobStatusChoices.STATUS_PENDING and job.created > timezone.now() - QUEUE_PUSH_GRACE)
     try:
         status = rq_job.get_status(refresh=True)
     except InvalidJobOperation:

@@ -489,7 +489,9 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertContains(progress, "Completed 3 of 8 plan steps")
 
     def test_a_missing_task_offers_explicit_restore_without_get_mutations(self):
+        from datetime import timedelta
         from core.choices import JobStatusChoices
+        from django.utils import timezone
         from django_rq import get_queue
 
         self._upload()
@@ -499,6 +501,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         rq_job = queue.fetch_job(str(job.job_id))
         # Remove only the task hash. A mutating queue fetch would also remove its queue ID.
         queue.connection.delete(rq_job.key)
+        Job.objects.filter(pk=job.pk).update(created=timezone.now() - timedelta(minutes=2))
         queue_before = {key: queue.connection.dump(key) for key in queue.connection.scan_iter()}
         before = preview_coordinator(self.client)
 
