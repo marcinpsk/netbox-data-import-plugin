@@ -1272,7 +1272,8 @@ of scope: with a warning, a converter needs no representation to be importable.<
 <li>Plan schema bump. The trace workspace must be able to recover its own stale cached plan. Re-read
    currently needs a successful deserialization first (<code>views.py:3895</code>), so a bumped schema sends
    the operator to setup. r2 routes a schema rejection to a rebuild from the stored Source Document,
-   the route the preview already uses (<code>views.py:1212</code>). No compatibility reader.</li>
+   the route the preview already uses (<code>views.py:1212</code>). No compatibility reader. Since ADR 0004 the
+   page load only reports the rejection, and the coordinated re-read command performs the rebuild.</li>
 <li>Override loss covers every resolved-pair change, not only an operator re-pick: a PortMapping edit
    that changes the unique mapped peer does it too (<code>cable_target.py:771</code>, <code>:802</code>). The workspace
    notice and the regression tests cover all of them.</li>

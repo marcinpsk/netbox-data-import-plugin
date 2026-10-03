@@ -1848,13 +1848,13 @@ command never edits an Import Plan.</p>
 <tbody>
 <tr>
 <td>Views</td>
-<td><code>ImportEngine.plan</code>, <code>ImportEngine.execute</code>, Review Workspace commands, domain model reads</td>
-<td>Target Modules, Source Adapters, private engine helpers, safety-intent calculation</td>
+<td><code>ImportEngine.plan</code>, the Preview Coordinator (<code>setup_claim</code>, <code>read_preview</code>, <code>apply_preview_command</code>), Review Workspace commands under the coordinator, domain model reads</td>
+<td>Target Modules, Source Adapters, private engine helpers, safety-intent calculation, preview state in the session</td>
 </tr>
 <tr>
 <td>Jobs</td>
 <td><code>ImportEngine.execute</code>, the inference proposal service</td>
-<td>Target Modules, plan mutation, safety recalculation</td>
+<td>Target Modules, plan mutation, safety recalculation, the Preview Coordinator</td>
 </tr>
 <tr>
 <td>Templates</td>
@@ -2120,7 +2120,9 @@ operator confirmation.</p>
 and configuration before it writes. Selective execution compares the accepted unit and its explicit
 dependency closure with the equivalent current units. A change in an unrelated unit does not block a
 safe selection. A change of source, Import Profile, actor, or planning context invalidates every
-selection. The complete preview regenerates after each selective execution.</p>
+selection. The complete preview regenerates after each selective execution. A selective execution
+started from the preview regenerates it inside the execution savepoint: a failed write or a failed
+replan rolls back both, the failed audit row stays, and the preview keeps its revision (ADR 0004).</p>
 <h3 id="46-transactions">4.6 Transactions</h3>
 <p>One outer database transaction covers one complete execution request. Final execution applies all
 currently actionable remaining units in that one transaction. Each selective execution also uses one
@@ -2132,8 +2134,9 @@ error, or database error rolls back the complete selected transaction.</p>
 <h3 id="47-ownership-idempotency-and-audit">4.7 Ownership, idempotency, and audit</h3>
 <p>An accepted plan belongs to the operator who generated it. A background job executes as that operator
 and rechecks current permissions. Another operator must generate and accept a new plan.</p>
-<p>Every execution request carries an idempotency key. The Review Workspace generates one key per submit
-action (spec default: a UUID minted when the workspace renders the submit control). The request first
+<p>Every execution request carries an idempotency key. The command that queues or runs an execution
+mints one key per accepted submission (spec default: a UUID). The Preview Coordinator refuses a
+second submission of the same Preview Claim with 409 before it reaches the engine (ADR 0004). The request first
 inserts an <code>ImportExecution</code> row with outcome <code>pending</code> and commits that insert, which reserves the
 unique (Import Profile, idempotency key). A duplicate HTTP submission or duplicate job delivery
 therefore returns the existing row in any outcome, including while the first attempt is still running.
@@ -2158,10 +2161,10 @@ diagnostic display holds a field its namespace's registered display vocabulary d
 incompatible too, because that field can hold a value no render rechecks. A namespace with no
 registered vocabulary is not checked. Historical Import Executions remain audit records. The runtime
 never migrates an old executable plan and never keeps a compatibility executor.</p>
-<p>The Import Plan contract is storage-neutral. This delivery stores the active preview plan in the
-session and passes the accepted serialized plan to the background job (spec default, permitted by ADR
-0001). No durable review-session model is added, because the review-workspace prototype (#83) did not
-prove that resumable plans require one.</p>
+<p>The Import Plan contract is storage-neutral. A background job receives the accepted serialized plan.
+The active preview plan lives in one database Preview Coordinator per browser session (section 10.2,
+ADR 0004), which replaces the session storage ADR 0001 allowed. The reason is concurrent correctness:
+a session value cannot order two tabs or a late session save against a newer preview.</p>
 <h2 id="5-canonical-source-trace-and-provenance-model">5. Canonical Source Trace and provenance model</h2>
 <h3 id="51-evidence-structure">5.1 Evidence structure</h3>
 <p>A Source Trace is input evidence for one end-to-end path. It is not a NetBox object, and it does not
@@ -2960,8 +2963,9 @@ results appear in the next preview. After a failure, the operator re-requests ma
 </tr>
 </tbody>
 </table>
-<p>Plan ownership under ADR 0001 is untouched. Acceptance only writes the decision. The operator still
-replans their own preview.</p>
+<p>Plan ownership under ADR 0001 is untouched. Acceptance writes the decision and replans the accepting
+operator's own preview in one coordinated transaction (section 10.2). Another operator's preview
+sees the decision through the profile fingerprint comparison.</p>
 <h3 id="77-acceptance">7.7 Acceptance</h3>
 <p>Acceptance is an explicit operator action. It is valid only on a proposal whose status is <code>completed</code>,
 whose outcome is <code>candidate</code>, whose <code>decision</code> is still null, and that passes freshness revalidation
@@ -2971,8 +2975,8 @@ exists.</p>
 <p>Acceptance upserts the <code>TerminationResolution</code> row for the bound key and links it from the proposal.
 The last explicit operator action wins across proposals for that key. Acceptance is a workspace
 command that writes profile policy, so it also compares the reviewed plan's profile fingerprint under
-the profile lock (section 10.2). After one acceptance the operator re-reads before the next policy
-decision, because acceptance does not replan the preview. A <code>no_match</code> outcome is
+the profile lock (section 10.2). Acceptance writes the resolution and replans the preview in the same
+coordinated transaction, so the next decision needs no re-read. A <code>no_match</code> outcome is
 informational and cannot be accepted. A proposal never changes NetBox and never applies itself.</p>
 <p>Rejection sets the same one-shot decision fields, records the operator and time, and does not block
 re-requesting a fresh proposal for the same key. It writes no Row Resolution, so it takes the preview
@@ -3331,6 +3335,12 @@ index, and projection column.</p>
 <td>(Import Profile, task type, field key) with at most one active row</td>
 <td>T8</td>
 </tr>
+<tr>
+<td><code>PreviewCoordinator</code></td>
+<td>The active preview of one browser session: generation, revision, state, plan, Job</td>
+<td>Session binding digest unique</td>
+<td>ADR 0004</td>
+</tr>
 </tbody>
 </table>
 <p><code>SourceDocument</code> stores the Import Profile, the uploaded workbook bytes, the content fingerprint, the
@@ -3342,7 +3352,8 @@ default). A newer upload never deletes an older one, so two operators previewing
 the same time cannot delete each other's input.</p>
 <p>An execution or a replan that references a deleted <code>SourceDocument</code> fails with the typed
 stale-document error (section 2.1) and requires a fresh upload. That error is the complete recovery
-contract; the runtime adds no other concurrent-preview machinery.</p>
+contract for a missing source. Concurrent previews are ordered by the Preview Coordinator
+(section 10.2), which references the document by id and never keeps it alive.</p>
 <p><code>TerminationResolution</code> is a Row Resolution in glossary terms. It stores the Import Profile, the task
 type, the canonical JSON field key (which carries the role marker, section 7.1), the device, cards, and
 port spelling the decision was made for, the selected object type, the selected object id, and the
@@ -3575,6 +3586,18 @@ metadata (section 9.1), and the REST representation still carries it.</p>
 reviewed plan's profile fingerprint under it. A preview revision is per session, so it cannot see
 another operator's policy edit; the comparison refuses a decision made against a policy that has
 already moved, and names the re-read.</p>
+<p>One Preview Coordinator row per browser session owns the active preview (ADR 0004). Every page
+renders one Preview Claim: the preview token, the revision, the Source Document, and the profile.
+Every form, picker, row modal, and proposal card posts it, and every read that answers a displayed
+question sends it. A command locks the coordinator, then the profile, then any proposal or target
+row; it validates the claim, writes, replans, and advances the revision in one transaction. An
+ordinary command needs the exact claim. A new setup may replace any revision of the same preview
+generation, never a newer generation. A stale command receives HTTP 409 as JSON, as a page, or as
+an HTMX redirect, and writes nothing. A page load is read-only. Re-read, discard, schema recovery,
+and the return to a preview after a failed import are POST commands. After each successful command
+the page loads again, so the displayed plan and the claim always belong together. While a per-trace
+sync Job runs, the preview refuses decisions, re-reads, and syncs; after the Job ends, the operator
+re-reads before the next decision.</p>
 <p>A drift warning strip appears when live NetBox differs from the reviewed snapshot, with a re-read
 action. The workspace compares the reviewed plan fingerprint with a freshly computed plan fingerprint
 on each full workspace load and on the explicit re-read action. It does not poll for drift
@@ -3634,7 +3657,17 @@ Inference Backend is never part of profile YAML.</p>
 <p>No job receives a secret value or a database id for an Inference Backend. A proposal carries no backend
 identifier because a scoped operator starts it from an editable field (section 7.5). The foreground
 connection test reports against the named row without creating a Job. Import execution progress counts
-Synchronization Units and Planned Changes.</p>
+Synchronization Units and Planned Changes. No job reads or writes the Preview Coordinator: the command
+that queues a Job records it there, and a queue push that fails after commit is compensated.</p>
+<p>A missing or terminal queue task cannot hold a preview forever. Page loads show the recovery action
+without changing the Job, the queue, or the coordinator. An explicit re-read or restore command
+marks an abandoned Job errored and replans the preview. If a submitted Job row was deleted, the
+preview offers a coordinated re-read from its stored source.</p>
+<p>Worker delivery and recovery share a Job advisory lock. A worker keeps a session lock through native
+Job handling and skips a deleted or terminal Job. Recovery takes a transaction lock without waiting
+while it holds the profile lock. PostgreSQL keeps that lock until commit or rollback. A late delivery
+therefore cannot execute a recovered Job, and recovery cannot interrupt a worker that can still
+write. The worker lock adds no transaction around the independently committed execution audit.</p>
 <h3 id="107-audit">10.7 Audit</h3>
 <table>
 <thead>
@@ -4428,7 +4461,6 @@ Confirm that no dual code path, commented-out code, or untracked "remove later" 
 <li>Creating a NetBox Cable Profile at run time.</li>
 <li>Updating attribute drift on a reused Cable.</li>
 <li>A trace-level database record.</li>
-<li>A durable review-session model.</li>
 <li>Migrating an old executable Import Plan or keeping a compatibility executor.</li>
 </ul>
 <p>Deferred and recorded as future fog:</p>

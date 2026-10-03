@@ -33,6 +33,10 @@
          <lastmod>2026-10-03</lastmod>
     </url>
     <url>
+         <loc>https://marcinpsk.github.io/netbox-data-import-plugin/adr/0004-database-preview-coordinator/</loc>
+         <lastmod>2026-10-03</lastmod>
+    </url>
+    <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/agents/domain/</loc>
          <lastmod>2026-10-03</lastmod>
     </url>
@@ -62,6 +66,10 @@
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/design/prospective-related-object-permissions/</loc>
+         <lastmod>2026-10-03</lastmod>
+    </url>
+    <url>
+         <loc>https://marcinpsk.github.io/netbox-data-import-plugin/design/public-refusal-messages/</loc>
          <lastmod>2026-10-03</lastmod>
     </url>
     <url>

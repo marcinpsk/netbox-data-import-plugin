@@ -372,6 +372,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#preview-storage-limit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Preview storage limit
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#inference-backend-credentials" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -576,6 +587,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#preview-storage-limit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Preview storage limit
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#inference-backend-credentials" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -712,6 +734,12 @@
 
 
 <h1 id="configuration">Configuration</h1>
+<h2 id="preview-storage-limit">Preview storage limit</h2>
+<p><code>preview_max_plan_bytes</code> sets the maximum UTF-8 JSON size of an active Import Plan. Set it in the
+plugin's <code>PLUGINS_CONFIG</code> entry. It defaults to 67,108,864 bytes (64 MiB). Use an integer from 1
+through 67,108,864 to apply a lower storage limit. Invalid values stop startup. A command whose
+replan exceeds the limit rolls back its changes. A single-row sync also keeps its failed execution
+audit.</p>
 <h2 id="inference-backend-credentials">Inference backend credentials</h2>
 <p>Configure the Vault connection before you add an Inference Backend. The recommended setup uses a
 Vault Proxy. The Proxy authenticates to Vault and renews its token. The NetBox web and worker
