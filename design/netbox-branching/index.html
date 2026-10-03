@@ -1132,6 +1132,11 @@ dry run rolls back and is not refused.</p>
 <p><code>fake_on_branch = True</code> on 0015, 0020, 0022, 0030, 0035, 0038 and 0039. The new tags migration
 also gets <code>fake_on_branch = True</code>: it moves rows between main-only tables and <code>extras_taggeditem</code>.
 It runs before netbox-branching can be installed alongside the plugin, so no branch misses it.</p>
+<p><code>0045_rekey_name_identities</code> also sets <code>fake_on_branch = True</code>. It rekeys the main-only decision and
+proposal rows, and also <code>CableImportSource</code>, which is branchable. A branch migrate fakes it, so a
+branch keeps its provenance copies under the casefold trace keys, and a later merge would bring those
+keys back to main beside the new ones. The upgrade note therefore requires every open branch to be
+merged or discarded before the upgrade. A branch provisioned after it copies the rekeyed rows.</p>
 <h3 id="mechanical-guards">Mechanical guards</h3>
 <ol>
 <li>A test walks the complete URL tree. For every callback whose module is inside

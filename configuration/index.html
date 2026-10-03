@@ -988,9 +988,12 @@ Target Module that consumes its output ships, so the plugin never offers a sourc
 import.</p>
 <p>A trace import opens the <strong>Trace Review Workspace</strong> directly. If a source Device label does not
 match exactly one visible NetBox Device in the selected Site, select <strong>Choose Device</strong>. The Import
-Profile stores that choice. A later trace file reuses it when the source Device label has the same
-letters after case and whitespace normalization. The choice applies to all ports on that source
-Device.</p>
+Profile stores that choice, with the label you chose it for. A later trace file reuses it when the
+source Device label has the same name identity. The plugin compares every name the same way: it reads
+each whitespace character as a space, collapses each run of spaces to one, trims the ends, and
+compares the uppercase form. So <code>core-sw  1</code>, <code>CORE-SW 1</code> and <code>Core-Sw 1</code> are one label, and
+<code>Straße</code> is the same label as <code>STRASSE</code> but not as <code>STRAẞE</code>, whose capital sharp s has no other
+uppercase. The choice applies to all ports on that source Device.</p>
 <p>Rack, Location, and U position are search hints. They can change the candidate order, but they never
 select a Device. A Rack or Location hint is used only when you can view that NetBox object. Each
 candidate names every hint it matches or contradicts, with the source value and the NetBox value.</p>
@@ -999,10 +1002,9 @@ The plugin does not split the path and does not compare it with a NetBox Locatio
 as a hint, map it to a NetBox Location of the Site under <strong>Source Locations</strong> in the workspace. A
 Device in the mapped Location, or in a Location below it, then matches the path. A Device in another
 Location of the Site conflicts with it. An unmapped path is not a hint. The Import Profile stores the
-mapping, and a later trace file reuses it after case and whitespace normalization. Matching ignores
-case, trims whitespace at both ends, and collapses each run of internal whitespace to one space. The
-separator spelling is part of the path, so <code>A&gt;&gt;B</code> and <code>A &gt;&gt; B</code> are two paths. Profile YAML does not
-include these mappings.</p>
+mapping, and a later trace file reuses it when the source Location path has the same name identity,
+as defined above. The separator spelling is part of the path, so <code>A&gt;&gt;B</code> and <code>A &gt;&gt; B</code> are two paths.
+Profile YAML does not include these mappings.</p>
 <p>A Device's Location is its own Location. Only a Device with no Location of its own uses its Rack's
 Location.</p>
 <p>The Location you select on the import page also ranks candidates, after the source hints, and never

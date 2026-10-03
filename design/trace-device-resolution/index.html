@@ -737,8 +737,9 @@ interface must remain usable by another Source Adapter that emits the same <code
 <li>Candidate reads remain inside the actor's object permissions and the selected import target.</li>
 <li>Rack, U position, and Location can rank or explain candidates. They never make the final selection.</li>
 <li>Saving a Device selection replans the current preview and stores one profile-owned decision.</li>
-<li>A later workbook under the same profile reuses the decision for the same normalized source device
-   label, including when it names a different port.</li>
+<li>A later workbook under the same profile reuses the decision for every source device label with
+   the same name identity (spec section 5.9), including when it names a different port. The decision
+   keeps the label it was made for, so a later identity change can rekey it from that text.</li>
 <li>A deleted, hidden, moved outside the selected Site, or otherwise ineligible selected Device is
    not used silently. A move within the Site does not break an explicit mapping. Rack and U position
    are evidence, not identity.</li>
@@ -764,7 +765,8 @@ interface must remain usable by another Source Adapter that emits the same <code
 <h3 id="a-helper-profile">A. Helper profile</h3>
 <p>A trace profile refers to a flat-workbook profile and borrows its Device matches.</p>
 <h3 id="b-trace-owned-device-resolution">B. Trace-owned Device resolution</h3>
-<p>A new profile-owned decision maps a normalized source device label to one NetBox Device.</p>
+<p>A new profile-owned decision maps the name identity of a source device label (spec section 5.9) to
+one NetBox Device.</p>
 <h3 id="c-adapter-neutral-device-binding">C. Adapter-neutral Device binding</h3>
 <p>The existing persistent Device-match concept becomes an output-kind-neutral binding used by both
 flat Device rows and Source Traces through one shared interface.</p>
