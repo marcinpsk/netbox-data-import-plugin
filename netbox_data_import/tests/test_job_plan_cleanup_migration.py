@@ -8,7 +8,7 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
-from netbox_data_import.tests.helpers import migrate_plugin_to_leaf
+from netbox_data_import.tests.helpers import migrate_plugin_to_leaf, unapply_plugin_migrations_to
 
 
 APP = "netbox_data_import"
@@ -21,11 +21,9 @@ class JobPlanCleanupMigrationTest(TransactionTestCase):
 
     def test_upgrade_removes_only_import_job_plan_copies(self):
         self.addCleanup(migrate_plugin_to_leaf)
-        self.addCleanup(lambda: MigrationExecutor(connection).migrate([AFTER], fake=True))
-        # Reverse the later schema migrations for real, so the fake below skips only this data step.
-        MigrationExecutor(connection).migrate([AFTER])
+        # The walk reverses the later schema migrations for real and fakes only the data steps, this one too.
+        unapply_plugin_migrations_to(BEFORE[1])
         executor = MigrationExecutor(connection)
-        executor.migrate([BEFORE], fake=True)
         Job = executor.loader.project_state([BEFORE]).apps.get_model("core", "Job")
 
         exposed = Job.objects.create(

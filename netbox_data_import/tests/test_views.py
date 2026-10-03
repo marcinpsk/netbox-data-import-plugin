@@ -2094,6 +2094,23 @@ class CheckDeviceNameViewTest(BaseViewTestCase):
         data = json.loads(resp.content)
         self.assertTrue(data.get("exists"))
 
+    def test_a_device_is_found_by_its_name_identity(self):
+        """`strA\u1e9ee  sw` names the Device `STRA\u1e9eE<NBSP>SW`; `Stra\u00dfe SW` is `STRASSE SW`, another name."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        site = Site.objects.create(name="IdentitySite", slug="identity-site")
+        mfg = Manufacturer.objects.create(name="IdentityMfg", slug="identity-mfg")
+        device_type = DeviceType.objects.create(manufacturer=mfg, model="IdentityModel", slug="identity-model")
+        role = DeviceRole.objects.create(name="IdentityRole", slug="identity-role")
+        device = Device.objects.create(name="STRA\u1e9eE\u00a0SW", device_type=device_type, role=role, site=site)
+        url = reverse("plugins:netbox_data_import:check_device")
+
+        found = self.client.get(url, {"name": "  strA\u1e9ee  sw "}).json()
+        other = self.client.get(url, {"name": "Stra\u00dfe SW"}).json()
+
+        self.assertEqual((found["exists"], found["id"]), (True, device.pk))
+        self.assertFalse(other["exists"])
+
     def test_check_nonexistent_device(self):
         """Returns exists=False for an unknown device name."""
         url = reverse("plugins:netbox_data_import:check_device")
@@ -2103,6 +2120,62 @@ class CheckDeviceNameViewTest(BaseViewTestCase):
 
         data = json.loads(resp.content)
         self.assertFalse(data.get("exists"))
+
+
+class CheckDeviceNameViewObjectPermissionTest(TestCase):
+    """`dcim.view_device` can be granted for some sites only, so the check reports only the Devices it covers."""
+
+    def setUp(self):
+        """Give one user Device view access to two of three sites."""
+        from django.contrib.contenttypes.models import ContentType
+
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+        from users.models import ObjectPermission
+
+        self.sites = {
+            slug: Site.objects.create(name=slug, slug=slug) for slug in ("hidden-site", "seen-site-1", "seen-site-2")
+        }
+        manufacturer = Manufacturer.objects.create(name="Seen Mfg", slug="seen-mfg")
+        self.device_type = DeviceType.objects.create(manufacturer=manufacturer, model="Seen Model", slug="seen-model")
+        self.role = DeviceRole.objects.create(name="Seen Role", slug="seen-role")
+        self.user = User.objects.create_user("seen_device_user", "seen@example.com", "testpass")
+        profile_view = ObjectPermission.objects.create(name="View profiles", actions=["view"])
+        profile_view.object_types.add(ContentType.objects.get_for_model(ImportProfile))
+        device_view = ObjectPermission.objects.create(
+            name="View seen sites", actions=["view"], constraints={"site__slug__in": ["seen-site-1", "seen-site-2"]}
+        )
+        device_view.object_types.add(ContentType.objects.get_for_model(Device))
+        for permission in (profile_view, device_view):
+            permission.users.add(self.user)
+        clear_user_permission_caches(self.user)
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    def device(self, name, site):
+        from dcim.models import Device
+
+        return Device.objects.create(name=name, site=self.sites[site], device_type=self.device_type, role=self.role)
+
+    def check(self, name):
+        return self.client.get(reverse("plugins:netbox_data_import:check_device"), {"name": name}).json()
+
+    def test_a_name_only_a_hidden_device_holds_reports_nothing(self):
+        """Existence, pk and URL of a Device outside the view grant stay hidden."""
+        self.device("core-sw", "hidden-site")
+
+        self.assertEqual(self.check("CORE-SW"), {"exists": False, "url": None, "id": None})
+
+    def test_a_shared_name_reports_a_visible_device_and_counts_only_visible_devices(self):
+        """The hidden Device has the lowest pk, so an unrestricted sample would report it first."""
+        self.device("edge-sw", "hidden-site")
+        first = self.device("Edge-SW", "seen-site-1")
+        self.device("EDGE-SW", "seen-site-2")
+
+        answer = self.check("edge-sw")
+
+        self.assertEqual((answer["exists"], answer["id"], answer["count"]), (True, first.pk, 2))
+        self.assertTrue(answer["url"].endswith(first.get_absolute_url()))
 
 
 class SearchNetBoxObjectsViewTest(BaseViewTestCase):
@@ -4799,6 +4872,23 @@ class SyncDeviceFieldViewTests(TestCase):
         self.assertFalse(data["ok"])
         self.assertIn("already exists", data["error"])
 
+    def test_sync_device_name_collision_by_name_identity(self):
+        """A name of the same identity is taken too, although no exact spelling matches."""
+        from dcim.models import Device
+
+        Device.objects.create(
+            name="taken\u00a0name",
+            site=self.device.site,
+            device_type=self.device.device_type,
+            role=self.device.role,
+        )
+        response = self.client.post(
+            self.url, {"device_id": self.device.pk, "field": "device_name", "value": "TAKEN  NAME"}
+        )
+
+        self.assertFalse(response.json()["ok"], response.json())
+        self.assertIn("already exists", response.json()["error"])
+
 
 class SyncAirflowAndIPTests(TestCase):
     """Airflow and the IP fields are written by the import, so the preview can sync them too."""
@@ -5210,6 +5300,14 @@ class SyncRackAndPlacementTests(TestCase):
         )
         data = resp.json()
         self.assertTrue(data["ok"], data)
+        self.device_no_loc.refresh_from_db()
+        self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
+
+    def test_rack_name_sync_finds_the_rack_by_name_identity(self):
+        """The planner matches racks by name identity, so the placement sync does too."""
+        resp = self.client.post(self.placement_url, {"device_id": self.device_no_loc.pk, "rack_name": " r1 "})
+
+        self.assertTrue(resp.json()["ok"], resp.json())
         self.device_no_loc.refresh_from_db()
         self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
 

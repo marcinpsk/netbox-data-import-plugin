@@ -245,6 +245,12 @@ dry run rolls back and is not refused.
 also gets `fake_on_branch = True`: it moves rows between main-only tables and `extras_taggeditem`.
 It runs before netbox-branching can be installed alongside the plugin, so no branch misses it.
 
+`0045_rekey_name_identities` also sets `fake_on_branch = True`. It rekeys the main-only decision and
+proposal rows, and also `CableImportSource`, which is branchable. A branch migrate fakes it, so a
+branch keeps its provenance copies under the casefold trace keys, and a later merge would bring those
+keys back to main beside the new ones. The upgrade note therefore requires every open branch to be
+merged or discarded before the upgrade. A branch provisioned after it copies the rekeyed rows.
+
 ### Mechanical guards
 
 1. A test walks the complete URL tree. For every callback whose module is inside

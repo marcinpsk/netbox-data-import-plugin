@@ -17,18 +17,19 @@ const SPLIT_FIELD_VALUES = { "cn-2": { device_name: ORIGINAL_VALUE, asset_tag: "
 
 let lookups;
 
-function render({ existingResolutions = {} } = {}) {
+function render({ existingResolutions = {}, original = ORIGINAL_VALUE, fieldValues = SPLIT_FIELD_VALUES } = {}) {
   lookups = [];
   window.EXISTING_RESOLUTIONS = existingResolutions;
   document.body.innerHTML = `
     <button id="trigger" data-ndi-modal="#splitNameModal" data-source-id="cn-2"
-            data-source-column="device_name" data-original-value="${ORIGINAL_VALUE}">Split</button>
+            data-source-column="device_name" data-original-value="${original}">Split</button>
     <div class="modal" id="splitNameModal">
       <form id="splitForm" data-check-device-url="/plugins/data-import/check-device/">
         <input type="hidden" id="res_source_id" name="source_id">
         <input type="hidden" id="res_source_column" name="source_column">
         <input type="hidden" id="res_original_value" name="original_value">
         <input type="hidden" id="res_resolved_fields" name="resolved_fields">
+        <input type="hidden" id="res_acknowledged_fields" name="acknowledged_fields">
         <div id="res_original_display"></div>
         <input type="text" id="res_delimiter" value=" - ">
         <div id="res_existing_notice" class="d-none"><code id="res_existing_display"></code></div>
@@ -40,7 +41,7 @@ function render({ existingResolutions = {} } = {}) {
         <button type="submit">Save</button>
       </form>
     </div>
-    <script type="application/json" id="ndi-split-field-values">${JSON.stringify(SPLIT_FIELD_VALUES)}</script>
+    <script type="application/json" id="ndi-split-field-values">${JSON.stringify(fieldValues)}</script>
   `;
   /* The script binds once and looks every element up by id, so one evaluation serves every
    * render in this file. */
@@ -140,7 +141,7 @@ describe("split modal parts", () => {
     const delimiter = document.getElementById("res_delimiter");
     delimiter.value = "-";
     delimiter.dispatchEvent(new Event("input", { bubbles: true }));
-    expect([partValue(0).value, partValue(1).value, partValue(2).value]).toEqual(["AT900", "host", "900"]);
+    expect([partValue(0).value, partValue(1).value, partValue(2).value]).toEqual(["AT900 ", " host", "900"]);
   });
 
   it("saves the field each part was sent to without navigating away", async () => {
@@ -333,12 +334,88 @@ describe("two parts claiming one field", () => {
 describe("a part that overwrites a value the file already carries", () => {
   beforeEach(() => render());
 
+  it("requires new consent after the proposed replacement changes", () => {
+    setField(0, "serial");
+    const checkbox = document.getElementById("res_force_0");
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event("change"));
+    expect(saveButton().disabled).toBe(false);
+
+    setValue(0, "AT901");
+
+    expect(document.getElementById("res_force_0").checked).toBe(false);
+    expect(saveButton().disabled).toBe(true);
+    submitForm();
+    expect(resolvedFields()).toBeNull();
+  });
+
   it("blocks the save until the override is acknowledged", () => {
     setField(0, "serial");
     expect(saveButton().disabled).toBe(true);
     document.getElementById("res_force_0").checked = true;
     document.getElementById("res_force_0").dispatchEvent(new Event("change"));
     expect(saveButton().disabled).toBe(false);
+  });
+});
+
+describe("a part compared with the value the file carries", () => {
+  /* The modal folds nothing and asks on any difference; the server decides by name identity, serials exactly. */
+  function renderPart(field, fileValue, part) {
+    const original = `${part} - host-900`;
+    render({ original, fieldValues: { "cn-2": { device_name: original, [field]: fileValue } } });
+    setField(0, field);
+  }
+
+  function acknowledgementAsked() {
+    return document.getElementById("res_force_0") !== null;
+  }
+
+  it("asks to acknowledge an asset tag whose capital sharp s keeps another identity", () => {
+    renderPart("asset_tag", "STRA\u1E9EE", "Stra\u00DFe");
+
+    expect(acknowledgementAsked()).toBe(true);
+    expect(saveButton().disabled).toBe(true);
+  });
+
+  it("asks to acknowledge two spellings of one name identity, which the server then saves without it", () => {
+    renderPart("asset_tag", "STRASSE", "stra\u00DFe");
+
+    expect(acknowledgementAsked()).toBe(true);
+  });
+
+  it("asks to acknowledge a value that differs only in a byte order mark the browser trims", () => {
+    renderPart("asset_tag", "\uFEFFAT900", "AT900");
+
+    expect(acknowledgementAsked()).toBe(true);
+  });
+
+  it("asks to acknowledge two letters whose browser uppercase agrees", () => {
+    renderPart("asset_tag", "\uA7D2", "\uA7D3");
+
+    expect(acknowledgementAsked()).toBe(true);
+  });
+
+  it("reads only the identical value as the value the file carries", () => {
+    renderPart("asset_tag", "AT900", "AT900");
+
+    expect(acknowledgementAsked()).toBe(false);
+    expect(document.getElementById("res_part_preview_0").textContent).toContain("Matches file value");
+  });
+
+  it("posts the acknowledged replacement for the server to check", () => {
+    renderPart("asset_tag", "STRA\u1E9EE", "Stra\u00DFe");
+    document.getElementById("res_force_0").checked = true;
+    document.getElementById("res_force_0").dispatchEvent(new Event("change"));
+
+    submitForm();
+
+    expect(JSON.parse(document.getElementById("res_acknowledged_fields").value)).toEqual(["asset_tag"]);
+  });
+
+  it("asks to acknowledge a serial that differs only in case", () => {
+    renderPart("serial", "sn900", "SN900");
+
+    expect(acknowledgementAsked()).toBe(true);
   });
 });
 

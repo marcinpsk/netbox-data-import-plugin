@@ -27,10 +27,11 @@ jobs:
         include:
           # One row per NetBox version, which pins the Python versions it supports.
           # `coverage` marks the row that publishes the report, so a version bump cannot miss it.
-          - python-version: "3.12"
+          # Python 3.14 and the ICU of postgres:18 state Unicode 16, which the name identity guard needs.
+          - python-version: "3.14"
             netbox-version: "v4.7.0"
             coverage: true
-          - python-version: "3.12"
+          - python-version: "3.14"
             netbox-version: "v4.6.10"
 
     services:
@@ -146,7 +147,7 @@ jobs:
 
   test-netbox-branching:
     # netbox-branching 1.2.x supports NetBox 4.7 only, so this job has one row.
-    name: test-netbox-branching (3.12, v4.7.0)
+    name: test-netbox-branching (3.14, v4.7.0)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -180,10 +181,10 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.14
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Checkout NetBox
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

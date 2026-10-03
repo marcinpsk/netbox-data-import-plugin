@@ -29,7 +29,7 @@ from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from . import inference_settings as _inference_settings
 from .proposal_contract import OUTCOME_CANDIDATE, OUTCOME_CHOICES, OUTCOME_NO_MATCH
 from .trace_schema import TRACE_EXPORT_TIMESTAMP_MAX_LENGTH
-from .values import identity_text
+from .identity import identity_text
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
@@ -758,6 +758,21 @@ class TerminationResolution(DigestIndexedMixin, PolicySectionModel):
         editable=False,
         help_text="Fixed-width digest of field_key, which is what the index and constraint carry",
     )
+    source_device = models.TextField(
+        blank=True,
+        default="",
+        help_text="Source Device spelling the decision was made for; empty on a row saved before it was kept",
+    )
+    source_cards = models.TextField(
+        blank=True,
+        default="",
+        help_text="Source cards spelling the decision was made for; empty on a row saved before it was kept",
+    )
+    source_port = models.TextField(
+        blank=True,
+        default="",
+        help_text="Source port spelling the decision was made for; empty on a row saved before it was kept",
+    )
     selected_object_type = models.ForeignKey(
         to="core.ObjectType",
         on_delete=models.PROTECT,
@@ -778,12 +793,17 @@ class TerminationResolution(DigestIndexedMixin, PolicySectionModel):
         verbose_name_plural = "Termination Resolutions"
 
     def clean(self):
-        """Reject an inapplicable row or a noncanonical field key."""
+        """Reject an inapplicable row, a noncanonical field key, or a source spelling of another key."""
         super().clean()
         try:
             _canonical_termination_field_key(self.field_key)
         except ValidationError as exc:
             raise ValidationError({"field_key": exc}) from exc
+        parsed = parse_termination_field_key(self.field_key)
+        for part in ("device", "cards", "port"):
+            spelling = getattr(self, f"source_{part}")
+            if (self._state.adding or spelling) and identity_text(spelling) != parsed[part]:
+                raise ValidationError({f"source_{part}": "Enter the source spelling of this field key."})
         self._derive_digest()
 
     def __str__(self):
@@ -810,6 +830,11 @@ class TraceDeviceResolution(DigestIndexedMixin, PolicySectionModel):
         blank=True,
         editable=False,
         help_text="Fixed-width digest of source_device_key, which the index and constraint carry",
+    )
+    source_device_label = models.TextField(
+        blank=True,
+        default="",
+        help_text="Source Device label the decision was made for; empty on a row saved before it was kept",
     )
     selected_device_id = models.PositiveBigIntegerField(
         help_text="Primary key of the selected NetBox Device",
@@ -839,6 +864,8 @@ class TraceDeviceResolution(DigestIndexedMixin, PolicySectionModel):
                 {"source_device_key": "Enter the canonical source Device key."},
                 code="invalid",
             )
+        if (self._state.adding or self.source_device_label) and identity_text(self.source_device_label) != canonical:
+            raise ValidationError({"source_device_label": "Enter the source label of this Device key."})
         self._derive_digest()
 
     def __str__(self):
@@ -865,6 +892,11 @@ class TraceLocationResolution(DigestIndexedMixin, PolicySectionModel):
         blank=True,
         editable=False,
         help_text="Fixed-width digest of source_location_key, which the index and constraint carry",
+    )
+    source_location_path = models.TextField(
+        blank=True,
+        default="",
+        help_text="Source Location path the decision was made for; empty on a row saved before it was kept",
     )
     selected_location_id = models.PositiveBigIntegerField(
         help_text="Primary key of the mapped NetBox Location",
@@ -894,6 +926,8 @@ class TraceLocationResolution(DigestIndexedMixin, PolicySectionModel):
                 {"source_location_key": "Enter the canonical source Location key."},
                 code="invalid",
             )
+        if (self._state.adding or self.source_location_path) and identity_text(self.source_location_path) != canonical:
+            raise ValidationError({"source_location_path": "Enter the source path of this Location key."})
         self._derive_digest()
 
     def __str__(self):
@@ -1914,7 +1948,12 @@ class CableImportSource(DigestIndexedMixin):
         help_text="Fixed-width digest of trace_identity, which is what the index and constraint carry",
     )
     segment_index = models.PositiveIntegerField(
-        help_text="Position of this segment in the Source Trace, in canonical order",
+        null=True,
+        blank=True,
+        help_text=(
+            "Position of this segment in the Source Trace, in canonical order; empty when an identity "
+            "upgrade reversed that order and the trace length was unknown"
+        ),
     )
     from_text = models.TextField(blank=True, default="")
     to_text = models.TextField(blank=True, default="")

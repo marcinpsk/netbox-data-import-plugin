@@ -18,6 +18,81 @@ python manage.py migrate
 
 ## Upgrade notes
 
+### Names compare under one uppercase identity
+
+The plugin now compares every name with one name identity: it reads each whitespace character as a
+space, collapses each run of spaces, trims the ends, and compares the full Unicode uppercase form.
+Python builds each saved key with it, and PostgreSQL compares each NetBox name with it. Before, the
+saved keys were casefolded, while the database compared uppercase names, and the two did not agree
+for every character.
+
+Before you upgrade:
+
+1. Stop NetBox web requests and background imports before you run migration
+   `0045_rekey_name_identities`. Wait for active requests and import jobs to finish. Confirm that
+   no web process or worker can start another import or change a saved decision. The migration
+   does not acquire the profile locks that normal writers use.
+2. Save a restorable database backup. Migration `0045_rekey_name_identities` merges and deletes
+   decisions and cannot be reversed.
+3. Merge or discard every open netbox-branching branch. Migration `0045_rekey_name_identities`
+   rewrites Cable provenance only in main, so a branch would bring back its old trace keys.
+4. Expect each open import preview to rebuild from its stored workbook. The plan schema version
+   changes.
+
+Restart web processes and workers only after the migration completes.
+
+Migration `0045_rekey_name_identities` rekeys every saved termination, Device and Location
+decision, every Cable provenance row and every Cable segment override. It never stops the upgrade:
+
+- A queued or running Resolution Proposal fails with the reason "Superseded by a newer request
+  contract". Every Resolution Proposal keeps its old key as history, so no earlier attempt answers,
+  pages or can be accepted for a question after the upgrade. Ask again.
+- Two saved decisions whose keys become one key are merged when they chose the same NetBox object:
+  the oldest row stays, and a proposal that wrote the other row points to it. When they chose
+  different objects, both are deleted, and the question is open again.
+- A Cable provenance row whose trace endpoints sort in the other order now, for example because a
+  name has `_` where the other has a letter, gets the other `direction`, and its `segment_index`
+  becomes empty: the upgrade does not know how many segments the trace has.
+
+Each merge, deletion and empty `segment_index` writes a warning to the
+`netbox_data_import.migrations.0045_rekey_name_identities` logger. Keep the `migrate` output.
+
+The upgrade can only uppercase the casefolded key it finds. That is exact unless the source name
+contains one of these characters, which casefold to another letter:
+
+| Character | Code point | Saved key after the upgrade answers |
+| --- | --- | --- |
+| Capital sharp s `ẞ` | U+1E9E | `SS`, so a name spelled `STRASSE` or `Straße` |
+| Kelvin sign | U+212A | the letter `K` |
+| Angstrom sign | U+212B | the letter `Å` (U+00C5) |
+| Ohm sign | U+2126 | the letter `Ω` (U+03A9) |
+| Theta symbol `ϴ` | U+03F4 | the letter `Θ` |
+| Capital I with dot above `İ` | U+0130 | `I` followed by a combining dot above |
+
+A saved decision for such a name now answers the spelling in the last column, and the name itself
+asks its question again. Choose it again. A name with a dotless `ı` (U+0131) now has the key of the
+same name with `i`, so its decision can merge with that name's decision, or both can be deleted.
+
+Python builds each key with its own Unicode case data, and PostgreSQL uppercases with the ICU
+library it was built with. The two agree on every code point when both state the same Unicode
+version. Python 3.14 and ICU 76, which the official `postgres:18` image uses, both state Unicode
+16.0. Python 3.12 (Unicode 15.0) and 3.13 (Unicode 15.1) disagree with an ICU of
+Unicode 16 on 27 code points, whose uppercase Unicode 16 added:
+
+| Code points | Characters |
+| --- | --- |
+| U+019B, U+0264 | Latin small lambda with stroke and small rams horn |
+| U+1C8A | Cyrillic small letter tje |
+| U+A7CD, U+A7DB | Latin small s with diagonal stroke and small lambda |
+| U+10D70 to U+10D85 | Garay small letters |
+
+On such an install, a source name or a NetBox name that contains one of these characters does not
+match its namesake: the key Python builds and the name the database compares differ, so the question
+stays open, and a picker search for that name finds nothing. A saved decision for such a name also
+stops matching when Python moves to another Unicode version, so choose it again after that upgrade.
+Run NetBox on Python 3.14 to avoid the gap. The plugin's `test_identity` fails on an install where
+the two sides disagree, and names both Unicode versions.
+
 ### Transform patterns use RE2
 
 The plugin now evaluates Column Transform Rule patterns with RE2. RE2 prevents a configured pattern

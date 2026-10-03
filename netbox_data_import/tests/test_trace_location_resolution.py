@@ -71,7 +71,8 @@ class LocationTreeMixin(CableTopologyMixin):
         """Store one Location mapping for this profile, the way the workspace writer does."""
         return TraceLocationResolution.objects.create(
             profile=self.profile,
-            source_location_key=" ".join(path.split()).casefold(),
+            source_location_key=" ".join(path.split()).upper(),
+            source_location_path=path,
             selected_location_id=location.pk,
             selected_display_name=display,
         )
@@ -79,7 +80,7 @@ class LocationTreeMixin(CableTopologyMixin):
     def evidence(self, *locations, racks=(), u_positions=(), label="SRV Alias"):
         """Return the Device evidence one source label carries."""
         return DeviceEvidence(
-            key=" ".join(label.split()).casefold(),
+            key=" ".join(label.split()).upper(),
             labels=(label,),
             locations=locations,
             racks=racks,
@@ -129,7 +130,8 @@ class TraceLocationResolutionModelTest(LocationTreeMixin, TestCase):
     def test_a_trace_profile_accepts_one_canonical_source_location_key(self):
         resolution = TraceLocationResolution(
             profile=self.profile,
-            source_location_key="region >> building (x) >> 1st floor >> dh4 >> t",
+            source_location_key="REGION >> BUILDING (X) >> 1ST FLOOR >> DH4 >> T",
+            source_location_path=SOURCE_PATH,
             selected_location_id=self.hall.pk,
             selected_display_name=str(self.hall),
         )
@@ -138,6 +140,53 @@ class TraceLocationResolutionModelTest(LocationTreeMixin, TestCase):
         resolution.save()
 
         self.assertEqual(len(resolution.source_location_key_digest), 64)
+
+    def test_a_legacy_location_resolution_can_be_validated_and_updated(self):
+        """A saved mapping can lack the source spelling introduced after it was stored."""
+        resolution = TraceLocationResolution.objects.create(
+            profile=self.profile,
+            source_location_key="SOURCE LOCATION",
+            selected_location_id=self.hall.pk,
+            selected_display_name=str(self.hall),
+        )
+        resolution = TraceLocationResolution.objects.get(pk=resolution.pk)
+        resolution.selected_display_name = "Updated location display"
+
+        resolution.full_clean()
+        resolution.save()
+
+        stored = TraceLocationResolution.objects.get(pk=resolution.pk)
+        self.assertEqual(stored.selected_display_name, "Updated location display")
+        self.assertEqual(stored.source_location_path, "")
+
+    def test_a_saved_location_resolution_rejects_a_nonempty_spelling_of_another_key(self):
+        resolution = TraceLocationResolution.objects.create(
+            profile=self.profile,
+            source_location_key="SOURCE LOCATION",
+            selected_location_id=self.hall.pk,
+            selected_display_name=str(self.hall),
+        )
+        resolution.source_location_path = "Another source"
+
+        with self.assertRaises(ValidationError) as caught:
+            resolution.full_clean()
+
+        self.assertIn("source_location_path", caught.exception.message_dict)
+
+    def test_the_kept_source_path_has_to_state_the_key(self):
+        """A path of another key would move the mapping to that key at the next rekey."""
+        for path in ("", "Region >> Building (X)"):
+            with self.subTest(path=path):
+                resolution = TraceLocationResolution(
+                    profile=self.profile,
+                    source_location_key="REGION >> BUILDING (X) >> 1ST FLOOR >> DH4 >> T",
+                    source_location_path=path,
+                    selected_location_id=self.hall.pk,
+                    selected_display_name=str(self.hall),
+                )
+
+                with self.assertRaisesMessage(ValidationError, "source path of this Location key"):
+                    resolution.full_clean()
 
     def test_a_noncanonical_or_empty_source_location_key_is_rejected(self):
         for key in (SOURCE_PATH, "  ", ""):
@@ -156,7 +205,7 @@ class TraceLocationResolutionModelTest(LocationTreeMixin, TestCase):
         flat_profile = ImportProfile.objects.create(name="Flat Location Resolution", adapter_config={})
         resolution = TraceLocationResolution(
             profile=flat_profile,
-            source_location_key="dh4",
+            source_location_key="DH4",
             selected_location_id=self.hall.pk,
             selected_display_name=str(self.hall),
         )
@@ -481,14 +530,14 @@ class LocationWorkspaceMixin(LocationTreeMixin):
         """Post one Location mapping command through the workspace endpoint."""
         client = client or self.client
         data.setdefault("preview_revision", client.session[PREVIEW_REVISION_SESSION_KEY])
-        data.setdefault("location_key", " ".join(SOURCE_PATH.split()).casefold())
+        data.setdefault("location_key", " ".join(SOURCE_PATH.split()).upper())
         return client.post(
             reverse("plugins:netbox_data_import:trace_location_mapping"),
             data,
             headers={"accept": "application/json"} if as_json else {},
         )
 
-    def device_candidates(self, client=None, device_key="srv alias"):
+    def device_candidates(self, client=None, device_key="SRV ALIAS"):
         """Return the JSON page the Device picker reads."""
         client = client or self.client
         response = client.get(
@@ -501,14 +550,14 @@ class LocationWorkspaceMixin(LocationTreeMixin):
     def location_candidates(self, client=None, **params):
         """Ask the shared Location picker endpoint the way the picker asks."""
         client = client or self.client
-        params.setdefault("location_key", " ".join(SOURCE_PATH.split()).casefold())
+        params.setdefault("location_key", " ".join(SOURCE_PATH.split()).upper())
         params.setdefault("preview_revision", client.session[PREVIEW_REVISION_SESSION_KEY])
         return client.get(reverse("plugins:netbox_data_import:trace_location_candidates"), params)
 
     @staticmethod
     def mapping_row(response, key=None):
         """Return the workspace row for one source Location path."""
-        key = key or " ".join(SOURCE_PATH.split()).casefold()
+        key = key or " ".join(SOURCE_PATH.split()).upper()
         return next(row for row in response.context["location_mappings"] if row.key == key)
 
 
@@ -584,6 +633,7 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         self.assertEqual(saved.status_code, 302, saved.content)
         stored = TraceLocationResolution.objects.get(profile=self.profile)
         self.assertEqual((stored.selected_location_id, stored.selected_display_name), (self.hall.pk, "DH4"))
+        self.assertEqual(stored.source_location_path, SOURCE_PATH)
         self.assertNotEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], before)
         page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         row = self.mapping_row(page)
@@ -812,7 +862,7 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         refused = self.client.post(
             reverse("plugins:netbox_data_import:trace_resolve_device"),
             {
-                "device_key": "srv alias",
+                "device_key": "SRV ALIAS",
                 "device_id": self.in_hall.pk,
                 "search": "",
                 "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
@@ -1151,7 +1201,7 @@ class LocationMappingRefusalTest(LocationWorkspaceMixin, TestCase):
     def test_without_a_preview_the_command_returns_to_setup(self):
         refused = self.client.post(
             reverse("plugins:netbox_data_import:trace_location_mapping"),
-            {"location_key": "dh4", "location_id": self.hall.pk},
+            {"location_key": "DH4", "location_id": self.hall.pk},
         )
 
         self.assertRedirects(refused, reverse("plugins:netbox_data_import:import_setup"), fetch_redirect_response=False)

@@ -9,7 +9,7 @@ from django.test import TransactionTestCase
 from extras.models import Tag, TaggedItem
 
 from netbox_data_import.models import ImportProfile, InferenceBackend
-from netbox_data_import.tests.helpers import migrate_plugin_to_leaf
+from netbox_data_import.tests.helpers import migrate_plugin_to_leaf, unapply_plugin_migrations_to
 
 APP = "netbox_data_import"
 BEFORE = (APP, "0039_remove_job_plan_copies")
@@ -39,8 +39,8 @@ class TagsMigrationTest(TransactionTestCase):
         self.addCleanup(migrate_plugin_to_leaf)
 
     def test_upgrade_moves_every_tag_link_to_a_tagged_item(self):
+        unapply_plugin_migrations_to(BEFORE[1])
         executor = MigrationExecutor(connection)
-        executor.migrate([BEFORE])
         old_apps = executor.loader.project_state([BEFORE]).apps
         old_tag = old_apps.get_model("extras", "Tag")
         first = old_tag.objects.create(name="First", slug="first")
@@ -65,8 +65,8 @@ class TagsMigrationTest(TransactionTestCase):
         backend = InferenceBackend.objects.create(backend_key="rolled-back", **BACKEND_FIELDS)
         backend.tags.add(tag)
 
+        unapply_plugin_migrations_to(BEFORE[1])
         executor = MigrationExecutor(connection)
-        executor.migrate([BEFORE])
         old_apps = executor.loader.project_state([BEFORE]).apps
 
         for model_name, pk in (("ImportProfile", profile.pk), ("InferenceBackend", backend.pk)):
@@ -78,8 +78,8 @@ class TagsMigrationTest(TransactionTestCase):
         self.assertFalse(TaggedItem.objects.exists())
 
     def test_the_data_move_alone_rolls_back_to_one_copy_of_each_assignment(self):
+        unapply_plugin_migrations_to(BEFORE[1])
         executor = MigrationExecutor(connection)
-        executor.migrate([BEFORE])
         old_apps = executor.loader.project_state([BEFORE]).apps
         tag = old_apps.get_model("extras", "Tag").objects.create(name="Round trip", slug="round-trip")
         profile = old_apps.get_model(APP, "ImportProfile").objects.create(name="Round trip profile")
@@ -105,8 +105,8 @@ class TagsMigrationTest(TransactionTestCase):
             tag=tag, content_type=ContentType.objects.get_for_model(ImportProfile), object_id=2_147_483_647
         )
 
+        unapply_plugin_migrations_to(BEFORE[1])
         executor = MigrationExecutor(connection)
-        executor.migrate([BEFORE])
         links = executor.loader.project_state([BEFORE]).apps.get_model(APP, "ImportProfile").tags.through
 
         self.assertEqual(list(links.objects.values_list("importprofile_id", "tag_id")), [(profile.pk, tag.pk)])

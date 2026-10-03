@@ -27,3 +27,19 @@ class InstallationGuideRegexTest(SimpleTestCase):
         guide = " ".join(INSTALLATION_GUIDE.read_text(encoding="utf-8").split())
         self.assertIn("uses Unicode simple case folding", guide)
         self.assertIn("families use ASCII semantics", guide)
+
+
+class InstallationGuideIdentityTest(SimpleTestCase):
+    """The identity upgrade note names each character whose saved decision the rekey cannot move exactly."""
+
+    def test_every_split_and_merged_character_is_named(self):
+        storable = tuple(chr(code) for code in range(1, 0x110000) if not 0xD800 <= code <= 0xDFFF)
+        split = {character for character in storable if character.casefold().upper() != character.upper()}
+        merged = {character for character in storable if character.casefold() != character.upper().casefold()}
+        note = INSTALLATION_GUIDE.read_text(encoding="utf-8").split("### Names compare under one uppercase identity")[1]
+        note = note.split("\n### ", 1)[0]
+
+        self.assertEqual(
+            sorted(f"U+{ord(character):04X}" for character in split | merged if f"U+{ord(character):04X}" not in note),
+            [],
+        )

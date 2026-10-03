@@ -39,8 +39,9 @@ interface must remain usable by another Source Adapter that emits the same `Sour
 3. Candidate reads remain inside the actor's object permissions and the selected import target.
 4. Rack, U position, and Location can rank or explain candidates. They never make the final selection.
 5. Saving a Device selection replans the current preview and stores one profile-owned decision.
-6. A later workbook under the same profile reuses the decision for the same normalized source device
-   label, including when it names a different port.
+6. A later workbook under the same profile reuses the decision for every source device label with
+   the same name identity (spec section 5.9), including when it names a different port. The decision
+   keeps the label it was made for, so a later identity change can rekey it from that text.
 7. A deleted, hidden, moved outside the selected Site, or otherwise ineligible selected Device is
    not used silently. A move within the Site does not break an explicit mapping. Rack and U position
    are evidence, not identity.
@@ -70,7 +71,8 @@ A trace profile refers to a flat-workbook profile and borrows its Device matches
 
 ### B. Trace-owned Device resolution
 
-A new profile-owned decision maps a normalized source device label to one NetBox Device.
+A new profile-owned decision maps the name identity of a source device label (spec section 5.9) to
+one NetBox Device.
 
 ### C. Adapter-neutral Device binding
 

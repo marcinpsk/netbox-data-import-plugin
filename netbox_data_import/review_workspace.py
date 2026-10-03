@@ -12,7 +12,8 @@ from typing import Any
 
 from .cable_disclosure import CABLE_SEGMENT_OVERRIDE_ROW, DISCLOSURE_SOURCE, POLICY_HIDDEN, POLICY_VISIBLE
 from .cable_policy import cable_media_family_label, cable_type_label
-from .cable_target import UNRESOLVED, AskedTermination
+from .cable_target import UNRESOLVED
+from .identity import identity_in, identity_text
 from .import_engine import ImportEngine
 from .models import (
     CableClassMapping,
@@ -29,12 +30,14 @@ from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
     effective_device_name,
     has_below_rack_position,
-    identity_text,
     normalize_for_compare,
     source_position,
     source_text,
     translation_maps,
 )
+
+
+TERMINATION_UNRESOLVABLE = "That termination cannot be resolved here."
 
 
 class IneligibleDeviceSelection(Exception):
@@ -49,13 +52,17 @@ def save_termination_resolution_and_replan(
     planning_context,
     task_type,
     field_key,
+    source,
     selected_object_type,
     selected_object_id,
     selected_display_name,
     reviewed_fingerprint,
 ):
-    """Persist one manual termination selection, then request a fresh Import Plan."""
+    """Persist one manual termination selection with its source spelling, then request a fresh Import Plan."""
     values = {
+        "source_device": source["device"],
+        "source_cards": source["cards"],
+        "source_port": source["port"],
         "selected_object_type": selected_object_type,
         "selected_object_id": selected_object_id,
         "selected_display_name": selected_display_name,
@@ -267,6 +274,7 @@ def save_trace_device_resolution_and_replan(
             "source_device_key_digest": index_digest(evidence.key),
         }
         values = {
+            "source_device_label": evidence.labels[0] if evidence.labels else "",
             "selected_device_id": chosen.pk,
             "selected_display_name": str(chosen),
         }
@@ -293,20 +301,21 @@ def save_trace_location_resolution_and_replan(
     source_document,
     actor,
     planning_context,
-    source_location_key,
+    source_location_path,
     selected_location_id,
     reviewed_fingerprint,
 ):
     """Map one source Location path to a visible Location of the selected Site, then replan."""
     from .netbox_reader import NetBoxReader
-    from .trace_location_resolution import site_locations
+    from .trace_location_resolution import site_locations, source_location_key
 
+    key = source_location_key(source_location_path)
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
         lookup = {
             "profile": locked_profile,
-            "source_location_key": source_location_key,
-            "source_location_key_digest": index_digest(source_location_key),
+            "source_location_key": key,
+            "source_location_key_digest": index_digest(key),
         }
         stored = TraceLocationResolution.objects.filter(
             profile=locked_profile, source_location_key_digest=lookup["source_location_key_digest"]
@@ -320,7 +329,11 @@ def save_trace_location_resolution_and_replan(
         location = site_locations(reader).filter(pk=selected_location_id).select_for_update(of=("self",)).first()
         if location is None:
             raise IneligibleLocationSelection(f"Location {selected_location_id} is not a visible Location of the Site.")
-        values = {"selected_location_id": location.pk, "selected_display_name": str(location)}
+        values = {
+            "source_location_path": source_location_path,
+            "selected_location_id": location.pk,
+            "selected_display_name": str(location),
+        }
         TraceLocationResolution(**lookup, **values).full_clean(validate_unique=False, validate_constraints=False)
         save_permission_scoped_object(actor, TraceLocationResolution, lookup, values)
         # atomic-exit-safe: location-mapping-saved-and-replanned
@@ -438,6 +451,14 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
         "Add the Device Type in NetBox, or map the source make and model to an existing Device Type."
     ),
     "device.device_type_slug_collision": "A stored device type already uses the slug this model derives.",
+    "device.device_type_mapping_ambiguous": (
+        "Device Type mappings with this make and model name different Device Types. "
+        "Delete one of them, or make them name one Device Type."
+    ),
+    "device.manufacturer_mapping_ambiguous": (
+        "Manufacturer mappings with this make name different manufacturers. "
+        "Delete one of them, or make them name one manufacturer."
+    ),
     "device.duplicate_asset_tag": "The asset tag appears more than once in this import.",
     "device.duplicate_name": "The device name appears more than once in this import.",
     "device.duplicate_serial": "The serial number appears more than once in this import.",
@@ -711,7 +732,7 @@ class AutoMatchSummary:
 def _resolve_strong_identity(devices, serial: str, asset_tag: str):
     """Resolve serial and asset tag to one device, or report ambiguity."""
     serial_matches = list(devices.filter(serial=serial)[:2]) if serial else []
-    asset_matches = list(devices.filter(asset_tag__iexact=asset_tag)[:2]) if asset_tag else []
+    asset_matches = list(devices.filter(identity_in("asset_tag", [identity_text(asset_tag)]))[:2]) if asset_tag else []
     if len(serial_matches) > 1 or len(asset_matches) > 1:
         return None, None, True
     serial_device = serial_matches[0] if serial_matches else None
@@ -732,7 +753,11 @@ def _match_existing_device(device_model, visible_devices, name, serial, asset_ta
         return None, None, True
     if device is None and name:
         tenant_filter = {"tenant_id": tenant_id} if tenant_id is not None else {"tenant__isnull": True}
-        matches = list(device_model.objects.filter(site=site, name__iexact=name, **tenant_filter)[:2])
+        matches = list(
+            device_model.objects.filter(site=site, **tenant_filter).filter(identity_in("name", [identity_text(name)]))[
+                :2
+            ]
+        )
         if len(matches) > 1:
             return None, None, True
         if matches:
@@ -859,18 +884,6 @@ class TraceWorkspaceUnit:
         return (sync,)
 
 
-def _asked_termination(record: dict, devices: dict) -> AskedTermination | None:
-    """Return the question one termination record states, or None when the record lacks its source values."""
-    from .field_keys import parse_termination_field_key
-    from .trace_device_resolution import DeviceEvidence
-
-    try:
-        device = DeviceEvidence.from_dict(devices[parse_termination_field_key(record["field_key"])["device"]])
-        return AskedTermination(field_key=record["field_key"], device=device, port=record["source_port"])
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
 class ReviewWorkspace:
     """Read-only presentation of the accepted Import Plan."""
 
@@ -934,18 +947,17 @@ class ReviewWorkspace:
         return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self._presentation_units if _states_a_trace(unit))
 
     @cached_property
-    def asked_terminations(self) -> MappingProxyType:
-        """Return each termination question this preview asked, by field key, with the source values it matched.
-
-        A key the source states two ways, or a record without its source values, maps to None, so no
-        lookup guesses which source spelling the question meant.
-        """
-        asked: dict[str, set] = {}
+    def termination_sources(self) -> MappingProxyType:
+        """Return each field source, or None when its occurrences state different spellings."""
+        sources: dict[str, dict | None] = {}
         for trace in self.traces:
-            devices = {item.get("key"): item for item in trace.devices}
             for item in trace.terminations:
-                asked.setdefault(item["field_key"], set()).add(_asked_termination(item, devices))
-        return MappingProxyType({key: next(iter(found)) if len(found) == 1 else None for key, found in asked.items()})
+                key, source = item["field_key"], item["source"]
+                if key not in sources:
+                    sources[key] = source
+                elif sources[key] != source:
+                    sources[key] = None
+        return MappingProxyType(sources)
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:
         """Return the unit and every unit owning a change it depends on, transitively.
@@ -1038,9 +1050,9 @@ class ReviewWorkspace:
 
     def auto_match_devices(self, profile, actor, target) -> AutoMatchSummary:  # noqa: C901
         """Save safe exact device matches for every eligible plan source row."""
+        from dcim.models import Device
         from django.core.exceptions import ValidationError
         from django.db import IntegrityError
-        from dcim.models import Device
 
         from .models import DeviceExistingMatch
         from .object_permissions import ObjectPermissionDenied, save_permission_scoped_object

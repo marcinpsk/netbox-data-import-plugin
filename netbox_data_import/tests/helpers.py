@@ -332,19 +332,6 @@ def run_on_separate_connection(target):
             raise errors.get()
 
 
-def asked_termination(*, device, cards, port, kind, role="termination"):
-    """Return the termination question a plan asks for one source port, with its source spellings."""
-    from netbox_data_import.cable_target import AskedTermination
-    from netbox_data_import.field_keys import termination_field_key
-    from netbox_data_import.trace_device_resolution import DeviceEvidence, source_device_key
-
-    return AskedTermination(
-        field_key=termination_field_key(device=device, cards=cards, port=port, kind=kind, role=role),
-        device=DeviceEvidence(key=source_device_key(device), labels=(device,), locations=(), racks=(), u_positions=()),
-        port=port,
-    )
-
-
 @contextmanager
 def executed_sql():
     """Yield a list that keeps each SQL statement this connection runs inside the block.
@@ -592,6 +579,25 @@ def migrate_plugin_to_leaf():
 
     executor = MigrationExecutor(connection)
     executor.migrate(executor.loader.graph.leaf_nodes("netbox_data_import"))
+
+
+def unapply_plugin_migrations_to(name):
+    """Walk the plugin back to migration *name* one step at a time, faking only a step with no reverse.
+
+    Every other step really reverses, so `migrate_plugin_to_leaf` rebuilds a table it dropped with
+    every later column.
+    """
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+
+    app = "netbox_data_import"
+    while plan := MigrationExecutor(connection).migration_plan([(app, name)]):
+        migration, backwards = plan[0]
+        if not backwards:
+            raise ValueError(f"Migration {name} is not below the applied plugin migrations.")
+        parent = next(dependency for dependency in migration.dependencies if dependency[0] == app)
+        reversible = all(operation.reversible for operation in migration.operations)
+        MigrationExecutor(connection).migrate([parent], fake=not reversible)
 
 
 def restore_plugin_migrations(floor=FAKED_REWIND_FLOOR):

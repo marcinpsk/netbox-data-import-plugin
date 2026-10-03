@@ -284,3 +284,40 @@ def restoring_the_default_action_is_fine():
 def restoring_the_default_action_by_imported_constant_is_fine():
     # ok: nbdi-deadline-alarm-keeps-its-default-action
     signal.signal(SIGALRM, SIG_DFL)
+
+
+def missing_legacy_device_allowance(self, canonical):
+    # ruleid: nbdi-source-spelling-allows-legacy-rows
+    if identity_text(self.source_device_label) != canonical:
+        raise ValueError("Wrong source label")
+
+
+def missing_legacy_location_allowance(self, canonical):
+    # ruleid: nbdi-source-spelling-allows-legacy-rows
+    if identity_text(self.source_location_path) != canonical:
+        raise ValueError("Wrong source path")
+
+
+def missing_legacy_termination_allowance(self, part, parsed):
+    # ruleid: nbdi-source-spelling-allows-legacy-rows
+    if identity_text(getattr(self, f"source_{part}")) != parsed[part]:
+        raise ValueError("Wrong source spelling")
+
+
+def legacy_device_allowance(self, canonical):
+    # ok: nbdi-source-spelling-allows-legacy-rows
+    if (self._state.adding or self.source_device_label) and identity_text(self.source_device_label) != canonical:
+        raise ValueError("Wrong source label")
+
+
+def legacy_location_allowance(self, canonical):
+    # ok: nbdi-source-spelling-allows-legacy-rows
+    if (self._state.adding or self.source_location_path) and identity_text(self.source_location_path) != canonical:
+        raise ValueError("Wrong source path")
+
+
+def legacy_termination_allowance(self, part, parsed):
+    spelling = getattr(self, f"source_{part}")
+    # ok: nbdi-source-spelling-allows-legacy-rows
+    if (self._state.adding or spelling) and identity_text(spelling) != parsed[part]:
+        raise ValueError("Wrong source spelling")

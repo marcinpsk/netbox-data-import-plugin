@@ -12,7 +12,7 @@ from django.core.exceptions import ValidationError
 from django.db import connection
 from django.test import TestCase, TransactionTestCase
 
-from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE
+from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, termination_field_key
 from netbox_data_import.inference_backend import proposal_eligible_set_limit
 from netbox_data_import.models import (
     ImportProfile,
@@ -36,7 +36,6 @@ from netbox_data_import.resolution_proposals import (
     request_proposal,
 )
 from netbox_data_import.tests.helpers import (
-    asked_termination,
     make_dcim_objects,
     run_on_separate_connection,
     user_with_object_permission,
@@ -59,17 +58,19 @@ class DecisionInventory:
             name="Decision Device", site=self.site, device_type=self.device_type, role=self.role
         )
         self.ports = [Interface.objects.create(device=self.device, name=f"Ethernet 1/{i}") for i in (1, 2)]
-        self.asked = asked_termination(
+        self.field_key = termination_field_key(
             device=self.device.name, cards="", port="Eth1", kind="interface", role=TERMINATION_ROLE
         )
-        self.field_key = self.asked.field_key
+        self.source = {"device": self.device.name, "cards": "", "port": "Eth1"}
         self.task = proposal_task(SELECT_TERMINATION_TASK)
 
     def reader(self, operator=None):
         return NetBoxReader.for_actor(operator or self.operator).for_target(site=self.site)
 
     def proposal(self, selection=0, outcome=ProposalOutcome.CANDIDATE, status=ProposalStatus.COMPLETED):
-        snapshot = self.task.current(profile=self.profile, asked=self.asked, netbox_reader=self.reader(), limit=64)
+        snapshot = self.task.current(
+            profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
+        )
         proposal = request_proposal(
             profile=self.profile,
             task_type=SELECT_TERMINATION_TASK,
@@ -110,7 +111,7 @@ class DecisionInventory:
         actor = operator or self.operator
         return accept_proposal(
             proposal.pk,
-            asked=self.asked,
+            source=self.source,
             operator=actor,
             netbox_reader=self.reader(actor),
             reviewed_fingerprint=self.reviewed_fingerprint(),
@@ -118,7 +119,10 @@ class DecisionInventory:
 
     def stale(self, proposal):
         inventory = self.task.inventory(
-            profile=self.profile, asked=self.asked, netbox_reader=self.reader(), limit=proposal_eligible_set_limit()
+            profile=self.profile,
+            field_key=self.field_key,
+            netbox_reader=self.reader(),
+            limit=proposal_eligible_set_limit(),
         )
         return proposal_staleness(proposal, inventory=inventory)
 
@@ -192,7 +196,7 @@ class ProposalFreshnessTest(DecisionInventory, TestCase):
 
         inventory = self.task.inventory(
             profile=self.profile,
-            asked=self.asked,
+            field_key=self.field_key,
             netbox_reader=self.reader(),
             limit=proposal_eligible_set_limit(),
         )
@@ -381,7 +385,7 @@ class ProposalAcceptanceTest(DecisionInventory, TestCase):
         with self.assertRaises(ValueError):
             accept_proposal(
                 proposal.pk,
-                asked=self.asked,
+                source=self.source,
                 operator=actor,
                 netbox_reader=self.reader(),
                 reviewed_fingerprint=self.reviewed_fingerprint(),

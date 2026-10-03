@@ -111,3 +111,24 @@ rules:
       - pattern: '$JOB.data.update(..., accepted_plan=$PLAN, ...)'
       - pattern: '$JOB.data |= {..., "accepted_plan": $PLAN, ...}'
       - pattern: '$JOB.data.setdefault("accepted_plan", $PLAN)'
+
+  - id: nbdi-source-spelling-allows-legacy-rows
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Permit empty source spellings on saved legacy decisions. Require matching spellings on
+      new decisions and when a saved decision supplies a spelling.
+    paths:
+      include:
+        - "models.py"
+    pattern-either:
+      - patterns:
+          - pattern: |
+              if identity_text(self.$FIELD) != $KEY:
+                  ...
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: '^source_(device_label|location_path)$'
+      - pattern: |
+          if identity_text(getattr(self, ...)) != $KEY:
+              ...
