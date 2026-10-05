@@ -111,6 +111,7 @@ def trace_location_mappings(*, profile, reader, keys: Iterable[str]) -> dict[str
     keys = tuple(dict.fromkeys(key for key in keys if key))
     if not keys:
         return {}
+    requested = frozenset(keys)
     rows = TraceLocationResolution.objects.filter(
         profile=profile,
         source_location_key_digest__in=[index_digest(key) for key in keys],
@@ -120,7 +121,7 @@ def trace_location_mappings(*, profile, reader, keys: Iterable[str]) -> dict[str
         # Two requested prefixes can name each other's keys, so the key alone does not prove the digest.
         if (
             index_digest(row.source_location_key) != row.source_location_key_digest
-            or row.source_location_key not in keys
+            or row.source_location_key not in requested
         ):
             raise ValueError(DIGEST_MISMATCH)
         stored[row.source_location_key] = row
