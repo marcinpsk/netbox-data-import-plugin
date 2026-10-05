@@ -387,11 +387,12 @@ Location below it, then matches the path. A Device in another Location of the Si
 An unmapped path is not a hint.
 
 The workspace lists the paths as a tree of prefixes. A chain of prefixes with one child each shows as
-one node, and each node shows its own state, the state it inherits, and the number of paths below
-it. Select a segment of a node to map the prefix that ends at that segment. The Import Profile stores
-the mapping, and a later trace file reuses it for a path or prefix with the same name identity, as
-defined above. The separator spelling is part of the key, so `A>>B` and `A >> B` are two paths, and
-their prefixes `A` are one key. Profile YAML does not include these mappings.
+one node. Each node shows one state: its own mapping, the mapping it inherits from a row above
+(marked "inherited"), or unmapped. It also shows the number of paths below it. Select a segment of
+a node to map the prefix that ends at that segment. The Import Profile stores the mapping, and a
+later trace file reuses it for a path or prefix with the same name identity, as defined above. The
+separator spelling is part of the key, so `A>>B` and `A >> B` are two paths, and their prefixes `A`
+are one key. Profile YAML does not include these mappings.
 
 A Device's Location is its own Location. Only a Device with no Location of its own uses its Rack's
 Location.

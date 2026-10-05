@@ -1553,11 +1553,14 @@ selected trace, as a tree of prefixes. Each node is a prefix key. A prefix key s
 the first batch path, in key order, that carries it, and siblings are ordered by key. A prefix with
 exactly one child prefix, no stored row, and no batch path ending at it is merged with that child
 into one node, starting from each path's first prefix, so a node ends at a branch, at a stored row,
-or at a batch path. Each node shows its own row's state (unmapped, mapped with the Location, stale,
-or a mapping the actor cannot view), the number of distinct batch path keys in its subtree including
-a path that ends at it, and, when it has no own row, the state it inherits. That number counts paths,
-not the paths a new mapping would change. By default the tree shows the top nodes and their
-children; a node with a mapped own row starts collapsed. The operator can expand any node. Every
+or at a batch path. Each node shows one state. A node with its own row shows that row's state:
+mapped with the Location, stale, or a mapping the actor cannot view. A node without its own row
+shows the state of the row that decides it, marked as inherited; the deciding row shows its Location
+once, and a node beneath it does not repeat it on screen. A node that no row decides shows unmapped.
+Each node also shows the number of distinct batch path keys in its subtree, including a path that
+ends at it. That number counts paths, not the paths a new mapping would change. By default the tree
+shows the top nodes and their children; a node with a mapped own row starts collapsed. The operator
+can expand any node, and collapsing a node hides its whole subtree. Every
 segment of a node's text is a control that maps the prefix ending at that segment, so a merged chain
 never hides a mappable prefix. With no paths it says "No source Location paths"; with paths but no
 visible Location in the Site it says so separately. One picker serves every prefix: it searches the
