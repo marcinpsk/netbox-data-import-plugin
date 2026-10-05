@@ -14,7 +14,7 @@ from typing import Any
 from django.db.models import BigIntegerField, Case, F, IntegerField, Q, Value, When
 
 from .identity import CANONICAL_NAME, identity_in, identity_text, matching_search, with_name_identity
-from .trace_location_resolution import MAPPED, site_locations, source_location_key, trace_location_mappings
+from .trace_location_resolution import MAPPED, decided_location_mappings, site_locations, source_location_key
 from .values import normalize_for_compare, source_position
 
 AUTOMATICALLY_RESOLVED = "automatically resolved"
@@ -329,9 +329,9 @@ def _in_subtree(location) -> Q:
 
 
 def _mapped_paths(profile, reader, evidence: DeviceEvidence) -> tuple[tuple[str, Any], ...]:
-    """Return each source Location path of *evidence* that maps to a visible Location, with that Location."""
+    """Return each source Location path of *evidence* whose deciding row maps to a visible Location, with it."""
     paths = {source_location_key(path): path for path in evidence.locations}
-    mappings = trace_location_mappings(profile=profile, reader=reader, keys=paths)
+    mappings = decided_location_mappings(profile=profile, reader=reader, paths=paths.values())
     return tuple((paths[key], mapping.location) for key, mapping in sorted(mappings.items()) if mapping.state == MAPPED)
 
 
