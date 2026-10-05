@@ -376,13 +376,23 @@ select a Device. A Rack or Location hint is used only when you can view that Net
 candidate names every hint it matches or contradicts, with the source value and the NetBox value.
 
 The source Location column holds a path, for example `Region >> Building >> 1st Floor >> DH4 >> T`.
-The plugin does not split the path and does not compare it with a NetBox Location name. To use a path
-as a hint, map it to a NetBox Location of the Site under **Source Locations** in the workspace. A
-Device in the mapped Location, or in a Location below it, then matches the path. A Device in another
-Location of the Site conflicts with it. An unmapped path is not a hint. The Import Profile stores the
-mapping, and a later trace file reuses it when the source Location path has the same name identity,
-as defined above. The separator spelling is part of the path, so `A>>B` and `A >> B` are two paths.
-Profile YAML does not include these mappings.
+The plugin splits the path only at `>>` to find its prefixes: `Region`, `Region >> Building`, and so
+on, up to the full path. It never compares a segment with a NetBox Location name. To use a path as a
+hint, map it, or one of its prefixes, to a NetBox Location of the Site under **Source Locations** in
+the workspace. A path uses the mapping of its longest prefix that has a mapping, so one mapping on
+`Region >> Building >> 1st Floor >> DH4` covers every rack, Device and port path below that room, and a
+mapping on a longer prefix overrides it. A stale mapping, or one you cannot view, also decides: the
+path then gives no hint and does not use a shorter mapping. A Device in the mapped Location, or in a
+Location below it, then matches the path. A Device in another Location of the Site conflicts with it.
+An unmapped path is not a hint.
+
+The workspace lists the paths as a tree of prefixes. A chain of prefixes with one child each shows as
+one node. Each node shows one state: its own mapping, the mapping it inherits from a row above
+(marked "inherited"), or unmapped. It also shows the number of paths below it. Select a segment of
+a node to map the prefix that ends at that segment. The Import Profile stores the mapping, and a
+later trace file reuses it for a path or prefix with the same name identity, as defined above. The
+separator spelling is part of the key, so `A>>B` and `A >> B` are two paths, and their prefixes `A`
+are one key. Profile YAML does not include these mappings.
 
 A Device's Location is its own Location. Only a Device with no Location of its own uses its Rack's
 Location.

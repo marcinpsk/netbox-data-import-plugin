@@ -470,7 +470,6 @@ def _assess_permission_scoped_save(
         if current is not None:
             for field_name, value in values.items():
                 setattr(prospective, field_name, value)
-        world = _prepare_prospective_world(prospective, prospective_relations)
         constraints = getattr(user, "_object_perm_cache", {}).get(permission, ())
         if unknown_fields:
             fields = {name: field for field in model._meta.concrete_fields for name in (field.name, field.attname)}
@@ -485,6 +484,10 @@ def _assess_permission_scoped_save(
                 else constraint
                 for constraint in constraints
             )
+        # An unconstrained grant admits every row, so only relations to validate need the prospective world.
+        if prospective_relations is None and any(not constraint for constraint in constraints):
+            return PermissionScopedSaveAssessment(True, permission)
+        world = _prepare_prospective_world(prospective, prospective_relations)
         allowed = any(
             not constraint or _prospective_row_matches(user, model, constraint, world) for constraint in constraints
         )
@@ -531,7 +534,34 @@ def assess_permission_scoped_save_option(
     This check ignores permission predicates rooted at ``unknown_fields``. It controls whether the
     UI offers a choice. It does not authorize the later save, which must assess every final value.
     """
-    current = model.objects.filter(**lookup).first()
+    return assess_loaded_save_option(
+        user,
+        model,
+        lookup,
+        values,
+        current=model.objects.filter(**lookup).first(),
+        unknown_fields=unknown_fields,
+        on_existing=on_existing,
+        prospective_relations=prospective_relations,
+    )
+
+
+def assess_loaded_save_option(
+    user,
+    model,
+    lookup: dict,
+    values: dict,
+    *,
+    current,
+    unknown_fields: set[str] | frozenset[str],
+    on_existing: Literal["update", "keep", "reject"] = "update",
+    prospective_relations: Mapping[str, models.Model | ProspectiveRelation] | None = None,
+) -> PermissionScopedSaveAssessment:
+    """Assess a UI option like `assess_permission_scoped_save_option`, against a row the caller already read.
+
+    *current* is the row *lookup* matches, or None when no row matches, so a bulk reader skips the row read.
+    A loaded row still costs the one query of NetBox's object permission check.
+    """
     return _assess_permission_scoped_save(
         user,
         model,
