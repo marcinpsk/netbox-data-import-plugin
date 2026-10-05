@@ -146,7 +146,8 @@ from .tables import (
 from .trace_device_resolution import DeviceEvidence, eligible_trace_devices, source_device_key
 from .trace_location_resolution import (
     eligible_trace_locations,
-    present_location_mappings,
+    location_prefix_spellings,
+    present_location_tree,
     site_locations,
     source_location_key,
 )
@@ -3593,6 +3594,11 @@ def _workspace_location_paths(workspace) -> dict[str, str]:
     return dict(sorted(paths.items()))
 
 
+def _workspace_location_prefixes(workspace) -> dict[str, str]:
+    """Return each prefix key of the active plan's source Location paths, with its representative spelling."""
+    return location_prefix_spellings(_workspace_location_paths(workspace))
+
+
 def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]]:
     """Return findings once per message in first-seen order, keeping every lost override."""
     messages: set[str] = set()
@@ -3680,7 +3686,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         # The picker reads Locations a page at a time, so the page only asks whether any is visible.
         has_locations = site_locations(reader).exists()
-        location_mappings = present_location_mappings(
+        location_tree = present_location_tree(
             profile=profile,
             viewer=request.user,
             reader=reader,
@@ -3769,7 +3775,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
                 "cable_policy_forms": cable_policy_forms,
                 "segment_policy_forms": segment_policy_forms,
                 "summary": summary,
-                "location_mappings": location_mappings,
+                "location_tree": location_tree,
                 "has_locations": has_locations,
                 "import_location_unavailable": reader.location_unavailable,
                 "drift": drift,
@@ -4039,7 +4045,7 @@ LOCATION_CHOICE_REFUSED = "Choose a visible Location in the selected Site."
 
 
 class TraceLocationCandidatesView(PermissionRequiredMixin, View):
-    """Serve one bounded page of the selected Site's visible Locations for one source Location path."""
+    """Serve one bounded page of the selected Site's visible Locations for one source Location prefix."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
@@ -4053,7 +4059,7 @@ class TraceLocationCandidatesView(PermissionRequiredMixin, View):
         except PlanError:
             return JsonResponse({"ok": False, "error": UNREADABLE_PREVIEW}, status=409)
         # A review read answers a question this preview asked, never one the caller invented.
-        if source_location_key(request.GET.get("location_key", "")) not in _workspace_location_paths(workspace):
+        if source_location_key(request.GET.get("location_key", "")) not in _workspace_location_prefixes(workspace):
             return JsonResponse(
                 {"ok": False, "error": "This preview carries no such source Location path."}, status=400
             )
@@ -4090,14 +4096,14 @@ class TraceLocationCandidatesView(PermissionRequiredMixin, View):
 
 @dataclass(frozen=True)
 class _MapTraceLocation(PreviewCommand):
-    """Map one source Location path the reviewed preview carries, or clear its mapping."""
+    """Map one source Location prefix the reviewed preview carries, or clear its mapping."""
 
     location_key: str
     location_id: int | None
 
     def apply(self, preview):
         """Write the decision under the profile lock; the coordinator stores the replan it returns."""
-        paths = _workspace_location_paths(preview.workspace)
+        paths = _workspace_location_prefixes(preview.workspace)
         # A review command answers a question this preview asked, never one the caller invented.
         if self.location_key not in paths:
             raise PreviewCommandRefused("This preview carries no such source Location path.")
@@ -4130,7 +4136,7 @@ class _MapTraceLocation(PreviewCommand):
 
 
 class TraceLocationMappingView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
-    """Map one source Location path the reviewed preview carries, or clear its mapping, then replan."""
+    """Map one source Location prefix the reviewed preview carries, or clear its mapping, then replan."""
 
     permission_required = "netbox_data_import.change_importprofile"
 

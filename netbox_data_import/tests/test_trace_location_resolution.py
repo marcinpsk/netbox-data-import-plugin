@@ -7,8 +7,11 @@ from io import BytesIO
 
 from dcim.models import Cable, Device, FrontPort, Interface, Location, Rack, RearPort, Site
 from django.core.exceptions import ValidationError
-from django.test import Client, TestCase, TransactionTestCase
+from django.db import connection
+from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from django.utils.html import escape
 
 from netbox_data_import.models import (
     CableClassMapping,
@@ -18,9 +21,11 @@ from netbox_data_import.models import (
     TraceDeviceResolution,
     TraceLocationResolution,
 )
+from netbox_data_import.identity import identity_text
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.profile_yaml import serialize_profile
 from netbox_data_import.trace_device_resolution import CandidateFact, DeviceEvidence, eligible_trace_devices
+from netbox_data_import.trace_location_resolution import location_prefix_spellings, location_prefixes
 from netbox_data_import.tests.helpers import (
     retired_claim,
     executed_sql,
@@ -40,6 +45,7 @@ from netbox_data_import.views import CANDIDATE_OFFSET_INVALID, CANDIDATE_OFFSET_
 
 SOURCE_PATH = "Region >> Building (X) >> 1st Floor >> DH4 >> T"
 OTHER_PATH = "Region >> Building (X) >> 1st Floor >> DH5"
+HALL_PREFIX = "Region >> Building (X) >> 1st Floor >> DH4"
 
 
 def located_path(location, *, source_label="SRV Alias", rack="", u_position="", to_port="eth1"):
@@ -78,7 +84,7 @@ class LocationTreeMixin(CableTopologyMixin):
         """Store one Location mapping for this profile, the way the workspace writer does."""
         return TraceLocationResolution.objects.create(
             profile=self.profile,
-            source_location_key=" ".join(path.split()).upper(),
+            source_location_key=identity_text(path),
             source_location_path=path,
             selected_location_id=location.pk,
             selected_display_name=display,
@@ -127,6 +133,42 @@ class LocationTreeMixin(CableTopologyMixin):
         """Return the rank order *actor* sees once no mapping exists, as if the evidence never existed."""
         TraceLocationResolution.objects.filter(profile=self.profile).delete()
         return self.order(self.candidates(self.evidence(path), actor))
+
+
+class LocationPrefixTest(SimpleTestCase):
+    """A source Location path splits only at '>>', and each prefix keys by name identity."""
+
+    def test_each_prefix_ends_before_one_separator_and_the_full_path_is_the_last(self):
+        self.assertEqual(
+            location_prefixes(" region >>  Building\t>> dh4 "),
+            (
+                ("REGION", " region "),
+                ("REGION >> BUILDING", " region >>  Building\t"),
+                ("REGION >> BUILDING >> DH4", " region >>  Building\t>> dh4 "),
+            ),
+        )
+
+    def test_a_prefix_whose_last_segment_is_blank_is_not_a_prefix(self):
+        cases = {
+            ">>A": ((">>A", ">>A"),),
+            "A>>>>B": (("A", "A"), ("A>>>>B", "A>>>>B")),
+            "A>> >>B": (("A", "A"), ("A>> >>B", "A>> >>B")),
+            "A>>>B": (("A", "A"), ("A>>>B", "A>>>B")),
+            # The full path stays its own last prefix, so a stored row for it keeps deciding.
+            "A >> ": (("A", "A "), ("A >>", "A >> ")),
+            "": (),
+            "  ": (),
+        }
+        for path, prefixes in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(location_prefixes(path), prefixes)
+
+    def test_two_separator_spellings_share_their_first_prefix(self):
+        """A prefix spells as the first path, in key order, that carries it."""
+        self.assertEqual(
+            location_prefix_spellings({"A>>B": "A>>b", "A >> B": "a >> B"}),
+            {"A": "a ", "A >> B": "a >> B", "A>>B": "A>>b"},
+        )
 
 
 class TraceLocationResolutionModelTest(LocationTreeMixin, TestCase):
@@ -279,6 +321,61 @@ class SourceLocationEvidenceTest(LocationTreeMixin, TestCase):
         ranked = [candidate.device for candidate in page.candidates]
         self.assertLess(ranked.index(self.in_row), ranked.index(self.in_other_hall))
         self.assertLess(ranked.index(self.in_hall), ranked.index(self.in_other_hall))
+
+    def test_a_path_ranks_and_explains_by_the_mapping_it_inherits(self):
+        self.map_path(HALL_PREFIX, self.hall)
+
+        page = self.candidates(self.evidence(SOURCE_PATH))
+
+        self.assertEqual(
+            self.facts(self.candidate_for(page, self.in_row), "location"),
+            ([CandidateFact("location", source=SOURCE_PATH, mapped="DH4", netbox="T")], []),
+        )
+        self.assertEqual(
+            self.facts(self.candidate_for(page, self.in_other_hall), "location"),
+            ([], [CandidateFact("location", source=SOURCE_PATH, mapped="DH4", netbox="DH5")]),
+        )
+        ranked = [candidate.device for candidate in page.candidates]
+        self.assertLess(ranked.index(self.in_row), ranked.index(self.in_other_hall))
+        self.assertLess(ranked.index(self.in_hall), ranked.index(self.in_other_hall))
+
+    def test_the_longest_mapped_prefix_decides(self):
+        self.map_path("Region", self.other_hall)
+        self.map_path(HALL_PREFIX, self.hall)
+
+        page = self.candidates(self.evidence(SOURCE_PATH))
+
+        self.assertEqual(
+            self.facts(self.candidate_for(page, self.in_row), "location"),
+            ([CandidateFact("location", source=SOURCE_PATH, mapped="DH4", netbox="T")], []),
+        )
+
+    def test_a_stale_or_hidden_deeper_row_never_falls_back_to_a_shorter_mapping(self):
+        gone = Location.objects.create(site=self.site, name="Gone Room", slug="gone-room")
+        actor = user_with_object_permission(
+            "location-prefix-fallback",
+            [
+                (Device, ("view",), {"site_id": self.site.pk}),
+                (Location, ("view",), {}),
+                (TraceLocationResolution, ("view",), {"source_location_key": "REGION"}),
+            ],
+        )
+        cases = (
+            ("stale", gone, None),
+            ("hidden", self.other_hall, actor),
+        )
+        for name, deeper, viewer in cases:
+            with self.subTest(case=name):
+                TraceLocationResolution.objects.filter(profile=self.profile).delete()
+                # Every Device sits under Building X, so a fallback to this row would match them all.
+                self.map_path("Region", self.building)
+                self.map_path(HALL_PREFIX, deeper)
+                Location.objects.filter(pk=gone.pk).delete()
+
+                page = self.candidates(self.evidence(SOURCE_PATH), viewer)
+
+                for device in (self.in_hall, self.in_row, self.in_other_hall):
+                    self.assertEqual(self.facts(self.candidate_for(page, device), "location"), ([], []))
 
     def test_a_mapped_path_conflicts_outside_its_subtree_with_all_three_values(self):
         self.map_path(SOURCE_PATH, self.hall)
@@ -580,11 +677,51 @@ class LocationWorkspaceMixin(LocationTreeMixin):
             params.setdefault(key, value)
         return client.get(reverse("plugins:netbox_data_import:trace_location_candidates"), params)
 
+    def open_paths(self, *paths, client=None):
+        """Open the workspace for a batch that carries each source Location path on its own trace."""
+        return self.open_workspace(
+            *(
+                located_path(path, source_label=f"SRV {index}", to_port=f"eth{index + 1}")
+                for index, path in enumerate(paths)
+            ),
+            client=client,
+        )
+
+    @classmethod
+    def location_nodes(cls, nodes):
+        """Yield every node of a workspace Location tree, each parent before its children."""
+        for node in nodes:
+            yield node
+            yield from cls.location_nodes(node.children)
+
+    @classmethod
+    def mapping_row(cls, response, key=None):
+        """Return the workspace tree node that ends at one source Location prefix."""
+        key = key or identity_text(SOURCE_PATH)
+        return next(node for node in cls.location_nodes(response.context["location_tree"]) if node.key == key)
+
+    @classmethod
+    def tree_shape(cls, nodes):
+        """Return what each node shows: its text, path count, expansion, own state and inherited state."""
+        return [
+            (
+                " >> ".join(segment.text for segment in node.segments),
+                node.path_count,
+                node.expanded,
+                node.own.state,
+                node.inherited.state if node.inherited else None,
+                cls.tree_shape(node.children),
+            )
+            for node in nodes
+        ]
+
     @staticmethod
-    def mapping_row(response, key=None):
-        """Return the workspace row for one source Location path."""
-        key = key or " ".join(SOURCE_PATH.split()).upper()
-        return next(row for row in response.context["location_mappings"] if row.key == key)
+    def location_card(response):
+        """Return the HTML of the Source Locations card."""
+        html = response.content.decode()
+        card = re.search(r"<div[^>]*data-trace-location-mappings.*?<div class=\"row g-3\">", html, re.DOTALL)
+        assert card is not None
+        return card.group()
 
 
 class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
@@ -616,8 +753,17 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         response = self.open_workspace(located_path(SOURCE_PATH), second, third)
 
         self.assertEqual(
-            [(row.path, row.state) for row in response.context["location_mappings"]],
-            [(SOURCE_PATH, "unmapped"), (OTHER_PATH, "unmapped")],
+            self.tree_shape(response.context["location_tree"]),
+            [
+                (
+                    "Region >> Building (X) >> 1st Floor",
+                    2,
+                    True,
+                    "unmapped",
+                    None,
+                    [("DH4 >> T", 1, False, "unmapped", None, []), ("DH5", 1, False, "unmapped", None, [])],
+                )
+            ],
         )
         self.assertContains(response, "data-trace-location-mappings")
 
@@ -628,15 +774,18 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
             located_path(SOURCE_PATH), located_path(compact, source_label="DEV-A", to_port="eth2")
         )
 
+        # The two spellings share the first prefix, then split into two keys.
+        (root,) = response.context["location_tree"]
+        self.assertEqual(root.key, "REGION")
         self.assertEqual(
-            sorted(row.path for row in response.context["location_mappings"]),
-            sorted([SOURCE_PATH, compact]),
+            [node.path for node in self.location_nodes(root.children)],
+            [SOURCE_PATH, compact],
         )
 
     def test_a_batch_with_no_source_path_says_so(self):
         response = self.open_workspace(located_path(""))
 
-        self.assertEqual(response.context["location_mappings"], [])
+        self.assertEqual(response.context["location_tree"], ())
         self.assertContains(response, "No source Location paths")
 
     def test_a_site_with_no_visible_location_says_so_separately(self):
@@ -664,7 +813,7 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         self.assertEqual(preview_coordinator(self.client).revision, before + 1)
         page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         row = self.mapping_row(page)
-        self.assertEqual((row.state, row.location), ("mapped", "DH4"))
+        self.assertEqual((row.own.state, row.own.location), ("mapped", "DH4"))
         candidates = self.device_candidates()
         self.assertEqual(
             candidates[self.in_row.pk]["matched_facts"],
@@ -692,18 +841,14 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         self.assertEqual(replanned, ImportProfile.objects.get(pk=self.profile.pk).planning_fingerprint)
         page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         self.assertFalse(page.context["drift"])
-        self.assertEqual(self.mapping_row(page).state, "unmapped")
+        self.assertEqual(self.mapping_row(page).own.state, "unmapped")
         candidates = self.device_candidates()
         for device in (self.in_row, self.in_other_hall):
             facts = candidates[device.pk]["matched_facts"] + candidates[device.pk]["conflicting_facts"]
             self.assertEqual([fact for fact in facts if fact["fact"] == "location"], [], device.name)
 
     def test_one_location_picker_serves_every_source_path(self):
-        """Each row opens the one shared picker; no row renders its own list of Locations."""
-        import re
-
-        from django.utils.html import escape
-
+        """Each segment opens the one shared picker; no node renders its own list of Locations."""
         second = located_path(OTHER_PATH, source_label="SRV Other", to_port="eth3")
         response = self.open_workspace(located_path(SOURCE_PATH), second)
 
@@ -712,8 +857,9 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         self.assertIsNotNone(card)
         self.assertNotIn("<select", card.group())
         self.assertEqual(html.count('id="traceLocationPicker"'), 1)
-        for row in response.context["location_mappings"]:
-            self.assertIn(f'data-trace-location-picker="{escape(row.key)}"', html)
+        for node in self.location_nodes(response.context["location_tree"]):
+            for segment in node.segments:
+                self.assertIn(f'data-trace-location-picker="{escape(segment.key)}"', html)
 
     def test_the_workspace_reads_no_location_list_to_render(self):
         """The page asks only whether a Location is visible; the picker pages the rest on demand."""
@@ -863,7 +1009,7 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         response = self.open_workspace()
 
         row = self.mapping_row(response)
-        self.assertEqual((row.state, row.location), ("stale", ""))
+        self.assertEqual((row.own.state, row.own.location), ("stale", ""))
         self.assertNotContains(response, "Hidden Snapshot Name")
         self.assertTrue(TraceLocationResolution.objects.filter(profile=self.profile).exists())
 
@@ -942,6 +1088,276 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         response = self.open_workspace()
 
         self.assertEqual(response.context["summary"]["saved_decisions"], 1)
+
+
+class LocationPrefixWorkspaceTest(LocationWorkspaceMixin, TestCase):
+    """The workspace maps any prefix of a batch path and lists the paths as a tree of prefixes."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_location_tree()
+
+    def setUp(self):
+        self.client.force_login(self.actor)
+
+    def location_facts(self):
+        """Return the Location facts each placed Device candidate reports, matched then conflicting."""
+        candidates = self.device_candidates()
+        return {
+            device.name: (
+                [fact for fact in candidates[device.pk]["matched_facts"] if fact["fact"] == "location"],
+                [fact for fact in candidates[device.pk]["conflicting_facts"] if fact["fact"] == "location"],
+            )
+            for device in (self.in_hall, self.in_row, self.in_other_hall)
+        }
+
+    def test_mapping_a_prefix_maps_every_path_beneath_it(self):
+        self.open_workspace()
+
+        saved = self.post_mapping(location_key=identity_text(HALL_PREFIX), location_id=self.hall.pk)
+
+        self.assertEqual(saved.status_code, 200, saved.content)
+        stored = TraceLocationResolution.objects.get(profile=self.profile)
+        self.assertEqual(
+            (stored.source_location_key, stored.source_location_path, stored.selected_location_id),
+            (identity_text(HALL_PREFIX), HALL_PREFIX + " ", self.hall.pk),
+        )
+        inherited = {"fact": "location", "source": SOURCE_PATH, "mapped": "DH4"}
+        self.assertEqual(
+            self.location_facts(),
+            {
+                "Server In Hall": ([{**inherited, "netbox": "DH4"}], []),
+                "Server In Row": ([{**inherited, "netbox": "T"}], []),
+                "Server In Other Hall": ([], [{**inherited, "netbox": "DH5"}]),
+            },
+        )
+        page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        path = self.mapping_row(page)
+        self.assertEqual((path.own.state, path.inherited.state, path.inherited.location), ("unmapped", "mapped", "DH4"))
+        self.assertEqual(self.mapping_row(page, stored.source_location_key).own.location, "DH4")
+
+    def test_a_deeper_mapping_overrides_and_clearing_it_restores_the_inherited_one(self):
+        self.open_workspace()
+        self.post_mapping(location_key=identity_text(HALL_PREFIX), location_id=self.hall.pk)
+
+        overridden = self.post_mapping(location_id=self.other_hall.pk)
+
+        self.assertEqual(overridden.status_code, 200, overridden.content)
+        self.assertEqual(
+            self.location_facts()["Server In Other Hall"],
+            ([{"fact": "location", "source": SOURCE_PATH, "mapped": "DH5", "netbox": "DH5"}], []),
+        )
+
+        cleared = self.post_mapping(clear="1")
+
+        self.assertEqual(cleared.status_code, 200, cleared.content)
+        self.assertEqual(
+            list(TraceLocationResolution.objects.values_list("source_location_key", flat=True)),
+            [identity_text(HALL_PREFIX)],
+        )
+        self.assertEqual(
+            self.location_facts()["Server In Other Hall"],
+            ([], [{"fact": "location", "source": SOURCE_PATH, "mapped": "DH4", "netbox": "DH5"}]),
+        )
+
+    def test_clearing_a_prefix_leaves_its_paths_unmapped(self):
+        self.open_workspace()
+        self.post_mapping(location_key="REGION", location_id=self.building.pk)
+
+        cleared = self.post_mapping(location_key="REGION", clear="1")
+
+        self.assertEqual(cleared.status_code, 200, cleared.content)
+        self.assertFalse(TraceLocationResolution.objects.exists())
+        self.assertEqual(self.location_facts()["Server In Row"], ([], []))
+
+    def test_the_picker_and_the_writers_accept_only_a_prefix_of_a_batch_path(self):
+        self.open_paths(SOURCE_PATH, "Room>>>>T")
+
+        for key in ("REGION", identity_text(HALL_PREFIX), "ROOM", "ROOM>>>>T"):
+            with self.subTest(key=key):
+                self.assertEqual(self.location_candidates(location_key=key).status_code, 200)
+        # 'ROOM>>' ends at a blank segment, so it is not a prefix of 'Room>>>>T'.
+        for key in ("REGION >> NOWHERE", "ROOM>>", "REGION >> BUILDING (X) >> 1ST"):
+            with self.subTest(key=key):
+                read = self.location_candidates(location_key=key)
+                saved = self.post_mapping(location_key=key, location_id=self.hall.pk)
+                cleared = self.post_mapping(location_key=key, clear="1")
+
+                self.assertEqual(read.status_code, 400)
+                for refused in (saved, cleared):
+                    self.assertEqual(refused.status_code, 400)
+                    self.assertEqual(refused.json()["error"], "This preview carries no such source Location path.")
+                self.assertFalse(TraceLocationResolution.objects.exists())
+
+    def test_the_tree_merges_single_child_chains_and_counts_the_paths_beneath_each_node(self):
+        response = self.open_paths(f"{SOURCE_PATH} >> 01", f"{SOURCE_PATH} >> 02", OTHER_PATH, HALL_PREFIX)
+
+        self.assertEqual(
+            self.tree_shape(response.context["location_tree"]),
+            [
+                (
+                    "Region >> Building (X) >> 1st Floor",
+                    4,
+                    True,
+                    "unmapped",
+                    None,
+                    [
+                        # A batch path ends at DH4, so the chain stops there.
+                        (
+                            "DH4",
+                            3,
+                            False,
+                            "unmapped",
+                            None,
+                            [
+                                (
+                                    "T",
+                                    2,
+                                    False,
+                                    "unmapped",
+                                    None,
+                                    [("01", 1, False, "unmapped", None, []), ("02", 1, False, "unmapped", None, [])],
+                                )
+                            ],
+                        ),
+                        ("DH5", 1, False, "unmapped", None, []),
+                    ],
+                )
+            ],
+        )
+        card = self.location_card(response)
+        for prefix in ("Region", "Region >> Building (X)", "Region >> Building (X) >> 1st Floor", HALL_PREFIX):
+            with self.subTest(prefix=prefix):
+                self.assertIn(f'data-trace-location-picker="{escape(identity_text(prefix))}"', card)
+        self.assertEqual(
+            re.findall(r"data-location-path-count[^>]*>\s*([^<]*?)\s*<", card),
+            ["4 paths", "3 paths", "2 paths", "1 path", "1 path", "1 path"],
+        )
+
+    def test_a_stored_row_ends_a_chain_and_a_mapped_node_starts_collapsed(self):
+        self.map_path("Region", self.building)
+        self.map_path(SOURCE_PATH, self.row)
+
+        response = self.open_paths(f"{SOURCE_PATH} >> 01", f"{SOURCE_PATH} >> 02", OTHER_PATH)
+
+        self.assertEqual(
+            self.tree_shape(response.context["location_tree"]),
+            [
+                (
+                    "Region",
+                    3,
+                    False,
+                    "mapped",
+                    None,
+                    [
+                        (
+                            "Building (X) >> 1st Floor",
+                            3,
+                            False,
+                            "unmapped",
+                            "mapped",
+                            [
+                                (
+                                    "DH4 >> T",
+                                    2,
+                                    False,
+                                    "mapped",
+                                    None,
+                                    [
+                                        ("01", 1, False, "unmapped", "mapped", []),
+                                        ("02", 1, False, "unmapped", "mapped", []),
+                                    ],
+                                ),
+                                ("DH5", 1, False, "unmapped", "mapped", []),
+                            ],
+                        )
+                    ],
+                )
+            ],
+        )
+        port = self.mapping_row(response, identity_text(f"{SOURCE_PATH} >> 01"))
+        self.assertEqual(port.inherited.location, "T")
+        card = self.location_card(response)
+        toggles = re.findall(r"<button[^>]*data-trace-location-toggle[^>]*>", card)
+        self.assertEqual(len(toggles), 3)
+        self.assertTrue(all('aria-expanded="false"' in toggle for toggle in toggles), toggles)
+        for toggle in toggles:
+            controlled = re.search(r'aria-controls="([^"]+)"', toggle).group(1)
+            self.assertRegex(card, rf'<ul[^>]*id="{controlled}"[^>]*hidden')
+
+    def test_a_stale_deeper_row_decides_the_paths_beneath_it(self):
+        gone = Location.objects.create(site=self.site, name="Gone Room", slug="gone-room")
+        self.map_path("Region", self.building)
+        self.map_path(HALL_PREFIX, gone, display="Gone Room Snapshot")
+        Location.objects.filter(pk=gone.pk).delete()
+
+        response = self.open_workspace()
+
+        hall = self.mapping_row(response, identity_text(HALL_PREFIX))
+        path = self.mapping_row(response)
+        self.assertEqual((hall.own.state, hall.own.location, hall.inherited), ("stale", "", None))
+        self.assertEqual((path.own.state, path.inherited.state), ("unmapped", "stale"))
+        self.assertNotContains(response, "Gone Room Snapshot")
+        self.assertEqual(
+            self.location_facts(),
+            {name: ([], []) for name in ("Server In Hall", "Server In Row", "Server In Other Hall")},
+        )
+
+
+class LocationPrefixPermissionTest(LocationWorkspaceMixin, TestCase):
+    """A row the actor cannot view decides its paths and discloses only that it exists."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_location_tree()
+
+    def test_a_hidden_deeper_row_decides_and_discloses_only_its_existence(self):
+        self.map_path("Region", self.building, display="Visible Region Snapshot")
+        self.map_path(HALL_PREFIX, self.other_hall, display="Hidden Hall Snapshot")
+        actor = user_with_object_permission(
+            "mapping-prefix-hidden", _workspace_grants(mapping_constraints={"source_location_key": "REGION"})
+        )
+        self.client.force_login(actor)
+
+        response = self.open_workspace()
+
+        hall = self.mapping_row(response, identity_text(HALL_PREFIX))
+        path = self.mapping_row(response)
+        self.assertEqual((hall.own.state, hall.own.location, hall.inherited), ("hidden", "", None))
+        self.assertEqual((path.own.state, path.inherited.state, path.inherited.location), ("unmapped", "hidden", ""))
+        self.assertEqual(hall.save_reason, "You cannot change a policy you cannot view.")
+        # The add grant admits only the REGION key, so each prefix is assessed on its own.
+        self.assertEqual(path.save_reason, "You do not have permission to save this Location mapping.")
+        card = self.location_card(response)
+        self.assertIn("a mapping you cannot view", card)
+        for disclosed in ("Hidden Hall Snapshot", "DH5", "stale", self.other_hall.slug):
+            self.assertNotIn(disclosed, card)
+        candidates = self.device_candidates()
+        for device in (self.in_hall, self.in_row, self.in_other_hall):
+            facts = candidates[device.pk]["matched_facts"] + candidates[device.pk]["conflicting_facts"]
+            self.assertEqual([fact for fact in facts if fact["fact"] == "location"], [], device.name)
+
+    def test_the_page_reads_mapping_rows_in_bulk_whatever_the_number_of_prefixes(self):
+        actor = user_with_object_permission("mapping-prefix-bulk", _workspace_grants())
+        self.client.force_login(actor)
+
+        def page_queries(depth):
+            TraceLocationResolution.objects.filter(profile=self.profile).delete()
+            prefix = " >> ".join(f"Level {level}" for level in range(depth))
+            self.map_path(prefix, self.hall)
+            self.map_path(f"{prefix} >> Rack", self.row)
+            self.open_paths(*(f"{prefix} >> Rack >> Port {port:02}" for port in range(4)))
+            with CaptureQueriesContext(connection) as captured:
+                response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+            self.assertEqual(response.status_code, 200)
+            segments = sum(len(node.segments) for node in self.location_nodes(response.context["location_tree"]))
+            return segments, len(captured.captured_queries)
+
+        shallow_segments, shallow = page_queries(2)
+        deep_segments, deep = page_queries(12)
+
+        self.assertEqual(deep_segments - shallow_segments, 10)
+        self.assertEqual(deep, shallow)
 
 
 class ImportLocationEvidenceTest(LocationWorkspaceMixin, TestCase):
@@ -1192,7 +1608,7 @@ class LocationMappingPermissionTest(LocationWorkspaceMixin, TestCase):
         response = self.open_workspace()
 
         row = self.mapping_row(response)
-        self.assertEqual((row.state, row.location), ("hidden", ""))
+        self.assertEqual((row.own.state, row.own.location), ("hidden", ""))
         self.assertEqual(row.save_reason, "You cannot change a policy you cannot view.")
         self.assertEqual(row.clear_reason, "You cannot change a policy you cannot view.")
         self.assertNotContains(response, "Hidden Row Snapshot")

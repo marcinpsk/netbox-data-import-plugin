@@ -10,17 +10,43 @@ const pickerSource = readFileSync(
   resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_picker.js"),
   "utf8",
 );
+const treeSource = readFileSync(
+  resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_location_tree.js"),
+  "utf8",
+);
+
+function segment(page, key) {
+  return page.locator(`[data-trace-location-picker="${key}"]`);
+}
+
+async function loadScripts(page) {
+  await page.addScriptTag({ content: pickerSource });
+  await page.addScriptTag({ content: treeSource });
+}
 
 const fixture = `
   <base href="http://preview.test/">
   ${claimForm()}
   ${script("preview_claim.js")}
-  <table>
-    <tr><td><button type="button" data-trace-location-picker="region >> dh4"
-                    data-trace-location-label="Region >> DH4">Choose Location</button></td></tr>
-    <tr><td><button type="button" data-trace-location-picker="region >> dh5"
-                    data-trace-location-label="Region >> DH5">Choose Location</button></td></tr>
-  </table>
+  <ul>
+    <li>
+      <button type="button" data-trace-location-toggle aria-expanded="true" aria-controls="locationChildren0">+</button>
+      <button type="button" data-trace-location-picker="region" data-trace-location-label="Region ">Region</button>
+      <ul id="locationChildren0">
+        <li>
+          <button type="button" data-trace-location-toggle aria-expanded="false" aria-controls="locationChildren1">+</button>
+          <button type="button" data-trace-location-picker="region >> dh4"
+                  data-trace-location-label="Region >> DH4">DH4</button>
+          <ul id="locationChildren1" hidden>
+            <li><button type="button" data-trace-location-picker="region >> dh4 >> t"
+                        data-trace-location-label="Region >> DH4 >> T">T</button></li>
+          </ul>
+        </li>
+        <li><button type="button" data-trace-location-picker="region >> dh5"
+                    data-trace-location-label="Region >> DH5">DH5</button></li>
+      </ul>
+    </li>
+  </ul>
   <div class="modal" id="traceLocationPicker">
     <form id="traceLocationForm" method="post"
           action="/plugins/data-import/trace-workspace/location-mapping/"
@@ -68,7 +94,7 @@ async function servedPage(page, payload, asked = []) {
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(payload) });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: pickerSource });
+  await loadScripts(page);
 }
 
 const offer = {
@@ -81,11 +107,11 @@ const offer = {
   total: 7,
 };
 
-test("every row opens the one shared dialog for its own path", async ({ page }) => {
+test("every segment opens the one shared dialog for its own prefix", async ({ page }) => {
   const asked = [];
   await servedPage(page, offer, asked);
 
-  await page.locator("[data-trace-location-picker]").nth(0).click();
+  await segment(page, "region >> dh4").click();
   await expect(page.locator("#traceLocationCount")).toHaveText("2 of 7 visible Locations");
   // The label changes before the second request is delivered.
   let releaseSecondRequest;
@@ -96,7 +122,7 @@ test("every row opens the one shared dialog for its own path", async ({ page }) 
     await secondRequest;
     await route.fallback();
   });
-  await page.locator("[data-trace-location-picker]").nth(1).click();
+  await segment(page, "region >> dh5").click();
   await expect(page.locator("#traceLocationLabel")).toHaveText("Region >> DH5");
 
   releaseSecondRequest();
@@ -109,7 +135,7 @@ test("every row opens the one shared dialog for its own path", async ({ page }) 
 test("saving waits for a chosen Location and posts that Location", async ({ page }) => {
   await servedPage(page, offer);
 
-  await page.locator("[data-trace-location-picker]").first().click();
+  await segment(page, "region >> dh4").click();
   await expect(page.locator("#traceLocationSubmit")).toBeDisabled();
   await expect(page.locator("#traceLocationCandidates button")).toHaveText(["DH4In 1st Floor", "DH5In 1st Floor"]);
   await page.locator("#traceLocationCandidates button").nth(1).click();
@@ -130,9 +156,9 @@ test("a search reaches the server and replaces the offer", async ({ page }) => {
     });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: pickerSource });
+  await loadScripts(page);
 
-  await page.locator("[data-trace-location-picker]").first().click();
+  await segment(page, "region >> dh4").click();
   await expect(page.locator("#traceLocationCandidates button")).toHaveCount(2);
   await page.locator("#traceLocationSearch").fill("dh4");
 
@@ -142,7 +168,7 @@ test("a search reaches the server and replaces the offer", async ({ page }) => {
 
 test("saving closes the dialog before the swap takes it away", async ({ page }) => {
   await servedPage(page, offer);
-  await page.locator("[data-trace-location-picker]").first().click();
+  await segment(page, "region >> dh4").click();
 
   // htmx swaps the content the dialog lives in, so a dialog left open strands its backdrop.
   await page.evaluate(() => {
@@ -167,9 +193,9 @@ test("the twenty-first Location of one name is reached through the next page", a
     });
   });
   await page.setContent(fixture);
-  await page.addScriptTag({ content: pickerSource });
+  await loadScripts(page);
 
-  await page.locator("[data-trace-location-picker]").first().click();
+  await segment(page, "region >> dh4").click();
   await expect(page.locator("#traceLocationCandidates button")).toHaveCount(20);
   await expect(page.locator("#traceLocationNext")).toBeEnabled();
   await page.locator("#traceLocationNext").click();
@@ -180,4 +206,27 @@ test("the twenty-first Location of one name is reached through the next page", a
   await expect(page.locator("#traceLocationId")).toHaveValue("120");
   await expect(page.locator("#traceLocationSubmit")).toBeEnabled();
   await expect(page.locator("#traceLocationNext")).toBeDisabled();
+});
+
+test("a collapsed node expands, and a segment inside it opens the shared dialog for its prefix", async ({ page }) => {
+  const asked = [];
+  await servedPage(page, offer, asked);
+  const toggle = page.locator('[aria-controls="locationChildren1"]');
+  await expect(segment(page, "region >> dh4 >> t")).toBeHidden();
+
+  await toggle.click();
+
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await segment(page, "region >> dh4 >> t").click();
+  await expect(page.locator("#traceLocationLabel")).toHaveText("Region >> DH4 >> T");
+  await expect(page.locator("#traceLocationKey")).toHaveValue("region >> dh4 >> t");
+  await segment(page, "region").click();
+  await expect(page.locator("#traceLocationKey")).toHaveValue("region");
+  await expect.poll(() => asked).toEqual(["region >> dh4 >> t", "region"]);
+  expect(await page.evaluate(() => window.ndiModalInstances)).toBe(1);
+
+  await toggle.click();
+
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(segment(page, "region >> dh4 >> t")).toBeHidden();
 });

@@ -873,7 +873,7 @@ class TraceDeviceResolution(DigestIndexedMixin, PolicySectionModel):
 
 
 class TraceLocationResolution(DigestIndexedMixin, PolicySectionModel):
-    """Map one opaque source Location path to one NetBox Location."""
+    """Map one source Location path or prefix to one NetBox Location."""
 
     POLICY_SECTION = "trace_location_resolutions"
     DIGEST_SOURCE_FIELD = "source_location_key"
@@ -885,7 +885,7 @@ class TraceLocationResolution(DigestIndexedMixin, PolicySectionModel):
         related_name="trace_location_resolutions",
     )
     source_location_key = models.TextField(
-        help_text="Canonical source Location path, compared as one opaque value",
+        help_text="Canonical key of one source Location path or prefix",
     )
     source_location_key_digest = models.CharField(
         max_length=64,
@@ -896,7 +896,7 @@ class TraceLocationResolution(DigestIndexedMixin, PolicySectionModel):
     source_location_path = models.TextField(
         blank=True,
         default="",
-        help_text="Source Location path the decision was made for; empty on a row saved before it was kept",
+        help_text="Source text of the path or prefix the decision was made for; empty on a row saved before it was kept",
     )
     selected_location_id = models.PositiveBigIntegerField(
         help_text="Primary key of the mapped NetBox Location",

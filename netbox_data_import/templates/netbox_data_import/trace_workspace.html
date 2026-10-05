@@ -42,7 +42,23 @@
   /* Only the candidate list scrolls, so the search, the count, the pages and Save stay in view. */
   .ndi-picker-list { min-height: 0; }
   .ndi-picker-list .list-group-item { padding-top: .375rem; padding-bottom: .375rem; }
-  .ndi-location-actions { white-space: nowrap; }
+  .ndi-location-tree, .ndi-location-children { list-style: none; margin: 0; padding: 0; }
+  .ndi-location-children { margin-left: .75rem; padding-left: .75rem; border-left: 1px solid var(--tblr-border-color); }
+  .ndi-location-row { display: flex; flex-wrap: wrap; align-items: center; column-gap: .75rem; row-gap: .25rem; min-height: 2.25rem; padding: .125rem 0; }
+  .ndi-location-toggle { flex: 0 0 1.75rem; width: 1.75rem; padding: 0; }
+  .ndi-location-toggle .mdi { display: inline-block; transition: transform .15s; }
+  .ndi-location-toggle[aria-expanded="true"] .mdi { transform: rotate(90deg); }
+  .ndi-location-text { flex: 1 1 16rem; min-width: 0; overflow-wrap: anywhere; }
+  .ndi-location-segment { border: 0; background: none; padding: 0; color: var(--tblr-link-color); text-align: start; }
+  .ndi-location-segment:hover:not(:disabled) { text-decoration: underline; }
+  .ndi-location-segment:disabled { color: var(--tblr-body-color); }
+  .ndi-location-separator { color: var(--tblr-secondary); margin: 0 .35rem; }
+  .ndi-location-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: .25rem .75rem; margin-left: auto; }
+  .ndi-location-state { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: .25rem .35rem; }
+  .ndi-location-inherited { color: var(--tblr-secondary); font-size: .8rem; display: inline-flex; align-items: center; gap: .35rem; white-space: nowrap; }
+  .ndi-location-count { flex: 0 0 4.5rem; text-align: end; color: var(--tblr-secondary); font-size: .8rem; white-space: nowrap; }
+  .ndi-location-actions { flex: 0 0 3.5rem; text-align: end; }
+  .ndi-location-notes { margin-left: 2.5rem; padding-bottom: .25rem; }
 </style>
 
 <div hx-history="false">
@@ -140,58 +156,20 @@
   <div class="card-header">Source Locations</div>
   <div class="card-body">
     <p class="text-secondary small mb-2">
-      Map a source Location path to a NetBox Location of this Site so it ranks and explains Device candidates.
-      A mapping never selects a Device.
+      Map a source Location path, or any prefix of it, to a NetBox Location of this Site so it ranks and explains
+      Device candidates. A path uses the mapping of its longest mapped prefix. Choose a segment to map the prefix that
+      ends there. A mapping never selects a Device.
     </p>
-    {% if not location_mappings %}
+    {% if not location_tree %}
       <div class="text-secondary">No source Location paths</div>
     {% else %}
       {% if not has_locations %}
         <div class="text-secondary mb-2">No Location in this Site is visible to you.</div>
       {% endif %}
-      <div class="table-responsive">
-        <table class="table table-sm align-middle mb-0">
-          <thead><tr><th>Source Location path</th><th>State</th><th>NetBox Location</th><th></th></tr></thead>
-          <tbody>
-            {% for mapping in location_mappings %}
-              <tr data-location-key="{{ mapping.key }}">
-                <td class="ndi-location-path">{{ mapping.path }}</td>
-                <td>
-                  <span class="badge ndi-trace-state-{{ mapping.state_style }}">{{ mapping.state_label }}</span>
-                  {% if mapping.detail %}<div class="ndi-trace-reason mt-1">{{ mapping.detail }}</div>{% endif %}
-                </td>
-                <td>{{ mapping.location }}</td>
-                <td class="ndi-location-actions">
-                  <div class="d-flex justify-content-end gap-2">
-                    {# One picker serves every row, so a long list of paths adds no per-row control to enhance. #}
-                    <button type="button" class="btn btn-sm btn-outline-secondary"
-                            data-trace-location-picker="{{ mapping.key }}"
-                            data-trace-location-label="{{ mapping.path }}"
-                            {% if mapping.save_reason %}disabled aria-describedby="locationReason{{ forloop.counter }}"{% endif %}>{% if mapping.location %}Change Location{% else %}Choose Location{% endif %}</button>
-                    {% if mapping.clearable %}
-                      <form method="post" class="d-inline"
-                            action="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
-                            hx-post="{% url 'plugins:netbox_data_import:trace_location_mapping' %}"
-                            hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
-                        {% csrf_token %}
-                        {% include "netbox_data_import/inc/preview_claim.html" %}
-                        <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
-                        <input type="hidden" name="location_key" value="{{ mapping.key }}">
-                        <button type="submit" name="clear" value="1" class="btn btn-sm btn-outline-secondary"
-                                data-location-mapping-clear {% if mapping.clear_reason %}disabled{% endif %}>Clear</button>
-                      </form>
-                    {% endif %}
-                  </div>
-                  {% if mapping.save_reason %}<div class="ndi-trace-reason mt-1 text-end" id="locationReason{{ forloop.counter }}">{{ mapping.save_reason }}</div>{% endif %}
-                  {% if mapping.clear_reason and mapping.clear_reason != mapping.save_reason %}
-                    <div class="ndi-trace-reason mt-1 text-end">{{ mapping.clear_reason }}</div>
-                  {% endif %}
-                </td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
+      {# One picker serves every segment, so a long list of prefixes adds no per-node control to enhance. #}
+      <ul class="ndi-location-tree">
+        {% for node in location_tree %}{% include "netbox_data_import/inc/trace_location_node.html" %}{% endfor %}
+      </ul>
     {% endif %}
   </div>
 </div>
@@ -650,7 +628,7 @@
   </div>
 </div>
 
-{% if location_mappings %}
+{% if location_tree %}
 <div class="modal" id="traceLocationPicker" tabindex="-1" aria-labelledby="traceLocationPickerTitle">
   <div class="modal-dialog modal-lg modal-dialog-scrollable" role="document">
     <div class="modal-content">
@@ -735,5 +713,6 @@
 <script src="{% static 'netbox_data_import/js/preview_claim.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_proposals.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_picker.js' %}?v={{ plugin_version }}"></script>
+<script src="{% static 'netbox_data_import/js/trace_location_tree.js' %}?v={{ plugin_version }}"></script>
 </div>
 {% endblock %}
