@@ -21,6 +21,7 @@ NO_VISIBLE_LOCATION = "No Location in this Site is visible to you."
 SAVE_PERMISSION_REFUSED = "You do not have permission to save this Location mapping."
 CLEAR_PERMISSION_REFUSED = "You do not have permission to clear this Location mapping."
 STALE_REASON = "The mapped Location is no longer available at this import target. Choose it again."
+DIGEST_MISMATCH = "A Trace Location Resolution digest does not match its source Location key."
 
 
 def source_location_key(path: str) -> str:
@@ -116,8 +117,12 @@ def trace_location_mappings(*, profile, reader, keys: Iterable[str]) -> dict[str
     )
     stored = {}
     for row in rows:
-        if row.source_location_key not in keys:
-            raise ValueError("A Trace Location Resolution digest does not match its source Location key.")
+        # Two requested prefixes can name each other's keys, so the key alone does not prove the digest.
+        if (
+            index_digest(row.source_location_key) != row.source_location_key_digest
+            or row.source_location_key not in keys
+        ):
+            raise ValueError(DIGEST_MISMATCH)
         stored[row.source_location_key] = row
     visible_rows = (
         set(stored)
@@ -146,6 +151,16 @@ def trace_location_mappings(*, profile, reader, keys: Iterable[str]) -> dict[str
                 key=key, state=MAPPED, row=row, location=locations[row.selected_location_id]
             )
     return mappings
+
+
+def stored_location_row(profile, key: str):
+    """Return the row stored for one source Location key, refusing a row whose digest names another key."""
+    from .models import TraceLocationResolution, index_digest
+
+    row = TraceLocationResolution.objects.filter(profile=profile, source_location_key_digest=index_digest(key)).first()
+    if row is not None and row.source_location_key != key:
+        raise ValueError(DIGEST_MISMATCH)
+    return row
 
 
 def decided_location_mappings(*, profile, reader, paths: Iterable[str]) -> dict[str, LocationMapping]:
@@ -395,5 +410,6 @@ __all__ = (
     "present_location_tree",
     "site_locations",
     "source_location_key",
+    "stored_location_row",
     "trace_location_mappings",
 )

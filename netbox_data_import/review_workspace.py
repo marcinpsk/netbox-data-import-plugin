@@ -308,7 +308,7 @@ def save_trace_location_resolution_and_replan(
 ):
     """Map one source Location path to a visible Location of the selected Site, then replan."""
     from .netbox_reader import NetBoxReader
-    from .trace_location_resolution import site_locations, source_location_key
+    from .trace_location_resolution import site_locations, source_location_key, stored_location_row
 
     key = source_location_key(source_location_path)
     with locked_profile_policy(profile.pk):
@@ -318,9 +318,7 @@ def save_trace_location_resolution_and_replan(
             "source_location_key": key,
             "source_location_key_digest": index_digest(key),
         }
-        stored = TraceLocationResolution.objects.filter(
-            profile=locked_profile, source_location_key_digest=lookup["source_location_key_digest"]
-        ).first()
+        stored = stored_location_row(locked_profile, key)
         _refuse_blind_overwrite(actor, stored)
         refuse_moved_policy(locked_profile, reviewed_fingerprint)
         reader = NetBoxReader.for_actor(actor).for_planning_context(
@@ -351,11 +349,11 @@ def clear_trace_location_resolution_and_replan(
     reviewed_fingerprint,
 ):
     """Drop one source Location mapping, so the path gives no Location evidence, then replan."""
+    from .trace_location_resolution import stored_location_row
+
     with locked_profile_policy(profile.pk):
         locked_profile = ImportProfile.objects.get(pk=profile.pk)
-        stored = TraceLocationResolution.objects.filter(
-            profile=locked_profile, source_location_key_digest=index_digest(source_location_key)
-        ).first()
+        stored = stored_location_row(locked_profile, source_location_key)
         _refuse_blind_overwrite(actor, stored)
         refuse_moved_policy(locked_profile, reviewed_fingerprint)
         if stored is not None:

@@ -1707,6 +1707,59 @@ class LocationMappingRefusalTest(LocationWorkspaceMixin, TestCase):
         self.assertRedirects(refused, reverse("plugins:netbox_data_import:import_setup"), fetch_redirect_response=False)
         self.assertFalse(TraceLocationResolution.objects.exists())
 
+    def corrupt_region_row(self):
+        """Store a REGION row, then give it the key of a longer prefix while it keeps the REGION digest."""
+        row = self.map_path("Region", self.building)
+        TraceLocationResolution.objects.filter(pk=row.pk).update(source_location_key=identity_text(HALL_PREFIX))
+        return row
+
+    def test_a_row_whose_digest_names_another_requested_key_is_refused(self):
+        from netbox_data_import.trace_location_resolution import trace_location_mappings
+
+        self.corrupt_region_row()
+
+        with self.assertRaisesMessage(ValueError, "digest does not match"):
+            trace_location_mappings(
+                profile=self.profile,
+                reader=NetBoxReader.unrestricted().for_target(site=self.site),
+                keys=("REGION", identity_text(HALL_PREFIX)),
+            )
+
+    def test_a_write_through_a_row_whose_digest_names_another_key_is_refused(self):
+        """The writers look a row up by digest alone, so they must not act on a row stored for another key."""
+        from netbox_data_import.models import SourceDocument
+        from netbox_data_import.review_workspace import (
+            clear_trace_location_resolution_and_replan,
+            save_trace_location_resolution_and_replan,
+        )
+
+        self.open_workspace()
+        coordinator = preview_coordinator(self.client)
+        row = self.corrupt_region_row()
+        command = {
+            "profile": self.profile,
+            "source_document": SourceDocument.objects.get(pk=coordinator.source_document_id),
+            "actor": self.actor,
+            "planning_context": {key: coordinator.context[key] for key in ("site_id", "location_id", "tenant_id")},
+            # The reviewed policy is the corrupt one, so only the key check can refuse the write.
+            "reviewed_fingerprint": ImportProfile.objects.get(pk=self.profile.pk).planning_fingerprint,
+        }
+        writes = {
+            "clear": lambda: clear_trace_location_resolution_and_replan(**command, source_location_key="REGION"),
+            "save": lambda: save_trace_location_resolution_and_replan(
+                **command, source_location_path="Region ", selected_location_id=self.other_hall.pk
+            ),
+        }
+
+        for name, write in writes.items():
+            with self.subTest(write=name), self.assertRaisesMessage(ValueError, "digest does not match"):
+                write()
+
+        self.assertEqual(
+            list(TraceLocationResolution.objects.values_list("pk", "source_location_key", "selected_location_id")),
+            [(row.pk, identity_text(HALL_PREFIX), self.building.pk)],
+        )
+
     def test_a_row_whose_digest_names_another_key_is_refused(self):
         from netbox_data_import.trace_location_resolution import trace_location_mappings
 
