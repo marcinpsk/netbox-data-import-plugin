@@ -27,6 +27,7 @@ from netbox_data_import.models import (
 from netbox_data_import.object_permissions import (
     ObjectPermissionDenied,
     ProspectiveRelation,
+    assess_loaded_save_option,
     assess_permission_scoped_save,
     assess_permission_scoped_save_option,
     delete_permission_scoped_objects,
@@ -251,6 +252,34 @@ class AssessPermissionScopedSaveTest(TestCase):
         )
 
         self.assertTrue(assessment.allowed)
+
+    def test_an_option_against_a_loaded_row_reads_nothing_for_an_unconstrained_grant(self):
+        """A bulk reader passes the row it read, so each option it offers adds no query."""
+        user = user_with_object_permission("assess-loaded", [(DeviceTypeMapping, ["add", "change"], None)])
+        existing = DeviceTypeMapping.objects.create(**self._lookup(), **self._values("stored"))
+        user.has_perm("netbox_data_import.add_devicetypemapping")
+
+        with CaptureQueriesContext(connection) as queries:
+            absent = assess_loaded_save_option(
+                user,
+                DeviceTypeMapping,
+                self._lookup(profile=self.other),
+                self._values("not-chosen-yet"),
+                current=None,
+                unknown_fields={"netbox_manufacturer_slug"},
+            )
+        loaded = assess_loaded_save_option(
+            user,
+            DeviceTypeMapping,
+            self._lookup(),
+            self._values("not-chosen-yet"),
+            current=existing,
+            unknown_fields={"netbox_manufacturer_slug"},
+        )
+
+        self.assertEqual((absent.allowed, absent.permission), (True, "netbox_data_import.add_devicetypemapping"))
+        self.assertEqual(queries.captured_queries, [])
+        self.assertEqual((loaded.allowed, loaded.permission), (True, "netbox_data_import.change_devicetypemapping"))
 
     def test_a_json_value_is_prepared_for_the_prospective_database_row(self):
         user = user_with_object_permission(
