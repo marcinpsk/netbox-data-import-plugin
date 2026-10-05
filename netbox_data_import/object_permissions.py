@@ -559,7 +559,8 @@ def assess_loaded_save_option(
 ) -> PermissionScopedSaveAssessment:
     """Assess a UI option like `assess_permission_scoped_save_option`, against a row the caller already read.
 
-    *current* is the row *lookup* matches, or None when no row matches, so a bulk reader adds no query.
+    *current* is the row *lookup* matches, or None when no row matches, so a bulk reader skips the row read.
+    A loaded row still costs the one query of NetBox's object permission check.
     """
     return _assess_permission_scoped_save(
         user,
