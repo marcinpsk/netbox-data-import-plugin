@@ -685,8 +685,9 @@ tools often extend it down to the Device and port, so one room can carry hundred
 The plugin splits the source text only at `>>`, scanning left to right with non-overlapping
 matches, to find the path's prefixes. It never interprets a segment and never compares one with a
 NetBox Location name. A prefix is the source text before one `>>`; the full path is its own last
-prefix. A prefix whose last segment is blank after name identity is not a prefix, so `>>A` has only
-the prefix `>>A`, `A>>>>B` has `A` and `A>>>>B`, and `A>>>B` has `A` and `A>>>B`. The key of a path or
+prefix. A prefix whose last segment is blank after name identity is not a prefix, unless it is the
+full path itself, so `>>A` has only the prefix `>>A`, `A>>>>B` has `A` and `A>>>>B`, `A>>>B` has `A`
+and `A>>>B`, and `A >> ` has `A` and `A >> ` (key `A >>`). The key of a path or
 prefix is the name identity of that source text (section 5.9), used for evidence collection, lookup,
 the digest, and uniqueness; the source text is kept separately for display and beside a saved
 mapping. An empty key is not a path or a prefix. Separator spelling is part of the key, so `A>>B` and
