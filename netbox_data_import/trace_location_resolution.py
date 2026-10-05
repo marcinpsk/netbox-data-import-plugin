@@ -5,8 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
-from itertools import count
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .identity import identity_text, matching_search
@@ -187,9 +186,12 @@ class LocationSegment:
 
 @dataclass(frozen=True)
 class LocationNode:
-    """One node of the workspace tree of source Location prefixes."""
+    """One row of the workspace tree of source Location prefixes, listed flat in page order."""
 
     index: int
+    parent: int | None
+    depth: int
+    children: tuple[int, ...]
     key: str
     path: str
     segments: tuple[LocationSegment, ...]
@@ -198,16 +200,27 @@ class LocationNode:
     inherited: LocationState | None
     path_count: int
     expanded: bool
+    shown: bool
     clearable: bool
     clear_reason: str
     reasons: tuple[str, ...]
-    children: tuple[LocationNode, ...]
 
     @property
     def save_reason(self) -> str:
         """Return why the prefix this node ends at cannot be saved, or an empty string."""
         return self.segments[-1].save_reason
 
+    @property
+    def inherited_marker(self) -> str:
+        """Return the muted text that names the inherited state; a hidden row discloses only that it exists."""
+        return _INHERITED_MARKER[self.inherited.state] if self.inherited is not None else ""
+
+
+_INHERITED_MARKER = {
+    MAPPED: "inherited",
+    STALE: "inherited stale",
+    HIDDEN: "inherited, a mapping you cannot view",
+}
 
 _STATE_PRESENTATION = {
     UNMAPPED: ("unmapped", "unknown"),
@@ -280,7 +293,6 @@ def present_location_tree(
         if visible_rows
         else ()
     )
-    numbering = count()
 
     def save_reason(key: str) -> str:
         mapping = own[key]
@@ -302,7 +314,14 @@ def present_location_tree(
         )
         return "" if assessment.allowed else SAVE_PERMISSION_REFUSED
 
-    def node(start: str, depth: int, inherited: LocationMapping | None) -> LocationNode:
+    nodes: list[LocationNode] = []
+    children: dict[int, list[int]] = {}
+    # (first prefix, depth, parent row, row that decides above, shown), popped in page order.
+    pending: list[tuple[str, int, int | None, LocationMapping | None, bool]] = [
+        (root, 0, None, None, True) for root in sorted(tree.children[None], reverse=True)
+    ]
+    while pending:
+        start, depth, parent, inherited, shown = pending.pop()
         chain = [start]
         # A node ends at a branch, at a stored row, or at a batch path.
         while len(tree.children[chain[-1]]) == 1 and own[chain[-1]].state == UNMAPPED and chain[-1] not in tree.ends:
@@ -322,27 +341,39 @@ def present_location_tree(
             clear_reason = CLEAR_PERMISSION_REFUSED
         else:
             clear_reason = ""
-        index = next(numbering)
-        below = mapping if stored else inherited
-        children = tuple(node(child, depth + 1, below) for child in sorted(tree.children[key]))
-        return LocationNode(
-            index=index,
-            key=key,
-            path=tree.spellings[key],
-            segments=segments,
-            own=_present_state(mapping),
-            inherited=None if stored or inherited is None else _present_state(inherited),
-            path_count=tree.counts[key],
-            expanded=bool(children) and depth == 0 and mapping.state != MAPPED,
-            clearable=stored,
-            clear_reason=clear_reason,
-            reasons=tuple(
-                dict.fromkeys(reason for reason in (*(item.save_reason for item in segments), clear_reason) if reason)
-            ),
-            children=children,
+        index = len(nodes)
+        if parent is not None:
+            children[parent].append(index)
+        children[index] = []
+        expanded = bool(tree.children[key]) and depth == 0 and mapping.state != MAPPED
+        nodes.append(
+            LocationNode(
+                index=index,
+                parent=parent,
+                depth=depth,
+                children=(),
+                key=key,
+                path=tree.spellings[key],
+                segments=segments,
+                own=_present_state(mapping),
+                inherited=None if stored or inherited is None else _present_state(inherited),
+                path_count=tree.counts[key],
+                expanded=expanded,
+                shown=shown,
+                clearable=stored,
+                clear_reason=clear_reason,
+                reasons=tuple(
+                    dict.fromkeys(
+                        reason for reason in (*(item.save_reason for item in segments), clear_reason) if reason
+                    )
+                ),
+            )
         )
-
-    return tuple(node(root, 0, None) for root in sorted(tree.children[None]))
+        below = mapping if stored else inherited
+        pending.extend(
+            (child, depth + 1, index, below, shown and expanded) for child in sorted(tree.children[key], reverse=True)
+        )
+    return tuple(replace(node, children=tuple(children[node.index])) for node in nodes)
 
 
 __all__ = (

@@ -14,24 +14,28 @@ function node(id) {
   return document.getElementById(id);
 }
 
+function row(id, depth, parent, { expanded = null, hidden = false } = {}) {
+  const toggle = expanded === null
+    ? ""
+    : `<button id="${id}Toggle" type="button" data-trace-location-toggle aria-expanded="${expanded}"><i id="${id}Icon"></i></button>`;
+  const parentAttribute = parent ? ` data-parent="${parent}"` : "";
+  return `<li id="${id}" data-depth="${depth}"${parentAttribute}${hidden ? " hidden" : ""}>${toggle}</li>`;
+}
+
+function shown() {
+  return Array.from(document.querySelectorAll("li")).filter((item) => !item.hidden).map((item) => item.id);
+}
+
+// Region (open) > DH4 (closed) > T (closed) > 01; Region > DH5; Annex is a second top node.
 beforeEach(() => {
-  document.body.innerHTML = `
-    <ul>
-      <li>
-        <button id="open" type="button" data-trace-location-toggle aria-expanded="true"
-                aria-controls="locationChildren0"><i id="openIcon"></i></button>
-        <ul id="locationChildren0">
-          <li>
-            <button id="closed" type="button" data-trace-location-toggle aria-expanded="false"
-                    aria-controls="locationChildren1"></button>
-            <ul id="locationChildren1" hidden><li>T</li></ul>
-          </li>
-        </ul>
-      </li>
-      <li><button id="orphan" type="button" data-trace-location-toggle aria-expanded="false"
-                  aria-controls="missing"></button></li>
-    </ul>
-  `;
+  document.body.innerHTML = `<ul>${[
+    row("region", 0, null, { expanded: true }),
+    row("hall", 1, "region", { expanded: false }),
+    row("rack", 2, "hall", { expanded: false, hidden: true }),
+    row("port", 3, "rack", { hidden: true }),
+    row("otherHall", 1, "region"),
+    row("annex", 0, null),
+  ].join("")}</ul>`;
   window.eval(treeSource);
 });
 
@@ -40,37 +44,44 @@ afterEach(() => {
 });
 
 describe("the Source Locations tree", () => {
-  it("expands a collapsed node and collapses it again", () => {
-    node("closed").click();
+  it("expands a node to its children and keeps a collapsed child's subtree hidden", () => {
+    node("hallToggle").click();
 
-    expect(node("closed").getAttribute("aria-expanded")).toBe("true");
-    expect(node("locationChildren1").hidden).toBe(false);
+    expect(node("hallToggle").getAttribute("aria-expanded")).toBe("true");
+    expect(shown()).toEqual(["region", "hall", "rack", "otherHall", "annex"]);
 
-    node("closed").click();
+    node("rackToggle").click();
 
-    expect(node("closed").getAttribute("aria-expanded")).toBe("false");
-    expect(node("locationChildren1").hidden).toBe(true);
+    expect(shown()).toEqual(["region", "hall", "rack", "port", "otherHall", "annex"]);
   });
 
-  it("collapses an expanded node from a click on its icon", () => {
-    node("openIcon").click();
+  it("collapses a node with its whole subtree and restores it as it was", () => {
+    node("hallToggle").click();
+    node("rackToggle").click();
 
-    expect(node("open").getAttribute("aria-expanded")).toBe("false");
-    expect(node("locationChildren0").hidden).toBe(true);
+    node("regionIcon").click();
+
+    expect(node("regionToggle").getAttribute("aria-expanded")).toBe("false");
+    expect(shown()).toEqual(["region", "annex"]);
+
+    node("regionToggle").click();
+
+    expect(shown()).toEqual(["region", "hall", "rack", "port", "otherHall", "annex"]);
   });
 
   it("toggles once per click after a second evaluation", () => {
     // An htmx boost evaluates the script again, so a second listener would undo the first.
     window.eval(treeSource);
 
-    node("closed").click();
+    node("hallToggle").click();
 
-    expect(node("locationChildren1").hidden).toBe(false);
+    expect(node("rack").hidden).toBe(false);
   });
 
-  it("leaves a toggle whose list is gone unchanged", () => {
-    node("orphan").click();
+  it("ignores a click outside a toggle", () => {
+    node("port").click();
+    node("annex").click();
 
-    expect(node("orphan").getAttribute("aria-expanded")).toBe("false");
+    expect(shown()).toEqual(["region", "hall", "otherHall", "annex"]);
   });
 });

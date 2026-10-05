@@ -12,6 +12,7 @@ from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils.html import escape
+from html import unescape
 
 from netbox_data_import.models import (
     CableClassMapping,
@@ -25,7 +26,11 @@ from netbox_data_import.identity import identity_text
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.profile_yaml import serialize_profile
 from netbox_data_import.trace_device_resolution import CandidateFact, DeviceEvidence, eligible_trace_devices
-from netbox_data_import.trace_location_resolution import location_prefix_spellings, location_prefixes
+from netbox_data_import.trace_location_resolution import (
+    STALE_REASON,
+    location_prefix_spellings,
+    location_prefixes,
+)
 from netbox_data_import.tests.helpers import (
     retired_claim,
     executed_sql,
@@ -687,33 +692,36 @@ class LocationWorkspaceMixin(LocationTreeMixin):
             client=client,
         )
 
-    @classmethod
-    def location_nodes(cls, nodes):
-        """Yield every node of a workspace Location tree, each parent before its children."""
-        for node in nodes:
-            yield node
-            yield from cls.location_nodes(node.children)
-
-    @classmethod
-    def mapping_row(cls, response, key=None):
-        """Return the workspace tree node that ends at one source Location prefix."""
+    @staticmethod
+    def mapping_row(response, key=None):
+        """Return the workspace tree row that ends at one source Location prefix."""
         key = key or identity_text(SOURCE_PATH)
-        return next(node for node in cls.location_nodes(response.context["location_tree"]) if node.key == key)
+        return next(node for node in response.context["location_tree"] if node.key == key)
 
-    @classmethod
-    def tree_shape(cls, nodes):
-        """Return what each node shows: its text, path count, expansion, own state and inherited state."""
+    @staticmethod
+    def tree_shape(nodes):
+        """Return each row in page order: depth, text, path count, expansion, shown, own and inherited state."""
         return [
             (
+                node.depth,
                 " >> ".join(segment.text for segment in node.segments),
                 node.path_count,
                 node.expanded,
+                node.shown,
                 node.own.state,
                 node.inherited.state if node.inherited else None,
-                cls.tree_shape(node.children),
             )
             for node in nodes
         ]
+
+    @classmethod
+    def row_text(cls, response, key, *, on_screen=False):
+        """Return the text one tree row reads to a screen reader, or only the text on screen."""
+        card = cls.location_card(response)
+        row = re.search(rf'<li[^>]*data-location-key="{re.escape(escape(key))}"[^>]*>(.*?)</li>', card, re.DOTALL)
+        assert row is not None, key
+        html = re.sub(r'<span class="visually-hidden">.*?</span>', "", row.group(1)) if on_screen else row.group(1)
+        return " ".join(unescape(re.sub(r"<[^>]+>", " ", html)).split())
 
     @staticmethod
     def location_card(response):
@@ -755,14 +763,9 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         self.assertEqual(
             self.tree_shape(response.context["location_tree"]),
             [
-                (
-                    "Region >> Building (X) >> 1st Floor",
-                    2,
-                    True,
-                    "unmapped",
-                    None,
-                    [("DH4 >> T", 1, False, "unmapped", None, []), ("DH5", 1, False, "unmapped", None, [])],
-                )
+                (0, "Region >> Building (X) >> 1st Floor", 2, True, True, "unmapped", None),
+                (1, "DH4 >> T", 1, False, True, "unmapped", None),
+                (1, "DH5", 1, False, True, "unmapped", None),
             ],
         )
         self.assertContains(response, "data-trace-location-mappings")
@@ -775,12 +778,9 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         )
 
         # The two spellings share the first prefix, then split into two keys.
-        (root,) = response.context["location_tree"]
+        root, *children = response.context["location_tree"]
         self.assertEqual(root.key, "REGION")
-        self.assertEqual(
-            [node.path for node in self.location_nodes(root.children)],
-            [SOURCE_PATH, compact],
-        )
+        self.assertEqual([(node.depth, node.path) for node in children], [(1, SOURCE_PATH), (1, compact)])
 
     def test_a_batch_with_no_source_path_says_so(self):
         response = self.open_workspace(located_path(""))
@@ -857,7 +857,7 @@ class LocationWorkspaceTest(LocationWorkspaceMixin, TestCase):
         self.assertIsNotNone(card)
         self.assertNotIn("<select", card.group())
         self.assertEqual(html.count('id="traceLocationPicker"'), 1)
-        for node in self.location_nodes(response.context["location_tree"]):
+        for node in response.context["location_tree"]:
             for segment in node.segments:
                 self.assertIn(f'data-trace-location-picker="{escape(segment.key)}"', html)
 
@@ -1195,34 +1195,13 @@ class LocationPrefixWorkspaceTest(LocationWorkspaceMixin, TestCase):
         self.assertEqual(
             self.tree_shape(response.context["location_tree"]),
             [
-                (
-                    "Region >> Building (X) >> 1st Floor",
-                    4,
-                    True,
-                    "unmapped",
-                    None,
-                    [
-                        # A batch path ends at DH4, so the chain stops there.
-                        (
-                            "DH4",
-                            3,
-                            False,
-                            "unmapped",
-                            None,
-                            [
-                                (
-                                    "T",
-                                    2,
-                                    False,
-                                    "unmapped",
-                                    None,
-                                    [("01", 1, False, "unmapped", None, []), ("02", 1, False, "unmapped", None, [])],
-                                )
-                            ],
-                        ),
-                        ("DH5", 1, False, "unmapped", None, []),
-                    ],
-                )
+                (0, "Region >> Building (X) >> 1st Floor", 4, True, True, "unmapped", None),
+                # A batch path ends at DH4, so the chain stops there.
+                (1, "DH4", 3, False, True, "unmapped", None),
+                (2, "T", 2, False, False, "unmapped", None),
+                (3, "01", 1, False, False, "unmapped", None),
+                (3, "02", 1, False, False, "unmapped", None),
+                (1, "DH5", 1, False, True, "unmapped", None),
             ],
         )
         card = self.location_card(response)
@@ -1234,7 +1213,7 @@ class LocationPrefixWorkspaceTest(LocationWorkspaceMixin, TestCase):
             ["4 paths", "3 paths", "2 paths", "1 path", "1 path", "1 path"],
         )
 
-    def test_a_stored_row_ends_a_chain_and_a_mapped_node_starts_collapsed(self):
+    def test_a_stored_row_ends_a_chain_and_a_mapped_node_starts_collapsed_with_its_whole_subtree(self):
         self.map_path("Region", self.building)
         self.map_path(SOURCE_PATH, self.row)
 
@@ -1243,47 +1222,61 @@ class LocationPrefixWorkspaceTest(LocationWorkspaceMixin, TestCase):
         self.assertEqual(
             self.tree_shape(response.context["location_tree"]),
             [
-                (
-                    "Region",
-                    3,
-                    False,
-                    "mapped",
-                    None,
-                    [
-                        (
-                            "Building (X) >> 1st Floor",
-                            3,
-                            False,
-                            "unmapped",
-                            "mapped",
-                            [
-                                (
-                                    "DH4 >> T",
-                                    2,
-                                    False,
-                                    "mapped",
-                                    None,
-                                    [
-                                        ("01", 1, False, "unmapped", "mapped", []),
-                                        ("02", 1, False, "unmapped", "mapped", []),
-                                    ],
-                                ),
-                                ("DH5", 1, False, "unmapped", "mapped", []),
-                            ],
-                        )
-                    ],
-                )
+                (0, "Region", 3, False, True, "mapped", None),
+                (1, "Building (X) >> 1st Floor", 3, False, False, "unmapped", "mapped"),
+                (2, "DH4 >> T", 2, False, False, "mapped", None),
+                (3, "01", 1, False, False, "unmapped", "mapped"),
+                (3, "02", 1, False, False, "unmapped", "mapped"),
+                (2, "DH5", 1, False, False, "unmapped", "mapped"),
             ],
         )
         port = self.mapping_row(response, identity_text(f"{SOURCE_PATH} >> 01"))
         self.assertEqual(port.inherited.location, "T")
         card = self.location_card(response)
+        rows = re.findall(r"<li[^>]*data-location-key[^>]*>", card)
+        self.assertEqual(["hidden" in row for row in rows], [False, True, True, True, True, True])
         toggles = re.findall(r"<button[^>]*data-trace-location-toggle[^>]*>", card)
         self.assertEqual(len(toggles), 3)
         self.assertTrue(all('aria-expanded="false"' in toggle for toggle in toggles), toggles)
-        for toggle in toggles:
-            controlled = re.search(r'aria-controls="([^"]+)"', toggle).group(1)
-            self.assertRegex(card, rf'<ul[^>]*id="{controlled}"[^>]*hidden')
+
+    def test_each_row_reads_one_effective_state(self):
+        gone = Location.objects.create(site=self.site, name="Gone Room", slug="gone-room")
+        self.map_path(HALL_PREFIX, self.hall)
+        self.map_path(OTHER_PATH, gone)
+        Location.objects.filter(pk=gone.pk).delete()
+
+        response = self.open_paths(f"{SOURCE_PATH} >> 01", f"{SOURCE_PATH} >> 02", OTHER_PATH, "Annex")
+
+        self.assertEqual(
+            {
+                key: self.row_text(response, identity_text(key))
+                for key in ("Annex", HALL_PREFIX, SOURCE_PATH, f"{SOURCE_PATH} >> 01", OTHER_PATH)
+            },
+            {
+                "Annex": "Annex unmapped 1 path",
+                HALL_PREFIX: "DH4 mapped DH4 2 paths Clear",
+                # The row that decides is the nearest row above, so its Location shows there once.
+                SOURCE_PATH: "T inherited , mapped to DH4 2 paths",
+                f"{SOURCE_PATH} >> 01": "01 inherited , mapped to DH4 1 path",
+                OTHER_PATH: "DH5 stale 1 path Clear " + STALE_REASON,
+            },
+        )
+        self.assertEqual(self.row_text(response, identity_text(SOURCE_PATH), on_screen=True), "T inherited 2 paths")
+
+    def test_a_path_two_hundred_segments_deep_renders_one_row_per_level(self):
+        levels = [f"L{level:03}" for level in range(200)]
+        paths = [" >> ".join(levels[: depth + 1]) for depth in range(200)]
+        self.map_path(levels[0], self.hall)
+
+        response = self.open_paths(*paths)
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.context["location_tree"]
+        self.assertEqual(
+            [(row.depth, row.path, row.path_count) for row in rows[::199]], [(0, paths[0], 200), (199, paths[-1], 1)]
+        )
+        self.assertEqual([row.shown for row in rows[:3]], [True, False, False])
+        self.assertEqual(len(re.findall(r"<li[^>]*data-location-key", self.location_card(response))), 200)
 
     def test_a_stale_deeper_row_decides_the_paths_beneath_it(self):
         gone = Location.objects.create(site=self.site, name="Gone Room", slug="gone-room")
@@ -1328,6 +1321,10 @@ class LocationPrefixPermissionTest(LocationWorkspaceMixin, TestCase):
         self.assertEqual(hall.save_reason, "You cannot change a policy you cannot view.")
         # The add grant admits only the REGION key, so each prefix is assessed on its own.
         self.assertEqual(path.save_reason, "You do not have permission to save this Location mapping.")
+        self.assertEqual(
+            self.row_text(response, identity_text(SOURCE_PATH)),
+            "T inherited, a mapping you cannot view 1 path You do not have permission to save this Location mapping.",
+        )
         card = self.location_card(response)
         self.assertIn("a mapping you cannot view", card)
         for disclosed in ("Hidden Hall Snapshot", "DH5", "stale", self.other_hall.slug):
@@ -1350,7 +1347,7 @@ class LocationPrefixPermissionTest(LocationWorkspaceMixin, TestCase):
             with CaptureQueriesContext(connection) as captured:
                 response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
             self.assertEqual(response.status_code, 200)
-            segments = sum(len(node.segments) for node in self.location_nodes(response.context["location_tree"]))
+            segments = sum(len(node.segments) for node in response.context["location_tree"])
             return segments, len(captured.captured_queries)
 
         shallow_segments, shallow = page_queries(2)

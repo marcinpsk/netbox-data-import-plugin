@@ -29,22 +29,22 @@ const fixture = `
   ${claimForm()}
   ${script("preview_claim.js")}
   <ul>
-    <li>
-      <button type="button" data-trace-location-toggle aria-expanded="true" aria-controls="locationChildren0">+</button>
+    <li id="locationNode0" data-depth="0">
+      <button type="button" data-trace-location-toggle aria-expanded="true" aria-controls="locationNode1 locationNode3">+</button>
       <button type="button" data-trace-location-picker="region" data-trace-location-label="Region ">Region</button>
-      <ul id="locationChildren0">
-        <li>
-          <button type="button" data-trace-location-toggle aria-expanded="false" aria-controls="locationChildren1">+</button>
-          <button type="button" data-trace-location-picker="region >> dh4"
-                  data-trace-location-label="Region >> DH4">DH4</button>
-          <ul id="locationChildren1" hidden>
-            <li><button type="button" data-trace-location-picker="region >> dh4 >> t"
-                        data-trace-location-label="Region >> DH4 >> T">T</button></li>
-          </ul>
-        </li>
-        <li><button type="button" data-trace-location-picker="region >> dh5"
-                    data-trace-location-label="Region >> DH5">DH5</button></li>
-      </ul>
+    </li>
+    <li id="locationNode1" data-depth="1" data-parent="locationNode0">
+      <button type="button" data-trace-location-toggle aria-expanded="false" aria-controls="locationNode2">+</button>
+      <button type="button" data-trace-location-picker="region >> dh4"
+              data-trace-location-label="Region >> DH4">DH4</button>
+    </li>
+    <li id="locationNode2" data-depth="2" data-parent="locationNode1" hidden>
+      <button type="button" data-trace-location-picker="region >> dh4 >> t"
+              data-trace-location-label="Region >> DH4 >> T">T</button>
+    </li>
+    <li id="locationNode3" data-depth="1" data-parent="locationNode0">
+      <button type="button" data-trace-location-picker="region >> dh5"
+              data-trace-location-label="Region >> DH5">DH5</button>
     </li>
   </ul>
   <div class="modal" id="traceLocationPicker">
@@ -211,7 +211,7 @@ test("the twenty-first Location of one name is reached through the next page", a
 test("a collapsed node expands, and a segment inside it opens the shared dialog for its prefix", async ({ page }) => {
   const asked = [];
   await servedPage(page, offer, asked);
-  const toggle = page.locator('[aria-controls="locationChildren1"]');
+  const toggle = page.locator("#locationNode1 [data-trace-location-toggle]");
   await expect(segment(page, "region >> dh4 >> t")).toBeHidden();
 
   await toggle.click();
@@ -225,8 +225,9 @@ test("a collapsed node expands, and a segment inside it opens the shared dialog 
   await expect.poll(() => asked).toEqual(["region >> dh4 >> t", "region"]);
   expect(await page.evaluate(() => window.ndiModalInstances)).toBe(1);
 
-  await toggle.click();
+  await page.locator("#locationNode0 [data-trace-location-toggle]").click();
 
-  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(segment(page, "region >> dh4")).toBeHidden();
   await expect(segment(page, "region >> dh4 >> t")).toBeHidden();
+  await expect(segment(page, "region >> dh5")).toBeHidden();
 });
