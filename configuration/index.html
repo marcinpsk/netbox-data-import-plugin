@@ -1026,13 +1026,22 @@ uppercase. The choice applies to all ports on that source Device.</p>
 select a Device. A Rack or Location hint is used only when you can view that NetBox object. Each
 candidate names every hint it matches or contradicts, with the source value and the NetBox value.</p>
 <p>The source Location column holds a path, for example <code>Region &gt;&gt; Building &gt;&gt; 1st Floor &gt;&gt; DH4 &gt;&gt; T</code>.
-The plugin does not split the path and does not compare it with a NetBox Location name. To use a path
-as a hint, map it to a NetBox Location of the Site under <strong>Source Locations</strong> in the workspace. A
-Device in the mapped Location, or in a Location below it, then matches the path. A Device in another
-Location of the Site conflicts with it. An unmapped path is not a hint. The Import Profile stores the
-mapping, and a later trace file reuses it when the source Location path has the same name identity,
-as defined above. The separator spelling is part of the path, so <code>A&gt;&gt;B</code> and <code>A &gt;&gt; B</code> are two paths.
-Profile YAML does not include these mappings.</p>
+The plugin splits the path only at <code>&gt;&gt;</code> to find its prefixes: <code>Region</code>, <code>Region &gt;&gt; Building</code>, and so
+on, up to the full path. It never compares a segment with a NetBox Location name. To use a path as a
+hint, map it, or one of its prefixes, to a NetBox Location of the Site under <strong>Source Locations</strong> in
+the workspace. A path uses the mapping of its longest prefix that has a mapping, so one mapping on
+<code>Region &gt;&gt; Building &gt;&gt; 1st Floor &gt;&gt; DH4</code> covers every rack, Device and port path below that room, and a
+mapping on a longer prefix overrides it. A stale mapping, or one you cannot view, also decides: the
+path then gives no hint and does not use a shorter mapping. A Device in the mapped Location, or in a
+Location below it, then matches the path. A Device in another Location of the Site conflicts with it.
+An unmapped path is not a hint.</p>
+<p>The workspace lists the paths as a tree of prefixes. A chain of prefixes with one child each shows as
+one node. Each node shows one state: its own mapping, the mapping it inherits from a row above
+(marked "inherited"), or unmapped. It also shows the number of paths below it. Select a segment of
+a node to map the prefix that ends at that segment. The Import Profile stores the mapping, and a
+later trace file reuses it for a path or prefix with the same name identity, as defined above. The
+separator spelling is part of the key, so <code>A&gt;&gt;B</code> and <code>A &gt;&gt; B</code> are two paths, and their prefixes <code>A</code>
+are one key. Profile YAML does not include these mappings.</p>
 <p>A Device's Location is its own Location. Only a Device with no Location of its own uses its Rack's
 Location.</p>
 <p>The Location you select on the import page also ranks candidates, after the source hints, and never
