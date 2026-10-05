@@ -680,15 +680,29 @@ Workspace. Rack, Location, and U position can rank candidates and explain the or
 select a Device: the operator must select it. Each placement hint is used only when the actor can
 also view its related Rack or Location.
 
-The source Location is an opaque path, for example `Region >> Building >> 1st Floor >> DH4 >> T`. The
-plugin never splits or interprets it, so it never compares it with a NetBox Location name. Its key is
-the name identity of the source value (section 5.9), used for evidence collection, lookup, the
-digest, and uniqueness; the source text is kept separately for display and beside a saved mapping. An empty key is not a path. Separator
-spelling is part of the key, so `A>>B` and `A >> B` are two paths.
+The source Location is a path, for example `Region >> Building >> 1st Floor >> DH4 >> T`. Source
+tools often extend it down to the Device and port, so one room can carry hundreds of distinct paths.
+The plugin splits the source text only at `>>`, scanning left to right with non-overlapping
+matches, to find the path's prefixes. It never interprets a segment and never compares one with a
+NetBox Location name. A prefix is the source text before one `>>`; the full path is its own last
+prefix. A prefix whose last segment is blank after name identity is not a prefix, so `>>A` has only
+the prefix `>>A`, `A>>>>B` has `A` and `A>>>>B`, and `A>>>B` has `A` and `A>>>B`. The key of a path or
+prefix is the name identity of that source text (section 5.9), used for evidence collection, lookup,
+the digest, and uniqueness; the source text is kept separately for display and beside a saved
+mapping. An empty key is not a path or a prefix. Separator spelling is part of the key, so `A>>B` and
+`A >> B` are two paths, and their prefixes `A` are one key.
 
-The operator can map one source Location path to one NetBox Location in the selected Site. A
-`TraceLocationResolution` row holds that mapping for the Import Profile, and later source documents
-reuse it for the same key. The mapping is optional and never blocks a unit.
+The operator can map one prefix of a batch path, the full path included, to one NetBox Location in
+the selected Site. A `TraceLocationResolution` row holds that mapping for the Import Profile, and
+later source documents reuse it for the same key. The mapping is optional and never blocks a unit.
+
+A path's mapping is decided by the longest of its prefixes that has a stored row, whatever that row's
+state. The path inherits a mapped row. A deeper row overrides a shorter one, so clearing an override
+returns the path to the next shorter row. A stale row or a row the actor cannot view also decides:
+the path acts as unmapped and never falls back past that row to a shorter one. For a row the actor
+cannot view, the workspace discloses only that such a row exists on that prefix, as it does for a
+full path. It never discloses the row's Location, snapshot, mapped or stale state, or an explanation
+derived from it, and a path beneath it shows only that a mapping the actor cannot view decides it.
 
 A Device's placement Location is its own Location when `location_id` is set, and its Rack's Location
 only when the Device has no Location of its own. An own Location the actor cannot view contributes no
@@ -704,6 +718,9 @@ Location evidence compares only through a mapping whose Location the actor can v
   conflict shows the source path, the mapped Location, and the Device's placement Location.
 - An unmapped path, and a Device with no visible placement Location, contribute neither a match nor
   a conflict.
+
+In this section a mapped path is a path whose deciding row (above) is mapped, whether it is the
+path's own row or an inherited one.
 
 One Device label can carry several distinct source Location paths. Each mapped path is evaluated and
 explained. Location adds one score when any mapped path matches; repeated occurrences and unmapped
@@ -1390,8 +1407,8 @@ label the decision was made for, the selected Device ID, and a display snapshot.
 deletion so the operator can replace it. The snapshot is never shown unless the Device is still in
 the actor's view scope. Installation-local Device IDs are not part of portable profile YAML.
 
-`TraceLocationResolution` stores the canonical source Location key, its fixed-width digest, the source
-path the decision was made for, the selected Location ID, and a display snapshot. Like `TraceDeviceResolution`, the plain ID keeps a
+`TraceLocationResolution` stores the canonical source Location key of one path or prefix, its
+fixed-width digest, the source text the decision was made for, the selected Location ID, and a display snapshot. Like `TraceDeviceResolution`, the plain ID keeps a
 stale decision after Location deletion so the operator can replace it, the snapshot is shown only
 while the Location is in the actor's view scope, and the row is not part of portable profile YAML
 (the YAML omits the whole section). It is a registered policy section, so a mapping change changes
@@ -1524,18 +1541,30 @@ without help.
 The searchable picker is scoped to eligible candidates of the admitted models on the resolved Device,
 shows each candidate's model, and shows a visible "N of M eligible" count. The Device, termination,
 and Location pickers share one dialog: each pages through its whole candidate set with Previous and
-Next, and a later page states its range, such as "21–40 of 57 eligible". A write rechecks the offer
-on the page, search, and offset that made it. A resolved termination
+Next, and a later page states its range, such as "21–40 of 57 eligible". A Device or termination
+write rechecks the offer on the page, search, and offset that made it. A Location write rechecks that
+the Location is still visible to the actor and inside the selected Site. A resolved termination
 shows its selected object's own model, not the claimed kind. Each render rechecks view permission on
 every port and every resolved Device a cached plan names: a hidden or deleted port shows neither its
 name nor its model, and a hidden or deleted Device shows no name.
 
-The workspace lists, at batch level and independent of the selected trace, each distinct source
-Location path of the batch with its state: unmapped, mapped (with the Location), or stale. With no
-paths it says "No source Location paths"; with paths but no visible Location in the Site it says so
-separately. One picker serves every path: it searches the visible Locations of the selected Site by
-name identity (section 5.9) and shows a bounded page with an "N of M" count, so the page renders no per-path
-list of Locations.
+The workspace lists the source Location paths of the batch, at batch level and independent of the
+selected trace, as a tree of prefixes. Each node is a prefix key. A prefix key shows the spelling of
+the first batch path, in key order, that carries it, and siblings are ordered by key. A prefix with
+exactly one child prefix, no stored row, and no batch path ending at it is merged with that child
+into one node, starting from each path's first prefix, so a node ends at a branch, at a stored row,
+or at a batch path. Each node shows its own row's state (unmapped, mapped with the Location, stale,
+or a mapping the actor cannot view), the number of distinct batch path keys in its subtree including
+a path that ends at it, and, when it has no own row, the state it inherits. That number counts paths,
+not the paths a new mapping would change. By default the tree shows the top nodes and their
+children; a node with a mapped own row starts collapsed. The operator can expand any node. Every
+segment of a node's text is a control that maps the prefix ending at that segment, so a merged chain
+never hides a mappable prefix. With no paths it says "No source Location paths"; with paths but no
+visible Location in the Site it says so separately. One picker serves every prefix: it searches the
+visible Locations of the selected Site by name identity (section 5.9) and shows a bounded page with
+an "N of M" count, so the page renders no per-prefix list of Locations. A save, clear, or picker read
+accepts only a prefix key of a path the reviewed preview carries. The workspace reads stored rows for
+all prefixes in bulk, so the number of row queries does not grow with the number of prefixes.
 
 A mapping row's state, target, snapshot, and every explanation derived from it need view permission
 on that row. Add, change, and delete are checked separately with object constraints, on the server,
