@@ -2,6 +2,54 @@
 
 <!-- version list -->
 
+## v2.11.0 (2026-10-06)
+
+### Bug Fixes
+
+- Refuse a Location mapping row whose digest names another key
+  ([`b864980`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b864980c5b8090ea01ea1d49fbaac2ec11608258))
+
+- Render the Source Locations tree flat with one state per row
+  ([`eed264e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/eed264e0f77f75b805df4d0e8dfae10ddc5993a8))
+
+### Chores
+
+- **deps**: Bump the github-actions group with 3 updates
+  ([`f70c1f9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f70c1f94ccceb3711f3c6a2d319b3f718f8342d3))
+
+### Documentation
+
+- Describe one effective state per Source Locations tree row
+  ([`74c4ddb`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/74c4ddb1d45b5ce75efe030306c799aa1f09d573))
+
+- Describe source Location prefix mapping in the workspace guide
+  ([`d0b0860`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d0b086064b7464e17795ec8d23f5dee36fa44946))
+
+- Map source Location prefixes with longest-prefix inheritance
+  ([`81bb3c7`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/81bb3c7bbde047c431e75f0a7522617f8eedf39a))
+
+- State that the full source Location path is always its own prefix
+  ([`9ba197e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9ba197e155540a09f509edb5fe290d16842076ee))
+
+### Features
+
+- Map source Location prefixes with longest-prefix inheritance
+  ([`b7afab5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b7afab5490e0805810e5bc88ef384efe4e065d6d))
+
+### Performance Improvements
+
+- Assess a save option against a row the caller already read
+  ([`41ee388`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/41ee388d5ab309c2b4baa91c6d5a661381ec77a4))
+
+- Test requested Location keys against a set
+  ([`e2836e9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e2836e97f017048fdc5f3855d273fe01f34437ac))
+
+### Testing
+
+- Count the object check when a save option uses a loaded row
+  ([`cfe90a4`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/cfe90a41805a9965187e18dca518212f697294f3))
+
+
 ## v2.10.0 (2026-10-03)
 
 ### Bug Fixes
