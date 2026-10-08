@@ -8,6 +8,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from functools import cached_property
 from typing import ClassVar
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -3662,18 +3663,26 @@ def _proposal_entries(workspace, terminations, *, profile, viewer, reader):
     ]
 
 
-def _active_proposal_count(profile, workspace, display):
-    """Return what the summary strip shows for the preview's active proposals."""
+def _active_proposal_count(profile, workspace, display) -> tuple[int | str, int]:
+    """Return what the summary strip shows for the active proposals, and when the database counted them.
+
+    The time is the counting statement's own start, in microseconds, so a later count saw every commit an
+    earlier one saw, and the page can refuse an answer that arrives after a newer one.
+    """
+    from django.db.models import Count, DateTimeField, Func, Max
+    from django.db.models.functions import Coalesce
+
     from .models import ProposalStatus, ResolutionProposal
 
-    if display.view_reason:
-        return "Not permitted"
-    return ResolutionProposal.objects.filter(
+    counted_at = Func(function="statement_timestamp", output_field=DateTimeField())
+    result = ResolutionProposal.objects.filter(
         profile=profile,
         task_type=SELECT_TERMINATION_TASK,
         field_key__in=list(workspace.termination_sources),
         status__in=ProposalStatus.ACTIVE,
-    ).count()
+    ).aggregate(count=Count("pk"), at=Coalesce(Max(counted_at), counted_at))
+    stamp = (result["at"] - datetime.fromtimestamp(0, tz=UTC)) // timedelta(microseconds=1)
+    return ("Not permitted" if display.view_reason else result["count"]), stamp
 
 
 def _termination_cards(terminations, trace, claim):
@@ -3713,6 +3722,7 @@ def _proposal_card(request, snapshot, field_key: str, identity: str):
     display, entries = _proposal_entries(
         workspace, [field], profile=snapshot.profile, viewer=request.user, reader=reader
     )
+    active_proposals, counted_at = _active_proposal_count(snapshot.profile, workspace, display)
     return render(
         request,
         "netbox_data_import/_proposal_card_answer.html",
@@ -3720,7 +3730,8 @@ def _proposal_card(request, snapshot, field_key: str, identity: str):
             "termination": _termination_cards(entries, trace, snapshot.claim)[0],
             "selected_trace": trace,
             "preview_claim": snapshot.claim,
-            "active_proposals": _active_proposal_count(snapshot.profile, workspace, display),
+            "active_proposals": active_proposals,
+            "active_proposals_counted_at": counted_at,
         },
     )
 
@@ -3813,7 +3824,9 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
             if not device.get("selectable") and device.get("state_style") != "manual"
         ]
         attention = _termination_cards(attention, selected, snapshot.claim) if selected else []
-        summary["active_proposals"] = _active_proposal_count(profile, workspace, proposal_display)
+        summary["active_proposals"], summary["active_proposals_counted_at"] = _active_proposal_count(
+            profile, workspace, proposal_display
+        )
         ask_all_reason = (
             proposal_display.request_block_reason
             or retained_reason
@@ -4426,16 +4439,20 @@ INVALID_PROPOSAL_ID_ERROR = "Enter a valid proposal_id integer."
 SESSION_ENDED = "Your session has ended. Reload the page to log in again."
 
 
-class _TraceProposalMixin(_TraceWorkspaceMixin):
-    """Answer every proposal command and read in the workspace JSON envelope."""
-
-    permission_denied_response_format = "json"
+class _SessionEndedRefusal:
+    """Refuse an ended session in the JSON envelope, so htmx never swaps the login page into the workspace."""
 
     def handle_no_permission(self):
-        """Refuse an ended session in the envelope, so htmx never swaps the login page into a card."""
+        """Answer 401 for an anonymous caller, and keep the usual refusal for one who lacks a permission."""
         if not self.request.user.is_authenticated:
             return JsonResponse({"ok": False, "error": SESSION_ENDED}, status=401)
         return super().handle_no_permission()
+
+
+class _TraceProposalMixin(_SessionEndedRefusal, _TraceWorkspaceMixin):
+    """Answer every proposal command and read in the workspace JSON envelope."""
+
+    permission_denied_response_format = "json"
 
     def dispatch(self, request, *args, **kwargs):
         """Translate domain refusals into the workspace JSON envelope."""
@@ -4504,7 +4521,7 @@ class _ProposalRequests:
         from .resolution_proposals import (
             ActiveProposalExists,
             active_proposal_exists,
-            fail_proposal,
+            fail_queued_proposal,
             next_page_offset,
             record_proposal_job,
             request_proposal,
@@ -4569,10 +4586,11 @@ class _ProposalRequests:
             # A failed push stops only the later pushes, so a task that reached the queue keeps its attempt.
             if pushed:
                 return
-            fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)
-            Job.objects.filter(pk=job.pk, status=JobStatusChoices.STATUS_PENDING).update(
-                status=JobStatusChoices.STATUS_ERRORED
-            )
+            # A worker that took the attempt owns it, so only an attempt still queued fails here.
+            if fail_queued_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE):
+                Job.objects.filter(pk=job.pk, status=JobStatusChoices.STATUS_PENDING).update(
+                    status=JobStatusChoices.STATUS_ERRORED
+                )
 
         return compensate
 
@@ -4655,7 +4673,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
         return _proposal_card_after(request, result, field_key)
 
 
-class TraceRequestAllProposalsView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+class TraceRequestAllProposalsView(_SessionEndedRefusal, _TraceWorkspaceMixin, PermissionRequiredMixin, View):
     """Ask AI about every open termination of the preview, and report what it skipped and why."""
 
     permission_required = "netbox_data_import.change_importprofile"

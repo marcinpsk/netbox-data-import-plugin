@@ -147,7 +147,7 @@
         <div class="d-flex flex-wrap gap-4">
           <div>
             <div class="text-secondary small">Active proposals</div>
-            <div class="h2 mb-0" id="ndiActiveProposals">{{ summary.active_proposals }}</div>
+            <div class="h2 mb-0" id="ndiActiveProposals" data-counted-at="{{ summary.active_proposals_counted_at }}">{{ summary.active_proposals }}</div>
           </div>
         </div>
         {# One command for the whole preview; the page then says how many it asked about and what it skipped. #}

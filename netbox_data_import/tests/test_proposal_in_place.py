@@ -51,6 +51,7 @@ BACKEND = {"inference_backend": FALLBACK, "inference_backend_origin_allowlist": 
 
 FIXTURE = pathlib.Path(__file__).parent / "js" / "trace_proposal_fixture.js"
 ACTIVE_COUNT = re.compile(r'<div\b[^>]*id="ndiActiveProposals"[^>]*hx-swap-oob="true"[^>]*>\s*(\S+)\s*</div>')
+COUNTED_AT = re.compile(r'<div\b[^>]*id="ndiActiveProposals"[^>]*data-counted-at="(\d+)"')
 
 
 class _HtmxAttributes(HTMLParser):
@@ -382,6 +383,28 @@ class ProposalInPlaceTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, CableTo
             )
         self.assertFalse(ResolutionProposal.objects.exists())
 
+    def test_each_count_names_when_the_database_counted_it_so_a_late_answer_cannot_win(self):
+        page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        stamps = [int(COUNTED_AT.search(page.content.decode()).group(1))]
+        for key in (self.first, self.second):
+            stamps.append(int(COUNTED_AT.search(self.ask(key).content.decode()).group(1)))
+
+        self.assertEqual(stamps, sorted(stamps))
+        self.assertEqual(len(set(stamps)), 3)
+
+    def test_an_ended_session_answers_ask_ai_for_all_with_a_refusal_not_the_login_page(self):
+        claim = preview_claim(self.client)
+        self.client.logout()
+
+        with override_plugins_config(netbox_data_import=BACKEND):
+            response = self.post("trace_request_all_proposals", claim)
+
+        self.assertEqual(response.status_code, 401, response.content[:300])
+        self.assertEqual(
+            response.json(), {"ok": False, "error": "Your session has ended. Reload the page to log in again."}
+        )
+        self.assertFalse(ResolutionProposal.objects.exists())
+
     def test_the_summary_strip_offers_ask_ai_for_all(self):
         with override_plugins_config(netbox_data_import=BACKEND):
             page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
@@ -455,3 +478,33 @@ class AskAllQueueFailureTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, Cabl
         )
         proposal_jobs = Job.objects.filter(name=ResolutionProposalJob.Meta.name)
         self.assertEqual(proposal_jobs.filter(status=JobStatusChoices.STATUS_PENDING).count(), 1)
+
+    def test_compensation_never_fails_an_attempt_a_worker_already_took(self):
+        """A queue that cannot answer is no proof the task is missing, so only a queued attempt may fail."""
+        from rq.job import Job as RQJob
+
+        def a_worker_takes_it_and_the_push_fails(queue, *args, **kwargs):
+            self.assertTrue(claim_proposal(ResolutionProposal.objects.get(field_key=self.first).pk))
+            raise RedisConnectionError
+
+        with (
+            patch.object(DjangoRQ, "enqueue_call", autospec=True, side_effect=a_worker_takes_it_and_the_push_fails),
+            patch.object(RQJob, "fetch", side_effect=RedisConnectionError),
+        ):
+            response = self.post("trace_request_proposal", field_key=self.first)
+
+        self.assertEqual(response.status_code, 503, response.content[:300])
+        proposal = ResolutionProposal.objects.select_related("job").get(field_key=self.first)
+        self.assertEqual((proposal.status, proposal.failure_reason), (ProposalStatus.RUNNING, ""))
+        self.assertEqual(proposal.job.status, JobStatusChoices.STATUS_PENDING)
+        entry = proposal.candidate_snapshot["candidates"][0]
+        self.assertTrue(
+            complete_proposal(
+                proposal.pk,
+                outcome=ProposalOutcome.CANDIDATE,
+                explanation="The worker's answer still lands.",
+                selected_candidate_id=entry["candidate_id"],
+                selected_object_type=ObjectType.objects.get_for_model(Interface),
+                selected_object_id=entry["object_id"],
+            )
+        )

@@ -50,8 +50,22 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/* htmx dispatches beforeSwap on the target and names the element that sent the request in requestConfig. */
 function swap(elt, target, responseText, responseURL = 'http://preview.test/login/?next=/workspace/') {
-  return emit(elt, 'htmx:beforeSwap', {target, shouldSwap: true, xhr: {status: 200, responseText, responseURL}});
+  const xhr = {status: 200, responseText, responseURL};
+  return emit(target, 'htmx:beforeSwap', {target, shouldSwap: true, xhr, requestConfig: {elt, target}});
+}
+
+/* htmx dispatches oobBeforeSwap on the element the out-of-band copy replaces. */
+function swapCount(count, countedAt) {
+  const fragment = document.createDocumentFragment();
+  const copy = document.createElement('div');
+  copy.id = 'ndiActiveProposals';
+  copy.dataset.countedAt = String(countedAt);
+  copy.textContent = String(count);
+  fragment.appendChild(copy);
+  const target = document.getElementById('ndiActiveProposals');
+  return emit(target, 'htmx:oobBeforeSwap', {target, fragment, shouldSwap: true});
 }
 
 function hide(hidden) {
@@ -220,4 +234,26 @@ it('an action refused because the session ended reads nothing more and stops the
   expect(reads).toEqual([]);
   expect(cardOf('field').hasAttribute('data-proposal-halted')).toBe(true);
   expect(errorOf('field').textContent).toBe('Your session has ended. Reload the page to log in again.');
+});
+
+it('a workspace form whose session ended reloads the page, which then shows the login page', () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', {assign, href: 'http://preview.test/workspace/'});
+  mount();
+
+  refuse(document.querySelector('[data-proposal-ask-all]').form, 401, {ok: false, error: 'Your session has ended.'});
+
+  expect(assign).toHaveBeenCalledWith('http://preview.test/workspace/');
+});
+
+it('an older count that arrives after a newer one does not replace it', () => {
+  mount();
+  document.getElementById('ndiActiveProposals').dataset.countedAt = '100';
+
+  const newer = swapCount(0, 300);
+  document.getElementById('ndiActiveProposals').dataset.countedAt = '300';
+  const older = swapCount(1, 200);
+  const same = swapCount(0, 300);
+
+  expect([newer.detail.shouldSwap, older.detail.shouldSwap, same.detail.shouldSwap]).toEqual([true, false, true]);
 });

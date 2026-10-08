@@ -1,5 +1,5 @@
 {# SPDX-License-Identifier: Apache-2.0 #}
 {# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
-{# A card answer: the card for its own swap, and the summary count htmx swaps out of band. #}
+{# A card answer: the card, and the summary count htmx swaps out of band; the script keeps the newest count. #}
 {% include 'netbox_data_import/_termination_card.html' %}
-<div class="h2 mb-0" id="ndiActiveProposals" hx-swap-oob="true">{{ active_proposals }}</div>
+<div class="h2 mb-0" id="ndiActiveProposals" data-counted-at="{{ active_proposals_counted_at }}" hx-swap-oob="true">{{ active_proposals }}</div>

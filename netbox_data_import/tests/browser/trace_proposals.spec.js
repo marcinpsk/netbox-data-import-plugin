@@ -64,9 +64,9 @@ test('Ask AI on two fields posts one claim twice, shows both busy, and swaps eac
     ['first', '4', 'fixture-token'], ['second', '4', 'fixture-token'],
   ]);
 
-  await held[1].route.fulfill(html(answer('second', 'pending', 1)));
+  await held[1].route.fulfill(html(answer('second', 'pending', 1, 200)));
   await expect(page.locator('#ndiActiveProposals')).toHaveText('1');
-  await held[0].route.fulfill(html(answer('first', 'pending', 2)));
+  await held[0].route.fulfill(html(answer('first', 'pending', 2, 300)));
   await expect(page.locator('#ndiActiveProposals')).toHaveText('2');
 
   for (const field of ['first', 'second']) {
@@ -178,4 +178,32 @@ test('Ask AI for all shows its busy state, then swaps in the workspace that name
   expect(posted).toEqual([expect.objectContaining({preview_revision: '4', trace: 'trace-1'})]);
   expect(await samePage(page)).toBe(true);
   expect(loads()).toBe(1);
+});
+
+test('a card answer that arrives late does not put back an older active proposal count', async ({page}) => {
+  const held = [];
+  await page.route(`${ORIGIN}${ACTION_URLS.cancel}`, route => { held.push(route); });
+  await open(page, [card('first', 'pending'), card('second', 'pending')]);
+
+  await actionOf(page, 'first', 'cancel').click();
+  await actionOf(page, 'second', 'cancel').click();
+  await expect.poll(() => held.length).toBe(2);
+  // The first cancel counted before the second one committed, but its answer is delivered last.
+  await held[1].fulfill(html(answer('second', 'open', 0, 300)));
+  await expect(page.locator('#ndiActiveProposals')).toHaveText('0');
+  await held[0].fulfill(html(answer('first', 'open', 1, 200)));
+
+  await expect(actionOf(page, 'first', 'request')).toBeEnabled();
+  await expect(page.locator('#ndiActiveProposals')).toHaveText('0');
+});
+
+test('a login page answered to Accept opens as a page instead of emptying the workspace', async ({page}) => {
+  await page.route(`${ORIGIN}${ACTION_URLS.accept}`, route =>
+    route.fulfill(html('<!doctype html><html><body><form id="login">Log in</form></body></html>')));
+  await open(page, [card('first', 'completed')]);
+
+  await actionOf(page, 'first', 'accept').click();
+
+  await page.waitForURL(`${ORIGIN}${ACTION_URLS.accept}`);
+  await expect(page.locator('#login')).toHaveText('Log in');
 });

@@ -12,7 +12,8 @@
   var HALTING = [401, 403, 404, 409];
 
   function scopeOf(event) {
-    var source = event.detail.elt;
+    // htmx dispatches a swap event on its target, so the element that sent the request is in requestConfig.
+    var source = event.detail.requestConfig ? event.detail.requestConfig.elt : event.detail.elt;
     return source && source.closest ? source.closest('[data-proposal-field], [data-proposal-batch]') : null;
   }
 
@@ -65,6 +66,12 @@
   });
 
   document.addEventListener('htmx:responseError', function (event) {
+    var scope = scopeOf(event);
+    if (scope && !scope.matches('[data-proposal-field]') && event.detail.xhr.status === 401) {
+      // The workspace has no card to show it in, and a page load leads to the login page.
+      window.location.assign(window.location.href);
+      return;
+    }
     var card = cardOf(event);
     if (!card) return;
     var status = event.detail.xhr.status;
@@ -84,6 +91,14 @@
       window.htmx.ajax('GET', card.dataset.proposalRead, {source: card, target: card, swap: 'outerHTML'})
         .then(function () { show(document.getElementById(card.id) || card, answer.error); });
     }, 0);
+  });
+
+  // Card answers can arrive out of order, so a count the database made earlier never replaces a later one.
+  document.addEventListener('htmx:oobBeforeSwap', function (event) {
+    if (event.detail.target.id !== 'ndiActiveProposals') return;
+    var copy = event.detail.fragment.querySelector ? event.detail.fragment.querySelector('#ndiActiveProposals') : null;
+    if (!copy) return;
+    if (Number(copy.dataset.countedAt) < Number(event.detail.target.dataset.countedAt)) event.detail.shouldSwap = false;
   });
 
   document.addEventListener('htmx:sendError', function (event) {

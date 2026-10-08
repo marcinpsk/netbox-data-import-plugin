@@ -79,13 +79,13 @@ export function card(field, state = 'open', {revision = 4, proposal = 7} = {}) {
 }
 
 /* The workspace content that the page and every swap of #page-content carry: the claim, the strip, the cards. */
-export function workspace(cards, {revision = 4, note = '', active = 0} = {}) {
+export function workspace(cards, {revision = 4, note = '', active = 0, countedAt = 100} = {}) {
   return `
     <div id="page-content">
       <div class="ndi-trace-workspace">
         <form id="ndi-preview-claim" hidden>${claimInputs(revision)}</form>
         <output id="ndi-revision">${revision}</output>
-        <div id="ndiActiveProposals">${active}</div>
+        <div id="ndiActiveProposals" data-counted-at="${countedAt}">${active}</div>
         <p id="ndi-note">${note}</p>
         <form class="ndi-trace-action" method="post" data-proposal-batch action="${ASK_ALL_URL}" hx-post="${ASK_ALL_URL}"
               hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true"
@@ -101,6 +101,7 @@ export function workspace(cards, {revision = 4, note = '', active = 0} = {}) {
 }
 
 /* A card answer as `_proposal_card_answer.html` renders it: the card, and the strip count out of band. */
-export function answer(field, state, active) {
-  return `${card(field, state)}\n<div class="h2 mb-0" id="ndiActiveProposals" hx-swap-oob="true">${active}</div>`;
+export function answer(field, state, active, countedAt) {
+  const count = `<div class="h2 mb-0" id="ndiActiveProposals" data-counted-at="${countedAt}" hx-swap-oob="true">${active}</div>`;
+  return `${card(field, state)}\n${count}`;
 }
