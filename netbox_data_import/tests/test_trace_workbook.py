@@ -18,12 +18,14 @@ from netbox_data_import import trace_workbook
 from netbox_data_import.tests.helpers import (
     TRACE_LIST_HEADER as LIST_HEADER,
     TRACE_PATH_HEADER as PATH_HEADER,
+    power_hub_block,
     trace_endpoint_line as _endpoint_line,
     trace_segment as _segment,
     trace_termination as _termination,
     trace_visit as _visit,
     trace_workbook_bytes as _workbook,
 )
+from netbox_data_import.source_trace import SegmentEvidence
 from netbox_data_import.trace_workbook import parse_endpoint_line
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -760,6 +762,216 @@ class TraceWorkbookTaxonomyTest(SimpleTestCase):
 
         self.assertFalse(batch.rows[0].valid)
         self.assertEqual(_codes(batch), ["trace.non_linear_path"])
+
+    def test_a_hub_shaped_copper_block_stays_non_linear(self):
+        """The power rule reads only a power From line, so a copper fan-out is still not a path."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "NIC")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        endpoint_c = _termination("DEVICE-C", "", "PORT-C", "NIC")
+        hub = _termination("SWITCH-1", "", "01", "Switch Port")
+        block = (
+            _endpoint_line(endpoint_a),
+            _endpoint_line(endpoint_c),
+            (
+                _segment(endpoint_a, "Cable A", hub),
+                _segment(hub, "Cable A", endpoint_b),
+                _segment(hub, "Cable A", endpoint_c),
+            ),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.non_linear_path"])
+        self.assertIn("branch", batch.diagnostics[0].message)
+        self.assertEqual(len(batch.rows[0].segments), 3)
+
+
+SERVER_1_INLET = _termination("SRV-1", "", "PowerIn 01", "Power Input Port")
+SERVER_2_INLET = _termination("SRV-2", "PSU-R", "PowerIn 01", "Power Input Port")
+SERVER_3_INLET = _termination("SRV-3", "", "PowerIn 01", "Power Input Port")
+SWITCH_INLET = _termination("SW-1", "PSU 02", "PowerIn", "Power Input Port")
+PDU_INLET = _termination("PDU-A", "", "PowerIn", "Power Input Port")
+FEED_OUTLET = _termination("FEED-1", "", "L5-30R", "Power Output Port")
+FEED_INLET = _termination("FEED-1", "", "PowerIn", "Power Input Port")
+PANEL_OUTLET = _termination("RPP-1", "RPP-1-L", "CP-1", "Power Output Port")
+
+
+def _pdu_outlet(name):
+    """Return one outlet of the shared PDU."""
+    return _termination("PDU-A", "", name, "Power Output Port")
+
+
+def _pdu_hub_rows(*, skip=()):
+    """Return the other cables on PDU-A that a power block walks, the feed side included."""
+    rows = (
+        (FEED_OUTLET, PDU_INLET),
+        (_pdu_outlet("A1"), SERVER_2_INLET),
+        (_pdu_outlet("A2"), SERVER_3_INLET),
+        (_pdu_outlet("B2"), SWITCH_INLET),
+        (SERVER_1_INLET, _pdu_outlet("A3")),
+        (FEED_INLET, PANEL_OUTLET),
+    )
+    return tuple(row for row in rows if not set(row) & set(skip))
+
+
+class TraceWorkbookPowerTest(SimpleTestCase):
+    """A power block states a PDU fan-out, so it yields only the cable that touches its From inlet."""
+
+    def _block(self, inlet=SERVER_1_INLET, outlet=None):
+        """Return the hub-shaped block of one inlet, with an arbitrary leaf as its To line."""
+        outlet = outlet or _pdu_outlet("A3")
+        return power_hub_block(inlet, outlet, _pdu_hub_rows(skip=(inlet, outlet)), SWITCH_INLET)
+
+    def test_a_power_hub_block_yields_the_one_cable_that_touches_from(self):
+        """The trace joins From and that row's peer, and the hub rows and the To line state nothing."""
+        outlet = _pdu_outlet("A3")
+        block = self._block()
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        (trace,) = batch.rows
+        self.assertTrue(trace.valid, _codes(batch))
+        self.assertEqual(batch.diagnostics, ())
+        from_end = parse_endpoint_line(_endpoint_line(SERVER_1_INLET))
+        peer = parse_endpoint_line(_endpoint_line(outlet))
+        self.assertEqual(trace.identity, trace_workbook.canonical_trace_identity(from_end, peer))
+        (segment,) = trace.segments
+        self.assertEqual(
+            {segment.left.identity_key, segment.right.identity_key}, {from_end.identity_key, peer.identity_key}
+        )
+        self.assertEqual(segment.cable_class, "Power Cable")
+        self.assertEqual(trace.endpoint_summary.to_termination.identity_key, peer.identity_key)
+        self.assertEqual(trace.pass_through_claims, ())
+        self.assertEqual(trace.provenance[0].to_text, _endpoint_line(SWITCH_INLET))
+        stated = SegmentEvidence(left=from_end, cable_class="Power Cable", right=peer)
+        self.assertEqual(trace.content_fingerprint, trace_workbook.content_fingerprint(from_end, peer, (stated,)))
+
+    def test_power_port_classes_claim_their_own_kinds(self):
+        """A power inlet and an outlet never share the interface claim, so an Interface cannot answer."""
+        batch = _interpret(_workbook(path_blocks=(self._block(),)))
+
+        kinds = {
+            end.port: end.identity_key[3] for end in (batch.rows[0].segments[0].left, batch.rows[0].segments[0].right)
+        }
+        self.assertEqual(kinds, {"PowerIn 01": "power_port", "A3": "power_outlet"})
+
+    def test_the_from_row_is_found_wherever_the_block_states_it(self):
+        """The rule selects the row that touches From, in either column, not the first row."""
+        outlet = _pdu_outlet("B3")
+        reversed_row = _segment(outlet, "Fixed Power Cable", SERVER_1_INLET)
+        block = (
+            _endpoint_line(SERVER_1_INLET),
+            _endpoint_line(SWITCH_INLET),
+            (
+                *(_segment(left, "Power Cable", right) for left, right in _pdu_hub_rows(skip=(SERVER_1_INLET,))),
+                reversed_row,
+            ),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        (trace,) = batch.rows
+        self.assertTrue(trace.valid, _codes(batch))
+        self.assertEqual(
+            {(end.device, end.port) for segment in trace.segments for end in (segment.left, segment.right)},
+            {("SRV-1", "PowerIn 01"), ("PDU-A", "B3")},
+        )
+        self.assertEqual(trace.segments[0].cable_class, "Fixed Power Cable")
+
+    def test_a_power_block_with_no_row_at_from_stays_invalid(self):
+        """Without the row that touches From the block names no cable, so it states no trace."""
+        block = (
+            _endpoint_line(SERVER_1_INLET),
+            _endpoint_line(SWITCH_INLET),
+            tuple(_segment(left, "Power Cable", right) for left, right in _pdu_hub_rows(skip=(SERVER_1_INLET,))),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        (trace,) = batch.rows
+        self.assertFalse(trace.valid)
+        self.assertEqual(_codes(batch), ["trace.non_linear_path"])
+        self.assertIn("touches the From termination", batch.diagnostics[0].message)
+        self.assertEqual(trace.segments, ())
+
+    def test_a_power_block_with_two_rows_at_from_stays_invalid(self):
+        """Two cords on one inlet are not one cable, so the rule cannot choose between them."""
+        block = power_hub_block(
+            SERVER_1_INLET,
+            _pdu_outlet("A3"),
+            ((_pdu_outlet("A4"), SERVER_1_INLET),),
+            SWITCH_INLET,
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.non_linear_path"])
+        self.assertIn("touch the From termination", batch.diagnostics[0].message)
+        self.assertEqual(batch.rows[0].segments, ())
+
+    def test_two_power_blocks_on_one_pdu_are_two_independent_traces(self):
+        """Each block keeps its own cord, so the shared hub rows never make a cross-trace claim."""
+        first = self._block(SERVER_1_INLET, _pdu_outlet("A3"))
+        second = self._block(SERVER_2_INLET, _pdu_outlet("A1"))
+
+        batch = _interpret(_workbook(path_blocks=(first, second)))
+
+        self.assertEqual(len(batch.rows), 2)
+        self.assertTrue(all(trace.valid for trace in batch.rows), _codes(batch))
+        self.assertEqual(
+            sorted(
+                tuple(sorted((segment.left.port, segment.right.port)))
+                for trace in batch.rows
+                for segment in trace.segments
+            ),
+            [("A1", "PowerIn 01"), ("A3", "PowerIn 01")],
+        )
+
+    def test_the_paired_trace_list_hub_walk_corroborates_the_from_row(self):
+        """The Trace List repeats the fan-out, which corroborates the cord but adds no visit to the trace."""
+        block = self._block()
+        walk = (SERVER_1_INLET, _pdu_outlet("A3"), _pdu_outlet("A1"), SERVER_2_INLET, _pdu_outlet("A2"), FEED_OUTLET)
+        list_block = (block[0], block[1], tuple(_visit(termination) for termination in walk))
+
+        batch = _interpret(_workbook(path_blocks=(block,), list_blocks=(list_block,), include_list=True))
+
+        (trace,) = batch.rows
+        self.assertTrue(trace.valid, _codes(batch))
+        self.assertEqual(
+            {(visit.device, visit.port) for visit in trace.corroboration}, {("SRV-1", "PowerIn 01"), ("PDU-A", "A3")}
+        )
+        self.assertEqual({item.sheet for item in trace.provenance}, {"Trace From To", "Trace List"})
+
+    def test_a_trace_list_without_the_peer_contradicts_the_power_trace(self):
+        """A non-empty list that never visits the selected outlet does not corroborate the cord."""
+        block = self._block()
+        walk = (SERVER_1_INLET, _pdu_outlet("A1"), SERVER_2_INLET)
+        list_block = (block[0], block[1], tuple(_visit(termination) for termination in walk))
+
+        batch = _interpret(_workbook(path_blocks=(block,), list_blocks=(list_block,), include_list=True))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.corroboration_mismatch"])
+
+    def test_a_power_trace_list_block_alone_states_no_cable(self):
+        """An unpaired list block has no Segment Evidence, so no row can name the peer of From."""
+        walk = (SERVER_1_INLET, _pdu_outlet("A3"), _pdu_outlet("A1"), SERVER_2_INLET)
+        list_block = (
+            _endpoint_line(SERVER_1_INLET),
+            _endpoint_line(SWITCH_INLET),
+            tuple(_visit(item) for item in walk),
+        )
+
+        batch = _interpret(_workbook(list_blocks=(list_block,), include_path=False, include_list=True))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.non_linear_path"])
+        self.assertEqual(
+            {(visit.device, visit.port) for visit in batch.rows[0].corroboration},
+            {("SRV-1", "PowerIn 01")},
+        )
 
 
 class _CountingSheet:

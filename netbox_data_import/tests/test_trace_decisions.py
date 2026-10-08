@@ -109,10 +109,17 @@ class TraceFieldKeyTest(SimpleTestCase):
             "Fiber Pair Front": "front_port",
             "Punch-Down": "rear_port",
             "Fiber Pair Back": "rear_port",
+            "Power Input Port": "power_port",
+            "Power Output Port": "power_outlet",
         }
 
         self.assertEqual(PORT_CLASS_CLAIMED_KINDS, expected)
         self.assertEqual({value: claimed_termination_kind(value) for value in expected}, expected)
+
+    def test_each_power_claim_admits_only_its_own_netbox_model(self):
+        """A power claim never reaches an Interface, so a same-named Interface cannot answer it."""
+        self.assertEqual(field_keys.ADMITTED_TERMINATION_MODELS["power_port"], ("dcim.powerport",))
+        self.assertEqual(field_keys.ADMITTED_TERMINATION_MODELS["power_outlet"], ("dcim.poweroutlet",))
 
     def test_shared_field_keys_import_no_netbox_or_runtime_implementation(self):
         """Both source and target sides can import the shared module without crossing a boundary."""

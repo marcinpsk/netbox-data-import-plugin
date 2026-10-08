@@ -11,16 +11,23 @@ from .identity import identity_text
 INTERFACE_PORT_CLASSES = frozenset({"NIC", "Switch Port", "Port"})
 FRONT_PORT_CLASSES = frozenset({"Position Front", "Fiber Pair Front"})
 REAR_PORT_CLASSES = frozenset({"Punch-Down", "Fiber Pair Back"})
-PORT_CLASSES = INTERFACE_PORT_CLASSES | FRONT_PORT_CLASSES | REAR_PORT_CLASSES
+POWER_PORT_CLASSES = frozenset({"Power Input Port"})
+POWER_OUTLET_CLASSES = frozenset({"Power Output Port"})
+POWER_CLASSES = POWER_PORT_CLASSES | POWER_OUTLET_CLASSES
+PORT_CLASSES = INTERFACE_PORT_CLASSES | FRONT_PORT_CLASSES | REAR_PORT_CLASSES | POWER_CLASSES
 
 INTERFACE_KIND = "interface"
 FRONT_PORT_KIND = "front_port"
 REAR_PORT_KIND = "rear_port"
+POWER_PORT_KIND = "power_port"
+POWER_OUTLET_KIND = "power_outlet"
 
 PORT_CLASS_CLAIMED_KINDS = {
     **dict.fromkeys(INTERFACE_PORT_CLASSES, INTERFACE_KIND),
     **dict.fromkeys(FRONT_PORT_CLASSES, FRONT_PORT_KIND),
     **dict.fromkeys(REAR_PORT_CLASSES, REAR_PORT_KIND),
+    **dict.fromkeys(POWER_PORT_CLASSES, POWER_PORT_KIND),
+    **dict.fromkeys(POWER_OUTLET_CLASSES, POWER_OUTLET_KIND),
 }
 
 FRONT_PORT_MODEL = "dcim.frontport"
@@ -37,6 +44,8 @@ ADMITTED_TERMINATION_MODELS = {
     ),
     FRONT_PORT_KIND: (FRONT_PORT_MODEL,),
     REAR_PORT_KIND: (REAR_PORT_MODEL,),
+    POWER_PORT_KIND: ("dcim.powerport",),
+    POWER_OUTLET_KIND: ("dcim.poweroutlet",),
 }
 CABLE_END_KINDS = frozenset(model for models in ADMITTED_TERMINATION_MODELS.values() for model in models)
 
@@ -119,6 +128,11 @@ __all__ = (
     "MAPPED_PEER_ROLE",
     "PORT_CLASSES",
     "PORT_CLASS_CLAIMED_KINDS",
+    "POWER_CLASSES",
+    "POWER_OUTLET_CLASSES",
+    "POWER_OUTLET_KIND",
+    "POWER_PORT_CLASSES",
+    "POWER_PORT_KIND",
     "REAR_PORT_CLASSES",
     "REAR_PORT_KIND",
     "REAR_PORT_MODEL",
