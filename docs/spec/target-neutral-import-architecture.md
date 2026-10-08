@@ -682,7 +682,8 @@ class gets the same error, because a `Trace List` states no Segment Evidence.
 
 A power block with no segment, for any reason, keeps the From termination and the To line as its
 identity, so it stays one stable unit. It claims only the From termination in the cross-trace
-check, because its To line is not cable evidence.
+check, because its To line is not cable evidence. When duplicate collapse (section 5.4) merges
+occurrences, the trace claims the From termination of every occurrence.
 
 The paired `Trace List` block repeats the fan-out. It corroborates a power trace when it visits both
 terminations of the selected segment, in any order. A non-empty block that misses either one is
