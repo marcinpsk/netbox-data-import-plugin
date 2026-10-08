@@ -680,6 +680,10 @@ When no row, or more than one row, touches the From termination, the block is `t
 and its trace states no segment. An unpaired `Trace List` block whose From termination is a power
 class gets the same error, because a `Trace List` states no Segment Evidence.
 
+A power block with no segment, for any reason, keeps the From termination and the To line as its
+identity, so it stays one stable unit. It claims only the From termination in the cross-trace
+check, because its To line is not cable evidence.
+
 The paired `Trace List` block repeats the fan-out. It corroborates a power trace when it visits both
 terminations of the selected segment, in any order. A non-empty block that misses either one is
 `trace.corroboration_mismatch`. The trace keeps only the visits of its two endpoints, so the other
