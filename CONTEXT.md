@@ -107,6 +107,10 @@ _Avoid_: Panel mapping
 The From and To statement of a Source Trace's two endpoint Termination References without path detail. It corroborates path evidence and is the fallback when no path evidence exists.
 _Avoid_: From/To header
 
+**Power Block**:
+A source block whose From Termination Reference has a power PortClass. The source states it as the fan-out of a power distribution unit, not as a path, so it yields one Segment Evidence entry: the row that touches its From termination. That row's peer, not the To line, is the second endpoint.
+_Avoid_: Power path
+
 **CableClass**:
 The source label for one cable's kind. It maps to Cable Type and Cable Profile only through Import Profile policy.
 

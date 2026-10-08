@@ -71,6 +71,7 @@ from netbox_data_import.tests.helpers import (
     assert_absent_from,
     make_dcim_objects,
     competing_write_during,
+    power_hub_block,
     run_on_separate_connection,
     trace_endpoint_line,
     trace_segment,
@@ -122,6 +123,34 @@ def power_path(from_end=SERVER_PSU, to_end=PDU_OUTLET):
         trace_endpoint_line(from_end),
         trace_endpoint_line(to_end),
         (trace_segment(from_end, "Power", to_end),),
+    )
+
+
+SERVER_1_INLET = trace_termination("SRV-1", "", "PowerIn 01", "Power Input Port")
+SERVER_2_INLET = trace_termination("SRV-2", "", "PowerIn 01", "Power Input Port")
+SERVER_3_INLET = trace_termination("SRV-3", "", "PowerIn 01", "Power Input Port")
+PDU_A_INLET = trace_termination("PDU-A", "", "Power Port 1", "Power Input Port")
+FEED_OUTLET = trace_termination("FEED-1", "", "L5-30R", "Power Output Port")
+
+
+def pdu_a_outlet(name):
+    """Return one outlet of PDU-A as the source names it."""
+    return trace_termination("PDU-A", "", name, "Power Output Port")
+
+
+def power_hub_path(inlet=SERVER_1_INLET, outlet="A3"):
+    """Return one power block that walks the whole PDU-A fan-out, with SRV-3 as its arbitrary To line."""
+    hub = (
+        (FEED_OUTLET, PDU_A_INLET),
+        (SERVER_1_INLET, pdu_a_outlet("A3")),
+        (pdu_a_outlet("A1"), SERVER_2_INLET),
+        (pdu_a_outlet("A2"), SERVER_3_INLET),
+    )
+    return power_hub_block(
+        inlet,
+        pdu_a_outlet(outlet),
+        tuple(row for row in hub if inlet not in row),
+        SERVER_3_INLET,
     )
 
 
@@ -195,6 +224,29 @@ class CableTopologyMixin:
         cls.pdu = cls.make_device("PDU-1")
         cls.psu = PowerPort.objects.create(device=cls.device_a, name="PSU1")
         cls.outlet = PowerOutlet.objects.create(device=cls.pdu, name="OUT1")
+
+    @classmethod
+    def build_power_hub_topology(cls):
+        """Add PDU-A with its inlet and outlets, two servers whose inlets match the source, and one that does not."""
+        CableClassMapping.objects.create(
+            profile=cls.profile,
+            cable_class="Power Cable",
+            cable_type_resolved=True,
+            cable_type="power",
+            cable_profile_resolved=True,
+            cable_profile="single-1c1p",
+        )
+        cls.pdu_a = cls.make_device("PDU-A")
+        PowerPort.objects.create(device=cls.pdu_a, name="Power Port 1")
+        cls.pdu_a_outlets = {
+            name: PowerOutlet.objects.create(device=cls.pdu_a, name=name) for name in ("A1", "A2", "A3", "B1")
+        }
+        cls.server_inlets = {
+            name: PowerPort.objects.create(device=cls.make_device(name), name="PowerIn 01")
+            for name in ("SRV-1", "SRV-2")
+        }
+        cls.server_3 = cls.make_device("SRV-3")
+        cls.server_3_psus = [PowerPort.objects.create(device=cls.server_3, name=name) for name in ("ps1", "ps2")]
 
     @classmethod
     def make_device(cls, name):
@@ -1224,6 +1276,46 @@ class CableEndKindTest(CableTopologyMixin, TestCase):
             (records["PDU-1 OUT1"]["state"], records["PDU-1 OUT1"]["selected_type"]),
             ("automatically resolved", "dcim.poweroutlet"),
         )
+
+    def test_a_power_inlet_class_never_resolves_to_a_same_named_interface(self):
+        """The power_port claim admits only PowerPort, so an Interface named like the inlet cannot answer."""
+        self.build_power_hub_topology()
+        Interface.objects.create(device=self.server_inlets["SRV-1"].device, name="PowerIn 01", type="1000base-t")
+
+        unit = self.unit(power_hub_path())
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+        self.assertEqual(
+            self.termination_pairs(unit.changes[0]),
+            sorted(
+                [
+                    ("dcim.poweroutlet", self.pdu_a_outlets["A3"].pk),
+                    ("dcim.powerport", self.server_inlets["SRV-1"].pk),
+                ]
+            ),
+        )
+        self.assertEqual(unit.changes[0].payload["cable_type"], "power")
+
+    def test_a_power_inlet_netbox_names_otherwise_waits_for_a_power_port_selection(self):
+        """The source says PowerIn 01 and NetBox says ps1, so the operator picks among power ports only."""
+        self.build_power_hub_topology()
+        Interface.objects.create(device=self.server_3, name="eth0", type="1000base-t")
+        inlet = SERVER_3_INLET
+        block = power_hub_block(inlet, pdu_a_outlet("A2"), ((pdu_a_outlet("A1"), SERVER_2_INLET),), SERVER_2_INLET)
+
+        unit = self.unit(block)
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.termination_unresolved", self.codes(unit))
+        field_key = termination_field_key(device="SRV-3", cards="", port="PowerIn 01", kind="power_port")
+        offered = eligible_terminations(field_key, self.reader(), profile=self.profile)
+        self.assertEqual(offered.candidates, tuple(self.server_3_psus))
+
+        self.save_resolution(inlet, self.server_3_psus[0])
+        resolved = self.unit(block)
+
+        self.assertEqual(resolved.disposition, Disposition.ACTIONABLE, self.codes(resolved))
+        self.assertIn(("dcim.powerport", self.server_3_psus[0].pk), self.termination_pairs(resolved.changes[0]))
 
     def test_several_interface_matches_never_fall_through_to_a_power_port(self):
         """Several matches in the first model leave the field open, though a later model holds one."""
@@ -3360,6 +3452,50 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
             sorted([("poweroutlet", self.outlet.pk), ("powerport", self.psu.pk)]),
         )
         self.assertEqual(CableImportSource.objects.get().cable, cable)
+
+    def test_a_power_hub_block_writes_the_one_cord_at_from_and_replans_as_a_no_op(self):
+        """The source walks the PDU fan-out, and the import writes only the inlet's own cord."""
+        self.build_power_hub_topology()
+        plan = self.plan(power_hub_path())
+        (unit,) = plan.units
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+
+        execution = self.execute(plan)
+
+        self.assertEqual(execution.outcome, "succeeded")
+        cable = Cable.objects.get()
+        self.assertEqual((cable.type, cable.profile), ("power", "single-1c1p"))
+        self.assertEqual(
+            sorted((row.termination_type.model, row.termination_id) for row in CableTermination.objects.all()),
+            sorted([("poweroutlet", self.pdu_a_outlets["A3"].pk), ("powerport", self.server_inlets["SRV-1"].pk)]),
+        )
+        source = CableImportSource.objects.get()
+        self.assertEqual((source.cable, source.to_text), (cable, trace_endpoint_line(SERVER_3_INLET)))
+        self.assertEqual(self.plan(power_hub_path()).units[0].disposition, Disposition.NO_OP)
+
+    def test_two_power_blocks_on_one_pdu_write_two_independent_cords(self):
+        """Each block names its own cord, so the shared hub rows never join the two traces."""
+        self.build_power_hub_topology()
+        blocks = (power_hub_path(SERVER_1_INLET, "A3"), power_hub_path(SERVER_2_INLET, "A1"))
+        plan = self.plan(*blocks)
+        self.assertEqual([unit.disposition for unit in plan.units], [Disposition.ACTIONABLE] * 2)
+
+        execution = self.execute(plan)
+
+        self.assertEqual(execution.outcome, "succeeded")
+        self.assertEqual(
+            sorted(
+                tuple(sorted((row.termination_type.model, row.termination_id) for row in cable.terminations.all()))
+                for cable in Cable.objects.all()
+            ),
+            sorted(
+                [
+                    tuple(sorted([("poweroutlet", self.pdu_a_outlets[outlet].pk), ("powerport", inlet.pk)]))
+                    for outlet, inlet in (("A3", self.server_inlets["SRV-1"]), ("A1", self.server_inlets["SRV-2"]))
+                ]
+            ),
+        )
+        self.assertEqual([unit.disposition for unit in self.plan(*blocks).units], [Disposition.NO_OP] * 2)
 
     def test_reverse_import_keeps_creation_and_provenance_positions_canonical(self):
         """Opposite workbook direction preserves each physical segment's plan and stored index."""

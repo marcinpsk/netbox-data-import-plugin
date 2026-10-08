@@ -19,6 +19,7 @@ from .field_keys import (
     FRONT_PORT_CLASSES,
     INTERFACE_PORT_CLASSES,
     PORT_CLASSES,
+    POWER_CLASSES,
     REAR_PORT_CLASSES,
     same_device_and_cards,
 )
@@ -469,6 +470,60 @@ def _linearity_error(
     return None
 
 
+def _power_evidence(
+    block: _Block, summary: EndpointSummary, segments: Sequence[_ParsedSegment]
+) -> tuple[EndpointSummary, tuple[_ParsedSegment, ...], SourceDiagnostic | None]:
+    """Return the one cable a power block names, from its From termination to that row's peer.
+
+    A power block states a PDU fan-out, not a path. Only the row that touches From names a cable of
+    this trace, and its peer replaces the To line, which names an arbitrary leaf of the fan-out.
+    """
+    from_key = summary.from_termination.identity_key
+    touching = []
+    for parsed in segments:
+        evidence = parsed.evidence
+        if evidence.left.identity_key != from_key and evidence.right.identity_key == from_key:
+            evidence = SegmentEvidence(left=evidence.right, cable_class=evidence.cable_class, right=evidence.left)
+        if evidence.left.identity_key == from_key:
+            touching.append(_ParsedSegment(evidence, parsed.row_number))
+    if len(touching) == 1:
+        (selected,) = touching
+        return replace(summary, to_termination=selected.evidence.right), (selected,), None
+    if touching:
+        detail = (
+            f"{len(touching)} Segment Evidence rows touch the From termination, "
+            "so the power block names no single cable."
+        )
+        row_number = touching[1].row_number
+    else:
+        detail = "No Segment Evidence row touches the From termination, so the power block names no cable."
+        row_number = block.row_start
+    return summary, (), _error(block, "trace.non_linear_path", detail, row_number)
+
+
+def _power_corroboration_error(
+    block: _Block, segment: SegmentEvidence, visits: Sequence[_ParsedVisit]
+) -> SourceDiagnostic | None:
+    """Return a contradiction when a non-empty Trace List does not visit both ends of the power cable."""
+    visited = {visit.termination.identity_key for visit in visits}
+    if not visits or {segment.left.identity_key, segment.right.identity_key} <= visited:
+        return None
+    return _error(
+        block,
+        "trace.corroboration_mismatch",
+        "The Trace List does not visit both terminations of the cable at the From termination.",
+        visits[0].row_number,
+    )
+
+
+def _endpoint_visits(
+    summary: EndpointSummary, visits: Iterable[TerminationReference]
+) -> tuple[TerminationReference, ...]:
+    """Return the visits of the two endpoints, which drops the rest of a PDU fan-out."""
+    endpoints = {summary.from_termination.identity_key, summary.to_termination.identity_key}
+    return tuple(visit for visit in visits if visit.identity_key in endpoints)
+
+
 def _pass_through_claims(segments: Sequence[SegmentEvidence]) -> tuple[PassThroughClaim, ...]:
     """Return the continuation each pair of consecutive segments claims."""
     claims = []
@@ -646,24 +701,35 @@ def _path_trace(
         unknown = _unknown_port_class_error(list_block, visit_terms)
     if unknown is not None:
         errors.append(unknown)
-    incomplete = any(error.code == "trace.incomplete_block" for error in errors)
-    linearity = None if incomplete else _linearity_error(path_block, summary, parsed_segments)
+    broken = any(error.code == "trace.incomplete_block" for error in errors)
+    power = summary.from_termination.port_class in POWER_CLASSES
+    if power:
+        summary, parsed_segments, power_error = (
+            (summary, (), None) if broken else _power_evidence(path_block, summary, parsed_segments)
+        )
+        if power_error is not None:
+            errors.append(power_error)
+        broken = broken or power_error is not None
+    linearity = None if broken else _linearity_error(path_block, summary, parsed_segments)
     if linearity is not None:
         errors.append(linearity)
-    if not incomplete and linearity is None:
+    if not broken and linearity is None:
         pass_through = _pass_through_error(path_block, parsed_segments)
         if pass_through is not None:
             errors.append(pass_through)
         if list_block is not None:
-            mismatch = _corroboration_error(
-                list_block,
-                tuple(parsed.evidence for parsed in parsed_segments),
-                parsed_visits,
+            stated = tuple(parsed.evidence for parsed in parsed_segments)
+            mismatch = (
+                _power_corroboration_error(list_block, stated[0], parsed_visits)
+                if power
+                else _corroboration_error(list_block, stated, parsed_visits)
             )
             if mismatch is not None:
                 errors.append(mismatch)
     stated_segments = tuple(parsed.evidence for parsed in parsed_segments)
     visits = tuple(visit.termination for visit in parsed_visits)
+    if power:
+        visits = _endpoint_visits(summary, visits)
     path_corroboration = tuple(
         termination for segment in stated_segments for termination in (segment.left, segment.right)
     )
@@ -711,6 +777,16 @@ def _fallback_trace(block: _Block) -> tuple[SourceTrace | None, tuple[SourceDiag
     if loop is not None:
         errors.append(loop)
     corroboration = tuple(visit.termination for visit in visits)
+    if summary.from_termination.port_class in POWER_CLASSES:
+        errors.append(
+            _error(
+                block,
+                "trace.non_linear_path",
+                "A Trace List block states no Segment Evidence, "
+                "so no row names the cable at the power From termination.",
+            )
+        )
+        corroboration = _endpoint_visits(summary, corroboration)
     summary = _enrich_summary(summary, corroboration)
     return (
         SourceTrace(
@@ -784,7 +860,25 @@ def _location_from_provenance(provenance: TraceProvenance) -> str:
     return f"{provenance.sheet} block {provenance.block_ordinal} (rows {provenance.row_start}-{provenance.row_end})"
 
 
-def _cross_trace_conflicts(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ...]:
+def _claimed_endpoints(trace: SourceTrace) -> tuple[TerminationReference, ...]:
+    """Return the endpoints a trace claims, which leaves out the To leaf of a power block with no cable."""
+    summary = trace.endpoint_summary
+    if summary.from_termination.port_class in POWER_CLASSES and not trace.segments:
+        return (summary.from_termination,)
+    return summary.from_termination, summary.to_termination
+
+
+def _endpoint_claims(occurrences: Iterable[SourceTrace]) -> dict[str, set[IdentityKey]]:
+    """Return the endpoints every occurrence of each identity claims, before collapse keeps one summary."""
+    claims: dict[str, set[IdentityKey]] = defaultdict(set)
+    for occurrence in occurrences:
+        claims[occurrence.identity].update(endpoint.identity_key for endpoint in _claimed_endpoints(occurrence))
+    return claims
+
+
+def _cross_trace_conflicts(
+    traces: Sequence[SourceTrace], endpoint_claims: Mapping[str, set[IdentityKey]]
+) -> tuple[SourceTrace, ...]:
     """Flag every trace that claims a termination another Source Trace claims for another segment."""
     termination_claims: dict[IdentityKey, dict[int, set[_SegmentClaim]]] = defaultdict(lambda: defaultdict(set))
     for index, trace in enumerate(traces):
@@ -795,8 +889,8 @@ def _cross_trace_conflicts(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, 
             segment_pair = ordered_pair[0], ordered_pair[1]
             claims[segment.left.identity_key].add(segment_pair)
             claims[segment.right.identity_key].add(segment_pair)
-        claims.setdefault(trace.endpoint_summary.from_termination.identity_key, set())
-        claims.setdefault(trace.endpoint_summary.to_termination.identity_key, set())
+        for endpoint in endpoint_claims[trace.identity]:
+            claims.setdefault(endpoint, set())
         for termination, trace_claims in claims.items():
             termination_claims[termination][index].update(trace_claims)
     conflicts: dict[int, set[str]] = defaultdict(set)
@@ -868,7 +962,7 @@ def interpret(content: bytes) -> tuple[tuple[SourceTrace, ...], tuple[SourceDiag
         diagnostics.extend(block_diagnostics)
         if trace is not None:
             traces.append(trace)
-    checked = _cross_trace_conflicts(_collapse_duplicates(traces))
+    checked = _cross_trace_conflicts(_collapse_duplicates(traces), _endpoint_claims(traces))
     diagnostics.extend(error for trace in checked for error in trace.errors)
     return checked, tuple(diagnostics)
 
