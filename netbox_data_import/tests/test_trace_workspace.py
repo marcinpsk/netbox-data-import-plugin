@@ -479,6 +479,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
                 [
                     reverse("plugins:netbox_data_import:preview_reread"),
                     reverse("plugins:netbox_data_import:trace_sync"),
+                    reverse("plugins:netbox_data_import:trace_request_all_proposals"),
                     reverse("plugins:netbox_data_import:trace_resolve_device"),
                     reverse("plugins:netbox_data_import:trace_resolve_termination"),
                     # This path states two CableClass values, and each offers its own policy form.

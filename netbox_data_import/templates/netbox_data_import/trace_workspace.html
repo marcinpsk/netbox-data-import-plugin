@@ -23,7 +23,17 @@
   .ndi-proposal-card p { overflow-wrap: anywhere; white-space: pre-wrap; }
   .ndi-trace-actions { display: flex; flex-wrap: wrap; gap: 1rem; }
   .ndi-trace-action { flex: 0 1 auto; max-width: 22rem; min-width: 0; }
-  [data-proposal-action]:disabled { color: var(--tblr-secondary-color); border-color: var(--tblr-border-color); opacity: 1; }
+  /* An enabled action is solid and one disabled for a reason is muted, so the two never look alike.
+     NetBox's dark theme sets the primary button text with !important, so the muted text needs it too. */
+  .ndi-trace-workspace .btn:disabled:not([data-disabled-by-htmx]) {
+    background-color: transparent; border-color: var(--tblr-border-color); border-style: dashed;
+    color: var(--tblr-secondary) !important; box-shadow: none; opacity: 1;
+  }
+  /* A pressed action keeps its colour and shows a spinner; the other actions of its card wait. */
+  .ndi-trace-workspace .btn[data-disabled-by-htmx] { cursor: progress; opacity: .8; }
+  .ndi-busy { display: none; margin-right: .375rem; vertical-align: -.125em; }
+  .htmx-request .ndi-busy { display: inline-block; }
+  .ndi-ask-all { max-width: 14rem; }
   .ndi-trace-status-create { background-color: var(--tblr-success) !important; color: #fff !important; }
   .ndi-trace-status-reuse { background-color: var(--tblr-secondary) !important; color: #fff !important; }
   .ndi-trace-status-conflict { background-color: var(--tblr-danger) !important; color: #fff !important; }
@@ -73,7 +83,7 @@
   .ndi-location-notes { margin-left: 2.5rem; padding-bottom: .25rem; }
 </style>
 
-<div hx-history="false">
+<div class="ndi-trace-workspace" hx-history="false">
 <h1 class="page-title mb-3">Trace Review Workspace</h1>
 {# The page-level claim the proposal cards and pickers post; every form below renders the same one. #}
 <form id="ndi-preview-claim" hidden>{% include "netbox_data_import/inc/preview_claim.html" %}</form>
@@ -99,7 +109,7 @@
     {% include "netbox_data_import/inc/preview_claim.html" %}
     <input type="hidden" name="next" value="{{ reread_next }}">
     <button type="submit" id="traceWorkspaceReread"
-            class="btn {% if drift or retained_sync_reason %}btn-warning{% else %}btn-outline-secondary{% endif %}"
+            class="btn {% if drift or retained_sync_reason %}btn-warning{% else %}btn-secondary{% endif %}"
             {% if sync_running %}disabled title="{{ retained_sync_reason }}"{% endif %}>
       Re-read from NetBox
     </button>
@@ -140,6 +150,20 @@
             <div class="h2 mb-0">{{ summary.active_proposals }}</div>
           </div>
         </div>
+        {# One command for the whole preview; the page then says how many it asked about and what it skipped. #}
+        <form class="ndi-trace-action ndi-ask-all mt-2" method="post"
+              action="{% url 'plugins:netbox_data_import:trace_request_all_proposals' %}"
+              hx-post="{% url 'plugins:netbox_data_import:trace_request_all_proposals' %}"
+              hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true"
+              hx-disabled-elt="find button">
+          {% csrf_token %}
+          {% include "netbox_data_import/inc/preview_claim.html" %}
+          <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
+          <button type="submit" class="btn btn-sm btn-primary" data-proposal-ask-all
+                  title="Ask AI about every open termination of this preview"
+                  {% if ask_all_reason %}disabled aria-describedby="askAllReason"{% endif %}><span class="spinner-border spinner-border-sm ndi-busy" aria-hidden="true"></span>Ask AI for all</button>
+          {% if ask_all_reason %}<div class="ndi-trace-reason mt-1" id="askAllReason">{{ ask_all_reason }}</div>{% endif %}
+        </form>
       </section>
       <section data-trace-summary-group="review">
         <h2 class="h4 mb-2">Review state</h2>
@@ -223,7 +247,7 @@
                       {% include "netbox_data_import/inc/preview_claim.html" %}
                       <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
                       <input type="hidden" name="location_key" value="{{ node.key }}">
-                      <button type="submit" name="clear" value="1" class="btn btn-sm btn-outline-secondary"
+                      <button type="submit" name="clear" value="1" class="btn btn-sm btn-secondary"
                               data-location-mapping-clear {% if node.clear_reason %}disabled aria-describedby="locationReason{{ node.index }}"{% endif %}>Clear</button>
                     </form>
                   {% endif %}
@@ -392,10 +416,10 @@
                       <label class="visually-hidden" for="{{ segment.form.cable_profile.id_for_label }}">
                         Cable Profile for segment {{ segment.position }}</label>
                       {{ segment.form.cable_profile }}
-                      <button type="submit" class="btn btn-sm btn-outline-primary" data-segment-policy-force
+                      <button type="submit" class="btn btn-sm btn-primary" data-segment-policy-force
                               {% if segment.reason %}disabled{% endif %}>Force</button>
                       {% if segment.overridden %}
-                        <button type="submit" name="clear" value="1" class="btn btn-sm btn-outline-secondary"
+                        <button type="submit" name="clear" value="1" class="btn btn-sm btn-secondary"
                                 data-segment-policy-clear {% if segment.clear_reason %}disabled{% endif %}>Clear</button>
                       {% endif %}
                     </form>
@@ -433,7 +457,7 @@
               {% endif %}
               <div class="ndi-trace-actions mt-2">
                 <div class="ndi-trace-action">
-                  <button type="button" class="btn btn-sm btn-outline-secondary"
+                  <button type="button" class="btn btn-sm btn-primary"
                           data-trace-device-picker="{{ device.key }}" {% if not device.action_allowed %}disabled{% endif %}
                           data-trace-device-label="{{ device.label }}"
                           {% if not device.action_allowed %}aria-describedby="deviceReasonAttention{{ forloop.counter }}"{% endif %}>Choose Device</button>
@@ -468,7 +492,7 @@
                     <td><span class="badge ndi-trace-state-{{ device.state_style }}">{{ device.state }}</span></td>
                     <td class="text-end">
                       <div class="ndi-trace-action">
-                        <button type="button" class="btn btn-sm btn-outline-secondary"
+                        <button type="button" class="btn btn-sm btn-secondary"
                                 data-trace-device-picker="{{ device.key }}" {% if not device.action_allowed %}disabled{% endif %}
                                 data-trace-device-label="{{ device.label }}"
                                 {% if not device.action_allowed %}aria-describedby="deviceReasonManual{{ forloop.counter }}"{% endif %}>Change Device</button>
@@ -497,7 +521,7 @@
                       <td><span class="badge ndi-trace-state-{{ device.state_style }}">{{ device.state }}</span></td>
                       <td class="text-end">
                         <div class="ndi-trace-action">
-                          <button type="button" class="btn btn-sm btn-outline-secondary"
+                          <button type="button" class="btn btn-sm btn-secondary"
                                   data-trace-device-picker="{{ device.key }}" {% if not device.action_allowed %}disabled{% endif %}
                                   data-trace-device-label="{{ device.label }}"
                                   {% if not device.action_allowed %}aria-describedby="deviceReasonSettled{{ forloop.counter }}"{% endif %}>Change Device</button>
@@ -519,45 +543,7 @@
         <h3>Terminations</h3>
         <ul class="list-unstyled mb-0">
           {% for termination in attention_terminations %}
-            <li class="card ndi-proposal-card mb-3" data-proposal-field="{{ termination.field_key }}"
-                data-proposal-url="{% url 'plugins:netbox_data_import:trace_proposal' %}">
-              <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
-                <strong>{{ termination.label }}</strong>
-                <span class="badge ndi-trace-state-{{ termination.proposal.state_style }}"
-                      data-proposal-state data-proposal-state-prefix="ndi-trace-state-">{{ termination.proposal.field_state }}</span>
-                {% if termination.resolved_device %}
-                  <span class="text-secondary">NetBox Device: {{ termination.resolved_device }}</span>
-                {% endif %}
-                {% if termination.selected %}
-                  <span class="text-secondary">{{ termination.selected }}{% if termination.selected_model %} ({{ termination.selected_model }}){% endif %}</span>
-                {% endif %}
-              </div>
-              {% with field_number=forloop.counter %}
-                <div data-proposal-content>
-                  {% if termination.proposal.has_proposal %}
-                    {% include 'netbox_data_import/_proposal_card.html' %}
-                  {% endif %}
-                </div>
-                <template data-proposal-template>
-                  {% include 'netbox_data_import/_proposal_card.html' %}
-                </template>
-                <div class="ndi-trace-actions mt-2" data-proposal-field-actions>
-                  <div class="ndi-trace-action">
-                    <button type="button" class="btn btn-sm btn-outline-secondary"
-                            data-trace-picker="{{ termination.field_key }}"
-                            data-trace-label="{{ termination.label }}"
-                            {% if not termination.selectable %}disabled{% endif %}>Choose termination</button>
-                    {% if not termination.selectable %}
-                      <div class="ndi-trace-reason">{{ termination.reason }}</div>
-                    {% endif %}
-                  </div>
-                  {% for action in termination.proposal.actions|slice:":2" %}
-                    {% include 'netbox_data_import/_proposal_action.html' %}
-                  {% endfor %}
-                </div>
-              {% endwith %}
-              <div class="alert alert-danger mt-2 mb-0" role="alert" data-proposal-error hidden></div>
-            </li>
+            {% include 'netbox_data_import/_termination_card.html' %}
           {% empty %}
             {% if trace.resolution_started %}
               <li class="text-secondary">Every termination on this trace resolves to a NetBox port.</li>
@@ -778,7 +764,6 @@
   </div>
 </div>
 
-{{ proposal_fields|json_script:"traceProposalFields" }}
 <script src="{% static 'netbox_data_import/js/preview_claim.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_proposals.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_picker.js' %}?v={{ plugin_version }}"></script>

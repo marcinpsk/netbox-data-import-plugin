@@ -120,7 +120,23 @@ class ProposalPreviewMixin:
     def request_proposal(self):
         response = self.call("request_proposal", field_key=self.field_key)
         self.assertEqual(response.status_code, 200, response.content)
-        return ResolutionProposal.objects.get(pk=response.json()["proposal_id"])
+        return self.proposal_of(response)
+
+    @staticmethod
+    def proposal_of(response):
+        """Return the attempt the card a command answered with shows."""
+        return ResolutionProposal.objects.get(pk=response.context["termination"]["proposal_read"]["proposal"]["id"])
+
+    def read(self, field_key=None):
+        """Return the proposal read of the card the workspace polls for, as the logged-in operator reads it."""
+        response = self.call("proposal", field_key=field_key or self.field_key)
+        self.assertEqual(response.status_code, 200, response.content)
+        return response.context["termination"]["proposal_read"]
+
+    @staticmethod
+    def page_reads(page) -> dict:
+        """Return the proposal read of each termination the workspace page renders, by field key."""
+        return {item["field_key"]: item["proposal_read"] for item in page.context["selected_trace"].terminations}
 
 
 class ProposalQueueFailureTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, CableTopologyMixin, TransactionTestCase):
@@ -264,7 +280,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_request_and_cancel_without_accept_allow_current_preview_claim(self):
         response = self.call("request_proposal", accept=None, field_key=self.field_key)
         self.assertEqual(response.status_code, 200, response.content)
-        proposal = ResolutionProposal.objects.get(pk=response.json()["proposal_id"])
+        proposal = self.proposal_of(response)
         self.assertEqual(proposal.status, ProposalStatus.QUEUED)
         response = self.call("cancel_proposal", accept=None, proposal_id=proposal.pk)
         self.assertEqual(response.status_code, 200, response.content)
@@ -321,9 +337,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
 
     def card(self):
         """Return the card the workspace polls for, as the logged-in operator reads it."""
-        response = self.call("proposal", field_key=self.field_key)
-        self.assertEqual(response.status_code, 200, response.content)
-        return response.json()["presentation"]
+        return self.read()["presentation"]
 
     def test_a_queued_card_reports_where_its_background_job_is(self):
         """A job no worker has taken reads exactly like one that started, which is the whole bug."""
@@ -376,14 +390,19 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         from django.db import connection
 
         resolution_reads = []
+        inserted = []
 
         def rename_after_resolved_device_read(execute, sql, params, many, context):
             """Rename both Devices after the one-name query has read the original row."""
             result = execute(sql, params, many, context)
             device_table = connection.ops.quote_name(Device._meta.db_table)
             query_values = tuple(params or ())
+            # The card the request answers with reads the field again, after the attempt row exists.
+            if sql.startswith(f"INSERT INTO {connection.ops.quote_name(ResolutionProposal._meta.db_table)}"):
+                inserted.append(True)
             if (
-                f"FROM {device_table}" in sql
+                not inserted
+                and f"FROM {device_table}" in sql
                 and "UPPER" in sql
                 and "DEV-A" in query_values
                 and "DEV-B" not in query_values
@@ -718,8 +737,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         cancel_proposal(proposal.pk)
         retry = self.request_proposal()
         self.assertNotEqual(proposal.pk, retry.pk)
-        response = self.call("proposal", field_key=self.field_key)
-        self.assertEqual(response.json()["proposal"]["id"], retry.pk)
+        self.assertEqual(self.read()["proposal"]["id"], retry.pk)
 
     def test_request_refuses_retired_adapter(self):
         ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired-adapter")
@@ -792,24 +810,22 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
             response = self.call("request_proposal", field_key=self.field_key)
 
         self.assertEqual(response.status_code, 200, response.content)
-        stored = ResolutionProposal.objects.get(pk=response.json()["proposal_id"]).candidate_snapshot
+        stored = self.proposal_of(response).candidate_snapshot
         self.assertEqual((stored["total"], stored["page_size"]), (2, 1))
 
     def test_read_computes_candidate_staleness_with_view_only_profile_access(self):
         proposal = self.completed()
         self.operator(view_only=True)
-        response = self.call("proposal", field_key=self.field_key)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["proposal"]["id"], proposal.pk)
+        read = self.read()
+        self.assertEqual(read["proposal"]["id"], proposal.pk)
         self.assertEqual(
-            response.json()["staleness"],
+            read["staleness"],
             {"is_stale": False, "resolved_device_changed": False, "candidates_changed": False},
         )
         self.eth0.name = "changed"
         self.eth0.save()
-        response = self.call("proposal", field_key=self.field_key)
         self.assertEqual(
-            response.json()["staleness"],
+            self.read()["staleness"],
             {"is_stale": True, "resolved_device_changed": False, "candidates_changed": True},
         )
 
@@ -817,30 +833,24 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         self.completed()
         self.device_a.name = "changed"
         self.device_a.save()
-        response = self.call("proposal", field_key=self.field_key)
         self.assertEqual(
-            response.json()["staleness"],
+            self.read()["staleness"],
             {"is_stale": True, "resolved_device_changed": True, "candidates_changed": True},
         )
 
     def test_read_uses_actor_inventory_scope(self):
         proposal = self.completed()
         self.operator(view_only=True, device=False)
-        response = self.call("proposal", field_key=self.field_key)
-        payload = response.json()
+        payload = self.read()
         self.assertTrue(payload["staleness"]["resolved_device_changed"])
         self.assertEqual(payload["proposal"], {"id": proposal.pk})
         self.assertEqual(payload["presentation"]["candidate"], "")
 
     def test_read_without_an_attempt_returns_null(self):
-        response = self.call("proposal", field_key=self.field_key)
+        read = self.read()
         self.assertEqual(
+            {key: read[key] for key in ("proposal", "staleness", "history_display", "history_has_more", "history_url")},
             {
-                key: response.json()[key]
-                for key in ("ok", "proposal", "staleness", "history_display", "history_has_more", "history_url")
-            },
-            {
-                "ok": True,
                 "proposal": None,
                 "staleness": None,
                 "history_display": [],
@@ -919,10 +929,12 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         self.assertNotEqual(actor.pk, proposal.requested_by_id)
         self.assertEqual(self.accepted_field()["state"], UNRESOLVED)
         revision = preview_coordinator(self.client).revision
-        response = self.call("accept_proposal", proposal_id=proposal.pk)
-        self.assertEqual(response.status_code, 200, response.content)
+        response = self.call("accept_proposal", accept=None, proposal_id=proposal.pk)
+        # The card's form swaps the replanned workspace in, so the answer sends the operator back to it.
+        self.assertRedirects(
+            response, reverse("plugins:netbox_data_import:trace_workspace"), fetch_redirect_response=False
+        )
         proposal.refresh_from_db()
-        self.assertNotIn("preview_state", response.json())
         row = TerminationResolution.objects.get(profile=self.profile)
         self.assertEqual(row.selected_object_id, self.eth0.pk)
         self.assertEqual((row.source_device, row.source_cards, row.source_port), ("DEV-A", "", "absent-port"))
@@ -937,7 +949,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         self.assertEqual(self.accepted_field()["selected"], str(self.eth0))
         page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         self.assertFalse(page.context["drift"])
-        self.assertEqual(page.context["proposal_fields"][self.field_key]["presentation"]["field_state"], "accepted")
+        self.assertEqual(self.page_reads(page)[self.field_key]["presentation"]["field_state"], "accepted")
 
     def test_accepting_a_power_port_that_shares_an_interface_id_saves_the_power_port(self):
         """The accept view writes the candidate's own model, never another model with the same numeric id."""
@@ -1182,7 +1194,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
                 response = self.call(action, proposal_id=proposal.pk)
                 self.assertEqual(response.status_code, 404)
                 self.assertEqual(response.json(), {"ok": False, "error": "That proposal is no longer available."})
-        self.assertIsNone(self.call("proposal", field_key=self.field_key).json()["proposal"])
+        self.assertIsNone(self.read()["proposal"])
         self.assert_unwritten(proposal)
 
     def test_proposal_deletion_races_use_the_json_404_envelope(self):
@@ -1392,7 +1404,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         self.assertEqual(TerminationResolution.objects.filter(profile=self.profile).count(), 2)
 
     def test_proposal_survives_replanning_after_its_field_leaves_the_preview(self):
-        """The attempt still reads, and its freshness reads NetBox from the field key alone."""
+        """The attempt survives the replan, and the workspace stops showing a card for its field."""
         proposal = self.completed()
         before = preview_coordinator(self.client).preview_token
         self.client.force_login(self.actor)
@@ -1412,29 +1424,34 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         )
         self.assertEqual(response.status_code, 200)
         self.assertNotEqual(preview_coordinator(self.client).preview_token, before)
+        # No card shows a field the preview no longer asks about; the attempt row and its API history remain.
         response = self.call("proposal", field_key=self.field_key)
-        self.assertEqual(response.json()["proposal"]["id"], proposal.pk)
-        self.assertFalse(response.json()["staleness"]["is_stale"])
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json(), {"ok": False, "error": TERMINATION_UNRESOLVABLE})
+        history = self.client.get(
+            reverse("plugins-api:netbox_data_import-api:resolutionproposalhistory-list"),
+            {"profile_id": self.profile.pk, "field_key": self.field_key},
+        )
+        self.assertEqual([row["id"] for row in history.json()["results"]], [proposal.pk])
 
     def test_profile_view_alone_can_read_when_planning_target_is_not_visible(self):
         proposal = self.completed()
         actor = user_with_object_permission("profile-viewer", [(ImportProfile, ["view"], {"pk": self.profile.pk})])
         self.login_with_preview(actor)
-        response = self.call("proposal", field_key=self.field_key)
-        self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(response.json()["proposal"]["id"], proposal.pk)
-        self.assertIsNone(response.json()["staleness"])
-        self.assertIn("outside your view scope", response.json()["staleness_error"])
+        read = self.read()
+        self.assertEqual(read["proposal"]["id"], proposal.pk)
+        self.assertIsNone(read["staleness"])
+        self.assertIn("outside your view scope", read["staleness_error"])
 
     def presentation(self, field_key=None):
-        return self.call("proposal", field_key=field_key or self.field_key).json()["presentation"]
+        return self.read(field_key)["presentation"]
 
     def test_history_returns_every_attempt_newest_first_with_status_and_outcome(self):
         first = self.completed(no_match=True)
         second = self.request_proposal()
         cancel_proposal(second.pk)
         latest = self.request_proposal()
-        payload = self.call("proposal", field_key=self.field_key).json()
+        payload = self.read()
         self.assertEqual(payload["proposal"]["id"], latest.pk)
         self.assertEqual(
             [(row["id"], row["status"], row["outcome"]) for row in payload["history_display"]],
@@ -1455,7 +1472,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         )
 
         response = self.call("proposal", field_key=self.field_key)
-        payload = response.json()
+        payload = response.context["termination"]["proposal_read"]
 
         expected = list(reversed(attempts[-10:]))
         self.assertEqual([row["id"] for row in payload["history_display"]], expected)
@@ -1477,7 +1494,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
             field_key=termination_field_key(device="DEV-B", cards="", port="absent-port", kind="interface")
         )
         own = self.completed()
-        payload = self.call("proposal", field_key=self.field_key).json()
+        payload = self.read()
         self.assertEqual([row["id"] for row in payload["history_display"]], [own.pk])
         self.operator(view_only=True, profile_scope=other_profile.pk)
         response = self.call("proposal", field_key=self.field_key)
@@ -1488,7 +1505,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         proposal = self.completed()
         actor = user_with_object_permission("history-viewer", [(ImportProfile, ["view"], {"pk": self.profile.pk})])
         self.login_with_preview(actor)
-        payload = self.call("proposal", field_key=self.field_key).json()
+        payload = self.read()
         self.assertEqual([row["id"] for row in payload["history_display"]], [proposal.pk])
         history = self.client.get(payload["history_url"])
         self.assertEqual(history.status_code, 200)
@@ -1509,7 +1526,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
             }
         ):
             response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
-        fields = response.context["proposal_fields"]
+        fields = self.page_reads(response)
         self.assertEqual(fields[self.field_key]["presentation"]["actions"][0]["reason"], "")
         resolved = termination_field_key(device="DEV-B", cards="", port="eth1", kind="interface")
         self.assertIn("already resolved", fields[resolved]["presentation"]["actions"][0]["reason"])
@@ -1586,7 +1603,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
 
         self.assertEqual(preview_coordinator(self.client).revision, before + 1)
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
-        data = response.context["proposal_fields"][self.field_key]["presentation"]
+        data = self.page_reads(response)[self.field_key]["presentation"]
         self.assertEqual(data["field_state"], "accepted")
         self.assertEqual(data["badge"], "Accepted")
         self.assertIn("already resolved", data["actions"][0]["reason"])
@@ -1607,7 +1624,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         ):
             response = self.reread(follow=True)
 
-        data = response.context["proposal_fields"][self.field_key]["presentation"]
+        data = self.page_reads(response)[self.field_key]["presentation"]
         self.assertEqual(data["field_state"], "unresolved")
         self.assertEqual(data["state_style"], "unresolved")
         self.assertEqual(data["badge"], "Accepted resolution no longer applies")
@@ -1686,7 +1703,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         resolved = termination_field_key(device="DEV-B", cards="", port="eth1", kind="interface")
         rendered = response.content.decode()
-        self.assertEqual(response.context["proposal_fields"][resolved]["presentation"]["state_style"], "auto")
+        self.assertEqual(self.page_reads(response)[resolved]["presentation"]["state_style"], "auto")
         self.assertIn('class="badge ndi-trace-state-auto"', rendered)
         self.assertIn('class="badge ndi-trace-state-unresolved"', rendered)
         # A dark-theme override carries the same class name, so each rule is matched at its own line.
@@ -1709,7 +1726,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
             CaptureQueriesContext(connection) as queries,
         ):
             response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
-        fields = response.context["proposal_fields"]
+        fields = self.page_reads(response)
         self.assertGreater(len(fields), 1)
         self.assertEqual(fields[self.field_key]["presentation"]["actions"][0]["reason"], "")
         backend_reads = [query for query in queries if 'FROM "netbox_data_import_inferencebackend"' in query["sql"]]
@@ -1910,24 +1927,35 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         key = termination_field_key(
             device="DEV-A", cards="", port="absent-port", kind="interface", role=MAPPED_PEER_ROLE
         )
-        data = self.presentation(key)
+        from netbox_data_import.cable_target import UNRESOLVED
+        from netbox_data_import.proposal_presentation import ProposalPresentation
+        from netbox_data_import.views import _trace_reader
+
+        reader = _trace_reader(self.actor, self.profile, self.planning_context)
+        display = ProposalPresentation(profile=self.profile, actor=self.actor, reader=reader)
+        data = display.fields([{"field_key": key, "state": UNRESOLVED}])[key]["presentation"]
         self.assertTrue(data["actions"][0]["reason"])
         self.assertIn("mapped peer", data["actions"][1]["reason"])
 
-    def test_history_for_a_field_outside_the_preview_disables_every_command(self):
-        proposal = self.completed()
+    def assert_outside_the_preview(self, proposal, actions):
+        """A field the preview does not ask about has no card, and no command reaches its attempt."""
         other_key = termination_field_key(device="DEV-A", cards="", port="older-port", kind="interface")
         ResolutionProposal.objects.filter(pk=proposal.pk).update(field_key=other_key)
-        payload = self.call("proposal", field_key=other_key).json()
-        self.assertEqual([row["id"] for row in payload["history_display"]], [proposal.pk])
-        self.assertTrue(all(action["reason"] for action in payload["presentation"]["actions"]))
+        before = ResolutionProposal.objects.values().get(pk=proposal.pk)
+        response = self.call("proposal", field_key=other_key)
+        self.assertEqual((response.status_code, response.json()["error"]), (400, TERMINATION_UNRESOLVABLE))
+        for action in actions:
+            with self.subTest(action=action):
+                response = self.call(action, proposal_id=proposal.pk)
+                self.assertEqual((response.status_code, response.json()["error"]), (400, TERMINATION_UNRESOLVABLE))
+        self.assertEqual(ResolutionProposal.objects.values().get(pk=proposal.pk), before)
+        self.assertFalse(TerminationResolution.objects.exists())
+
+    def test_history_for_a_field_outside_the_preview_disables_every_command(self):
+        self.assert_outside_the_preview(self.completed(), ("accept_proposal", "reject_proposal"))
 
     def test_active_history_outside_the_preview_disables_cancel(self):
-        proposal = self.request_proposal()
-        other_key = termination_field_key(device="DEV-A", cards="", port="older-port", kind="interface")
-        ResolutionProposal.objects.filter(pk=proposal.pk).update(field_key=other_key)
-        payload = self.call("proposal", field_key=other_key).json()
-        self.assertTrue(all(action["reason"] for action in payload["presentation"]["actions"]))
+        self.assert_outside_the_preview(self.request_proposal(), ("cancel_proposal",))
 
     def test_workspace_history_requires_profile_view_scope_even_with_preview_access(self):
         from netbox_data_import.tests.test_inference_backend import ALLOWLIST, FALLBACK
@@ -1952,19 +1980,18 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
             }
         ):
             response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
-        payload = response.context["proposal_fields"][self.field_key]
+        payload = self.page_reads(response)[self.field_key]
         self.assertEqual((payload["proposal"], payload["history_display"]), (None, []))
         self.assertIsNone(payload["history_url"])
         self.assertEqual(response.context["summary"]["active_proposals"], "Not permitted")
         self.assertTrue(all(action["reason"] for action in payload["presentation"]["actions"]))
 
     def test_workspace_renders_actions_reasons_and_the_controller_contract(self):
-        import json
         import re
 
         proposal = self.completed(no_match=True)
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
-        html = re.sub(r"<template\b.*?</template>", "", response.content.decode(), flags=re.DOTALL)
+        html = response.content.decode()
         buttons = re.findall(r'<button\b[^>]*data-proposal-action="([^"]+)"([^>]*)>', html)
         self.assertEqual(
             [(key, "disabled" in attributes, "hidden" in attributes) for key, attributes in buttons],
@@ -1975,13 +2002,29 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
                 ("cancel", True, False),
             ],
         )
-        reason = response.context["proposal_fields"][self.field_key]["presentation"]["actions"][2]["reason"]
+        reason = self.page_reads(response)[self.field_key]["presentation"]["actions"][2]["reason"]
         self.assertRegex(
             html, rf'<div\b(?![^>]*\bhidden\b)[^>]*data-proposal-reason="accept"[^>]*>{re.escape(reason)}</div>'
         )
         self.assertRegex(html, r'<script src="[^"]*/trace_proposals.js[^"]*"></script>')
-        script = re.search(r'<script id="traceProposalFields" type="application/json">(.*?)</script>', html)
-        self.assertEqual(json.loads(script.group(1))[self.field_key]["proposal"]["id"], proposal.pk)
+        claim = preview_claim(self.client)
+        forms = re.findall(r'<form\b[^>]*class="ndi-trace-action"[^>]*>.*?</form>', html, re.DOTALL)
+        actions = {
+            re.search(r'data-proposal-action="([^"]+)"', form).group(1): form
+            for form in forms
+            if "data-proposal-action" in form
+        }
+        self.assertEqual(sorted(actions), ["accept", "cancel", "reject", "request"])
+        for key, form in actions.items():
+            with self.subTest(action=key):
+                self.assertIn(f'hx-post="{reverse(f"plugins:netbox_data_import:trace_{key}_proposal")}"', form)
+                self.assertIn(f'name="proposal_id" value="{proposal.pk}"', form)
+                self.assertIn(f'name="preview_revision" value="{claim["preview_revision"]}"', form)
+                self.assertIn("csrfmiddlewaretoken", form)
+                target = 'hx-target="#page-content"' if key == "accept" else 'hx-target="closest [data-proposal-field]"'
+                self.assertIn(target, form)
+        # A settled proposal has nothing to wait for, so its card does not poll.
+        self.assertNotRegex(html, r"<li\b[^>]*data-proposal-field[^>]*hx-trigger=")
 
     def test_a_queued_card_renders_the_background_job_line(self):
         """The operator reads the page, not the JSON, so the first render has to carry the line."""
@@ -1991,7 +2034,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
 
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
-        html = re.sub(r"<template\b.*?</template>", "", response.content.decode(), flags=re.DOTALL)
+        html = response.content.decode()
         line = re.search(r"<div\b(?![^>]*\bhidden\b)[^>]*data-proposal-job[^-][^>]*>([^<]*)</div>", html)
         self.assertIsNotNone(line, html[html.index("data-proposal-field") :][:2000])
         self.assertIn("Background job: Pending", line.group(1))
@@ -2001,7 +2044,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         import re
 
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
-        html = re.sub(r"<template\b.*?</template>", "", response.content.decode(), flags=re.DOTALL)
+        html = response.content.decode()
         field = re.search(r"<li\b[^>]*data-proposal-field=.*?</li>", html, re.DOTALL).group()
         self.assertNotIn('data-proposal-action="accept"', field)
         self.assertNotIn('data-proposal-action="reject"', field)
@@ -2021,7 +2064,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         import re
 
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
-        html = re.sub(r"<template\b.*?</template>", "", response.content.decode(), flags=re.DOTALL)
+        html = response.content.decode()
         settled = re.search(r"<details\b[^>]*data-trace-settled.*?</details>", html, re.DOTALL)
         self.assertIsNotNone(settled)
         group = settled.group()

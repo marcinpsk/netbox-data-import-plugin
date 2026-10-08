@@ -1,210 +1,63 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
 
+/* htmx swaps each termination card in place. A refused proposal command or read answers with the
+ * workspace JSON envelope and not with a card, so this script shows that refusal in its card. */
 (function () {
-  if (window.ndiTraceProposals) {
-    window.ndiTraceProposals.init();
-    return;
+  if (window.ndiTraceProposals) return;
+  window.ndiTraceProposals = true;
+
+  function cardOf(event) {
+    var source = event.detail.elt;
+    return source && source.closest ? source.closest('[data-proposal-field]') : null;
   }
 
-  var cards = new Map();
-
-  // The claim this page holds is spent once a reload starts, so the latch lives on the claim.
-  function reloadStarted() {
-    var claim = document.getElementById('ndi-preview-claim');
-    return Boolean(claim && claim.dataset.ndiReloading === 'true');
+  function show(card, message) {
+    var slot = card.querySelector('[data-proposal-error]');
+    slot.textContent = message;
+    slot.hidden = !message;
   }
 
-  /* A successful action advanced the preview revision, so no card may poll or render again. */
-  function reloadWorkspace() {
-    document.getElementById('ndi-preview-claim').dataset.ndiReloading = 'true';
-    cards.forEach(function (_, card) { stop(card); });
-    window.location.reload();
-  }
-
-  function node(card, name) {
-    return card.querySelector('[data-proposal-' + name + ']');
-  }
-
-  function error(card, message) {
-    var target = node(card, 'error');
-    target.textContent = message;
-    target.hidden = !message;
-  }
-
-  function stop(card) {
-    var state = cards.get(card);
-    if (!state) return;
-    clearTimeout(state.timer);
-    if (state.controller) state.controller.abort();
-    cards.delete(card);
-  }
-
-  function schedule(card) {
-    var state = cards.get(card);
-    clearTimeout(state.timer);
-    if (!card.isConnected || state.halted || !state.payload.presentation.pending) return;
-    state.timer = setTimeout(function () {
-      if (!card.isConnected) { stop(card); return; }
-      refresh(card);
-    }, 3000);
-  }
-
-  function render(card, payload) {
-    var state = cards.get(card);
-    state.payload = payload;
-    var display = payload.presentation;
-    var badge = node(card, 'state');
-    badge.textContent = display.field_state;
-    badge.className = 'badge ' + badge.dataset.proposalStatePrefix + display.state_style;
-    var content = node(card, 'content');
-    if (payload.proposal && !node(card, 'display')) {
-      content.appendChild(node(card, 'template').content.cloneNode(true));
-    } else if (!payload.proposal) {
-      content.replaceChildren();
-    }
-    if (payload.proposal) renderProposal(card, payload);
-    display.actions.forEach(function (action) {
-      var button = card.querySelector('[data-proposal-action="' + action.key + '"]');
-      if (!button) return;
-      button.textContent = action.label;
-      button.disabled = state.busy || Boolean(action.reason);
-      var reason = card.querySelector('[data-proposal-reason="' + action.key + '"]');
-      reason.textContent = action.reason;
-      reason.hidden = !action.reason;
-    });
-    schedule(card);
-  }
-
-  function renderProposal(card, payload) {
-    var display = payload.presentation;
-    ['badge', 'candidate', 'explanation'].forEach(function (name) {
-      node(card, name).textContent = display[name];
-    });
-    node(card, 'progress').hidden = !display.pending;
-    [
-      ['job', display.job_status], ['job-note', display.job_note], ['page', display.page_status],
-    ].forEach(function (slot) {
-      var target = node(card, slot[0]);
-      target.textContent = slot[1];
-      target.hidden = !slot[1];
-    });
-    node(card, 'failure').textContent = display.failure
-      ? display.failure + ' (' + display.failure_code + ')' : '';
-    var history = node(card, 'history');
-    history.replaceChildren();
-    payload.history_display.forEach(function (attempt) {
-      var row = document.createElement('li');
-      row.textContent = '#' + attempt.id + ' · ' + attempt.created + ' · ' + attempt.status + ' · '
-        + attempt.outcome + (attempt.decision ? ' · ' + attempt.decision : '')
-        + (attempt.failure ? ' · ' + attempt.failure : '');
-      history.appendChild(row);
-    });
-    var historyLink = node(card, 'history-link');
-    historyLink.hidden = !payload.history_has_more;
-    if (payload.history_url) historyLink.href = payload.history_url;
-    else historyLink.removeAttribute('href');
-    node(card, 'history-disclosure').hidden = payload.history_display.length === 0;
-  }
-
-  async function readResponse(response) {
-    var payload;
-    try { payload = await response.json(); }
-    catch (_) { throw new Error('The proposal response could not be read. Reload the workspace.'); }
-    if (!response.ok || !payload.ok) {
-      var refusal = new Error(payload.error || 'The proposal request was refused.');
-      refusal.status = response.status;
-      throw refusal;
-    }
-    return payload;
-  }
-
-  async function refresh(card) {
-    var state = cards.get(card);
-    if (!state || !card.isConnected || state.halted || reloadStarted()) return;
-    var generation = ++state.generation;
-    if (state.controller) state.controller.abort();
-    state.controller = new AbortController();
-    var url = new URL(card.dataset.proposalUrl, document.baseURI);
-    url.searchParams.set('field_key', card.dataset.proposalField);
+  function refusal(xhr) {
     try {
-      window.ndiPreviewClaim(url.searchParams);
-      var payload = await fetch(url, {
-        headers: {Accept: 'application/json'}, credentials: 'same-origin', signal: state.controller.signal,
-      }).then(readResponse);
-      if (!card.isConnected || generation !== state.generation || reloadStarted()) return;
-      error(card, "");
-      render(card, payload);
-    } catch (failure) {
-      if (!card.isConnected || generation !== state.generation || failure.name === 'AbortError') return;
-      if (reloadStarted()) return;
-      error(card, failure.message);
+      var payload = JSON.parse(xhr.responseText);
+      if (payload && typeof payload.error === 'string') return payload;
+    } catch (_) {
+      // Not the JSON envelope, for example a NetBox error page; the generic sentence follows.
+    }
+    return {error: 'The proposal request was refused.'};
+  }
+
+  document.addEventListener('htmx:beforeRequest', function (event) {
+    var card = cardOf(event);
+    if (!card) return;
+    if (event.detail.elt !== card) {
+      show(card, '');
+    } else if (card.hasAttribute('data-proposal-halted')) {
       // A refused claim stays refused, so asking again every interval would only repeat the refusal.
-      if (failure.status === 409) {
-        state.halted = true;
-        clearTimeout(state.timer);
-        return;
-      }
-      schedule(card);
+      event.preventDefault();
     }
-  }
-
-  async function act(card, key) {
-    var state = cards.get(card);
-    var action = state.payload.presentation.actions.find(function (item) { return item.key === key; });
-    if (state.busy || !action || action.reason || reloadStarted()) return;
-    state.busy = true;
-    state.generation += 1;
-    clearTimeout(state.timer);
-    if (state.controller) state.controller.abort();
-    state.controller = new AbortController();
-    error(card, '');
-    card.querySelectorAll('[data-proposal-action]').forEach(function (button) { button.disabled = true; });
-    var form = document.getElementById('traceTerminationForm');
-    var data = new FormData();
-    data.set('csrfmiddlewaretoken', form.elements.namedItem('csrfmiddlewaretoken').value);
-    try {
-      window.ndiPreviewClaim(data);
-      data.set('field_key', card.dataset.proposalField);
-      if (state.payload.proposal) data.set('proposal_id', state.payload.proposal.id);
-      await fetch(action.url, {
-        method: 'POST', body: data, headers: {Accept: 'application/json'},
-        credentials: 'same-origin', signal: state.controller.signal,
-      }).then(readResponse);
-      if (!card.isConnected || reloadStarted()) return;
-      reloadWorkspace();
-    } catch (failure) {
-      if (!card.isConnected || failure.name === 'AbortError' || reloadStarted()) return;
-      await refresh(card);
-      if (!card.isConnected || reloadStarted()) return;
-      state.busy = false;
-      render(card, state.payload);
-      error(card, failure.message);
-    }
-  }
-
-  function init() {
-    cards.forEach(function (_, card) { if (!card.isConnected) stop(card); });
-    var source = document.getElementById('traceProposalFields');
-    if (!source) return;
-    var fields = JSON.parse(source.textContent);
-    document.querySelectorAll('[data-proposal-field]').forEach(function (card) {
-      if (cards.has(card)) return;
-      cards.set(card, {generation: 0, busy: false, halted: false, timer: null, controller: null});
-      render(card, fields[card.dataset.proposalField]);
-    });
-  }
-
-  document.addEventListener('click', function (event) {
-    var button = event.target.closest('[data-proposal-action]');
-    if (!button || button.disabled) return;
-    var card = button.closest('[data-proposal-field]');
-    if (cards.has(card)) act(card, button.dataset.proposalAction);
   });
-  document.addEventListener('htmx:load', init);
-  new MutationObserver(function () {
-    cards.forEach(function (_, card) { if (!card.isConnected) stop(card); });
-  }).observe(document.documentElement, {childList: true, subtree: true});
-  window.ndiTraceProposals = {init: init};
-  init();
+
+  document.addEventListener('htmx:responseError', function (event) {
+    var card = cardOf(event);
+    if (!card) return;
+    var answer = refusal(event.detail.xhr);
+    if (event.detail.elt === card || answer.code === 'preview_stale') {
+      if (event.detail.xhr.status === 409) card.setAttribute('data-proposal-halted', '');
+      show(card, answer.error);
+      return;
+    }
+    // The action can lose a race with another operator, so the card first shows what the field holds now.
+    // The refused request still holds its card until this event returns, and htmx would queue the read.
+    setTimeout(function () {
+      window.htmx.ajax('GET', card.dataset.proposalRead, {source: card, target: card, swap: 'outerHTML'})
+        .then(function () { show(document.getElementById(card.id) || card, answer.error); });
+    }, 0);
+  });
+
+  document.addEventListener('htmx:sendError', function (event) {
+    var card = cardOf(event);
+    if (card) show(card, 'The proposal request did not reach NetBox. Try again.');
+  });
 }());

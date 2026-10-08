@@ -68,6 +68,14 @@ no foreign key to a branchable model and stays on main only.
 A stale command receives a real HTTP 409 in every response format: a JSON envelope, a page for a
 form post, and a 409 with a redirect header for an HTMX request.
 
+Amended 2026-10-08: a command that changes no plan does not advance the revision. Requesting,
+cancelling and rejecting a Resolution Proposal, one at a time or for every open termination, write
+only proposal rows, and the plan and every claim on the page stay valid. So the operator can ask about
+several terminations from one page load, and each card updates in place. The proposal lifecycle, not
+the revision, orders two such commands: the partial unique index and the conditional updates refuse a
+second active proposal or a second decision. A command that writes policy or replans, which includes
+proposal acceptance, still advances the revision.
+
 ## Considered options
 
 - A lock around the session helpers: rejected. Response middleware saves the session after the lock
@@ -83,6 +91,7 @@ form post, and a 409 with a redirect header for an HTMX request.
 ## Consequences
 
 Every flat-preview row action now replans in its own transaction, and the page reloads after each
-successful command. The setup, progress and results pages no longer change the preview when they
+successful command that advances the revision. A trace workspace command swaps the page content with
+htmx, which renders every claim on the page again. The setup, progress and results pages no longer change the preview when they
 load. The results page takes the Import Execution in its URL. The `import_*` session keys are gone,
 and a test keeps any new code from reading or writing preview state through the session.
