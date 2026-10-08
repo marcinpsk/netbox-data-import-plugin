@@ -79,14 +79,15 @@ export function card(field, state = 'open', {revision = 4, proposal = 7} = {}) {
 }
 
 /* The workspace content that the page and every swap of #page-content carry: the claim, the strip, the cards. */
-export function workspace(cards, {revision = 4, note = ''} = {}) {
+export function workspace(cards, {revision = 4, note = '', active = 0} = {}) {
   return `
     <div id="page-content">
       <div class="ndi-trace-workspace">
         <form id="ndi-preview-claim" hidden>${claimInputs(revision)}</form>
         <output id="ndi-revision">${revision}</output>
+        <div id="ndiActiveProposals">${active}</div>
         <p id="ndi-note">${note}</p>
-        <form class="ndi-trace-action" method="post" action="${ASK_ALL_URL}" hx-post="${ASK_ALL_URL}"
+        <form class="ndi-trace-action" method="post" data-proposal-batch action="${ASK_ALL_URL}" hx-post="${ASK_ALL_URL}"
               hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true"
               hx-disabled-elt="find button">
           <input type="hidden" name="csrfmiddlewaretoken" value="fixture-token">${claimInputs(revision)}
@@ -97,4 +98,9 @@ export function workspace(cards, {revision = 4, note = ''} = {}) {
         <ul class="list-unstyled">${cards.join('')}</ul>
       </div>
     </div>`;
+}
+
+/* A card answer as `_proposal_card_answer.html` renders it: the card, and the strip count out of band. */
+export function answer(field, state, active) {
+  return `${card(field, state)}\n<div class="h2 mb-0" id="ndiActiveProposals" hx-swap-oob="true">${active}</div>`;
 }

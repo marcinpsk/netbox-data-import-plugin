@@ -3662,6 +3662,20 @@ def _proposal_entries(workspace, terminations, *, profile, viewer, reader):
     ]
 
 
+def _active_proposal_count(profile, workspace, display):
+    """Return what the summary strip shows for the preview's active proposals."""
+    from .models import ProposalStatus, ResolutionProposal
+
+    if display.view_reason:
+        return "Not permitted"
+    return ResolutionProposal.objects.filter(
+        profile=profile,
+        task_type=SELECT_TERMINATION_TASK,
+        field_key__in=list(workspace.termination_sources),
+        status__in=ProposalStatus.ACTIVE,
+    ).count()
+
+
 def _termination_cards(terminations, trace, claim):
     """Add what each termination card renders beyond its proposal: the resolved Device, an id, and its read."""
     resolved = {
@@ -3696,16 +3710,17 @@ def _proposal_card(request, snapshot, field_key: str, identity: str):
         reader = _trace_reader(request.user, snapshot.profile, snapshot.planning_context)
     except PlanningTargetUnavailable:
         reader = None
-    _display, entries = _proposal_entries(
+    display, entries = _proposal_entries(
         workspace, [field], profile=snapshot.profile, viewer=request.user, reader=reader
     )
     return render(
         request,
-        "netbox_data_import/_termination_card.html",
+        "netbox_data_import/_proposal_card_answer.html",
         {
             "termination": _termination_cards(entries, trace, snapshot.claim)[0],
             "selected_trace": trace,
             "preview_claim": snapshot.claim,
+            "active_proposals": _active_proposal_count(snapshot.profile, workspace, display),
         },
     )
 
@@ -3798,17 +3813,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
             if not device.get("selectable") and device.get("state_style") != "manual"
         ]
         attention = _termination_cards(attention, selected, snapshot.claim) if selected else []
-        from .models import ProposalStatus, ResolutionProposal
-
-        if proposal_display.view_reason:
-            summary["active_proposals"] = "Not permitted"
-        else:
-            summary["active_proposals"] = ResolutionProposal.objects.filter(
-                profile=profile,
-                task_type=SELECT_TERMINATION_TASK,
-                field_key__in=list(workspace.termination_sources),
-                status__in=ProposalStatus.ACTIVE,
-            ).count()
+        summary["active_proposals"] = _active_proposal_count(profile, workspace, proposal_display)
         ask_all_reason = (
             proposal_display.request_block_reason
             or retained_reason
@@ -4418,12 +4423,19 @@ class InvalidProposalTarget(Exception):
 
 
 INVALID_PROPOSAL_ID_ERROR = "Enter a valid proposal_id integer."
+SESSION_ENDED = "Your session has ended. Reload the page to log in again."
 
 
 class _TraceProposalMixin(_TraceWorkspaceMixin):
     """Answer every proposal command and read in the workspace JSON envelope."""
 
     permission_denied_response_format = "json"
+
+    def handle_no_permission(self):
+        """Refuse an ended session in the envelope, so htmx never swaps the login page into a card."""
+        if not self.request.user.is_authenticated:
+            return JsonResponse({"ok": False, "error": SESSION_ENDED}, status=401)
+        return super().handle_no_permission()
 
     def dispatch(self, request, *args, **kwargs):
         """Translate domain refusals into the workspace JSON envelope."""
@@ -4484,7 +4496,7 @@ class _ProposalRequests:
 
         from .cable_target import UNRESOLVED
         from .inference_backend import proposal_candidate_limit, proposal_eligible_set_limit
-        from .jobs import ResolutionProposalJob
+        from .jobs import ResolutionProposalJob, import_queue_task
         from .models import ProposalFailureReason
         from .proposal_jobs import PROMPT_VERSION
         from .proposal_response import RESPONSE_SCHEMA_VERSION
@@ -4549,6 +4561,14 @@ class _ProposalRequests:
 
         def compensate():
             # The push runs after commit, so the attempt fails on its own row rather than staying queued.
+            try:
+                pushed = import_queue_task(job) is not None
+            except (RedisConnectionError, RedisTimeoutError):
+                # A queue that cannot answer cannot show the task, so the attempt fails as before.
+                pushed = False
+            # A failed push stops only the later pushes, so a task that reached the queue keeps its attempt.
+            if pushed:
+                return
             fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)
             Job.objects.filter(pk=job.pk, status=JobStatusChoices.STATUS_PENDING).update(
                 status=JobStatusChoices.STATUS_ERRORED

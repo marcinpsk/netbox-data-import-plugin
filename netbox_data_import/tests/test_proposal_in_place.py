@@ -3,21 +3,26 @@
 """Proposal actions update the workspace in place, through real previews and the real coordinator."""
 
 import html
+import pathlib
 import re
+from html.parser import HTMLParser
 import uuid
 from contextlib import nullcontext
 from io import BytesIO
 from unittest.mock import patch
 
-from core.models import ObjectType
+from core.choices import JobStatusChoices
+from core.models import Job, ObjectType
 from dcim.models import Device, Interface, Site
 from django.contrib.messages import get_messages
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
+from django_rq import get_queue
 from django_rq.queues import DjangoRQ
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from netbox_data_import.field_keys import termination_field_key
+from netbox_data_import.jobs import ResolutionProposalJob
 from netbox_data_import.models import (
     ImportProfile,
     PreviewState,
@@ -42,6 +47,29 @@ from netbox_data_import.tests.test_inference_backend import ALLOWLIST, FALLBACK
 
 HTMX = {"HX-Request": "true"}
 BACKEND = {"inference_backend": FALLBACK, "inference_backend_origin_allowlist": ALLOWLIST}
+
+
+FIXTURE = pathlib.Path(__file__).parent / "js" / "trace_proposal_fixture.js"
+ACTIVE_COUNT = re.compile(r'<div\b[^>]*id="ndiActiveProposals"[^>]*hx-swap-oob="true"[^>]*>\s*(\S+)\s*</div>')
+
+
+class _HtmxAttributes(HTMLParser):
+    """Collect the hx-* attributes of every element that carries one, in document order."""
+
+    def __init__(self):
+        super().__init__()
+        self.elements: list[tuple[str, dict]] = []
+
+    def handle_starttag(self, tag, attrs):
+        found = {name: value for name, value in attrs if name.startswith("hx-")}
+        if found:
+            self.elements.append((tag, found))
+
+
+def htmx_attributes(content: str) -> list[tuple[str, dict]]:
+    parser = _HtmxAttributes()
+    parser.feed(content)
+    return parser.elements
 
 
 def field(device, port):
@@ -273,6 +301,87 @@ class ProposalInPlaceTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, CableTo
         self.assertEqual(response.status_code, 403)
         self.assertFalse(ResolutionProposal.objects.exists())
 
+    def active_count(self, response) -> str:
+        """Return the active proposal count a card answer swaps into the summary strip."""
+        counts = ACTIVE_COUNT.findall(response.content.decode())
+        self.assertEqual(len(counts), 1, response.content[-800:])
+        return counts[0]
+
+    def test_each_card_answer_updates_the_active_proposal_count_in_the_strip(self):
+        page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertRegex(page.content.decode(), r'<div\b[^>]*id="ndiActiveProposals"[^>]*>\s*0\s*</div>')
+        self.assertNotIn(
+            "hx-swap-oob", re.search(r'<div\b[^>]*id="ndiActiveProposals"[^>]*>', page.content.decode()).group()
+        )
+
+        counts = [self.active_count(self.ask(key)) for key in (self.first, self.second, self.third)]
+        queued = ResolutionProposal.objects.get(field_key=self.second)
+        cancelled = self.post("trace_cancel_proposal", proposal_id=queued.pk)
+        poll = self.client.get(
+            reverse("plugins:netbox_data_import:trace_proposal"),
+            {**preview_claim(self.client), "field_key": self.first},
+            headers=HTMX,
+        )
+
+        self.assertEqual(counts, ["1", "2", "3"])
+        self.assertEqual(self.active_count(cancelled), "2")
+        self.assertEqual(self.active_count(poll), "2")
+
+    def test_the_card_markup_is_the_htmx_contract_the_browser_fixture_copies(self):
+        """The Playwright fixture copies these attributes, so the real render and the fixture must agree."""
+        self.completed(self.first)
+        response = self.ask(self.second)
+        card_id = re.search(r'<li\b[^>]*\bid="([^"]+)"', response.content.decode()).group(1)
+        disable = f"#{card_id} [data-proposal-action]"
+        card_swap = {
+            "hx-target": "closest [data-proposal-field]",
+            "hx-swap": "outerHTML",
+            "hx-sync": "closest [data-proposal-field]:replace",
+            "hx-disabled-elt": disable,
+        }
+        accept = {
+            "hx-target": "#page-content",
+            "hx-select": "#page-content",
+            "hx-swap": "outerHTML",
+            "hx-push-url": "true",
+            "hx-sync": "closest [data-proposal-field]:replace",
+            "hx-disabled-elt": disable,
+        }
+        read = reverse("plugins:netbox_data_import:trace_proposal")
+        expected = [
+            ("li", {"hx-trigger": "every 3s", "hx-swap": "outerHTML", "hx-sync": "this:abort"}),
+            ("form", {"hx-post": reverse("plugins:netbox_data_import:trace_accept_proposal"), **accept}),
+            ("form", {"hx-post": reverse("plugins:netbox_data_import:trace_reject_proposal"), **card_swap}),
+            ("form", {"hx-post": reverse("plugins:netbox_data_import:trace_request_proposal"), **card_swap}),
+            ("form", {"hx-post": reverse("plugins:netbox_data_import:trace_cancel_proposal"), **card_swap}),
+            ("div", {"hx-swap-oob": "true"}),
+        ]
+        rendered = htmx_attributes(response.content.decode())
+        self.assertTrue(rendered[0][1].pop("hx-get").startswith(f"{read}?"))
+        self.assertEqual(rendered, expected)
+        fixture = FIXTURE.read_text(encoding="utf-8")
+        for _tag, attributes in expected:
+            for name, value in attributes.items():
+                if name not in ("hx-post", "hx-disabled-elt", "hx-swap-oob"):
+                    self.assertIn(f'{name}="{value}"', fixture)
+        self.assertIn('hx-disabled-elt="#${id} [data-proposal-action]"', fixture)
+
+    def test_an_ended_session_answers_the_card_with_a_refusal_not_the_login_page(self):
+        claim = preview_claim(self.client)
+        self.client.logout()
+
+        poll = self.client.get(
+            reverse("plugins:netbox_data_import:trace_proposal"), {**claim, "field_key": self.first}, headers=HTMX
+        )
+        command = self.post("trace_request_proposal", claim, field_key=self.first)
+
+        for response in (poll, command):
+            self.assertEqual(response.status_code, 401, response.content[:300])
+            self.assertEqual(
+                response.json(), {"ok": False, "error": "Your session has ended. Reload the page to log in again."}
+            )
+        self.assertFalse(ResolutionProposal.objects.exists())
+
     def test_the_summary_strip_offers_ask_ai_for_all(self):
         with override_plugins_config(netbox_data_import=BACKEND):
             page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
@@ -313,3 +422,36 @@ class AskAllQueueFailureTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, Cabl
         )
         asked.refresh_from_db()
         self.assertEqual(asked.status, ProposalStatus.QUEUED)
+
+    def test_a_push_after_a_pushed_one_fails_only_the_attempts_no_worker_will_run(self):
+        """The first task reached the queue, so its attempt stays queued; the rest never will."""
+        original = DjangoRQ.enqueue_call
+        pushes = []
+
+        def second_push_fails(queue, *args, **kwargs):
+            pushes.append(kwargs.get("job_id"))
+            if len(pushes) == 1:
+                return original(queue, *args, **kwargs)
+            raise RedisConnectionError
+
+        with (
+            override_plugins_config(netbox_data_import=BACKEND),
+            patch.object(DjangoRQ, "enqueue_call", autospec=True, side_effect=second_push_fails),
+        ):
+            response = self.post("trace_request_all_proposals")
+
+        self.assertEqual(response.status_code, 204, response.content[:500])
+        self.assertEqual(len(pushes), 2)
+        rows = {row.field_key: row for row in ResolutionProposal.objects.select_related("job")}
+        pushed = next(row for row in rows.values() if str(row.job.job_id) == pushes[0])
+        self.assertEqual(pushed.status, ProposalStatus.QUEUED)
+        self.assertEqual(pushed.job.status, JobStatusChoices.STATUS_PENDING)
+        self.assertIsNotNone(get_queue().fetch_job(pushes[0]))
+        others = [row for row in rows.values() if row.pk != pushed.pk]
+        self.assertEqual(len(others), 2)
+        self.assertEqual(
+            {(row.status, row.failure_reason, row.job.status) for row in others},
+            {(ProposalStatus.FAILED, ProposalFailureReason.QUEUE_UNAVAILABLE, JobStatusChoices.STATUS_ERRORED)},
+        )
+        proposal_jobs = Job.objects.filter(name=ResolutionProposalJob.Meta.name)
+        self.assertEqual(proposal_jobs.filter(status=JobStatusChoices.STATUS_PENDING).count(), 1)

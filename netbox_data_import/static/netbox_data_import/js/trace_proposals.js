@@ -2,20 +2,34 @@
 /* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
 
 /* htmx swaps each termination card in place. A refused proposal command or read answers with the
- * workspace JSON envelope and not with a card, so this script shows that refusal in its card. */
+ * workspace JSON envelope and not with a card, so this script shows that refusal in its card. It also
+ * keeps a page that is not a card, such as the login page, out of the cards. */
 (function () {
   if (window.ndiTraceProposals) return;
   window.ndiTraceProposals = true;
 
-  function cardOf(event) {
+  // A read refused with one of these is refused again on the next interval, so the card stops polling.
+  var HALTING = [401, 403, 404, 409];
+
+  function scopeOf(event) {
     var source = event.detail.elt;
-    return source && source.closest ? source.closest('[data-proposal-field]') : null;
+    return source && source.closest ? source.closest('[data-proposal-field], [data-proposal-batch]') : null;
+  }
+
+  function cardOf(event) {
+    var scope = scopeOf(event);
+    return scope && scope.matches('[data-proposal-field]') ? scope : null;
   }
 
   function show(card, message) {
     var slot = card.querySelector('[data-proposal-error]');
     slot.textContent = message;
     slot.hidden = !message;
+  }
+
+  function halt(card, message) {
+    card.setAttribute('data-proposal-halted', '');
+    show(card, message);
   }
 
   function refusal(xhr) {
@@ -33,19 +47,35 @@
     if (!card) return;
     if (event.detail.elt !== card) {
       show(card, '');
-    } else if (card.hasAttribute('data-proposal-halted')) {
-      // A refused claim stays refused, so asking again every interval would only repeat the refusal.
+    } else if (card.hasAttribute('data-proposal-halted') || document.hidden) {
+      // A halted card stays quiet, and a hidden tab asks again on the first interval after it shows.
       event.preventDefault();
     }
+  });
+
+  document.addEventListener('htmx:beforeSwap', function (event) {
+    var scope = scopeOf(event);
+    if (!scope || !event.detail.shouldSwap) return;
+    var expected = event.detail.target.matches('[data-proposal-field]') ? 'data-proposal-field=' : 'id="page-content"';
+    if (event.detail.xhr.responseText.indexOf(expected) !== -1) return;
+    // Another page came back, for example the login page after the session ended, so the browser opens it.
+    event.detail.shouldSwap = false;
+    if (scope.matches('[data-proposal-field]')) halt(scope, 'NetBox answered with another page. Opening it.');
+    window.location.assign(event.detail.xhr.responseURL || window.location.href);
   });
 
   document.addEventListener('htmx:responseError', function (event) {
     var card = cardOf(event);
     if (!card) return;
+    var status = event.detail.xhr.status;
     var answer = refusal(event.detail.xhr);
-    if (event.detail.elt === card || answer.code === 'preview_stale') {
-      if (event.detail.xhr.status === 409) card.setAttribute('data-proposal-halted', '');
-      show(card, answer.error);
+    if (event.detail.elt === card) {
+      if (HALTING.indexOf(status) === -1) show(card, answer.error);
+      else halt(card, answer.error);
+      return;
+    }
+    if (answer.code === 'preview_stale' || status === 401) {
+      halt(card, answer.error);
       return;
     }
     // The action can lose a race with another operator, so the card first shows what the field holds now.

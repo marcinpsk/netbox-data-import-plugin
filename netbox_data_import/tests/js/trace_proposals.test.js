@@ -4,7 +4,7 @@
 /* htmx sends the requests and swaps the cards; the script only reads the refusals htmx reports. These
  * tests dispatch the events htmx dispatches, and a fake htmx.ajax swaps in the card a read returns. */
 import {readFileSync} from 'node:fs';
-import {afterEach, beforeAll, beforeEach, expect, it} from 'vitest';
+import {afterEach, beforeAll, beforeEach, expect, it, vi} from 'vitest';
 import {card, workspace} from './trace_proposal_fixture.js';
 
 const source = readFileSync('netbox_data_import/static/netbox_data_import/js/trace_proposals.js', 'utf8');
@@ -47,7 +47,16 @@ beforeEach(() => {
 afterEach(() => {
   document.body.replaceChildren();
   delete window.htmx;
+  vi.unstubAllGlobals();
 });
+
+function swap(elt, target, responseText, responseURL = 'http://preview.test/login/?next=/workspace/') {
+  return emit(elt, 'htmx:beforeSwap', {target, shouldSwap: true, xhr: {status: 200, responseText, responseURL}});
+}
+
+function hide(hidden) {
+  Object.defineProperty(document, 'hidden', {configurable: true, get: () => hidden});
+}
 
 it('a refused action reads its card again and shows the refusal in the card that replaced it', async () => {
   mount(card('field', 'open'));
@@ -87,10 +96,10 @@ it('a refused poll halts the card, so the next interval asks nothing', () => {
   expect(emit(formOf('field', 'cancel'), 'htmx:beforeRequest').defaultPrevented).toBe(false);
 });
 
-it('a poll refused for another reason says why and keeps polling', () => {
+it('a poll that hit a server error says why and keeps polling', () => {
   mount(card('field', 'pending'));
 
-  refuse(cardOf('field'), 403, '<html>Forbidden</html>');
+  refuse(cardOf('field'), 502, '<html>Bad Gateway</html>');
 
   expect(cardOf('field').hasAttribute('data-proposal-halted')).toBe(false);
   expect(errorOf('field').textContent).toBe('The proposal request was refused.');
@@ -134,4 +143,81 @@ it('a second evaluation adds no second listener', async () => {
   await settled();
 
   expect(reads).toHaveLength(1);
+});
+
+it('a login page is not swapped into a polling card; the browser opens it and the card stops', () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', {assign, href: 'http://preview.test/workspace/'});
+  mount(card('field', 'pending'));
+  const polling = cardOf('field');
+
+  const event = swap(polling, polling, '<!doctype html><html><form action="/login/">Log in</form></html>');
+
+  expect(event.detail.shouldSwap).toBe(false);
+  expect(assign).toHaveBeenCalledWith('http://preview.test/login/?next=/workspace/');
+  expect(polling.hasAttribute('data-proposal-halted')).toBe(true);
+  expect(errorOf('field').textContent).toBe('NetBox answered with another page. Opening it.');
+});
+
+it('a login page is not swapped into the workspace after Accept or Ask AI for all', () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', {assign, href: 'http://preview.test/workspace/'});
+  mount();
+  const content = document.getElementById('page-content');
+
+  for (const form of [formOf('field', 'accept'), document.querySelector('[data-proposal-ask-all]').form]) {
+    expect(swap(form, content, '<html><body>Log in</body></html>').detail.shouldSwap).toBe(false);
+  }
+  expect(assign).toHaveBeenCalledTimes(2);
+});
+
+it('a card and a workspace page swap as htmx answered them', () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', {assign, href: 'http://preview.test/workspace/'});
+  mount(card('field', 'pending'));
+
+  const polled = swap(cardOf('field'), cardOf('field'), card('field', 'completed'));
+  const accepted = swap(formOf('field', 'cancel'), document.getElementById('page-content'), workspace([]));
+
+  expect([polled.detail.shouldSwap, accepted.detail.shouldSwap]).toEqual([true, true]);
+  expect(assign).not.toHaveBeenCalled();
+});
+
+it('a poll refused as missing, forbidden or logged out stops; a server error keeps polling', () => {
+  for (const status of [401, 403, 404, 409]) {
+    mount(card('field', 'pending'));
+    refuse(cardOf('field'), status, {ok: false, error: `Refused ${status}.`});
+    expect(cardOf('field').hasAttribute('data-proposal-halted')).toBe(true);
+    expect(emit(cardOf('field'), 'htmx:beforeRequest').defaultPrevented).toBe(true);
+  }
+  mount(card('field', 'pending'));
+  refuse(cardOf('field'), 500, '<html>Server Error</html>');
+  expect(cardOf('field').hasAttribute('data-proposal-halted')).toBe(false);
+  expect(errorOf('field').textContent).toBe('The proposal request was refused.');
+  expect(emit(cardOf('field'), 'htmx:beforeRequest').defaultPrevented).toBe(false);
+});
+
+it('a hidden tab skips its polls and asks again once it shows', () => {
+  mount(card('field', 'pending'));
+  try {
+    hide(true);
+    expect(emit(cardOf('field'), 'htmx:beforeRequest').defaultPrevented).toBe(true);
+    // An action is the operator's own request, so a hidden tab still sends it.
+    expect(emit(formOf('field', 'cancel'), 'htmx:beforeRequest').defaultPrevented).toBe(false);
+    hide(false);
+    expect(emit(cardOf('field'), 'htmx:beforeRequest').defaultPrevented).toBe(false);
+  } finally {
+    delete document.hidden;
+  }
+});
+
+it('an action refused because the session ended reads nothing more and stops the card', async () => {
+  mount(card('field', 'pending'));
+
+  refuse(formOf('field', 'cancel'), 401, {ok: false, error: 'Your session has ended. Reload the page to log in again.'});
+  await settled();
+
+  expect(reads).toEqual([]);
+  expect(cardOf('field').hasAttribute('data-proposal-halted')).toBe(true);
+  expect(errorOf('field').textContent).toBe('Your session has ended. Reload the page to log in again.');
 });

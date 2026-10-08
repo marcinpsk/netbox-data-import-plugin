@@ -4,7 +4,7 @@
 /* The proposal cards under the htmx release NetBox ships, so each swap, poll and busy state is real. */
 import {expect, test} from '@playwright/test';
 import {readFileSync} from 'node:fs';
-import {ACTION_URLS, ASK_ALL_URL, card, workspace} from '../js/trace_proposal_fixture.js';
+import {ACTION_URLS, ASK_ALL_URL, answer, card, workspace} from '../js/trace_proposal_fixture.js';
 import {postedFields, scriptSource} from './preview_page.js';
 
 const ORIGIN = 'http://preview.test';
@@ -64,8 +64,10 @@ test('Ask AI on two fields posts one claim twice, shows both busy, and swaps eac
     ['first', '4', 'fixture-token'], ['second', '4', 'fixture-token'],
   ]);
 
-  await held[1].route.fulfill(html(card('second', 'pending')));
-  await held[0].route.fulfill(html(card('first', 'pending')));
+  await held[1].route.fulfill(html(answer('second', 'pending', 1)));
+  await expect(page.locator('#ndiActiveProposals')).toHaveText('1');
+  await held[0].route.fulfill(html(answer('first', 'pending', 2)));
+  await expect(page.locator('#ndiActiveProposals')).toHaveText('2');
 
   for (const field of ['first', 'second']) {
     await expect(cardOf(page, field).locator('[data-proposal-progress]')).toHaveText('Waiting for the backend...');

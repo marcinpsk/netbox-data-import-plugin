@@ -169,8 +169,9 @@ page. It also restarts once the last page is reached. A request that failed, was
 still waiting for your decision did not use its page up, so the next request asks that page again.
 
 Ask AI, Cancel and Reject update their termination card in place, so you can ask about several
-terminations without waiting for a page load. A waiting card refreshes itself every 3 seconds. Accept
-writes the resolution and replans the preview, so it refreshes the whole workspace.
+terminations without waiting for a page load. A waiting card refreshes itself every 3 seconds while
+its tab is visible. Accept writes the resolution and replans the preview, so it refreshes the whole
+workspace.
 
 **Ask AI for all**, in the summary strip, asks about every open termination of the preview at once.
 It skips a termination that has an active proposal, no resolved Device, no eligible candidates, or
