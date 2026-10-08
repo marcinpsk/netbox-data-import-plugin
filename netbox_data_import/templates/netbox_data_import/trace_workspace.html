@@ -151,7 +151,7 @@
           </div>
         </div>
         {# One command for the whole preview; the page then says how many it asked about and what it skipped. #}
-        <form class="ndi-trace-action ndi-ask-all mt-2" method="post" data-proposal-batch
+        <form class="ndi-trace-action ndi-ask-all mt-2" method="post"
               action="{% url 'plugins:netbox_data_import:trace_request_all_proposals' %}"
               hx-post="{% url 'plugins:netbox_data_import:trace_request_all_proposals' %}"
               hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true"

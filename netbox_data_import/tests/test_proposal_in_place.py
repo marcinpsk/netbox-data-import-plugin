@@ -82,6 +82,8 @@ class InPlacePreviewMixin:
 
     def setUp(self):
         super().setUp()
+        # Ask AI refuses without an Inference Backend, so each test has one unless it removes it.
+        self.enterContext(override_plugins_config(netbox_data_import=BACKEND))
         self.client.force_login(self.actor)
         self.first = field("DEV-A", "absent-port")
         self.second = field("DEV-B", "absent-b")
@@ -404,6 +406,54 @@ class ProposalInPlaceTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, CableTo
             response.json(), {"ok": False, "error": "Your session has ended. Reload the page to log in again."}
         )
         self.assertFalse(ResolutionProposal.objects.exists())
+
+    def test_an_ended_session_answers_every_workspace_swap_with_a_refusal_not_the_login_page(self):
+        """Each of these forms swaps #page-content, so a login page would empty the workspace."""
+        claim = preview_claim(self.client)
+        self.client.logout()
+
+        for route in (
+            "preview_reread",
+            "trace_cable_policy",
+            "trace_segment_policy",
+            "trace_location_mapping",
+            "trace_resolve_device",
+            "trace_resolve_termination",
+        ):
+            with self.subTest(route=route):
+                response = self.post(route, claim)
+                self.assertEqual(response.status_code, 401, response.content[:300])
+                self.assertEqual(
+                    response.json(),
+                    {"ok": False, "error": "Your session has ended. Reload the page to log in again."},
+                )
+
+    def test_an_ended_session_still_sends_a_plain_form_post_to_the_login_page(self):
+        claim = preview_claim(self.client)
+        self.client.logout()
+
+        response = self.client.post(reverse("plugins:netbox_data_import:preview_reread"), claim)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("login", response["Location"])
+
+    def test_ask_ai_refuses_without_an_inference_backend_as_ask_ai_for_all_does(self):
+        claim = preview_claim(self.client)
+
+        with override_plugins_config(netbox_data_import={}):
+            single = self.post("trace_request_proposal", claim, field_key=self.first)
+            every = self.post("trace_request_all_proposals", claim)
+
+        self.assertEqual(single.status_code, 409, single.content[:300])
+        self.assertEqual(
+            single.json(), {"ok": False, "error": "No Inference Backend is enabled or configured as a fallback."}
+        )
+        self.assertIn(
+            "No Inference Backend is enabled or configured as a fallback.",
+            [str(m) for m in get_messages(every.wsgi_request)],
+        )
+        self.assertFalse(ResolutionProposal.objects.exists())
+        self.assertEqual(preview_claim(self.client), claim)
 
     def test_the_summary_strip_offers_ask_ai_for_all(self):
         with override_plugins_config(netbox_data_import=BACKEND):

@@ -53,6 +53,7 @@ from netbox_data_import.tests.helpers import (
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, PANEL_1_FRONT, direct_path, patched_path
 from netbox_data_import.tests.plugins_config import override_plugins_config
+from netbox_data_import.tests.test_inference_backend import ALLOWLIST, FALLBACK
 
 
 class ProposalErrorEnvelopeTest(SimpleTestCase):
@@ -83,11 +84,16 @@ class ProposalErrorEnvelopeTest(SimpleTestCase):
             ProgrammingFailureView.as_view()(RequestFactory().get("/proposal"))
 
 
+BACKEND = {"inference_backend": FALLBACK, "inference_backend_origin_allowlist": ALLOWLIST}
+
+
 class ProposalPreviewMixin:
     """Open one trace preview with an unresolved termination and drive the proposal endpoints."""
 
     def setUp(self):
         super().setUp()
+        # Ask AI refuses without an Inference Backend, so each test has one unless it removes it.
+        self.enterContext(override_plugins_config(netbox_data_import=BACKEND))
         self.client.force_login(self.actor)
         self.field_key = termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface")
         upload = BytesIO(
@@ -343,7 +349,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         """A job no worker has taken reads exactly like one that started, which is the whole bug."""
         self.operator()
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             self.request_proposal()
 
         card = self.card()
@@ -439,7 +445,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_a_dense_device_is_offered_one_page_and_asked_again_for_the_next(self):
         """120 candidates used to refuse the request outright; they are searched in turns now."""
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             first = self.request_proposal()
             self.assertEqual(first.candidate_snapshot["total"], 3)
             self.assertEqual((first.candidate_snapshot["page_offset"], first.candidate_snapshot["page_size"]), (0, 2))
@@ -453,7 +459,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_the_search_starts_again_once_the_last_page_found_nothing(self):
         """The whole set has been seen, so the next request is a fresh search, not a fourth page."""
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             self.no_match(self.request_proposal())
             self.no_match(self.request_proposal())
 
@@ -464,7 +470,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_a_changed_eligible_set_restarts_the_search(self):
         """A new port renumbers every page, so continuing from the old offset would skip candidates."""
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             self.no_match(self.request_proposal())
             Interface.objects.create(device=self.device_a, name="eth7", type="1000base-t")
 
@@ -476,7 +482,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_a_candidate_answer_does_not_advance_the_page(self):
         """Only a page that found nothing is exhausted; an answered one is waiting for a decision."""
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             proposal = self.request_proposal()
             entry = proposal.candidate_snapshot["candidates"][0]
             self.assertTrue(claim_proposal(proposal.pk))
@@ -498,7 +504,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def assert_unfinished_page_is_asked_again(self, settle):
         """Leave page 1 searched and page 2 unfinished, then require the next request on page 2."""
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             self.no_match(self.request_proposal())
             second = self.request_proposal()
             self.assertEqual(second.candidate_snapshot["page_offset"], 2)
@@ -525,7 +531,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_a_paged_card_names_the_candidates_it_searched(self):
         """A no_match means nothing without the range it searched."""
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             self.no_match(self.request_proposal())
 
         self.assertEqual(self.card()["page_status"], "Searched candidates 1-2 of 3.")
@@ -544,7 +550,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
                 return super().offered_page(proposal)
 
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             self.no_match(self.request_proposal())
             reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
             presentation = CountingPresentation(profile=self.profile, actor=self.actor, reader=reader)
@@ -556,7 +562,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_a_no_match_with_a_next_page_offers_the_next_one(self):
         """Nothing in this page is not nothing on the Device, and the card has to say which."""
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             self.no_match(self.request_proposal())
 
         card = self.card()
@@ -581,7 +587,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_the_next_page_offer_names_one_page_not_the_whole_remainder(self):
         """Five candidates in pages of two leave three, but the next request only sends two."""
         self.dense_device("eth5", "eth6", "eth7", "eth8")
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             self.no_match(self.request_proposal())
 
             card = self.card()
@@ -595,7 +601,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_a_changed_set_advertises_a_restart_and_not_a_continuation(self):
         """The next request restarts on a changed set, so promising a continuation is a lie."""
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             self.no_match(self.request_proposal())
             Interface.objects.create(device=self.device_a, name="eth7", type="1000base-t")
 
@@ -610,7 +616,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_a_replaced_resolved_device_restarts_the_search(self):
         """The same ports moved wholesale, so the candidate set matches while the Device did not."""
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             self.no_match(self.request_proposal())
             old_name = self.device_a.name
             self.device_a.name = "Former DEV-A"
@@ -631,7 +637,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         from netbox_data_import.proposal_decisions import reject_proposal
 
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             proposal = self.request_proposal()
             entry = proposal.candidate_snapshot["candidates"][0]
             self.assertTrue(claim_proposal(proposal.pk))
@@ -654,7 +660,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_a_request_refuses_a_predecessor_it_observed_running(self):
         """The worker can settle between the read and the insert, and page one is searched twice."""
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             first = self.request_proposal()
             self.assertTrue(claim_proposal(first.pk))
             settled = []
@@ -699,7 +705,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_a_candidate_found_on_a_later_page_is_accepted_and_written(self):
         """Paging is worthless if the answer it finds cannot be applied."""
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             self.no_match(self.request_proposal())
             second = self.request_proposal()
             self.assertEqual(second.candidate_snapshot["page_offset"], 2)
@@ -713,7 +719,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_a_change_outside_the_offered_page_still_refuses_acceptance(self):
         """The whole set is the evidence, so a candidate the prompt never saw still ages it."""
         self.dense_device()
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 2}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 2}):
             proposal = self.request_proposal()
             self.answer_with(proposal, 0)
         outside = Interface.objects.get(device=self.device_a, name="eth6")
@@ -806,7 +812,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         """This is the refusal operators hit on dense equipment; it is a page now, not an error."""
         Interface.objects.create(device=self.device_a, name="extra", type="1000base-t")
 
-        with override_plugins_config(netbox_data_import={"inference_proposal_candidate_limit": 1}):
+        with override_plugins_config(netbox_data_import={**BACKEND, "inference_proposal_candidate_limit": 1}):
             response = self.call("request_proposal", field_key=self.field_key)
 
         self.assertEqual(response.status_code, 200, response.content)
@@ -1998,7 +2004,8 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
             [
                 ("accept", True, False),
                 ("reject", False, False),
-                ("request", True, False),
+                # A no_match over the whole set may be asked again while a backend is configured.
+                ("request", False, False),
                 ("cancel", True, False),
             ],
         )
@@ -2043,7 +2050,8 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
     def test_no_proposal_has_only_field_actions_and_no_history(self):
         import re
 
-        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        with override_plugins_config(netbox_data_import={}):
+            response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         html = response.content.decode()
         field = re.search(r"<li\b[^>]*data-proposal-field=.*?</li>", html, re.DOTALL).group()
         self.assertNotIn('data-proposal-action="accept"', field)

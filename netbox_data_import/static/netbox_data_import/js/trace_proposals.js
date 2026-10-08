@@ -3,7 +3,7 @@
 
 /* htmx swaps each termination card in place. A refused proposal command or read answers with the
  * workspace JSON envelope and not with a card, so this script shows that refusal in its card. It also
- * keeps a page that is not a card, such as the login page, out of the cards. */
+ * keeps a page that is not a card or a workspace, such as the login page, out of every workspace swap. */
 (function () {
   if (window.ndiTraceProposals) return;
   window.ndiTraceProposals = true;
@@ -11,15 +11,14 @@
   // A read refused with one of these is refused again on the next interval, so the card stops polling.
   var HALTING = [401, 403, 404, 409];
 
-  function scopeOf(event) {
+  function closestTo(event, selector) {
     // htmx dispatches a swap event on its target, so the element that sent the request is in requestConfig.
     var source = event.detail.requestConfig ? event.detail.requestConfig.elt : event.detail.elt;
-    return source && source.closest ? source.closest('[data-proposal-field], [data-proposal-batch]') : null;
+    return source && source.closest ? source.closest(selector) : null;
   }
 
   function cardOf(event) {
-    var scope = scopeOf(event);
-    return scope && scope.matches('[data-proposal-field]') ? scope : null;
+    return closestTo(event, '[data-proposal-field]');
   }
 
   function show(card, message) {
@@ -55,24 +54,24 @@
   });
 
   document.addEventListener('htmx:beforeSwap', function (event) {
-    var scope = scopeOf(event);
-    if (!scope || !event.detail.shouldSwap) return;
-    var expected = event.detail.target.matches('[data-proposal-field]') ? 'data-proposal-field=' : 'id="page-content"';
-    if (event.detail.xhr.responseText.indexOf(expected) !== -1) return;
+    var target = event.detail.target;
+    if (!event.detail.shouldSwap || !closestTo(event, '.ndi-trace-workspace')) return;
+    var card = target.matches('[data-proposal-field]') ? target : null;
+    if (!card && target.id !== 'page-content') return;
+    if (event.detail.xhr.responseText.indexOf(card ? 'data-proposal-field=' : 'id="page-content"') !== -1) return;
     // Another page came back, for example the login page after the session ended, so the browser opens it.
     event.detail.shouldSwap = false;
-    if (scope.matches('[data-proposal-field]')) halt(scope, 'NetBox answered with another page. Opening it.');
+    if (card) halt(card, 'NetBox answered with another page. Opening it.');
     window.location.assign(event.detail.xhr.responseURL || window.location.href);
   });
 
   document.addEventListener('htmx:responseError', function (event) {
-    var scope = scopeOf(event);
-    if (scope && !scope.matches('[data-proposal-field]') && event.detail.xhr.status === 401) {
-      // The workspace has no card to show it in, and a page load leads to the login page.
+    var card = cardOf(event);
+    if (!card && event.detail.xhr.status === 401 && closestTo(event, '.ndi-trace-workspace')) {
+      // A workspace form has no card to show it in, and a page load leads to the login page.
       window.location.assign(window.location.href);
       return;
     }
-    var card = cardOf(event);
     if (!card) return;
     var status = event.detail.xhr.status;
     var answer = refusal(event.detail.xhr);

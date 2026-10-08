@@ -4,7 +4,7 @@
 /* The proposal cards under the htmx release NetBox ships, so each swap, poll and busy state is real. */
 import {expect, test} from '@playwright/test';
 import {readFileSync} from 'node:fs';
-import {ACTION_URLS, ASK_ALL_URL, answer, card, workspace} from '../js/trace_proposal_fixture.js';
+import {ACTION_URLS, ASK_ALL_URL, CABLE_POLICY_URL, answer, card, workspace} from '../js/trace_proposal_fixture.js';
 import {postedFields, scriptSource} from './preview_page.js';
 
 const ORIGIN = 'http://preview.test';
@@ -205,5 +205,16 @@ test('a login page answered to Accept opens as a page instead of emptying the wo
   await actionOf(page, 'first', 'accept').click();
 
   await page.waitForURL(`${ORIGIN}${ACTION_URLS.accept}`);
+  await expect(page.locator('#login')).toHaveText('Log in');
+});
+
+test('a login page answered to a Cable policy save opens as a page instead of emptying the workspace', async ({page}) => {
+  await page.route(`${ORIGIN}${CABLE_POLICY_URL}`, route =>
+    route.fulfill(html('<!doctype html><html><body><form id="login">Log in</form></body></html>')));
+  await open(page, [card('first')]);
+
+  await page.locator('[data-cable-policy-save]').click();
+
+  await page.waitForURL(`${ORIGIN}${CABLE_POLICY_URL}`);
   await expect(page.locator('#login')).toHaveText('Log in');
 });

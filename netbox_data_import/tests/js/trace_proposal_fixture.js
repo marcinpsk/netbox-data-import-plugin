@@ -11,6 +11,7 @@ export const ACTION_URLS = {
   reject: '/plugins/data-import/trace-workspace/proposals/reject/',
 };
 export const ASK_ALL_URL = '/plugins/data-import/trace-workspace/proposals/request-all/';
+export const CABLE_POLICY_URL = '/plugins/data-import/trace-workspace/cable-policy/';
 
 export function claimFields(revision = 4) {
   return [
@@ -87,13 +88,18 @@ export function workspace(cards, {revision = 4, note = '', active = 0, countedAt
         <output id="ndi-revision">${revision}</output>
         <div id="ndiActiveProposals" data-counted-at="${countedAt}">${active}</div>
         <p id="ndi-note">${note}</p>
-        <form class="ndi-trace-action" method="post" data-proposal-batch action="${ASK_ALL_URL}" hx-post="${ASK_ALL_URL}"
+        <form class="ndi-trace-action" method="post" action="${ASK_ALL_URL}" hx-post="${ASK_ALL_URL}"
               hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true"
               hx-disabled-elt="find button">
           <input type="hidden" name="csrfmiddlewaretoken" value="fixture-token">${claimInputs(revision)}
           <input type="hidden" name="trace" value="trace-1">
           <button type="submit" class="btn btn-primary" data-proposal-ask-all><span
             class="spinner-border spinner-border-sm ndi-busy" aria-hidden="true"></span>Ask AI for all</button>
+        </form>
+        <form method="post" action="${CABLE_POLICY_URL}" hx-post="${CABLE_POLICY_URL}"
+              hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
+          <input type="hidden" name="csrfmiddlewaretoken" value="fixture-token">${claimInputs(revision)}
+          <button type="submit" class="btn btn-sm btn-primary" data-cable-policy-save>Save</button>
         </form>
         <ul class="list-unstyled">${cards.join('')}</ul>
       </div>

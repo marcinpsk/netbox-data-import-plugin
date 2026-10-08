@@ -1615,7 +1615,22 @@ class ImportRunView(_PreviewCommandMixin, PermissionRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": result.outcome.job_id}))
 
 
-class PreviewRereadView(_PreviewCommandMixin, PermissionRequiredMixin, View):
+SESSION_ENDED = "Your session has ended. Reload the page to log in again."
+
+
+class _SessionEndedRefusal:
+    """Refuse an ended session in the JSON envelope, so htmx never swaps the login page into the workspace."""
+
+    def handle_no_permission(self):
+        """Answer an anonymous script or htmx caller with 401; a plain form post still goes to the login page."""
+        if not self.request.user.is_authenticated and (
+            self.request.headers.get("HX-Request") == "true" or _wants_json(self.request)
+        ):
+            return JsonResponse({"ok": False, "error": SESSION_ENDED}, status=401)
+        return super().handle_no_permission()
+
+
+class PreviewRereadView(_SessionEndedRefusal, _PreviewCommandMixin, PermissionRequiredMixin, View):
     """Re-read the preview from its stored source against live NetBox, which also recovers a plan of an older schema."""
 
     permission_required = "netbox_data_import.change_importprofile"
@@ -3617,7 +3632,7 @@ def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]
     return unique
 
 
-class _TraceWorkspaceMixin(_PreviewCommandMixin):
+class _TraceWorkspaceMixin(_SessionEndedRefusal, _PreviewCommandMixin):
     """A trace workspace command: a refusal goes back to the trace it came from."""
 
     def refusal_url(self, request):
@@ -4436,20 +4451,9 @@ class InvalidProposalTarget(Exception):
 
 
 INVALID_PROPOSAL_ID_ERROR = "Enter a valid proposal_id integer."
-SESSION_ENDED = "Your session has ended. Reload the page to log in again."
 
 
-class _SessionEndedRefusal:
-    """Refuse an ended session in the JSON envelope, so htmx never swaps the login page into the workspace."""
-
-    def handle_no_permission(self):
-        """Answer 401 for an anonymous caller, and keep the usual refusal for one who lacks a permission."""
-        if not self.request.user.is_authenticated:
-            return JsonResponse({"ok": False, "error": SESSION_ENDED}, status=401)
-        return super().handle_no_permission()
-
-
-class _TraceProposalMixin(_SessionEndedRefusal, _TraceWorkspaceMixin):
+class _TraceProposalMixin(_TraceWorkspaceMixin):
     """Answer every proposal command and read in the workspace JSON envelope."""
 
     permission_denied_response_format = "json"
@@ -4479,6 +4483,14 @@ class _TraceProposalMixin(_SessionEndedRefusal, _TraceWorkspaceMixin):
 
 
 PROPOSAL_QUEUE_UNAVAILABLE = "The proposal queue is unavailable. Try again later."
+
+
+def _refuse_without_backend() -> None:
+    """Refuse a proposal request that no Inference Backend can answer, before any attempt row exists."""
+    from .proposal_presentation import backend_unavailable_reason
+
+    if reason := backend_unavailable_reason():
+        raise PreviewCommandRefused(reason, 409)
 
 
 class _ProposalRequests:
@@ -4607,6 +4619,7 @@ class _RequestProposal(PreviewCommand):
 
     def apply(self, preview):
         """Queue one proposal for the field."""
+        _refuse_without_backend()
         compensate = _ProposalRequests(preview).queue(self.field_key)
         return CommandOutcome(payload={"field_key": self.field_key}, compensate=compensate)
 
@@ -4623,13 +4636,11 @@ class _RequestAllProposals(PreviewCommand):
         """Ask about each open termination once, and count each refusal by its reason instead of stopping."""
         from .cable_target import UNRESOLVED
         from .field_keys import TERMINATION_ROLE
-        from .proposal_presentation import backend_unavailable_reason
         from .proposal_tasks import UnusableCandidateSet
         from .resolution_proposals import ActiveProposalExists
         from .termination_proposal import InvalidProposalCandidate, UnsupportedProposalRole
 
-        if reason := backend_unavailable_reason():
-            raise PreviewCommandRefused(reason, 409)
+        _refuse_without_backend()
         fields = dict.fromkeys(
             item["field_key"]
             for trace in preview.workspace.traces
@@ -4673,7 +4684,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
         return _proposal_card_after(request, result, field_key)
 
 
-class TraceRequestAllProposalsView(_SessionEndedRefusal, _TraceWorkspaceMixin, PermissionRequiredMixin, View):
+class TraceRequestAllProposalsView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     """Ask AI about every open termination of the preview, and report what it skipped and why."""
 
     permission_required = "netbox_data_import.change_importprofile"

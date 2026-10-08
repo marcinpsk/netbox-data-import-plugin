@@ -257,3 +257,31 @@ it('an older count that arrives after a newer one does not replace it', () => {
 
   expect([newer.detail.shouldSwap, older.detail.shouldSwap, same.detail.shouldSwap]).toEqual([true, false, true]);
 });
+
+it('any workspace form that swaps the page refuses a login page and opens it', () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', {assign, href: 'http://preview.test/workspace/'});
+  mount();
+  const save = document.querySelector('[data-cable-policy-save]').form;
+
+  const login = swap(save, document.getElementById('page-content'), '<html><body>Log in</body></html>');
+  const page = swap(save, document.getElementById('page-content'), workspace([]));
+
+  expect([login.detail.shouldSwap, page.detail.shouldSwap]).toEqual([false, true]);
+  expect(assign).toHaveBeenCalledTimes(1);
+});
+
+it('any workspace form whose session ended loads the page again, and a page outside the workspace is left alone', () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', {assign, href: 'http://preview.test/workspace/'});
+  mount();
+  const outside = document.createElement('form');
+  document.body.appendChild(outside);
+
+  refuse(document.querySelector('[data-cable-policy-save]').form, 401, {ok: false, error: 'Your session has ended.'});
+  refuse(outside, 401, {ok: false, error: 'Your session has ended.'});
+  swap(outside, outside, '<html>Log in</html>');
+
+  expect(assign).toHaveBeenCalledTimes(1);
+  expect(assign).toHaveBeenCalledWith('http://preview.test/workspace/');
+});

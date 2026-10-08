@@ -176,7 +176,8 @@ workspace.
 **Ask AI for all**, in the summary strip, asks about every open termination of the preview at once.
 It skips a termination that has an active proposal, no resolved Device, no eligible candidates, or
 source spellings that disagree, and it reports how many it asked about and why it skipped the rest.
-No setting limits how many it asks about: each request is one background job, and the RQ workers
+Ask AI and **Ask AI for all** both refuse when no Inference Backend is enabled or configured as a
+fallback. No setting limits how many it asks about: each request is one background job, and the RQ workers
 run them in turn.
 
 A Device with more than 1024 eligible ports of one kind is refused. That ceiling bounds the stored
