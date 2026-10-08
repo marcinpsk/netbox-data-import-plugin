@@ -973,6 +973,63 @@ class TraceWorkbookPowerTest(SimpleTestCase):
             {("SRV-1", "PowerIn 01")},
         )
 
+    def test_an_invalid_power_block_never_claims_its_to_leaf(self):
+        """The To line names an arbitrary leaf, so a broken block cannot take that inlet from its own cord."""
+        hub_rows = (_segment(_pdu_outlet("A1"), "Power Cable", SERVER_3_INLET),)
+        unreadable = _segment(_pdu_outlet("B1"), "", SERVER_3_INLET)
+        broken_blocks = {
+            "no row at From": (_endpoint_line(SERVER_1_INLET), _endpoint_line(SERVER_2_INLET), hub_rows),
+            "unreadable row": (
+                _endpoint_line(SERVER_1_INLET),
+                _endpoint_line(SERVER_2_INLET),
+                (_segment(SERVER_1_INLET, "Power Cable", _pdu_outlet("A3")), unreadable),
+            ),
+        }
+        valid = self._block(SERVER_2_INLET, _pdu_outlet("A2"))
+
+        for label, broken in broken_blocks.items():
+            with self.subTest(label):
+                batch = _interpret(_workbook(path_blocks=(broken, valid)))
+
+                by_from = {trace.endpoint_summary.from_termination.device: trace for trace in batch.rows}
+                self.assertTrue(by_from["SRV-2"].valid, [error.code for error in by_from["SRV-2"].errors])
+                self.assertFalse(by_from["SRV-1"].valid)
+                self.assertNotIn("trace.cross_trace_conflict", _codes(batch))
+
+    def test_a_block_that_starts_at_a_pdu_outlet_is_a_power_block(self):
+        """An outlet From names the same cord as the inlet From, so both blocks collapse into one trace."""
+        outlet = _pdu_outlet("A3")
+        from_outlet = power_hub_block(outlet, SERVER_1_INLET, _pdu_hub_rows(skip=(SERVER_1_INLET,)), SWITCH_INLET)
+
+        batch = _interpret(_workbook(path_blocks=(from_outlet, self._block())))
+
+        (trace,) = batch.rows
+        self.assertTrue(trace.valid, _codes(batch))
+        self.assertEqual(len(trace.segments), 1)
+        self.assertEqual(len(trace.provenance), 2)
+        self.assertEqual(trace.endpoint_summary.from_termination.port_class, "Power Output Port")
+
+    def test_a_trace_list_without_the_from_visit_contradicts_the_power_trace(self):
+        """Corroboration needs both ends, so a list that skips the From inlet does not corroborate."""
+        block = self._block()
+        walk = (_pdu_outlet("A3"), _pdu_outlet("A1"), SERVER_2_INLET)
+        list_block = (block[0], block[1], tuple(_visit(termination) for termination in walk))
+
+        batch = _interpret(_workbook(path_blocks=(block,), list_blocks=(list_block,), include_list=True))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.corroboration_mismatch"])
+
+    def test_a_trace_list_corroborates_in_any_order(self):
+        """The list walks the fan-out in its own order, so the two ends can come late and reversed."""
+        block = self._block()
+        walk = (_pdu_outlet("A1"), SERVER_2_INLET, _pdu_outlet("A3"), SERVER_1_INLET)
+        list_block = (block[0], block[1], tuple(_visit(termination) for termination in walk))
+
+        batch = _interpret(_workbook(path_blocks=(block,), list_blocks=(list_block,), include_list=True))
+
+        self.assertTrue(batch.rows[0].valid, _codes(batch))
+
 
 class _CountingSheet:
     """Count the cell reads the parser makes, leaving the worksheet's own attributes alone."""

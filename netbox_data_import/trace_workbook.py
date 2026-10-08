@@ -860,6 +860,14 @@ def _location_from_provenance(provenance: TraceProvenance) -> str:
     return f"{provenance.sheet} block {provenance.block_ordinal} (rows {provenance.row_start}-{provenance.row_end})"
 
 
+def _claimed_endpoints(trace: SourceTrace) -> tuple[TerminationReference, ...]:
+    """Return the endpoints a trace claims, which leaves out the To leaf of a power block with no cable."""
+    summary = trace.endpoint_summary
+    if summary.from_termination.port_class in POWER_CLASSES and not trace.segments:
+        return (summary.from_termination,)
+    return summary.from_termination, summary.to_termination
+
+
 def _cross_trace_conflicts(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ...]:
     """Flag every trace that claims a termination another Source Trace claims for another segment."""
     termination_claims: dict[IdentityKey, dict[int, set[_SegmentClaim]]] = defaultdict(lambda: defaultdict(set))
@@ -871,8 +879,8 @@ def _cross_trace_conflicts(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, 
             segment_pair = ordered_pair[0], ordered_pair[1]
             claims[segment.left.identity_key].add(segment_pair)
             claims[segment.right.identity_key].add(segment_pair)
-        claims.setdefault(trace.endpoint_summary.from_termination.identity_key, set())
-        claims.setdefault(trace.endpoint_summary.to_termination.identity_key, set())
+        for endpoint in _claimed_endpoints(trace):
+            claims.setdefault(endpoint.identity_key, set())
         for termination, trace_claims in claims.items():
             termination_claims[termination][index].update(trace_claims)
     conflicts: dict[int, set[str]] = defaultdict(set)
