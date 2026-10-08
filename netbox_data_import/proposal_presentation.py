@@ -39,6 +39,7 @@ STATE_STYLES = {
 }
 
 RECENT_PROPOSAL_HISTORY_LIMIT = 10
+REQUEST_PERMISSION_REASON = "You do not have permission to request proposals for this Import Profile."
 
 
 def group_terminations(fields):
@@ -50,11 +51,22 @@ def group_terminations(fields):
     for field in fields:
         settles = (
             field["proposal"]["field_state"] == AUTOMATICALLY_RESOLVED
-            and not field["proposal_history"]
+            and not field["proposal_read"]["history_display"]
             and not field["incompatible"]
         )
         (settled if settles else attention).append(field)
     return attention, settled
+
+
+def backend_unavailable_reason() -> str:
+    """Return why no proposal can reach an Inference Backend now, or an empty string."""
+    try:
+        resolve_active_backend()
+    except NoActiveInferenceBackend:
+        return "No Inference Backend is enabled or configured as a fallback."
+    except (InvalidInferenceConfiguration, ValidationError):
+        return "The active Inference Backend configuration is invalid."
+    return ""
 
 
 def _action(key, label, reason):
@@ -80,13 +92,16 @@ class ProposalPresentation:
         self.view_reason = ""
         if not self.profile_view_allowed:
             self.view_reason = "You do not have permission to view proposals for this Import Profile."
-        self.backend_reason = ""
-        try:
-            resolve_active_backend()
-        except NoActiveInferenceBackend:
-            self.backend_reason = "No Inference Backend is enabled or configured as a fallback."
-        except (InvalidInferenceConfiguration, ValidationError):
-            self.backend_reason = "The active Inference Backend configuration is invalid."
+        self.backend_reason = backend_unavailable_reason()
+
+    @property
+    def request_block_reason(self) -> str:
+        """Explain why this operator can ask about no field of the profile, or return an empty string."""
+        if self.view_reason:
+            return self.view_reason
+        if not self.preview_allowed:
+            return REQUEST_PERMISSION_REASON
+        return self.backend_reason
 
     def fields(self, fields):
         """Return each displayed field and its bounded history within the authorized profile."""
@@ -136,7 +151,6 @@ class ProposalPresentation:
             query = urlencode({"profile_id": self.profile.pk, "field_key": field["field_key"]})
             history_url = f"{reverse('plugins-api:netbox_data_import-api:resolutionproposalhistory-list')}?{query}"
         payload = {
-            "ok": True,
             "proposal": record,
             "history_display": [
                 {
@@ -184,11 +198,9 @@ class ProposalPresentation:
     def action_permission_reason(self, field, inventory):
         """Explain access shared by request and cancellation actions."""
         if not self.preview_allowed:
-            return "You do not have permission to request proposals for this Import Profile."
+            return REQUEST_PERMISSION_REASON
         if parse_termination_field_key(field["field_key"])["role"] != TERMINATION_ROLE:
             return "Ask AI supports termination fields only. Choose the mapped peer manually."
-        if not field.get("offered", True):
-            return "This preview asked no question about that termination."
         if inventory is None or inventory.resolved_device is None:
             return "The resolved Device is unavailable or outside your view permission."
         return ""
@@ -322,15 +334,11 @@ class ProposalPresentation:
         if not request_reason and pending:
             request_reason = "An active proposal already exists for this field."
         request_reason = request_reason or self.backend_reason
-        if not field.get("offered", True):
-            request_reason = "This preview asked no question about that termination."
         decision_reason = "" if completed else "Wait for a completed proposal."
         if proposal is not None and proposal.status == ProposalStatus.FAILED:
             decision_reason = (
                 f"The proposal failed: {proposal.get_failure_reason_display()} ({proposal.failure_reason})."
             )
-        if not field.get("offered", True):
-            decision_reason = "This preview asked no question about that termination."
         accept_reason = decision_reason
         if not accept_reason and proposal.outcome == ProposalOutcome.NO_MATCH:
             # A changed set restarts the search, so a stale card must promise no continuation.

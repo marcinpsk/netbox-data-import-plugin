@@ -1,10 +1,19 @@
 {# SPDX-License-Identifier: Apache-2.0 #}
 {# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
-<div class="ndi-trace-action">
-  <button type="button" class="btn btn-sm btn-outline-primary" data-proposal-action="{{ action.key }}"
-          aria-describedby="proposalReason{{ field_number }}{{ action.key }}"
-          {% if action.reason %}disabled{% endif %}>{{ action.label }}</button>
+{# Acceptance replans, so it swaps the whole workspace and every claim on it; the other actions swap their card. #}
+<form class="ndi-trace-action" method="post" action="{{ action.url }}" hx-post="{{ action.url }}"
+      {% if action.key == "accept" %}hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true"{% else %}hx-target="closest [data-proposal-field]" hx-swap="outerHTML"{% endif %}
+      hx-sync="closest [data-proposal-field]:replace"
+      hx-disabled-elt="#{{ termination.card_id }} [data-proposal-action]">
+  {% csrf_token %}
+  {% include "netbox_data_import/inc/preview_claim.html" %}
+  <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
+  <input type="hidden" name="field_key" value="{{ termination.field_key }}">
+  {% if termination.proposal_read.proposal %}<input type="hidden" name="proposal_id" value="{{ termination.proposal_read.proposal.id }}">{% endif %}
+  <button type="submit" class="btn btn-sm {% if action.key == 'request' or action.key == 'accept' %}btn-primary{% else %}btn-secondary{% endif %}"
+          data-proposal-action="{{ action.key }}" aria-describedby="proposalReason{{ termination.card_id }}{{ action.key }}"
+          {% if action.reason %}disabled{% endif %}><span class="spinner-border spinner-border-sm ndi-busy" aria-hidden="true"></span>{{ action.label }}</button>
   <div class="ndi-trace-reason" data-proposal-reason="{{ action.key }}"
-       id="proposalReason{{ field_number }}{{ action.key }}"
+       id="proposalReason{{ termination.card_id }}{{ action.key }}"
        {% if not action.reason %}hidden{% endif %}>{{ action.reason }}</div>
-</div>
+</form>

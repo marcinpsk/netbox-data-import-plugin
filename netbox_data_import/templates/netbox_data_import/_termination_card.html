@@ -1,0 +1,35 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
+{# One termination card. A proposal command and a poll answer with it alone, so it swaps in place. #}
+<li class="card ndi-proposal-card mb-3" id="{{ termination.card_id }}" data-proposal-field="{{ termination.field_key }}"
+    data-proposal-read="{{ termination.read_url }}"
+    {% if termination.proposal.pending %}hx-get="{{ termination.read_url }}" hx-trigger="every 3s" hx-swap="outerHTML" hx-sync="this:abort"{% endif %}>
+  <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+    <strong>{{ termination.label }}</strong>
+    <span class="badge ndi-trace-state-{{ termination.proposal.state_style }}" data-proposal-state>{{ termination.proposal.field_state }}</span>
+    {% if termination.resolved_device %}
+      <span class="text-secondary">NetBox Device: {{ termination.resolved_device }}</span>
+    {% endif %}
+    {% if termination.selected %}
+      <span class="text-secondary">{{ termination.selected }}{% if termination.selected_model %} ({{ termination.selected_model }}){% endif %}</span>
+    {% endif %}
+  </div>
+  {% if termination.proposal.has_proposal %}
+    {% include 'netbox_data_import/_proposal_card.html' %}
+  {% endif %}
+  <div class="ndi-trace-actions mt-2" data-proposal-field-actions>
+    <div class="ndi-trace-action">
+      <button type="button" class="btn btn-sm btn-primary"
+              data-trace-picker="{{ termination.field_key }}"
+              data-trace-label="{{ termination.label }}"
+              {% if not termination.selectable %}disabled{% endif %}>Choose termination</button>
+      {% if not termination.selectable %}
+        <div class="ndi-trace-reason">{{ termination.reason }}</div>
+      {% endif %}
+    </div>
+    {% for action in termination.proposal.actions|slice:":2" %}
+      {% include 'netbox_data_import/_proposal_action.html' %}
+    {% endfor %}
+  </div>
+  <div class="alert alert-danger mt-2 mb-0" role="alert" data-proposal-error hidden></div>
+</li>

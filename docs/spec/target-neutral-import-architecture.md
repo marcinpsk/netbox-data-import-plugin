@@ -1654,12 +1654,14 @@ One Preview Coordinator row per browser session owns the active preview (ADR 000
 renders one Preview Claim: the preview token, the revision, the Source Document, and the profile.
 Every form, picker, row modal, and proposal card posts it, and every read that answers a displayed
 question sends it. A command locks the coordinator, then the profile, then any proposal or target
-row; it validates the claim, writes, replans, and advances the revision in one transaction. An
-ordinary command needs the exact claim. A new setup may replace any revision of the same preview
+row; it validates the claim, writes, replans, and advances the revision in one transaction. A
+proposal request, cancellation, or rejection changes no plan, so it does not advance the revision and
+its card updates in place (ADR 0004, amended 2026-10-08). An ordinary command needs the exact claim. A new setup may replace any revision of the same preview
 generation, never a newer generation. A stale command receives HTTP 409 as JSON, as a page, or as
 an HTMX redirect, and writes nothing. A page load is read-only. Re-read, discard, schema recovery,
 and the return to a preview after a failed import are POST commands. After each successful command
-the page loads again, so the displayed plan and the claim always belong together. While a per-trace
+that advances the revision, the page content is rendered again, so the displayed plan and the claim
+always belong together. While a per-trace
 sync Job runs, the preview refuses decisions, re-reads, and syncs; after the Job ends, the operator
 re-reads before the next decision.
 

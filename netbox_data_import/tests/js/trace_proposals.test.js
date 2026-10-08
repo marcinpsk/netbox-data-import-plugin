@@ -1,278 +1,287 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
 
+/* htmx sends the requests and swaps the cards; the script only reads the refusals htmx reports. These
+ * tests dispatch the events htmx dispatches, and a fake htmx.ajax swaps in the card a read returns. */
 import {readFileSync} from 'node:fs';
-import {afterEach, beforeEach, expect, it, vi} from 'vitest';
-import {CLAIM, completed, fixture, payload} from './trace_proposal_fixture.js';
+import {afterEach, beforeAll, beforeEach, expect, it, vi} from 'vitest';
+import {card, workspace} from './trace_proposal_fixture.js';
 
 const source = readFileSync('netbox_data_import/static/netbox_data_import/js/trace_proposals.js', 'utf8');
-const claimSource = readFileSync('netbox_data_import/static/netbox_data_import/js/preview_claim.js', 'utf8');
-const node = name => document.querySelector('[data-proposal-' + name + ']');
-const button = key => document.querySelector('[data-proposal-action="' + key + '"]');
-const response = body => ({ok: true, json: async () => body});
-const refused = (status, error) => ({ok: false, status, json: async () => ({ok: false, error})});
 const cardOf = key => document.querySelector('[data-proposal-field="' + key + '"]');
-const inCard = (key, selector) => cardOf(key).querySelector(selector);
-const reads = () => fetch.mock.calls.filter(([, options = {}]) => !options.method);
-let reload;
+const errorOf = key => cardOf(key).querySelector('[data-proposal-error]');
+const formOf = (key, action) => cardOf(key).querySelector('[data-proposal-action="' + action + '"]').form;
+let reads;
 
-function mount(initial = payload(), others = {}) {
-  document.body.innerHTML = fixture(initial, others);
-  window.eval(claimSource);
-  window.eval(source);
+function mount(...cards) {
+  document.body.innerHTML = workspace(cards.length ? cards : [card('field', 'completed')]);
 }
 
+// The read starts after the refused request releases its card, one task later.
+const settled = () => new Promise(resolve => { setTimeout(resolve, 0); });
+
+function emit(elt, name, detail = {}) {
+  const event = new CustomEvent(name, {bubbles: true, cancelable: true, detail: {elt, ...detail}});
+  elt.dispatchEvent(event);
+  return event;
+}
+
+function refuse(elt, status, body) {
+  const responseText = typeof body === 'string' ? body : JSON.stringify(body);
+  return emit(elt, 'htmx:responseError', {xhr: {status, responseText}});
+}
+
+// The listeners sit on the document, which outlives each test, so the script runs once per file.
+beforeAll(() => { window.eval(source); });
 beforeEach(() => {
-  vi.useFakeTimers();
-  vi.stubGlobal('fetch', vi.fn(async () => response(completed())));
-  reload = vi.fn();
-  vi.stubGlobal('location', {reload});
+  reads = [];
+  // A read answers with the field's card as it stands now, which here holds the active proposal.
+  window.htmx = {
+    ajax(verb, url, options) {
+      reads.push({verb, url, options});
+      options.target.outerHTML = card(options.target.dataset.proposalField, 'pending');
+      return Promise.resolve();
+    },
+  };
 });
-afterEach(async () => {
+afterEach(() => {
   document.body.replaceChildren();
-  await vi.advanceTimersByTimeAsync(0);
-  vi.clearAllTimers();
-  vi.useRealTimers();
+  delete window.htmx;
   vi.unstubAllGlobals();
 });
 
-it('polls at three seconds and stops at a terminal response', async () => {
+/* htmx dispatches beforeSwap on the target and names the element that sent the request in requestConfig. */
+function swap(elt, target, responseText, responseURL = 'http://preview.test/login/?next=/workspace/') {
+  const xhr = {status: 200, responseText, responseURL};
+  return emit(target, 'htmx:beforeSwap', {target, shouldSwap: true, xhr, requestConfig: {elt, target}});
+}
+
+/* htmx dispatches oobBeforeSwap on the element the out-of-band copy replaces. */
+function swapCount(count, countedAt) {
+  const fragment = document.createDocumentFragment();
+  const copy = document.createElement('div');
+  copy.id = 'ndiActiveProposals';
+  copy.dataset.countedAt = String(countedAt);
+  copy.textContent = String(count);
+  fragment.appendChild(copy);
+  const target = document.getElementById('ndiActiveProposals');
+  return emit(target, 'htmx:oobBeforeSwap', {target, fragment, shouldSwap: true});
+}
+
+function hide(hidden) {
+  Object.defineProperty(document, 'hidden', {configurable: true, get: () => hidden});
+}
+
+it('a refused action reads its card again and shows the refusal in the card that replaced it', async () => {
+  mount(card('field', 'open'));
+  const before = cardOf('field');
+
+  refuse(formOf('field', 'request'), 409, {ok: false, error: 'This field already has an active Resolution Proposal.'});
+  expect(reads).toEqual([]);
+  await settled();
+
+  expect(reads).toEqual([{verb: 'GET', url: before.dataset.proposalRead, options: {source: before, target: before, swap: 'outerHTML'}}]);
+  expect(cardOf('field')).not.toBe(before);
+  expect(cardOf('field').querySelector('[data-proposal-progress]')).not.toBeNull();
+  expect(errorOf('field').hidden).toBe(false);
+  expect(errorOf('field').textContent).toBe('This field already has an active Resolution Proposal.');
+});
+
+it('a stale claim shows the refusal and reads nothing, because the read is refused as well', () => {
   mount();
-  expect(node('progress').hidden).toBe(false);
-  await vi.advanceTimersByTimeAsync(2999);
-  expect(fetch).toHaveBeenCalledTimes(0);
-  await vi.advanceTimersByTimeAsync(1);
-  expect(fetch).toHaveBeenCalledTimes(1);
-  const asked = new URL(fetch.mock.calls[0][0]);
-  expect([...asked.searchParams]).toEqual([['field_key', 'field'], ...CLAIM]);
-  expect(node('badge').textContent).toBe('Proposal - not applied');
-  expect(node('progress').hidden).toBe(true);
-  await vi.advanceTimersByTimeAsync(12000);
-  expect(fetch).toHaveBeenCalledTimes(1);
+
+  refuse(formOf('field', 'accept'), 409, {ok: false, error: 'This preview changed.', code: 'preview_stale'});
+
+  expect(reads).toEqual([]);
+  expect(errorOf('field').textContent).toBe('This preview changed.');
+  expect(errorOf('field').hidden).toBe(false);
 });
 
-it('stops polling when a card leaves the DOM', async () => {
-  fetch.mockImplementation(async () => response(payload()));
+it('a refused poll halts the card, so the next interval asks nothing', () => {
+  mount(card('field', 'pending'));
+  const polling = cardOf('field');
+
+  refuse(polling, 409, {ok: false, error: 'A newer preview replaced this one.', code: 'preview_stale'});
+
+  expect(polling.hasAttribute('data-proposal-halted')).toBe(true);
+  expect(errorOf('field').textContent).toBe('A newer preview replaced this one.');
+  expect(emit(polling, 'htmx:beforeRequest').defaultPrevented).toBe(true);
+  // An action is the operator's own request, so a halted card still sends it.
+  expect(emit(formOf('field', 'cancel'), 'htmx:beforeRequest').defaultPrevented).toBe(false);
+});
+
+it('a poll that hit a server error says why and keeps polling', () => {
+  mount(card('field', 'pending'));
+
+  refuse(cardOf('field'), 502, '<html>Bad Gateway</html>');
+
+  expect(cardOf('field').hasAttribute('data-proposal-halted')).toBe(false);
+  expect(errorOf('field').textContent).toBe('The proposal request was refused.');
+  expect(emit(cardOf('field'), 'htmx:beforeRequest').defaultPrevented).toBe(false);
+});
+
+it('a new action clears the refusal its card shows', () => {
   mount();
-  await vi.advanceTimersByTimeAsync(3000);
-  expect(fetch).toHaveBeenCalledTimes(1);
-  document.body.replaceChildren();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(vi.getTimerCount()).toBe(0);
-  await vi.advanceTimersByTimeAsync(12000);
-  expect(fetch).toHaveBeenCalledTimes(1);
-  expect(vi.getTimerCount()).toBe(0);
+  refuse(formOf('field', 'accept'), 409, {ok: false, error: 'Stale.', code: 'preview_stale'});
+
+  emit(formOf('field', 'reject'), 'htmx:beforeRequest');
+
+  expect(errorOf('field').hidden).toBe(true);
+  expect(errorOf('field').textContent).toBe('');
 });
 
-it('aborts a detached read and ignores its late answer', async () => {
-  let release;
-  fetch.mockImplementation(() => new Promise(done => { release = done; }));
+it('a request that never reached NetBox says so in its card', () => {
+  mount(card('field', 'open'), card('other', 'open'));
+
+  emit(formOf('field', 'request'), 'htmx:sendError');
+
+  expect(errorOf('field').textContent).toBe('The proposal request did not reach NetBox. Try again.');
+  expect(errorOf('other').hidden).toBe(true);
+});
+
+it('a refusal outside every card is left to the page', () => {
   mount();
-  await vi.advanceTimersByTimeAsync(3000);
-  const signal = fetch.mock.calls[0][1].signal;
-  mount(completed({candidate: 'replacement (Rear port)'}));
-  release(response(completed({candidate: 'obsolete'})));
-  await vi.advanceTimersByTimeAsync(0);
-  expect(signal.aborted).toBe(true);
-  expect(node('candidate').textContent).toBe('replacement (Rear port)');
+  const askAll = document.querySelector('[data-proposal-ask-all]').form;
+
+  refuse(askAll, 409, {ok: false, error: 'Stale.'});
+
+  expect(reads).toEqual([]);
+  expect(errorOf('field').hidden).toBe(true);
 });
 
-it('renders candidate details as text and recent history attempts', () => {
-  const initial = completed({candidate: '<img src=x onerror=alert(1)> (Front port)'});
-  initial.history_display.push({id: 6, created: 'earlier', status: 'Failed', outcome: 'No outcome', failure: 'Timeout'});
-  initial.history_has_more = true;
-  mount(initial);
-  expect(node('display').hidden).toBe(false);
-  expect(node('candidate').textContent).toBe(initial.presentation.candidate);
-  expect(node('candidate').children.length).toBe(0);
-  expect(node('explanation').textContent).toBe('The labels name the same port.');
-  expect([...node('history').children].map(row => row.textContent)).toEqual([
-    '#7 · 2026-09-11T08:00:00+00:00 · Queued · No outcome',
-    '#6 · earlier · Failed · No outcome · Timeout',
-  ]);
-  expect(node('history-disclosure').hidden).toBe(false);
-  expect(node('history-link').hidden).toBe(false);
-  expect(node('history-link').href).toContain('resolution-proposal-history');
+it('a second evaluation adds no second listener', async () => {
+  mount(card('field', 'open'));
+  window.eval(source);
+
+  refuse(formOf('field', 'request'), 400, {ok: false, error: 'No eligible candidates.'});
+  await settled();
+
+  expect(reads).toHaveLength(1);
 });
 
-it('keeps stale and no-match accept buttons visible and disabled with their reason', () => {
-  for (const reason of ['The eligible candidates changed.', 'The backend found no match.']) {
-    const initial = completed({badge: 'Proposal - stale, not applied'});
-    initial.presentation.actions[2].reason = reason;
-    mount(initial);
-    expect(button('accept').disabled).toBe(true);
-    expect(button('accept').hidden).toBe(false);
-    expect(document.querySelector('[data-proposal-reason="accept"]').textContent).toBe(reason);
-    expect(document.querySelector('[data-proposal-reason="accept"]').hidden).toBe(false);
+it('a login page is not swapped into a polling card; the browser opens it and the card stops', () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', {assign, href: 'http://preview.test/workspace/'});
+  mount(card('field', 'pending'));
+  const polling = cardOf('field');
+
+  const event = swap(polling, polling, '<!doctype html><html><form action="/login/">Log in</form></html>');
+
+  expect(event.detail.shouldSwap).toBe(false);
+  expect(assign).toHaveBeenCalledWith('http://preview.test/login/?next=/workspace/');
+  expect(polling.hasAttribute('data-proposal-halted')).toBe(true);
+  expect(errorOf('field').textContent).toBe('NetBox answered with another page. Opening it.');
+});
+
+it('a login page is not swapped into the workspace after Accept or Ask AI for all', () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', {assign, href: 'http://preview.test/workspace/'});
+  mount();
+  const content = document.getElementById('page-content');
+
+  for (const form of [formOf('field', 'accept'), document.querySelector('[data-proposal-ask-all]').form]) {
+    expect(swap(form, content, '<html><body>Log in</body></html>').detail.shouldSwap).toBe(false);
+  }
+  expect(assign).toHaveBeenCalledTimes(2);
+});
+
+it('a card and a workspace page swap as htmx answered them', () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', {assign, href: 'http://preview.test/workspace/'});
+  mount(card('field', 'pending'));
+
+  const polled = swap(cardOf('field'), cardOf('field'), card('field', 'completed'));
+  const accepted = swap(formOf('field', 'cancel'), document.getElementById('page-content'), workspace([]));
+
+  expect([polled.detail.shouldSwap, accepted.detail.shouldSwap]).toEqual([true, true]);
+  expect(assign).not.toHaveBeenCalled();
+});
+
+it('a poll refused as missing, forbidden or logged out stops; a server error keeps polling', () => {
+  for (const status of [401, 403, 404, 409]) {
+    mount(card('field', 'pending'));
+    refuse(cardOf('field'), status, {ok: false, error: `Refused ${status}.`});
+    expect(cardOf('field').hasAttribute('data-proposal-halted')).toBe(true);
+    expect(emit(cardOf('field'), 'htmx:beforeRequest').defaultPrevented).toBe(true);
+  }
+  mount(card('field', 'pending'));
+  refuse(cardOf('field'), 500, '<html>Server Error</html>');
+  expect(cardOf('field').hasAttribute('data-proposal-halted')).toBe(false);
+  expect(errorOf('field').textContent).toBe('The proposal request was refused.');
+  expect(emit(cardOf('field'), 'htmx:beforeRequest').defaultPrevented).toBe(false);
+});
+
+it('a hidden tab skips its polls and asks again once it shows', () => {
+  mount(card('field', 'pending'));
+  try {
+    hide(true);
+    expect(emit(cardOf('field'), 'htmx:beforeRequest').defaultPrevented).toBe(true);
+    // An action is the operator's own request, so a hidden tab still sends it.
+    expect(emit(formOf('field', 'cancel'), 'htmx:beforeRequest').defaultPrevented).toBe(false);
+    hide(false);
+    expect(emit(cardOf('field'), 'htmx:beforeRequest').defaultPrevented).toBe(false);
+  } finally {
+    delete document.hidden;
   }
 });
 
-it('renders a failed attempt and offers Ask AI again', () => {
-  const initial = completed({badge: 'Failed', field_state: 'failed', failure: 'Backend refusal', failure_code: 'backend_refusal'});
-  initial.presentation.actions[0].label = 'Ask AI again';
-  mount(initial);
-  expect(node('failure').textContent).toBe('Backend refusal (backend_refusal)');
-  expect(node('state').textContent).toBe('failed');
-  expect([button('request').textContent, button('request').disabled]).toEqual(['Ask AI again', false]);
+it('an action refused because the session ended reads nothing more and stops the card', async () => {
+  mount(card('field', 'pending'));
+
+  refuse(formOf('field', 'cancel'), 401, {ok: false, error: 'Your session has ended. Reload the page to log in again.'});
+  await settled();
+
+  expect(reads).toEqual([]);
+  expect(cardOf('field').hasAttribute('data-proposal-halted')).toBe(true);
+  expect(errorOf('field').textContent).toBe('Your session has ended. Reload the page to log in again.');
 });
 
-it('sends cancel with the field, attempt, claim and CSRF token once after repeated script evaluation', async () => {
+it('a workspace form whose session ended reloads the page, which then shows the login page', () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', {assign, href: 'http://preview.test/workspace/'});
   mount();
-  window.eval(source);
-  button('cancel').click();
-  button('cancel').click();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(fetch).toHaveBeenCalledTimes(1);
-  await vi.advanceTimersByTimeAsync(12000);
-  expect(fetch).toHaveBeenCalledTimes(1);
-  const [url, options] = fetch.mock.calls[0];
-  expect([url, options.method, options.credentials, options.headers.Accept]).toEqual([
-    '/cancel/', 'POST', 'same-origin', 'application/json',
-  ]);
-  expect([...options.body]).toEqual([
-    ['csrfmiddlewaretoken', 'fixture-token'], ...CLAIM, ['field_key', 'field'], ['proposal_id', '7'],
-  ]);
-  expect(reload).toHaveBeenCalledOnce();
+
+  refuse(document.querySelector('[data-proposal-ask-all]').form, 401, {ok: false, error: 'Your session has ended.'});
+
+  expect(assign).toHaveBeenCalledWith('http://preview.test/workspace/');
 });
 
-it('stops every card polling before a successful action reloads the workspace', async () => {
-  const fieldOf = url => new URL(url).searchParams.get('field_key');
-  let otherAbortedAtReload;
-  reload.mockImplementation(() => {
-    otherAbortedAtReload = reads().find(([url]) => fieldOf(url) === 'other')[1].signal.aborted;
-  });
-  // `other` has a read in flight when the action lands, and `third` has its next read scheduled.
-  fetch.mockImplementation(async (url, options = {}) => {
-    if (options.method === 'POST') return response({ok: true, proposal_id: 7, status: 'cancelled', decision: ''});
-    return fieldOf(url) === 'other' ? new Promise(() => {}) : response(payload());
-  });
-  mount(completed(), {other: payload(), third: payload()});
-  await vi.advanceTimersByTimeAsync(3000);
-  expect(reads().map(([url]) => fieldOf(url)).sort()).toEqual(['other', 'third']);
-  inCard('field', '[data-proposal-action="reject"]').click();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(reload).toHaveBeenCalledOnce();
-  expect(otherAbortedAtReload).toBe(true);
-  await vi.advanceTimersByTimeAsync(12000);
-  expect(reads()).toHaveLength(2);
-});
-
-it('keeps the action busy while it posts and reloads without a post-action read', async () => {
-  let finishAction;
-  fetch.mockImplementation(() => new Promise(done => { finishAction = done; }));
-  mount(completed());
-  button('accept').click();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(button('accept').disabled).toBe(true);
-  button('accept').click();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(fetch).toHaveBeenCalledTimes(1);
-
-  finishAction(response({ok: true, proposal_id: 7, status: 'completed', decision: 'accepted'}));
-  await vi.advanceTimersByTimeAsync(0);
-  expect(fetch).toHaveBeenCalledTimes(1);
-  expect(reload).toHaveBeenCalledOnce();
-  expect(button('accept').disabled).toBe(true);
-});
-
-it('ignores a poll answer that arrives after the reload started', async () => {
-  let finishPoll;
-  fetch.mockImplementation(async (_url, options = {}) => options.method === 'POST'
-    ? response({ok: true, proposal_id: 7, status: 'cancelled', decision: ''})
-    : new Promise(done => { finishPoll = done; }));
-  mount(completed(), {other: payload()});
-  await vi.advanceTimersByTimeAsync(3000);
-  expect(reads()).toHaveLength(1);
-  const pollSignal = reads()[0][1].signal;
-  inCard('field', '[data-proposal-action="reject"]').click();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(reload).toHaveBeenCalledOnce();
-  expect(pollSignal.aborted).toBe(true);
-
-  // The stub ignores the abort, so only the reload latch keeps the late answer off the card.
-  finishPoll(response(completed({candidate: 'late (Rear port)'})));
-  await vi.advanceTimersByTimeAsync(3000);
-  expect(inCard('other', '[data-proposal-candidate]').textContent).toBe('');
-  expect(inCard('other', '[data-proposal-error]').textContent).toBe('');
-  expect(reads()).toHaveLength(1);
-});
-
-it('lets one reload win when actions on two cards both succeed', async () => {
-  const finish = {};
-  fetch.mockImplementation(async (url, options = {}) => options.method === 'POST'
-    ? new Promise(done => { finish[options.body.get('field_key')] = done; })
-    : response(completed()));
-  mount(completed(), {other: completed()});
-  inCard('field', '[data-proposal-action="accept"]').click();
-  inCard('other', '[data-proposal-action="reject"]').click();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(Object.keys(finish).sort()).toEqual(['field', 'other']);
-
-  finish.field(response({ok: true, proposal_id: 7, status: 'completed', decision: 'accepted'}));
-  await vi.advanceTimersByTimeAsync(0);
-  expect(reload).toHaveBeenCalledOnce();
-
-  finish.other(response({ok: false, error: 'The preview is stale.'}));
-  await vi.advanceTimersByTimeAsync(0);
-  expect(reload).toHaveBeenCalledOnce();
-  expect(inCard('other', '[data-proposal-error]').hidden).toBe(true);
-  expect(inCard('other', '[data-proposal-action="reject"]').disabled).toBe(true);
-  expect(reads()).toHaveLength(0);
-});
-
-it('refreshes an action refusal and shows the server reason', async () => {
-  fetch.mockImplementation(async (_url, options) => options.method === 'POST'
-    ? refused(409, 'The proposal is stale.')
-    : response(completed()));
-  mount(completed());
-  button('accept').click();
-  await vi.advanceTimersByTimeAsync(0);
-  expect([node('error').hidden, node('error').textContent]).toEqual([false, 'The proposal is stale.']);
-  expect(button('accept').disabled).toBe(false);
-  expect(reload).not.toHaveBeenCalled();
-});
-
-it('stops polling a card whose claim the server refuses and shows why', async () => {
-  fetch.mockImplementation(async () => refused(409, 'A newer preview replaced this one.'));
-  mount(payload(), {other: payload()});
-  await vi.advanceTimersByTimeAsync(3000);
-  expect(reads()).toHaveLength(2);
-  expect(inCard('field', '[data-proposal-error]').textContent).toBe('A newer preview replaced this one.');
-  expect(vi.getTimerCount()).toBe(0);
-  await vi.advanceTimersByTimeAsync(12000);
-  expect(reads()).toHaveLength(2);
-  expect(reload).not.toHaveBeenCalled();
-});
-
-it('retries a failed pending read at the next interval', async () => {
-  fetch.mockRejectedValueOnce(new Error('The network is unavailable.'));
+it('an older count that arrives after a newer one does not replace it', () => {
   mount();
-  await vi.advanceTimersByTimeAsync(3000);
-  expect(node('error').textContent).toBe('The network is unavailable.');
-  await vi.advanceTimersByTimeAsync(3000);
-  expect(node('badge').textContent).toBe('Proposal - not applied');
+  document.getElementById('ndiActiveProposals').dataset.countedAt = '100';
+
+  const newer = swapCount(0, 300);
+  document.getElementById('ndiActiveProposals').dataset.countedAt = '300';
+  const older = swapCount(1, 200);
+  const same = swapCount(0, 300);
+
+  expect([newer.detail.shouldSwap, older.detail.shouldSwap, same.detail.shouldSwap]).toEqual([true, false, true]);
 });
 
-it('recovers controls when both an action and its refresh fail', async () => {
-  fetch.mockRejectedValue(new Error('Offline'));
-  mount(completed());
-  button('accept').click();
-  await vi.advanceTimersByTimeAsync(0);
-  expect([button('accept').disabled, node('error').textContent]).toEqual([false, 'Offline']);
-});
-
-it('reports a non-JSON response instead of treating a login page as success', async () => {
-  fetch.mockResolvedValue({ok: true, json: async () => { throw new SyntaxError('HTML'); }});
+it('any workspace form that swaps the page refuses a login page and opens it', () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', {assign, href: 'http://preview.test/workspace/'});
   mount();
-  await vi.advanceTimersByTimeAsync(3000);
-  expect(node('error').textContent).toBe('The proposal response could not be read. Reload the workspace.');
+  const save = document.querySelector('[data-cable-policy-save]').form;
+
+  const login = swap(save, document.getElementById('page-content'), '<html><body>Log in</body></html>');
+  const page = swap(save, document.getElementById('page-content'), workspace([]));
+
+  expect([login.detail.shouldSwap, page.detail.shouldSwap]).toEqual([false, true]);
+  expect(assign).toHaveBeenCalledTimes(1);
 });
 
-it('moves the field badge onto the class of the state the read reports', async () => {
-  fetch.mockResolvedValue(response(completed({field_state: 'accepted', state_style: 'accepted'})));
+it('any workspace form whose session ended loads the page again, and a page outside the workspace is left alone', () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', {assign, href: 'http://preview.test/workspace/'});
   mount();
-  expect(node('state').className).toBe('badge ndi-trace-state-proposed');
-  await vi.advanceTimersByTimeAsync(3000);
-  expect([node('state').className, node('state').textContent])
-    .toEqual(['badge ndi-trace-state-accepted', 'accepted']);
+  const outside = document.createElement('form');
+  document.body.appendChild(outside);
+
+  refuse(document.querySelector('[data-cable-policy-save]').form, 401, {ok: false, error: 'Your session has ended.'});
+  refuse(outside, 401, {ok: false, error: 'Your session has ended.'});
+  swap(outside, outside, '<html>Log in</html>');
+
+  expect(assign).toHaveBeenCalledTimes(1);
+  expect(assign).toHaveBeenCalledWith('http://preview.test/workspace/');
 });
