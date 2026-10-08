@@ -984,6 +984,14 @@ class TraceWorkbookPowerTest(SimpleTestCase):
                 _endpoint_line(SERVER_2_INLET),
                 (_segment(SERVER_1_INLET, "Power Cable", _pdu_outlet("A3")), unreadable),
             ),
+            "two rows at From": (
+                _endpoint_line(SERVER_1_INLET),
+                _endpoint_line(SERVER_2_INLET),
+                (
+                    _segment(SERVER_1_INLET, "Power Cable", _pdu_outlet("A3")),
+                    _segment(_pdu_outlet("A4"), "Power Cable", SERVER_1_INLET),
+                ),
+            ),
         }
         valid = self._block(SERVER_2_INLET, _pdu_outlet("A2"))
 
@@ -995,6 +1003,34 @@ class TraceWorkbookPowerTest(SimpleTestCase):
                 self.assertTrue(by_from["SRV-2"].valid, [error.code for error in by_from["SRV-2"].errors])
                 self.assertFalse(by_from["SRV-1"].valid)
                 self.assertNotIn("trace.cross_trace_conflict", _codes(batch))
+
+    def test_every_collapsed_power_occurrence_keeps_its_from_claim(self):
+        """Collapse keeps one summary, but each invalid occurrence still claims its own From termination."""
+        inlet_a = _termination("DEV-A", "", "PowerIn", "Power Input Port")
+        outlet_b = _termination("DEV-B", "", "OUT-1", "Power Output Port")
+        inlet_c = _termination("DEV-C", "", "PowerIn", "Power Input Port")
+        hub_rows = (_segment(_pdu_outlet("A1"), "Power Cable", SERVER_3_INLET),)
+        from_a = (_endpoint_line(inlet_a), _endpoint_line(outlet_b), hub_rows)
+        from_b = (_endpoint_line(outlet_b), _endpoint_line(inlet_a), hub_rows)
+        valid_b = power_hub_block(outlet_b, inlet_c, (), SERVER_3_INLET)
+        workbooks = {
+            "path blocks": _workbook(path_blocks=(from_a, from_b, valid_b)),
+            "list blocks": _workbook(
+                path_blocks=(valid_b,),
+                list_blocks=(
+                    (from_a[0], from_a[1], (_visit(inlet_a),)),
+                    (from_b[0], from_b[1], (_visit(outlet_b),)),
+                ),
+                include_list=True,
+            ),
+        }
+
+        for label, content in workbooks.items():
+            with self.subTest(label):
+                batch = _interpret(content)
+
+                cord = next(trace for trace in batch.rows if trace.segments)
+                self.assertIn("trace.cross_trace_conflict", [error.code for error in cord.errors])
 
     def test_a_block_that_starts_at_a_pdu_outlet_is_a_power_block(self):
         """An outlet From names the same cord as the inlet From, so both blocks collapse into one trace."""

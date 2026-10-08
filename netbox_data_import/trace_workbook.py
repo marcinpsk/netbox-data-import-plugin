@@ -868,7 +868,17 @@ def _claimed_endpoints(trace: SourceTrace) -> tuple[TerminationReference, ...]:
     return summary.from_termination, summary.to_termination
 
 
-def _cross_trace_conflicts(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ...]:
+def _endpoint_claims(occurrences: Iterable[SourceTrace]) -> dict[str, set[IdentityKey]]:
+    """Return the endpoints every occurrence of each identity claims, before collapse keeps one summary."""
+    claims: dict[str, set[IdentityKey]] = defaultdict(set)
+    for occurrence in occurrences:
+        claims[occurrence.identity].update(endpoint.identity_key for endpoint in _claimed_endpoints(occurrence))
+    return claims
+
+
+def _cross_trace_conflicts(
+    traces: Sequence[SourceTrace], endpoint_claims: Mapping[str, set[IdentityKey]]
+) -> tuple[SourceTrace, ...]:
     """Flag every trace that claims a termination another Source Trace claims for another segment."""
     termination_claims: dict[IdentityKey, dict[int, set[_SegmentClaim]]] = defaultdict(lambda: defaultdict(set))
     for index, trace in enumerate(traces):
@@ -879,8 +889,8 @@ def _cross_trace_conflicts(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, 
             segment_pair = ordered_pair[0], ordered_pair[1]
             claims[segment.left.identity_key].add(segment_pair)
             claims[segment.right.identity_key].add(segment_pair)
-        for endpoint in _claimed_endpoints(trace):
-            claims.setdefault(endpoint.identity_key, set())
+        for endpoint in endpoint_claims[trace.identity]:
+            claims.setdefault(endpoint, set())
         for termination, trace_claims in claims.items():
             termination_claims[termination][index].update(trace_claims)
     conflicts: dict[int, set[str]] = defaultdict(set)
@@ -952,7 +962,7 @@ def interpret(content: bytes) -> tuple[tuple[SourceTrace, ...], tuple[SourceDiag
         diagnostics.extend(block_diagnostics)
         if trace is not None:
             traces.append(trace)
-    checked = _cross_trace_conflicts(_collapse_duplicates(traces))
+    checked = _cross_trace_conflicts(_collapse_duplicates(traces), _endpoint_claims(traces))
     diagnostics.extend(error for trace in checked for error in trace.errors)
     return checked, tuple(diagnostics)
 
