@@ -480,7 +480,8 @@ Per ADR 0002:
   JSON serialization of the two endpoint identity keys, sorted lexicographically by code point:
   `[["device","cards","port","kind"],["device","cards","port","kind"]]`. Device, cards, and port are
   name identities (section 5.9). The fourth member is the claimed kind (section 6.1), or the name
-  identity of a PortClass outside the vocabulary. JSON is unambiguous by construction, so a
+  identity of a PortClass outside the vocabulary. The second endpoint of a power block is the peer of
+  the row that touches its From termination, not its To line (section 5.10). JSON is unambiguous by construction, so a
   label that contains a separator character cannot collide with another identity. This canonical JSON
   form is the stored key and the Synchronization Unit identity. It is stable across direction flips,
   re-exports, and patching changes.
@@ -510,6 +511,8 @@ topology identity.
   `Cable` column is ignored: it is per-block, not per-segment. Any mismatch is a contradiction error
   on that trace.
 - An empty `Trace List` block corroborates nothing.
+- The `Trace List` block of a power block repeats its fan-out. It corroborates by membership, not by
+  sequence (section 5.10).
 - A `Trace List` block with data but no `Trace From To` partner becomes an Endpoint Summary fallback
   trace. Its visit rows are unordered corroboration, not Segment Evidence.
 
@@ -539,7 +542,7 @@ existing Cables, PortMapping rows) and cannot be detected during source interpre
 | --- | --- | --- | --- |
 | Workbook contains neither recognized sheet | `trace.no_recognized_sheet` | Batch-level error, no units | Source Adapter |
 | Incomplete block (From without To, missing header row, unparseable Segment Evidence row) | `trace.incomplete_block` | `invalid` | Source Adapter |
-| Non-linear or discontinuous path (broken continuity, duplicated or branching rows, first or last termination contradicting the From/To lines) | `trace.non_linear_path` | `invalid` | Source Adapter |
+| Non-linear or discontinuous path (broken continuity, duplicated or branching rows, first or last termination contradicting the From/To lines, a power block without exactly one row that touches its From termination) | `trace.non_linear_path` | `invalid` | Source Adapter |
 | `Trace List` contradicts the path rows | `trace.corroboration_mismatch` | `invalid` | Source Adapter |
 | Same identity stated with differing evidence | `trace.duplicate_conflict` | `invalid` | Source Adapter |
 | Pass-Through Claim whose entry or exit carries an interface-kind PortClass | `trace.pass_through_at_interface` | `invalid` | Source Adapter |
@@ -658,6 +661,33 @@ provenance key from the earlier casefold identity to this one; see the installat
 the names it cannot move exactly. A Resolution Proposal is an audit record of the question it was
 asked, so it keeps its casefold key and binds to no question after the change.
 
+### 5.10 Power blocks
+
+A block whose From termination carries a power PortClass (`Power Input Port` or `Power Output Port`,
+section 6.1) is a power block. The source exports a power block as the fan-out of a power
+distribution unit, not as a path. Its Segment Evidence rows list every cable on that PDU, the
+upstream feed included, and its To line names an arbitrary leaf of the fan-out.
+
+A power block yields exactly one Segment Evidence entry: the row that touches the From termination,
+in either column and at any position in the block. The adapter orients that row from the From
+termination. Its peer replaces the To line as the second endpoint, so the trace identity
+(section 5.2) is the From termination and that peer, and the content fingerprint covers that one
+segment. The other rows state no cable of this trace. They are still read, so an unreadable row or a
+PortClass outside the vocabulary makes the block invalid wherever it appears. The provenance keeps
+the original To line text.
+
+When no row, or more than one row, touches the From termination, the block is `trace.non_linear_path`
+and its trace states no segment. An unpaired `Trace List` block whose From termination is a power
+class gets the same error, because a `Trace List` states no Segment Evidence.
+
+The paired `Trace List` block repeats the fan-out. It corroborates a power trace when it visits both
+terminations of the selected segment, in any order. A non-empty block that misses either one is
+`trace.corroboration_mismatch`. The trace keeps only the visits of its two endpoints, so the other
+devices of the fan-out add no Device evidence.
+
+A block whose From termination has another PortClass keeps every path rule, even when it contains
+power rows.
+
 ## 6. Patched Path Replacement planning and transaction behavior
 
 The Cable Target Module verifies pass-throughs against the PortMapping model, which NetBox 4.5
@@ -751,11 +781,16 @@ fixed, ordered list of NetBox termination models:
 | NIC, Switch Port, Port | `interface` | Interface, then ConsolePort, ConsoleServerPort, PowerPort, PowerOutlet |
 | Position Front, Fiber Pair Front | `front_port` | FrontPort |
 | Punch-Down, Fiber Pair Back | `rear_port` | RearPort |
+| Power Input Port | `power_port` | PowerPort |
+| Power Output Port | `power_outlet` | PowerOutlet |
 
-The source vocabulary has no console or power class: a source system records a server's console or
-power inlet, and a console server or PDU port, as NIC, Switch Port, or Port. The `interface` claim
-therefore admits the console and power component models. The admitted models of all three claims
-together are the Cable End Kinds.
+The source vocabulary has no console class: a source system records a server's console port and a
+console server port as NIC, Switch Port, or Port. It can record a power inlet or a PDU outlet the
+same way. The `interface` claim therefore admits the console and power component models. The two
+power claims admit only their own model, so an Interface with the name of a power port never answers
+a power PortClass. The admitted models of all five claims together are the Cable End Kinds. A
+PowerPort and a PowerOutlet are a pair NetBox can cable, so a power block's one segment plans like
+any other segment.
 
 A PortClass value outside this vocabulary is a source-structure error the Source Adapter reports as
 `trace.unknown_port_class`, so it never reaches planning. A resolved object whose real type is not a
