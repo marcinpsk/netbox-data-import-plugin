@@ -15,7 +15,9 @@ from core.choices import JobStatusChoices
 from core.models import Job, ObjectType
 from dcim.models import Device, Interface, Site
 from django.contrib.messages import get_messages
+from django.db import connection
 from django.test import TestCase, TransactionTestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django_rq import get_queue
 from django_rq.queues import DjangoRQ
@@ -43,7 +45,6 @@ from netbox_data_import.tests.helpers import (
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.tests.plugins_config import override_plugins_config
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
-from netbox_data_import.termination_proposal import SelectTerminationTask
 from netbox_data_import.tests.test_inference_backend import ALLOWLIST, FALLBACK
 
 HTMX = {"HX-Request": "true"}
@@ -267,18 +268,14 @@ class ProposalInPlaceTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, CableTo
 
     def test_ask_ai_for_all_reads_one_inventory_per_device_kind_and_role(self):
         """The first and third fields share DEV-A, so the command reads its candidates once."""
-        reads, real = [], SelectTerminationTask.inventory
-
-        def counted(task, **kwargs):
-            reads.append(kwargs["field_key"])
-            return real(task, **kwargs)
-
-        with patch.object(SelectTerminationTask, "inventory", autospec=True, side_effect=counted):
+        with CaptureQueriesContext(connection) as queries:
             response = self.post("trace_request_all_proposals")
 
         self.assertEqual(response.status_code, 302, response.content[:500])
         self.assertEqual(ResolutionProposal.objects.filter(status=ProposalStatus.QUEUED).count(), 3)
-        self.assertEqual(len(reads), 2, reads)
+        # Only the candidate ranking of an inventory read annotates _ndi_order.
+        rankings = [query["sql"] for query in queries.captured_queries if '"_ndi_order"' in query["sql"]]
+        self.assertEqual(len(rankings), 2, rankings)
 
     def test_ask_ai_for_all_refuses_without_an_inference_backend(self):
         with override_plugins_config(netbox_data_import={}):
