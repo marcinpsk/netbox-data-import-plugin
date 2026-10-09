@@ -1231,8 +1231,9 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
 
     def test_invalid_field_and_unoffered_field_are_refused(self):
         for key in ("invalid", termination_field_key(device="DEV-A", cards="", port="invented", kind="interface")):
-            with self.subTest(key=key):
-                self.assertEqual(self.call("request_proposal", field_key=key).status_code, 400)
+            for action in ("request_proposal", "proposal"):
+                with self.subTest(key=key, action=action):
+                    self.assertEqual(self.call(action, field_key=key).status_code, 400)
         self.assertFalse(ResolutionProposal.objects.exists())
 
     def test_terminal_cancel_and_repeat_decisions_refuse(self):

@@ -3724,7 +3724,6 @@ def _proposal_card(request, snapshot, field_key: str, identity: str):
         workspace = snapshot.workspace(request.user)
     except PlanError:
         raise StalePreview(UNREADABLE_PREVIEW) from None
-    parse_termination_field_key(field_key)
     traces = [trace for trace in workspace.traces if any(item["field_key"] == field_key for item in trace.terminations)]
     trace = next((trace for trace in traces if trace.identity == identity), traces[0] if traces else None)
     if trace is None:
