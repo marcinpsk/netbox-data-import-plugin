@@ -4504,6 +4504,13 @@ class _ProposalRequests:
         return _trace_reader(self.preview.actor, self.preview.profile, self.preview.planning_context)
 
     @cached_property
+    def inventories(self):
+        """Return the inventory cache that every request of this command shares."""
+        from .proposal_presentation import TerminationInventories
+
+        return TerminationInventories(profile=self.preview.profile, reader=self.reader)
+
+    @cached_property
     def live_terminations(self) -> dict:
         """Return each termination of a plan made against live NetBox now, by field key."""
         preview = self.preview
@@ -4523,12 +4530,11 @@ class _ProposalRequests:
         from core.models import Job, ObjectType
 
         from .cable_target import UNRESOLVED
-        from .inference_backend import proposal_candidate_limit, proposal_eligible_set_limit
+        from .inference_backend import proposal_candidate_limit
         from .jobs import ResolutionProposalJob, import_queue_task
         from .models import ProposalFailureReason
         from .proposal_jobs import PROMPT_VERSION
         from .proposal_response import RESPONSE_SCHEMA_VERSION
-        from .proposal_tasks import proposal_task
         from .resolution_proposals import (
             ActiveProposalExists,
             active_proposal_exists,
@@ -4544,8 +4550,6 @@ class _ProposalRequests:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
         if sources[field_key] is None:
             raise InvalidProposalTarget(TERMINATION_UNRESOLVABLE)
-        reader = self.reader
-        task = proposal_task(SELECT_TERMINATION_TASK)
         field = self.live_terminations.get(field_key)
         if field is None:
             raise InvalidProposalTarget("This field is no longer in the preview.")
@@ -4554,9 +4558,7 @@ class _ProposalRequests:
         # Refuse on the observed predecessor, not on the index: see active_proposal_exists.
         if active_proposal_exists(profile=profile, task_type=SELECT_TERMINATION_TASK, field_key=field_key):
             raise ActiveProposalExists("This field already has an active Resolution Proposal.")
-        inventory = task.inventory(
-            profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_eligible_set_limit()
-        )
+        inventory = self.inventories.get(field_key)
         device = inventory.resolved_device
         if device is None:
             raise PreviewCommandRefused("The resolved Device is unavailable or outside your view permission.", 409)

@@ -43,6 +43,7 @@ from netbox_data_import.tests.helpers import (
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.tests.plugins_config import override_plugins_config
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
+from netbox_data_import.termination_proposal import SelectTerminationTask
 from netbox_data_import.tests.test_inference_backend import ALLOWLIST, FALLBACK
 
 HTMX = {"HX-Request": "true"}
@@ -263,6 +264,21 @@ class ProposalInPlaceTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, CableTo
         notes = [str(message) for message in get_messages(response.wsgi_request)]
         self.assertIn("Asked AI about 2 terminations.", notes)
         self.assertIn("Skipped 1 termination: This field already has an active Resolution Proposal. (1)", notes)
+
+    def test_ask_ai_for_all_reads_one_inventory_per_device_kind_and_role(self):
+        """The first and third fields share DEV-A, so the command reads its candidates once."""
+        reads, real = [], SelectTerminationTask.inventory
+
+        def counted(task, **kwargs):
+            reads.append(kwargs["field_key"])
+            return real(task, **kwargs)
+
+        with patch.object(SelectTerminationTask, "inventory", autospec=True, side_effect=counted):
+            response = self.post("trace_request_all_proposals")
+
+        self.assertEqual(response.status_code, 302, response.content[:500])
+        self.assertEqual(ResolutionProposal.objects.filter(status=ProposalStatus.QUEUED).count(), 3)
+        self.assertEqual(len(reads), 2, reads)
 
     def test_ask_ai_for_all_refuses_without_an_inference_backend(self):
         with override_plugins_config(netbox_data_import={}):

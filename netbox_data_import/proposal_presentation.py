@@ -78,6 +78,28 @@ def _action(key, label, reason):
     }
 
 
+class TerminationInventories:
+    """Read one inventory per Device, kind, and role, for the card display and for every request."""
+
+    def __init__(self, *, profile, reader):
+        self.profile = profile
+        self.reader = reader
+        self._reads = {}
+
+    def get(self, field_key):
+        """Return the cached inventory for the Device, kind, and role that *field_key* names."""
+        parsed = parse_termination_field_key(field_key)
+        key = (parsed["device"], parsed["kind"], parsed["role"])
+        if key not in self._reads:
+            self._reads[key] = proposal_task(SELECT_TERMINATION_TASK).inventory(
+                profile=self.profile,
+                field_key=field_key,
+                netbox_reader=self.reader,
+                limit=proposal_eligible_set_limit(),
+            )
+        return self._reads[key]
+
+
 class ProposalPresentation:
     """Read one profile's proposal display with one backend lookup per response."""
 
@@ -85,7 +107,7 @@ class ProposalPresentation:
         self.profile = profile
         self.actor = actor
         self.reader = reader
-        self._inventory = {}
+        self._inventories = TerminationInventories(profile=profile, reader=reader)
         self._write_assessments = {}
         self.preview_allowed = ImportProfile.objects.restrict(actor, "change").filter(pk=profile.pk).exists()
         self.profile_view_allowed = ImportProfile.objects.restrict(actor, "view").filter(pk=profile.pk).exists()
@@ -182,18 +204,9 @@ class ProposalPresentation:
 
     def field_inventory(self, field):
         """Return one cached inventory read for fields that share device, kind, and role."""
-        parsed = parse_termination_field_key(field["field_key"])
-        if self.reader is None or parsed["role"] != TERMINATION_ROLE:
+        if self.reader is None or parse_termination_field_key(field["field_key"])["role"] != TERMINATION_ROLE:
             return None
-        key = (parsed["device"], parsed["kind"], parsed["role"])
-        if key not in self._inventory:
-            self._inventory[key] = proposal_task(SELECT_TERMINATION_TASK).inventory(
-                profile=self.profile,
-                field_key=field["field_key"],
-                netbox_reader=self.reader,
-                limit=proposal_eligible_set_limit(),
-            )
-        return self._inventory[key]
+        return self._inventories.get(field["field_key"])
 
     def action_permission_reason(self, field, inventory):
         """Explain access shared by request and cancellation actions."""
