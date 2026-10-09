@@ -143,6 +143,44 @@ test('a refused action reads its card again and shows the refusal there, without
   expect(errors).toEqual([]);
 });
 
+test('a refusal that arrives while the tab is hidden still reads its card and shows why', async ({page}) => {
+  await page.route(`${ORIGIN}${ACTION_URLS.request}`, route => route.fulfill({
+    status: 409, json: {ok: false, error: 'This field already has an active Resolution Proposal.'},
+  }));
+  await page.route(cardRead, route => route.fulfill(html(card('first', 'pending'))));
+  await open(page, [card('first')]);
+
+  // The operator switches tabs while the command is on its way, so the refusal arrives in a hidden tab.
+  await page.evaluate(() => Object.defineProperty(document, 'hidden', {configurable: true, get: () => true}));
+  await actionOf(page, 'first', 'request').click();
+
+  await expect(cardOf(page, 'first').locator('[data-proposal-progress]')).toBeVisible();
+  await expect(cardOf(page, 'first').locator('[data-proposal-error]')).toHaveText(
+    'This field already has an active Resolution Proposal.');
+});
+
+test('a retry that succeeds while the refused read is on its way does not show the old refusal', async ({page}) => {
+  let posts = 0;
+  await page.route(`${ORIGIN}${ACTION_URLS.request}`, route => {
+    posts += 1;
+    return posts === 1
+      ? route.fulfill({status: 409, json: {ok: false, error: 'The backend is busy.'}})
+      : route.fulfill(html(answer('first', 'pending', 1, 100)));
+  });
+  const reads = [];
+  await page.route(cardRead, route => { reads.push(route); });
+  await open(page, [card('first')]);
+
+  await actionOf(page, 'first', 'request').click();
+  await expect.poll(() => reads.length).toBe(1);
+  await actionOf(page, 'first', 'request').click();
+
+  await expect(cardOf(page, 'first').locator('[data-proposal-progress]')).toBeVisible();
+  expect(posts).toBe(2);
+  await expect(cardOf(page, 'first').locator('[data-proposal-error]')).toBeHidden();
+  await reads[0].fulfill(html(card('first', 'completed'))).catch(() => {});
+});
+
 test('a poll the server refuses stops polling and says why', async ({page}) => {
   await page.clock.install({time: new Date('2026-09-11T08:00:00Z')});
   let reads = 0;

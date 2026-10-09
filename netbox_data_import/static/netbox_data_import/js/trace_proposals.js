@@ -47,10 +47,13 @@
   document.addEventListener('htmx:beforeRequest', function (event) {
     var card = cardOf(event);
     if (!card) return;
+    // htmx starts a poll with no event, and the read after a refusal with the ndi:read event.
+    var asked = event.detail.requestConfig && event.detail.requestConfig.triggeringEvent;
     if (event.detail.elt !== card) {
+      delete refusals[card.id];
       show(card, '');
-    } else if (card.hasAttribute('data-proposal-halted') || document.hidden) {
-      // A halted card stays quiet, and a hidden tab asks again on the first interval after it shows.
+    } else if (card.hasAttribute('data-proposal-halted') || (document.hidden && !asked)) {
+      // A halted card stays quiet, and a hidden tab polls again on the first interval after it shows.
       delete refusals[card.id];
       event.preventDefault();
     }
@@ -91,6 +94,7 @@
     // The action can lose a race with another operator, so the card first shows what the field holds now.
     // The refused request still holds its card until this event returns, so the read starts one task later.
     // NetBox does not set window.htmx, so the card's own hx-get answers the event that its hx-trigger names.
+    show(card, answer.error);
     setTimeout(function () {
       refusals[card.id] = answer.error;
       card.dispatchEvent(new Event('ndi:read'));
