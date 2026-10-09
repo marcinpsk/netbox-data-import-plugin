@@ -21,7 +21,18 @@
       {% endif %}
     </div>
   </div>
-  {% if not sync_active %}
+  {% if sync_status.state == "queued" %}
+    <form method="post" action="{% url 'plugins:netbox_data_import:trace_sync_cancel' %}"
+          hx-post="{% url 'plugins:netbox_data_import:trace_sync_cancel' %}"
+          hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true"
+          hx-sync="closest #ndiSyncStatus:replace" hx-disabled-elt="find button">
+      {% csrf_token %}
+      {% include "netbox_data_import/inc/preview_claim.html" %}
+      <input type="hidden" name="job_id" value="{{ sync_status.job.pk }}">
+      <input type="hidden" name="trace" value="{{ sync_trace }}">
+      <button type="submit" class="btn btn-sm btn-outline-danger" data-sync-cancel><span class="spinner-border spinner-border-sm ndi-busy" aria-hidden="true"></span>Cancel sync</button>
+    </form>
+  {% elif not sync_active %}
     <form method="post" action="{% url 'plugins:netbox_data_import:preview_reread' %}"
           hx-post="{% url 'plugins:netbox_data_import:preview_reread' %}"
           hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true"

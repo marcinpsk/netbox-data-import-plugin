@@ -185,6 +185,7 @@ urlpatterns = [
     ),
     path("trace-workspace/sync/", views.TraceSyncView.as_view(), name="trace_sync"),
     path("trace-workspace/sync/status/", views.TraceSyncStatusView.as_view(), name="trace_sync_status"),
+    path("trace-workspace/sync/cancel/", views.TraceSyncCancelView.as_view(), name="trace_sync_cancel"),
     path(
         "trace-workspace/cable-policy/",
         views.TraceCablePolicyView.as_view(),

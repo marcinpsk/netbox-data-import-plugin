@@ -220,7 +220,8 @@ A trace sync keeps its preview until the Job ends. The trace workspace and the p
 whether the Job waits for a worker or runs. A waiting Job shows how many jobs a worker takes before
 it and how many workers are busy. A running Job shows its phase and its steps. The workspace checks
 the Job every 3 seconds and loads the page again when the Job ends. Then re-read the preview before
-the next decision.
+the next decision. While no worker has started the Job, **Cancel sync** stops it and re-reads the
+preview.
 
 You can leave the progress page while the Job runs. Open **Run Import** and select **Resume import** to return to the latest active Job. The direct progress URL also restores a completed result or a refreshed preview after a safe validation failure.
 

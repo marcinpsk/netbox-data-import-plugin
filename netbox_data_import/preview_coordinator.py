@@ -71,10 +71,15 @@ EXPIRED_PREVIEW = "This preview expired. Start a new import."
 SUBMITTED_PREVIEW = "The import already started, so this preview can no longer take a decision."
 SYNC_QUEUED = (
     "A trace synchronization waits in the queue and has not started. "
-    "Wait for it to finish before you change this workspace."
+    "Wait for it to finish, or cancel it, before you change this workspace."
 )
 SYNC_RUNNING = "A trace synchronization is running. Wait for it to finish before you change this workspace."
 SYNC_FINISHED = "The trace synchronization finished. Re-read the preview before the next decision."
+SYNC_STARTED = "The trace synchronization already started, so you cannot cancel it."
+SYNC_CANCELLED = "The operator cancelled this trace synchronization before it started."
+SYNC_CANCEL_DONE = "The trace synchronization was cancelled. The preview was re-read from NetBox."
+SYNC_NOT_THIS_PREVIEW = "This preview did not queue that trace synchronization."
+SYNC_OTHER_ACTIVE = "Another trace synchronization of this source waits or runs. Wait for it to finish."
 UNREADABLE_PREVIEW = "This preview cannot be read. Re-read the preview."
 PREVIEW_TOO_LARGE = "This preview is too large to store. Split the source file and import each part."
 SOURCE_GONE = "The stored source is no longer available. Upload it again."
@@ -689,6 +694,47 @@ class RereadPreview(PreviewCommand):
         return CommandOutcome(message="The preview was re-read from NetBox.")
 
 
+class CancelTraceSync(PreviewCommand):
+    """Cancel the preview's own trace sync before a worker starts it, then replan the preview.
+
+    A worker that holds the Job lock owns the delivery, so the command refuses instead of waiting.
+    """
+
+    allowed_states = frozenset({PreviewState.SYNC_PENDING})
+    reviews_policy = False
+    reads_plan = False
+
+    def __init__(self, job_id: int):
+        self.job_id = job_id
+
+    def apply(self, preview):
+        """Refuse another preview's Job, a Job a worker took, or a source another sync holds."""
+        from core.choices import JobStatusChoices
+
+        from .jobs import ImportJobRunner, cancel_queued_import_job, retained_sync_jobs
+
+        job = (
+            ImportJobRunner.get_jobs()
+            .filter(
+                pk=self.job_id,
+                user=preview.actor,
+                data__job_type=ImportJobRunner.job_type,
+                data__keeps_preview=True,
+                data__profile_id=preview.profile.pk,
+                data__source_document_id=preview.document.pk,
+            )
+            .first()
+        )
+        if job is None or job.pk != preview.job_id:
+            raise StalePreview(SYNC_NOT_THIS_PREVIEW)
+        # The replan below reads NetBox, which another sync of this source may be writing.
+        if retained_sync_jobs(preview.actor, preview.profile.pk, preview.document.pk).exclude(pk=job.pk).exists():
+            raise StalePreview(SYNC_OTHER_ACTIVE)
+        if not cancel_queued_import_job(job, SYNC_CANCELLED):
+            raise StalePreview(SYNC_FINISHED if job.status in JobStatusChoices.TERMINAL_STATE_CHOICES else SYNC_STARTED)
+        return CommandOutcome(message=SYNC_CANCEL_DONE)
+
+
 class RestorePreview(PreviewCommand):
     """Return to the preview whose final import failed, replanned against live NetBox."""
 
@@ -827,6 +873,7 @@ def expire_previews(*, now=None) -> tuple[int, int]:
 
 __all__ = (
     "CLAIM_FIELDS",
+    "CancelTraceSync",
     "CommandOutcome",
     "DiscardPreview",
     "LockedPreview",

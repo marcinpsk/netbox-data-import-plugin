@@ -76,6 +76,15 @@ the revision, orders two such commands: the partial unique index and the conditi
 second active proposal or a second decision. A command that writes policy or replans, which includes
 proposal acceptance, still advances the revision.
 
+Amended 2026-10-09: the operator can cancel the preview's own trace sync while no worker has started
+it. Cancel is a preview command. It takes the Job lock that a worker takes before it runs the Job,
+without waiting. If a worker holds the lock, the command refuses. Under the lock, a Job that is still
+pending and was never started becomes failed, with the phase `cancelled`. NetBox has no cancelled
+status. The command refuses while another sync of the same source is active, because the replan reads
+NetBox. Then the coordinator replans the preview to ready and advances the revision. The queue task is
+cancelled after the commit. A worker that already took the task skips it, because the Job is no
+longer enqueued.
+
 ## Considered options
 
 - A lock around the session helpers: rejected. Response middleware saves the session after the lock

@@ -67,6 +67,7 @@ COMMANDS = frozenset(
         "match_existing_device",
         "auto_match_devices",
         "trace_sync",
+        "trace_sync_cancel",
         "trace_cable_policy",
         "trace_segment_policy",
         "trace_resolve_termination",

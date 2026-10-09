@@ -5,12 +5,15 @@
 import logging
 from dataclasses import dataclass, replace
 from datetime import timedelta
+from functools import partial
 from typing import Any, NoReturn
 
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError, connection
+from django.db import DatabaseError, connection, transaction
 from django.utils import timezone
 from django_pg_utils import advisory_lock
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from rq import get_current_job
 from rq.exceptions import InvalidJobOperation, NoSuchJobError
 from rq.job import Job as RQJob, JobStatus
@@ -198,6 +201,46 @@ def recover_abandoned_import_job(job) -> None:
                 error=IMPORT_TASK_LOST,
                 data={**(job.data or {}), "phase": "failed", "message": IMPORT_TASK_LOST},
             )
+
+
+def cancel_queued_import_job(job, message: str) -> bool:
+    """Fail a Job that no worker has started, and cancel its queue task after the commit.
+
+    Return False, and change nothing, when a worker holds the Job lock or the Job has left the queue.
+    """
+    from core.choices import JobStatusChoices
+    from core.models import Job
+
+    if not _try_import_job_lock(job):
+        return False
+    job.refresh_from_db()
+    waiting = (JobStatusChoices.STATUS_PENDING, JobStatusChoices.STATUS_SCHEDULED)
+    if job.status not in waiting or job.started is not None:
+        return False
+    # NetBox has no cancelled status; a failed Job with this phase is one the operator stopped.
+    Job.objects.filter(pk=job.pk).update(
+        status=JobStatusChoices.STATUS_FAILED,
+        completed=timezone.now(),
+        error=message,
+        data={**(job.data or {}), "phase": "cancelled", "message": message},
+    )
+    transaction.on_commit(partial(_cancel_queue_task, job))
+    return True
+
+
+def _cancel_queue_task(job) -> None:
+    """Take a cancelled Job's task out of its queue; a worker that already took it skips the Job."""
+    try:
+        rq_job = import_queue_task(job)
+        if rq_job is not None and rq_job.get_status(refresh=True) in (
+            JobStatus.QUEUED,
+            JobStatus.SCHEDULED,
+            JobStatus.DEFERRED,
+        ):
+            rq_job.cancel()
+    except (RedisConnectionError, RedisTimeoutError):
+        # The Job row is the record: ImportJobRunner.handle runs only a Job that is still enqueued.
+        logger.warning("The queue task of cancelled import Job %s stays in its queue.", job.pk)
 
 
 class ImportJobRunner(JobRunner):

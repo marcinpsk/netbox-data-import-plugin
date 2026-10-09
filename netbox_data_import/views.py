@@ -100,7 +100,9 @@ from .object_permissions import (
 from .plan import Disposition, ImportPlan, PlanError
 from .preview_coordinator import (
     SYNC_FINISHED,
+    SYNC_NOT_THIS_PREVIEW,
     UNREADABLE_PREVIEW,
+    CancelTraceSync,
     CommandOutcome,
     DiscardPreview,
     LockedPreview,
@@ -1498,12 +1500,13 @@ def _import_job_progress(request, job):
     that submitted it; a newer preview is never replaced from here.
     """
     from core.choices import JobStatusChoices
-    from .jobs import IMPORT_TASK_LOST, LOST, import_job_status
+    from .jobs import IMPORT_TASK_LOST, LOST, QUEUED, import_job_status
 
     data = job.data or {}
     status = import_job_status(job)
     percentage = round(status.processed * 100 / status.total) if status.total else 0
     abandoned = status.state == LOST
+    cancelled = data.get("phase") == "cancelled"
     is_failed = abandoned or job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED)
     snapshot = read_preview(request, include_plan=False)
     restorable = (
@@ -1513,6 +1516,7 @@ def _import_job_progress(request, job):
         and snapshot.active
         and _import_source_rows_available(job)
     )
+    holds_preview = snapshot.active and snapshot.state == PreviewState.SYNC_PENDING and snapshot.job_id == job.pk
     execution_id = data.get("import_execution_id")
     return {
         "job": job,
@@ -1523,9 +1527,16 @@ def _import_job_progress(request, job):
         "is_active": status.active,
         "is_completed": job.status == JobStatusChoices.STATUS_COMPLETED,
         "is_failed": is_failed,
+        "cancelled": cancelled,
+        "cancel_claim": snapshot.claim if holds_preview and status.state == QUEUED else None,
+        "workspace_url": _review_workspace_url(snapshot.profile) if cancelled and snapshot.active else "",
         "restore_claim": snapshot.claim if restorable else None,
         "preview_replaced": (
-            is_failed and not restorable and isinstance(data.get("context_data"), dict) and snapshot.job_id != job.pk
+            is_failed
+            and not restorable
+            and not cancelled
+            and isinstance(data.get("context_data"), dict)
+            and snapshot.job_id != job.pk
         ),
         "results_url": (
             reverse("plugins:netbox_data_import:import_results", kwargs={"pk": execution_id}) if execution_id else ""
@@ -3939,6 +3950,21 @@ class TraceSyncStatusView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     def refusal_url(self, request):
         """Return the trace the polling page shows."""
         return _trace_workspace_url(request.GET.get("trace", ""))
+
+
+class TraceSyncCancelView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Cancel the preview's own trace sync before a worker starts it."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Cancel the sync, then show the workspace with the preview re-read."""
+        job_id = request.POST.get("job_id", "")
+        if not job_id.isascii() or not job_id.isdigit():
+            raise StalePreview(SYNC_NOT_THIS_PREVIEW)
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), CancelTraceSync(int(job_id)))
+        messages.success(request, result.outcome.message)
+        return redirect(_trace_workspace_url(request.POST.get("trace", "")))
 
 
 CANDIDATE_LIMIT_INVALID = f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}."

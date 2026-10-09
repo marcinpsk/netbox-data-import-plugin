@@ -11,6 +11,10 @@
   <div class="alert alert-success">
     <i class="mdi mdi-check-circle"></i> Import complete.
   </div>
+  {% elif cancelled %}
+  <div class="alert alert-secondary">
+    <i class="mdi mdi-cancel"></i> {{ message }}
+  </div>
   {% elif is_failed %}
   <div class="alert alert-danger">
     <i class="mdi mdi-alert-circle"></i> {{ message|default:"The import failed." }}
@@ -41,6 +45,8 @@
       <button type="submit" class="btn btn-primary">Review preview</button>
     </form>
     {% if results_url %}<a href="{{ results_url }}" class="btn btn-outline-secondary">View results</a>{% endif %}
+    {% elif cancelled %}
+    {% if workspace_url %}<a href="{{ workspace_url }}" class="btn btn-primary">Open the preview</a>{% endif %}
     {% elif is_failed and preview_replaced %}
     <span class="text-muted">A newer preview replaced this import's preview.</span>
     {% if results_url %}<a href="{{ results_url }}" class="btn btn-outline-secondary">View results</a>{% endif %}
@@ -48,7 +54,15 @@
     <a href="{% url 'plugins:netbox_data_import:import_setup' %}" class="btn btn-primary">Start a new import</a>
     {% if results_url %}<a href="{{ results_url }}" class="btn btn-outline-secondary">View results</a>{% endif %}
     {% else %}
-    <span class="text-muted"><i class="mdi mdi-loading mdi-spin"></i> This page updates automatically.</span>
+    {% if cancel_claim %}
+    <form method="post" action="{% url 'plugins:netbox_data_import:trace_sync_cancel' %}">
+      {% csrf_token %}
+      {% include "netbox_data_import/inc/preview_claim.html" with preview_claim=cancel_claim %}
+      <input type="hidden" name="job_id" value="{{ job.pk }}">
+      <button type="submit" class="btn btn-outline-danger" data-sync-cancel>Cancel sync</button>
+    </form>
+    {% endif %}
+    <span class="text-muted align-self-center"><i class="mdi mdi-loading mdi-spin"></i> This page updates automatically.</span>
     {% endif %}
   </div>
 </div>

@@ -1,24 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""A queued trace sync: its queue, and what the workspace says about it."""
+"""A queued trace sync: its queue, what the workspace says about it, and how the operator cancels it."""
 
+import threading
 from contextlib import nullcontext
 from io import BytesIO
+from unittest.mock import patch
 
 from core.choices import JobStatusChoices
 from core.management.commands.rqworker import DEFAULT_QUEUES
 from core.models import Job
-from django.test import TestCase
+from dcim.models import Cable
+from django.contrib.auth import get_user_model
+from django.db import connection
+from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
 from django_rq import get_queue, get_worker
 from netbox.constants import RQ_QUEUE_DEFAULT, RQ_QUEUE_HIGH, RQ_QUEUE_LOW
+from redis.exceptions import ConnectionError as RedisConnectionError
+from rq.job import Job as RQJob, JobStatus
 from rq.worker import WorkerStatus
 
 from netbox_data_import.jobs import ImportJobRunner, ResolutionProposalJob
-from netbox_data_import.preview_coordinator import SYNC_FINISHED, SYNC_QUEUED, SYNC_RUNNING
+from netbox_data_import.models import ImportExecution, PreviewState
+from netbox_data_import.preview_coordinator import (
+    SYNC_CANCELLED,
+    SYNC_FINISHED,
+    SYNC_NOT_THIS_PREVIEW,
+    SYNC_OTHER_ACTIVE,
+    SYNC_QUEUED,
+    SYNC_RUNNING,
+    SYNC_STARTED,
+)
 from netbox_data_import.tests.helpers import (
     preview_claim,
+    preview_coordinator,
     trace_termination,
     trace_workbook_bytes,
     upload_preview,
@@ -27,6 +44,7 @@ from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.tests.plugins_config import override_plugins_config
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
 from netbox_data_import.tests.test_inference_backend import ALLOWLIST, FALLBACK
+from netbox_data_import.views import _trace_workspace_url
 
 HTMX = {"HX-Request": "true"}
 BACKEND = {"inference_backend": FALLBACK, "inference_backend_origin_allowlist": ALLOWLIST}
@@ -84,6 +102,10 @@ class _QueuedSyncMixin:
         jobs = list(ResolutionProposalJob.get_jobs().order_by("pk"))
         self.assertEqual(len(jobs), 2)
         return jobs
+
+    def cancel(self, job, **extra):
+        """Post the cancel command for one Job, as the workspace form sends it."""
+        return self.post("trace_sync_cancel", {"job_id": str(job.pk), "trace": self.identity}, **extra)
 
     def status_read(self, **params):
         """Read the sync status the workspace polls, with the claim the page holds."""
@@ -164,10 +186,11 @@ class SyncStatusTest(_QueuedSyncMixin, IsolatedRQQueueTestMixin, CableTopologyMi
         self.assertNotContains(busy, "No worker serves")
         self.assertNotContains(busy, SYNC_RUNNING)
         self.assertContains(busy, f'href="{job.get_absolute_url()}"')
+        self.assertContains(busy, reverse("plugins:netbox_data_import:trace_sync_cancel"))
         self.assertContains(busy, 'hx-trigger="every 3s"')
         self.assertContains(busy, reverse("plugins:netbox_data_import:trace_sync_status"))
 
-    def test_a_running_sync_shows_its_phase_and_progress(self):
+    def test_a_running_sync_shows_its_phase_and_progress_and_offers_no_cancel(self):
         job = self.queue_sync()
         Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_RUNNING, started=timezone.now())
         rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
@@ -180,6 +203,7 @@ class SyncStatusTest(_QueuedSyncMixin, IsolatedRQQueueTestMixin, CableTopologyMi
         self.assertContains(page, "Phase: importing")
         self.assertContains(page, "Steps: 25 of 100")
         self.assertNotContains(page, SYNC_QUEUED)
+        self.assertNotContains(page, reverse("plugins:netbox_data_import:trace_sync_cancel"))
         self.assertContains(page, 'hx-trigger="every 3s"')
 
     def test_the_poll_answers_the_status_and_reloads_the_page_when_the_job_ends(self):
@@ -242,3 +266,234 @@ class SyncStatusTest(_QueuedSyncMixin, IsolatedRQQueueTestMixin, CableTopologyMi
 
                 self.assertContains(page, "Jobs ahead of it: 1")
                 self.assertContains(page, "No worker serves the default queue.")
+
+
+class SyncCancelTest(_QueuedSyncMixin, IsolatedRQQueueTestMixin, CableTopologyMixin, TestCase):
+    """The operator cancels a sync that no worker has started, and the preview is ready again."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+
+    def setUp(self):
+        super().setUp()
+        self.upload()
+
+    def test_cancel_ends_a_queued_sync_and_returns_the_preview_to_review(self):
+        job = self.queue_sync()
+        before = preview_coordinator(self.client)
+        rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
+        arguments = rq_job.kwargs
+
+        response = self.cancel(job, headers=HTMX)
+
+        self.assertEqual(response.status_code, 302, response.content[:500])
+        self.assertEqual(response.url, _trace_workspace_url(self.identity))
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_FAILED)
+        self.assertIsNotNone(job.completed)
+        self.assertIsNone(job.started)
+        self.assertEqual(
+            (job.data["phase"], job.data["message"], job.error), ("cancelled", SYNC_CANCELLED, SYNC_CANCELLED)
+        )
+        self.assertEqual(rq_job.get_status(refresh=True), JobStatus.CANCELED)
+        self.assertNotIn(rq_job.id, get_queue(job.queue_name).job_ids)
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.state, after.job_id), (PreviewState.READY, None))
+        self.assertEqual(after.revision, before.revision + 1)
+        self.assertEqual(after.preview_token, before.preview_token)
+        page = self.client.get(response.url)
+        self.assertNotContains(page, SYNC_QUEUED)
+        self.assertTrue(next(a for a in page.context["selected_trace"].actions if a.key == "sync").enabled)
+
+        # A delivery that RQ had already handed out writes nothing for a cancelled Job.
+        ImportJobRunner.handle(**arguments)
+        self.assertFalse(Cable.objects.exists())
+        self.assertFalse(ImportExecution.objects.exists())
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_FAILED)
+
+    def test_the_progress_page_offers_cancel_and_then_says_the_sync_was_cancelled(self):
+        job = self.queue_sync()
+        progress = reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk})
+        cancel_url = reverse("plugins:netbox_data_import:trace_sync_cancel")
+        self.assertContains(self.client.get(progress), f'action="{cancel_url}"')
+
+        response = self.post("trace_sync_cancel", {"job_id": str(job.pk)})
+
+        self.assertEqual(response.url, reverse("plugins:netbox_data_import:trace_workspace"))
+        page = self.client.get(progress)
+        self.assertContains(page, SYNC_CANCELLED)
+        self.assertNotContains(page, f'action="{cancel_url}"')
+        self.assertNotContains(page, "A newer preview replaced this import's preview.")
+        self.assertContains(page, f'href="{reverse("plugins:netbox_data_import:trace_workspace")}"')
+
+    def test_cancel_refuses_a_sync_that_already_started(self):
+        job = self.queue_sync()
+        Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_RUNNING, started=timezone.now())
+        claim = preview_claim(self.client)
+
+        refused = self.cancel(job)
+
+        self.assertContains(refused, SYNC_STARTED, status_code=409)
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_RUNNING)
+        self.assertEqual(preview_claim(self.client), claim)
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.SYNC_PENDING)
+        self.assertIn(str(job.job_id), get_queue(job.queue_name).job_ids)
+
+    def test_cancel_refuses_a_sync_that_already_ended(self):
+        job = self.queue_sync()
+        Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_COMPLETED, completed=timezone.now())
+
+        refused = self.cancel(job)
+
+        self.assertContains(refused, SYNC_FINISHED, status_code=409)
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_COMPLETED)
+
+    def test_cancel_refuses_a_job_this_preview_did_not_queue(self):
+        job = self.queue_sync()
+        other = get_user_model().objects.create_user("other-operator")
+        foreign = ImportJobRunner.enqueue(
+            name=ImportJobRunner.name,
+            user=other,
+            profile_id=self.profile.pk,
+            source_document_id=job.data["source_document_id"],
+            accepted_plan={},
+            selection=[],
+            idempotency_key="foreign",
+        )
+        foreign.data = dict(job.data)
+        foreign.save(update_fields=["data"])
+
+        refused = self.cancel(foreign)
+        self.assertContains(refused, SYNC_NOT_THIS_PREVIEW, status_code=409)
+
+        # The preview's own Job, moved to another user, is no longer this operator's to cancel.
+        Job.objects.filter(pk=job.pk).update(user=other)
+        refused = self.cancel(job)
+        self.assertContains(refused, SYNC_NOT_THIS_PREVIEW, status_code=409)
+
+        for each in (job, foreign):
+            each.refresh_from_db()
+            self.assertEqual(each.status, JobStatusChoices.STATUS_PENDING)
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.SYNC_PENDING)
+
+    def test_cancel_refuses_while_another_sync_of_the_source_is_active(self):
+        job = self.queue_sync()
+        rival = ImportJobRunner.enqueue(
+            name=ImportJobRunner.name,
+            user=self.actor,
+            profile_id=self.profile.pk,
+            source_document_id=job.data["source_document_id"],
+            accepted_plan={},
+            selection=[],
+            idempotency_key="rival",
+        )
+        rival.data = dict(job.data)
+        rival.save(update_fields=["data"])
+        claim = preview_claim(self.client)
+
+        refused = self.cancel(job)
+
+        self.assertContains(refused, SYNC_OTHER_ACTIVE, status_code=409)
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_PENDING)
+        self.assertEqual(preview_claim(self.client), claim)
+
+    def test_cancel_refuses_a_job_id_that_is_not_a_number(self):
+        job = self.queue_sync()
+
+        refused = self.post("trace_sync_cancel", {"job_id": "1e3", "trace": self.identity})
+
+        self.assertContains(refused, SYNC_NOT_THIS_PREVIEW, status_code=409)
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_PENDING)
+
+    def test_a_queue_that_cannot_answer_keeps_the_committed_cancel(self):
+        job = self.queue_sync()
+        arguments = get_queue(job.queue_name).fetch_job(str(job.job_id)).kwargs
+
+        # Redis is the boundary: the cancel after the commit cannot reach it.
+        with patch.object(RQJob, "cancel", autospec=True, side_effect=RedisConnectionError):
+            response = self.cancel(job)
+
+        self.assertEqual(response.status_code, 302)
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_FAILED)
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.READY)
+        # The task stays queued, and its late delivery writes nothing.
+        ImportJobRunner.handle(**arguments)
+        self.assertFalse(Cable.objects.exists())
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_FAILED)
+
+    def test_cancel_needs_the_exact_claim(self):
+        job = self.queue_sync()
+        stale = {**preview_claim(self.client), "preview_revision": "1"}
+
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync_cancel"),
+            {**stale, "job_id": str(job.pk), "trace": self.identity},
+        )
+
+        self.assertEqual(refused.status_code, 409)
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_PENDING)
+
+
+class SyncCancelRaceTest(_QueuedSyncMixin, IsolatedRQQueueTestMixin, CableTopologyMixin, TransactionTestCase):
+    """A worker that holds the Job lock owns the delivery, so a cancel must refuse rather than race it."""
+
+    def setUp(self):
+        super().setUp()
+        self.build_topology()
+        self.upload()
+
+    def test_cancel_refuses_while_a_worker_holds_the_job_lock(self):
+        job = self.queue_sync()
+        arguments = get_queue(job.queue_name).fetch_job(str(job.job_id)).kwargs
+        claim = preview_claim(self.client)
+        locked, release = threading.Event(), threading.Event()
+        errors: list[BaseException] = []
+
+        def pause_after_the_lock(execute, sql, params, many, context):
+            # The worker took the Job lock and has not yet read the Job row or started it.
+            if "pg_advisory_lock" in sql:
+                result = execute(sql, params, many, context)
+                locked.set()
+                release.wait(20)
+                return result
+            return execute(sql, params, many, context)
+
+        def deliver():
+            try:
+                with connection.execute_wrapper(pause_after_the_lock):
+                    ImportJobRunner.handle(**arguments)
+            except BaseException as exc:  # noqa: BLE001 - the thread hands every failure to the test
+                errors.append(exc)
+            finally:
+                connection.close()
+
+        worker = threading.Thread(target=deliver, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(locked.wait(20), "the worker never took the Job lock")
+            refused = self.cancel(job)
+            job.refresh_from_db()
+            status_while_held = job.status
+        finally:
+            release.set()
+            worker.join(30)
+
+        self.assertContains(refused, SYNC_STARTED, status_code=409)
+        self.assertEqual(status_while_held, JobStatusChoices.STATUS_PENDING)
+        self.assertEqual(preview_claim(self.client), claim)
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.SYNC_PENDING)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        # The refused cancel left the delivery alone, so the worker ran the sync to its end.
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_COMPLETED)
+        self.assertEqual(Cable.objects.count(), 1)
