@@ -16,7 +16,7 @@ import logging
 import re
 import secrets
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 from types import MappingProxyType
@@ -69,9 +69,11 @@ STALE_PREVIEW = "This preview changed in another tab or request. Reload it and t
 NEWER_PREVIEW = "A newer import was started in another tab. Reload the page to continue there."
 EXPIRED_PREVIEW = "This preview expired. Start a new import."
 SUBMITTED_PREVIEW = "The import already started, so this preview can no longer take a decision."
-RETAINED_SYNC_BLOCK_REASON = (
-    "A trace synchronization is still running. Wait for it to finish before changing this workspace."
+SYNC_QUEUED = (
+    "A trace synchronization waits in the queue and has not started. "
+    "Wait for it to finish before you change this workspace."
 )
+SYNC_RUNNING = "A trace synchronization is running. Wait for it to finish before you change this workspace."
 SYNC_FINISHED = "The trace synchronization finished. Re-read the preview before the next decision."
 UNREADABLE_PREVIEW = "This preview cannot be read. Re-read the preview."
 PREVIEW_TOO_LARGE = "This preview is too large to store. Split the source file and import each part."
@@ -227,11 +229,18 @@ def _planning_context(context: Mapping) -> dict:
     return {key: context.get(key) for key in PLANNING_KEYS}
 
 
-def _job_is_active(job_id) -> bool:
+def sync_hold_reason(statuses: Iterable[str]) -> str:
+    """Return why trace sync Jobs in these statuses hold their source, or "" when none of them is active."""
     from core.choices import JobStatusChoices
-    from core.models import Job
 
-    return Job.objects.filter(pk=job_id, status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES).exists()
+    active = set(statuses) & set(JobStatusChoices.ENQUEUED_STATE_CHOICES)
+    if not active:
+        return ""
+    return SYNC_RUNNING if JobStatusChoices.STATUS_RUNNING in active else SYNC_QUEUED
+
+
+def _sync_hold(jobs) -> str:
+    return sync_hold_reason(jobs.values_list("status", flat=True))
 
 
 def setup_claim(request) -> PreviewClaim:
@@ -488,7 +497,9 @@ def _refuse_state(row: PreviewCoordinator, allowed) -> None:
     if row.state in allowed:
         return
     if row.state == PreviewState.SYNC_PENDING:
-        raise StalePreview(RETAINED_SYNC_BLOCK_REASON if _job_is_active(row.job_id) else SYNC_FINISHED)
+        from core.models import Job
+
+        raise StalePreview(_sync_hold(Job.objects.filter(pk=row.job_id)) or SYNC_FINISHED)
     if row.state == PreviewState.SUBMITTED:
         raise StalePreview(SUBMITTED_PREVIEW)
     if row.state == PreviewState.EXPIRED:
@@ -668,21 +679,13 @@ class RereadPreview(PreviewCommand):
 
     def apply(self, preview):
         """Refuse while any sync of this source still writes; the coordinator replans."""
-        from core.choices import JobStatusChoices
-        from .jobs import ImportJobRunner, recover_abandoned_import_job, retained_sync_running
+        from .jobs import recover_abandoned_import_job, retained_sync_jobs
 
-        jobs = ImportJobRunner.get_jobs().filter(
-            user=preview.actor,
-            data__keeps_preview=True,
-            data__profile_id=preview.profile.pk,
-            data__source_document_id=preview.document.pk,
-            status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
-        )
-        for job in jobs:
+        for job in retained_sync_jobs(preview.actor, preview.profile.pk, preview.document.pk):
             recover_abandoned_import_job(job)
 
-        if retained_sync_running(preview.actor, preview.profile.pk, preview.document.pk):
-            raise StalePreview(RETAINED_SYNC_BLOCK_REASON)
+        if reason := _sync_hold(retained_sync_jobs(preview.actor, preview.profile.pk, preview.document.pk)):
+            raise StalePreview(reason)
         return CommandOutcome(message="The preview was re-read from NetBox.")
 
 
@@ -735,12 +738,12 @@ class QueueImport(PreviewCommand):
         from core.models import Job
 
         from .cable_disclosure import redact_deleted_cables
-        from .jobs import ImportJobRunner, retained_sync_running
+        from .jobs import ImportJobRunner, retained_sync_jobs
 
         selection = self.selection_for(preview)
         # The Job rows order this against a sync another request queued for the same source.
-        if retained_sync_running(preview.actor, preview.profile.pk, preview.document.pk):
-            raise StalePreview(RETAINED_SYNC_BLOCK_REASON)
+        if reason := _sync_hold(retained_sync_jobs(preview.actor, preview.profile.pk, preview.document.pk)):
+            raise StalePreview(reason)
         job = ImportJobRunner.enqueue(
             name=ImportJobRunner.name,
             user=preview.actor,
@@ -841,4 +844,5 @@ __all__ = (
     "expire_previews",
     "read_preview",
     "setup_claim",
+    "sync_hold_reason",
 )

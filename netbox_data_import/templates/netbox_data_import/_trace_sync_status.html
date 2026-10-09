@@ -1,0 +1,41 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
+{# The trace sync that holds this preview. A poll swaps it while the Job waits or runs, then reloads the page. #}
+<div id="ndiSyncStatus" role="status" aria-live="polite" data-sync-state="{{ sync_status.state|default:'ended' }}"
+     class="alert {% if sync_active %}alert-info{% elif sync_status.state == 'lost' %}alert-warning{% else %}alert-success{% endif %} d-flex flex-wrap align-items-center gap-3"
+     {% if sync_active %}hx-get="{{ sync_status_url }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  <div class="ndi-sync-status-text d-flex align-items-start gap-3">
+    <i class="mdi fs-2 {% if sync_status.state == 'queued' %}mdi-timer-sand text-info{% elif sync_status.state == 'running' %}mdi-sync text-info{% elif sync_status.state == 'lost' %}mdi-alert text-warning{% else %}mdi-check-circle text-success{% endif %}" aria-hidden="true"></i>
+    <div>
+      <div>{{ retained_sync_reason }}</div>
+      {% if sync_status %}
+        <div class="small text-secondary d-flex flex-wrap column-gap-3 mt-1">
+          {% if sync_status.state == "queued" %}
+            {% include "netbox_data_import/inc/job_queue_place.html" with status=sync_status %}
+          {% elif sync_status.state == "running" %}
+            {% if sync_status.phase %}<span>Phase: {{ sync_status.phase }}.</span>{% endif %}
+            {% if sync_status.total %}<span>Steps: {{ sync_status.processed }} of {{ sync_status.total }}.</span>{% endif %}
+          {% endif %}
+          <a href="{{ sync_status.job.get_absolute_url }}">Job {{ sync_status.job.pk }}</a>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+  {% if not sync_active %}
+    <form method="post" action="{% url 'plugins:netbox_data_import:preview_reread' %}"
+          hx-post="{% url 'plugins:netbox_data_import:preview_reread' %}"
+          hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true"
+          hx-disabled-elt="find button">
+      {% csrf_token %}
+      {% include "netbox_data_import/inc/preview_claim.html" %}
+      <input type="hidden" name="next" value="{{ reread_next }}">
+      <button type="submit" class="btn btn-sm btn-primary" data-sync-reread><span class="spinner-border spinner-border-sm ndi-busy" aria-hidden="true"></span>Re-read now</button>
+    </form>
+  {% endif %}
+  {% if sync_status.state == "running" and sync_status.total %}
+    <div class="progress w-100" role="progressbar" aria-label="Trace synchronization progress"
+         aria-valuenow="{{ sync_status.processed }}" aria-valuemin="0" aria-valuemax="{{ sync_status.total }}" style="height: .375rem">
+      <div class="progress-bar" style="width: {% widthratio sync_status.processed sync_status.total 100 %}%"></div>
+    </div>
+  {% endif %}
+</div>

@@ -216,6 +216,12 @@ After you confirm a preview, the plugin queues a native NetBox background Job an
 
 The Job writes a NetBox change log record for each NetBox object that it creates, changes, or deletes. The record names the user who started the import, and its request ID is the Job UUID. Event rules and webhooks run for these changes after a successful import. A failed import sends no events.
 
+A trace sync keeps its preview until the Job ends. The trace workspace and the progress page say
+whether the Job waits for a worker or runs. A waiting Job shows how many jobs a worker takes before
+it and how many workers are busy. A running Job shows its phase and its steps. The workspace checks
+the Job every 3 seconds and loads the page again when the Job ends. Then re-read the preview before
+the next decision.
+
 You can leave the progress page while the Job runs. Open **Run Import** and select **Resume import** to return to the latest active Job. The direct progress URL also restores a completed result or a refreshed preview after a safe validation failure.
 
 ## Device import record

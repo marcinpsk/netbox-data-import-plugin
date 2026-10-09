@@ -99,7 +99,6 @@ from .object_permissions import (
 )
 from .plan import Disposition, ImportPlan, PlanError
 from .preview_coordinator import (
-    RETAINED_SYNC_BLOCK_REASON,
     SYNC_FINISHED,
     UNREADABLE_PREVIEW,
     CommandOutcome,
@@ -116,6 +115,7 @@ from .preview_coordinator import (
     apply_preview_command,
     read_preview,
     setup_claim,
+    sync_hold_reason,
     validate_preview_plan,
 )
 from .profile_yaml import (
@@ -1225,19 +1225,36 @@ def _review_snapshot(request, *, profile_action="change"):
     return snapshot, None
 
 
-def _retained_sync_reason(snapshot) -> str:
-    """Return why the preview's own trace sync holds it, for a page that has to say so."""
+def _retained_sync(snapshot):
+    """Return the status of the preview's own trace sync and why it holds the preview, for a page that says so."""
     if snapshot.state != PreviewState.SYNC_PENDING:
-        return ""
-    from core.choices import JobStatusChoices
+        return None, ""
     from core.models import Job
 
-    from .jobs import IMPORT_TASK_LOST, import_job_abandoned
+    from .jobs import IMPORT_TASK_LOST, LOST, import_job_status
 
-    job = Job.objects.filter(pk=snapshot.job_id, status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES).first()
+    job = Job.objects.filter(pk=snapshot.job_id).first()
     if job is None:
-        return SYNC_FINISHED
-    return IMPORT_TASK_LOST if import_job_abandoned(job) else RETAINED_SYNC_BLOCK_REASON
+        return None, SYNC_FINISHED
+    status = import_job_status(job)
+    if status.state == LOST:
+        return status, IMPORT_TASK_LOST
+    return status, sync_hold_reason([job.status]) or SYNC_FINISHED
+
+
+def _sync_status_context(snapshot, identity: str, retained) -> dict:
+    """Return what the workspace's sync status block renders from `_retained_sync`, on the page and for each poll."""
+    status, reason = retained
+    read_url = reverse("plugins:netbox_data_import:trace_sync_status")
+    return {
+        "sync_status": status,
+        "retained_sync_reason": reason,
+        "sync_active": status is not None and status.active,
+        "sync_status_url": f"{read_url}?{urlencode({'trace': identity, **snapshot.claim.fields()})}",
+        "sync_trace": identity,
+        "preview_claim": snapshot.claim,
+        "reread_next": _trace_workspace_url(identity),
+    }
 
 
 def _live_plan(snapshot, actor):
@@ -1284,7 +1301,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         except PlanError:
             logger.warning("ImportPreviewView: the stored Import Plan is unreadable.", exc_info=True)
             return _unreadable_preview_page(request, snapshot)
-        if retained_reason := _retained_sync_reason(snapshot):
+        if retained_reason := _retained_sync(snapshot)[1]:
             messages.warning(request, retained_reason)
         live = _live_plan(snapshot, request.user)
         if live is None:
@@ -1481,18 +1498,12 @@ def _import_job_progress(request, job):
     that submitted it; a newer preview is never replaced from here.
     """
     from core.choices import JobStatusChoices
-    from .jobs import IMPORT_TASK_LOST, import_job_abandoned, import_queue_task
+    from .jobs import IMPORT_TASK_LOST, LOST, import_job_status
 
     data = job.data or {}
-    processed = int(data.get("processed") or 0)
-    total = int(data.get("total") or 0)
-    if job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES:
-        rq_job = import_queue_task(job)
-        if rq_job is not None:
-            processed = int(rq_job.meta.get("processed", processed) or 0)
-            total = int(rq_job.meta.get("total", total) or 0)
-    percentage = round(processed * 100 / total) if total else 0
-    abandoned = import_job_abandoned(job)
+    status = import_job_status(job)
+    percentage = round(status.processed * 100 / status.total) if status.total else 0
+    abandoned = status.state == LOST
     is_failed = abandoned or job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED)
     snapshot = read_preview(request, include_plan=False)
     restorable = (
@@ -1505,10 +1516,11 @@ def _import_job_progress(request, job):
     execution_id = data.get("import_execution_id")
     return {
         "job": job,
-        "processed": processed,
-        "total": total,
+        "status": status,
+        "processed": status.processed,
+        "total": status.total,
         "percentage": percentage,
-        "is_active": not abandoned and job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES,
+        "is_active": status.active,
         "is_completed": job.status == JobStatusChoices.STATUS_COMPLETED,
         "is_failed": is_failed,
         "restore_claim": snapshot.claim if restorable else None,
@@ -3779,7 +3791,8 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
         # Section 10.2: compared on each full load and on the re-read action, never polled.
         sync_block_reason = _trace_sync_block_reason(workspace.plan, live)
         drift = bool(sync_block_reason)
-        retained_reason = _retained_sync_reason(snapshot)
+        retained = _retained_sync(snapshot)
+        retained_reason = retained[1]
         block_reason = retained_reason or sync_block_reason
         traces = (
             [_with_blocked_sync(trace, block_reason) for trace in workspace.traces]
@@ -3867,10 +3880,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
                 "has_locations": has_locations,
                 "import_location_unavailable": reader.location_unavailable,
                 "drift": drift,
-                "retained_sync_reason": retained_reason,
-                "preview_claim": snapshot.claim,
-                "sync_running": retained_reason == RETAINED_SYNC_BLOCK_REASON,
-                "reread_next": _trace_workspace_url(selected.identity if selected else ""),
+                **_sync_status_context(snapshot, selected.identity if selected else "", retained),
                 "plugin_version": _plugin_version,
             },
         )
@@ -3908,6 +3918,27 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     def refusal_url(self, request):
         """Return the trace the sync was asked for."""
         return _trace_workspace_url(request.POST.get("identity", ""))
+
+
+class TraceSyncStatusView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Answer the workspace's poll of its trace sync, and reload the page once the sync ends."""
+
+    permission_required = "netbox_data_import.view_importprofile"
+
+    def get(self, request):
+        """Return the status block while the Job waits or runs; after that the whole page changes."""
+        snapshot = _claimed_snapshot(request, profile_action="view")
+        context = _sync_status_context(snapshot, request.GET.get("trace", ""), _retained_sync(snapshot))
+        if not context["sync_active"]:
+            # The trace actions and the re-read button all change, so the page loads again.
+            response = HttpResponse(status=204)
+            response["HX-Refresh"] = "true"
+            return response
+        return render(request, "netbox_data_import/_trace_sync_status.html", context)
+
+    def refusal_url(self, request):
+        """Return the trace the polling page shows."""
+        return _trace_workspace_url(request.GET.get("trace", ""))
 
 
 CANDIDATE_LIMIT_INVALID = f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}."

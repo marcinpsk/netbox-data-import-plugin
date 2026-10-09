@@ -34,7 +34,7 @@ from netbox_data_import.models import (
     SourceDocument,
     TerminationResolution,
 )
-from netbox_data_import.preview_coordinator import CLAIM_INVALID, RETAINED_SYNC_BLOCK_REASON, STALE_PREVIEW
+from netbox_data_import.preview_coordinator import CLAIM_INVALID, STALE_PREVIEW, SYNC_QUEUED
 from netbox_data_import.proposal_tasks import CandidateSnapshot
 from netbox_data_import.review_workspace import TERMINATION_UNRESOLVABLE
 from netbox_data_import.views import TARGET_GONE
@@ -328,7 +328,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         self.assertEqual(proposal.source_evidence["port"], "ABSENT-PORT")
         self.assertEqual(proposal.candidate_snapshot["candidates"][0]["object_id"], self.eth0.pk)
         job = Job.objects.get(name=ResolutionProposalJob.Meta.name)
-        queued = get_queue().fetch_job(str(job.job_id))
+        queued = get_queue(job.queue_name).fetch_job(str(job.job_id))
         self.assertIsNotNone(queued)
         self.assertEqual(queued.kwargs, {"job": job, "proposal_id": proposal.pk})
         self.assertEqual(job.user_id, proposal.requested_by_id)
@@ -1158,7 +1158,7 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         response = self.call("accept_proposal", proposal_id=proposal.pk)
 
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["error"], RETAINED_SYNC_BLOCK_REASON)
+        self.assertEqual(response.json()["error"], SYNC_QUEUED)
         self.assert_unwritten(proposal)
         self.assertEqual(stored_plan(self.client), before)
         self.assertEqual(preview_coordinator(self.client).state, PreviewState.SYNC_PENDING)

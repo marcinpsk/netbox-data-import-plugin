@@ -811,7 +811,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
 
         from netbox_data_import.jobs import ImportJobRunner
         from netbox_data_import.models import PreviewCoordinator, PreviewState
-        from netbox_data_import.preview_coordinator import RETAINED_SYNC_BLOCK_REASON
+        from netbox_data_import.preview_coordinator import SYNC_QUEUED
 
         self.start_alias_preview()
         coordinator = preview_coordinator(self.client)
@@ -841,7 +841,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         )
 
         self.assertEqual(saved.status_code, 409)
-        self.assertEqual(saved.json()["error"], RETAINED_SYNC_BLOCK_REASON)
+        self.assertEqual(saved.json()["error"], SYNC_QUEUED)
         self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
 
     def test_the_candidate_endpoint_rejects_invalid_limits(self):

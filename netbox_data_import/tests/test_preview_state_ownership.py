@@ -89,6 +89,7 @@ CLAIMED_READS = frozenset(
         "trace_device_candidates",
         "trace_location_candidates",
         "trace_proposal",
+        "trace_sync_status",
     }
 )
 # A page load reads the preview and writes nothing.
