@@ -257,6 +257,9 @@ def _cancel_queue_task(job) -> None:
             JobStatus.DEFERRED,
         ):
             rq_job.cancel()
+    except (InvalidJobOperation, NoSuchJobError):
+        # Another actor, such as NetBox Job.delete(), removed the task first, which is the goal.
+        logger.debug("The queue task of cancelled import Job %s was already gone.", job.pk)
     except (RedisConnectionError, RedisTimeoutError):
         # The Job row is the record: ImportJobRunner.handle runs only a Job that is still enqueued.
         logger.warning("The queue task of cancelled import Job %s stays in its queue.", job.pk)

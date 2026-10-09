@@ -353,12 +353,14 @@ class SyncCancelTest(_QueuedSyncMixin, IsolatedRQQueueTestMixin, CableTopologyMi
         self.assertNotContains(page, SYNC_QUEUED)
         self.assertTrue(next(a for a in page.context["selected_trace"].actions if a.key == "sync").enabled)
 
-        # A delivery that RQ had already handed out writes nothing for a cancelled Job.
+        # A delivery that RQ had already handed out neither starts nor ends a cancelled Job.
+        completed = job.completed
         ImportJobRunner.handle(**arguments)
         self.assertFalse(Cable.objects.exists())
         self.assertFalse(ImportExecution.objects.exists())
         job.refresh_from_db()
-        self.assertEqual(job.status, JobStatusChoices.STATUS_FAILED)
+        self.assertEqual((job.status, job.started, job.completed), (JobStatusChoices.STATUS_FAILED, None, completed))
+        self.assertEqual(job.data["phase"], "cancelled")
 
     def test_the_progress_page_offers_cancel_and_then_says_the_sync_was_cancelled(self):
         job = self.queue_sync()
@@ -475,6 +477,64 @@ class SyncCancelTest(_QueuedSyncMixin, IsolatedRQQueueTestMixin, CableTopologyMi
         self.assertFalse(Cable.objects.exists())
         job.refresh_from_db()
         self.assertEqual(job.status, JobStatusChoices.STATUS_FAILED)
+
+    def test_a_task_another_actor_removes_during_the_cancel_is_already_gone(self):
+        original = RQJob.get_status
+        removals = {
+            "cancelled": lambda task: RQJob.fetch(task.id, connection=task.connection).cancel(),
+            "deleted": lambda task: task.connection.delete(task.key),
+        }
+        for name, remove in removals.items():
+            with self.subTest(removal=name):
+                self.upload()
+                Job.objects.filter(data__job_type=ImportJobRunner.job_type).delete()
+                job = self.queue_sync()
+                removed = []
+
+                def removed_after_the_check(task, *args, removed=removed, remove=remove, **kwargs):
+                    # NetBox Job.delete() or another request removes the task right after the status check.
+                    status = original(task, *args, **kwargs)
+                    if not removed and status == JobStatus.QUEUED:
+                        removed.append(task.id)
+                        remove(task)
+                    return status
+
+                with patch.object(RQJob, "get_status", autospec=True, side_effect=removed_after_the_check):
+                    response = self.cancel(job)
+
+                self.assertEqual(removed, [str(job.job_id)])
+                self.assertEqual(response.status_code, 302, response.content[:300])
+                job.refresh_from_db()
+                self.assertEqual(job.status, JobStatusChoices.STATUS_FAILED)
+                self.assertEqual(preview_coordinator(self.client).state, PreviewState.READY)
+
+    def test_cancel_ends_a_scheduled_sync_that_never_started(self):
+        job = self.queue_sync()
+        Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_SCHEDULED)
+
+        response = self.cancel(job)
+
+        self.assertEqual(response.status_code, 302, response.content[:300])
+        job.refresh_from_db()
+        self.assertEqual((job.status, job.data["phase"]), (JobStatusChoices.STATUS_FAILED, "cancelled"))
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.READY)
+
+    def test_a_replan_that_fails_rolls_the_cancel_back(self):
+        job = self.queue_sync()
+        before = preview_coordinator(self.client)
+
+        with override_plugins_config(netbox_data_import={"preview_max_plan_bytes": 16}):
+            refused = self.cancel(job, HTTP_ACCEPT="application/json")
+
+        self.assertEqual(refused.status_code, 413, refused.content[:300])
+        job.refresh_from_db()
+        self.assertEqual((job.status, job.started, job.completed), (JobStatusChoices.STATUS_PENDING, None, None))
+        self.assertEqual(job.data["phase"], "queued")
+        # The queue task is cancelled only after a commit, and this command rolled back.
+        task = get_queue(job.queue_name).fetch_job(str(job.job_id))
+        self.assertEqual(task.get_status(refresh=True), JobStatus.QUEUED)
+        after = preview_coordinator(self.client)
+        self.assertEqual((after.state, after.job_id, after.revision), (before.state, before.job_id, before.revision))
 
     def test_cancel_needs_the_exact_claim(self):
         job = self.queue_sync()
