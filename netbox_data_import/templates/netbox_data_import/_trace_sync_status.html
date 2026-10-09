@@ -10,6 +10,7 @@
       <div>{{ retained_sync_reason }}</div>
       {% if sync_status %}
         <div class="small text-secondary d-flex flex-wrap column-gap-3 mt-1">
+          {% if sync_status.queue_note %}<span>{{ sync_status.queue_note }}</span>{% endif %}
           {% if sync_status.state == "queued" %}
             {% include "netbox_data_import/inc/job_queue_place.html" with status=sync_status %}
           {% elif sync_status.state == "running" %}

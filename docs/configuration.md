@@ -217,8 +217,10 @@ After you confirm a preview, the plugin queues a native NetBox background Job an
 The Job writes a NetBox change log record for each NetBox object that it creates, changes, or deletes. The record names the user who started the import, and its request ID is the Job UUID. Event rules and webhooks run for these changes after a successful import. A failed import sends no events.
 
 A trace sync keeps its preview until the Job ends. The trace workspace and the progress page say
-whether the Job waits for a worker or runs. A waiting Job shows how many jobs a worker takes before
-it and how many workers are busy. A running Job shows its phase and its steps. The workspace checks
+whether the Job waits for a worker or runs. A waiting Job shows its position in its own queue, where
+1 is the next job, and how many workers of that queue are busy. Jobs in a queue that a worker serves
+first, such as `high`, can still start before it. A running Job shows its phase and its steps. If
+Redis does not answer, the page says that the job queue cannot be read now. The workspace checks
 the Job every 3 seconds and loads the page again when the Job ends. Then re-read the preview before
 the next decision. While no worker has started the Job, **Cancel sync** stops it and re-reads the
 preview.

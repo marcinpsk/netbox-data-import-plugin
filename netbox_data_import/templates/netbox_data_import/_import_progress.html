@@ -26,10 +26,11 @@
     <div class="progress-bar" style="width: {{ percentage }}%">{{ percentage }}%</div>
   </div>
   <p class="mb-3 fw-semibold">Completed {{ processed }} of {{ total }} plan steps</p>
-  {% if status.state == "queued" %}
+  {% if status.state == "queued" or status.queue_note %}
   <p class="mb-3 text-secondary d-flex flex-wrap column-gap-3" data-job-queue-place>
-    <span>Waiting for a worker.</span>
-    {% include "netbox_data_import/inc/job_queue_place.html" %}
+    {% if status.state == "queued" %}<span>Waiting for a worker.</span>{% endif %}
+    {% if status.queue_note %}<span>{{ status.queue_note }}</span>{% endif %}
+    {% if status.state == "queued" %}{% include "netbox_data_import/inc/job_queue_place.html" %}{% endif %}
   </p>
   {% endif %}
 

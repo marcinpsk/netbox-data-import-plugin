@@ -19,10 +19,11 @@ from django.utils import timezone
 from django_rq import get_queue, get_worker
 from netbox.constants import RQ_QUEUE_DEFAULT, RQ_QUEUE_HIGH, RQ_QUEUE_LOW
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from rq.job import Job as RQJob, JobStatus
-from rq.worker import WorkerStatus
+from rq.worker import Worker, WorkerStatus
 
-from netbox_data_import.jobs import ImportJobRunner, ResolutionProposalJob
+from netbox_data_import.jobs import IMPORT_TASK_LOST, QUEUE_UNREADABLE, ImportJobRunner, ResolutionProposalJob
 from netbox_data_import.models import ImportExecution, PreviewState
 from netbox_data_import.preview_coordinator import (
     SYNC_CANCELLED,
@@ -166,7 +167,8 @@ class SyncStatusTest(_QueuedSyncMixin, IsolatedRQQueueTestMixin, CableTopologyMi
         with self.captureOnCommitCallbacks(execute=True):
             get_queue(queue_name).enqueue("builtins.len", [])
 
-    def test_a_queued_sync_says_it_waits_and_how_many_jobs_are_ahead_of_it(self):
+    def test_a_queued_sync_says_where_it_waits_in_its_queue(self):
+        # A worker started for named queues may never serve high, so only the Job's own queue counts.
         self.push(RQ_QUEUE_HIGH)
         self.push(RQ_QUEUE_DEFAULT)
         self.push(RQ_QUEUE_DEFAULT)
@@ -174,7 +176,7 @@ class SyncStatusTest(_QueuedSyncMixin, IsolatedRQQueueTestMixin, CableTopologyMi
 
         idle = self.workspace()
         self.assertContains(idle, SYNC_QUEUED)
-        self.assertContains(idle, "Jobs ahead of it: 3")
+        self.assertContains(idle, "Position in the default queue: 3.")
         self.assertContains(idle, "No worker serves the default queue.")
 
         worker = get_worker(*DEFAULT_QUEUES)
@@ -189,6 +191,51 @@ class SyncStatusTest(_QueuedSyncMixin, IsolatedRQQueueTestMixin, CableTopologyMi
         self.assertContains(busy, reverse("plugins:netbox_data_import:trace_sync_cancel"))
         self.assertContains(busy, 'hx-trigger="every 3s"')
         self.assertContains(busy, reverse("plugins:netbox_data_import:trace_sync_status"))
+
+    def test_reading_the_status_leaves_the_worker_registry_alone(self):
+        self.queue_sync()
+        busy = get_worker(*DEFAULT_QUEUES, name="busy-worker")
+        busy.register_birth()
+        busy.set_state(WorkerStatus.BUSY)
+        stale = get_worker(*DEFAULT_QUEUES, name="stale-worker")
+        stale.register_birth()
+        # A worker that stopped sending heartbeats: its hash expired, its registration stays.
+        stale.connection.delete(stale.key)
+
+        page = self.workspace()
+        self.status_read()
+
+        self.assertContains(page, "Busy workers: 1 of 1.")
+        self.assertTrue(stale.connection.sismember("rq:workers", stale.key))
+        self.assertTrue(stale.connection.sismember("rq:workers:default", stale.key))
+
+    def test_a_queue_outage_keeps_the_job_state_and_says_the_queue_cannot_be_read(self):
+        job = self.queue_sync()
+        progress = reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk})
+        outages = {
+            "task": patch("netbox_data_import.jobs.import_queue_task", autospec=True, side_effect=RedisConnectionError),
+            "position": patch.object(RQJob, "get_position", autospec=True, side_effect=RedisTimeoutError),
+            "workers": patch.object(Worker, "all_keys", autospec=True, side_effect=RedisConnectionError),
+        }
+        for name, outage in outages.items():
+            with self.subTest(outage=name), outage:
+                page = self.workspace()
+                poll = self.status_read()
+                progress_page = self.client.get(progress)
+
+                self.assertContains(page, SYNC_QUEUED)
+                self.assertContains(page, QUEUE_UNREADABLE)
+                self.assertNotContains(page, IMPORT_TASK_LOST)
+                self.assertContains(page, 'hx-trigger="every 3s"')
+                self.assertContains(poll, QUEUE_UNREADABLE)
+                self.assertContains(progress_page, QUEUE_UNREADABLE)
+                self.assertNotContains(progress_page, IMPORT_TASK_LOST)
+
+        Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_RUNNING, started=timezone.now())
+        with patch("netbox_data_import.jobs.import_queue_task", autospec=True, side_effect=RedisConnectionError):
+            running = self.workspace()
+        self.assertContains(running, SYNC_RUNNING)
+        self.assertContains(running, QUEUE_UNREADABLE)
 
     def test_a_running_sync_shows_its_phase_and_progress_and_offers_no_cancel(self):
         job = self.queue_sync()
@@ -264,7 +311,7 @@ class SyncStatusTest(_QueuedSyncMixin, IsolatedRQQueueTestMixin, CableTopologyMi
             with self.subTest(route=route):
                 page = self.client.get(reverse(f"plugins:netbox_data_import:{route}", kwargs={"pk": job.pk}))
 
-                self.assertContains(page, "Jobs ahead of it: 1")
+                self.assertContains(page, "Position in the default queue: 2.")
                 self.assertContains(page, "No worker serves the default queue.")
 
 

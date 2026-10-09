@@ -17,6 +17,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from rq import get_current_job
 from rq.exceptions import InvalidJobOperation, NoSuchJobError
 from rq.job import Job as RQJob, JobStatus
+from rq.utils import as_text
 from rq.worker import Worker, WorkerStatus
 
 from core.exceptions import JobFailed
@@ -53,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 IMPORT_TASK_LOST = "The import task is no longer queued or running. Re-read its preview to recover."
 QUEUE_PUSH_GRACE = timedelta(minutes=1)
+QUEUE_UNREADABLE = "The job queue cannot be read now."
 
 
 def _import_job_lock(job):
@@ -115,15 +117,21 @@ class ImportJobStatus:
     phase: str = ""
     processed: int = 0
     total: int = 0
-    # Only for a queued Job whose task is in its queue: the jobs a worker takes first, and its queue's workers.
-    ahead: int | None = None
+    # Only for a queued Job whose task is in its queue: its place there (1 is next), and its queue's workers.
+    position: int | None = None
     workers: int | None = None
     busy: int = 0
+    queue_readable: bool = True
 
     @property
     def active(self) -> bool:
         """Return whether the Job still waits in its queue or runs."""
         return self.state in (QUEUED, RUNNING)
+
+    @property
+    def queue_note(self) -> str:
+        """Return what a page says when Redis did not answer, or "" when it did."""
+        return "" if self.queue_readable else QUEUE_UNREADABLE
 
 
 def import_job_status(job) -> ImportJobStatus:
@@ -140,6 +148,19 @@ def import_job_status(job) -> ImportJobStatus:
     )
     if job.status not in JobStatusChoices.ENQUEUED_STATE_CHOICES:
         return status
+    try:
+        return _with_queue_evidence(status)
+    except (RedisConnectionError, RedisTimeoutError):
+        # An outage says nothing about the task, so the Job row alone decides the state.
+        state = RUNNING if job.status == JobStatusChoices.STATUS_RUNNING else QUEUED
+        return replace(status, state=state, queue_readable=False)
+
+
+def _with_queue_evidence(status: ImportJobStatus) -> ImportJobStatus:
+    """Add what the Job's queue task and its queue say; Redis errors reach the caller."""
+    from core.choices import JobStatusChoices
+
+    job = status.job
     rq_job = import_queue_task(job)
     if _task_lost(job, rq_job):
         return replace(status, state=LOST)
@@ -159,21 +180,19 @@ def import_job_status(job) -> ImportJobStatus:
 
 
 def _with_queue_place(status: ImportJobStatus, rq_job) -> ImportJobStatus:
-    """Add how many jobs a worker takes before a queued task, and how many workers serve its queue."""
+    """Add the task's place in its own queue, and the live workers of that queue; a read that writes nothing."""
     import django_rq
-    from core.management.commands.rqworker import DEFAULT_QUEUES
 
-    queue_name = status.job.queue_name
-    workers = Worker.all(queue=django_rq.get_queue(queue_name))
-    ahead = rq_job.get_position()
-    if ahead is not None and queue_name in DEFAULT_QUEUES:
-        # A NetBox worker takes every job of a queue before it takes one from the next queue.
-        ahead += sum(django_rq.get_queue(name).count for name in DEFAULT_QUEUES[: DEFAULT_QUEUES.index(queue_name)])
+    queue = django_rq.get_queue(status.job.queue_name)
+    # Worker.all() removes the registration of an expired worker, so read each worker hash directly.
+    states = [queue.connection.hget(key, "state") for key in Worker.all_keys(queue=queue)]
+    live = [as_text(state) for state in states if state is not None]
+    position = rq_job.get_position()
     return replace(
         status,
-        ahead=ahead,
-        workers=len(workers),
-        busy=sum(worker.get_state() == WorkerStatus.BUSY for worker in workers),
+        position=None if position is None else position + 1,
+        workers=len(live),
+        busy=live.count(WorkerStatus.BUSY),
     )
 
 
