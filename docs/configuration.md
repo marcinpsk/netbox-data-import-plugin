@@ -180,6 +180,11 @@ Ask AI and **Ask AI for all** both refuse when no Inference Backend is enabled o
 fallback. No setting limits how many it asks about: each request is one background job, and the RQ workers
 run them in turn.
 
+Proposal jobs wait in NetBox's `low` queue. A worker takes jobs from the `high` and `default` queues
+first, so an import or a trace sync that you queue after many proposals does not wait for them. A
+`manage.py rqworker` with no queue names serves all three queues. If you start a worker for named
+queues, include `low`, or no proposal runs.
+
 A Device with more than 1024 eligible ports of one kind is refused. That ceiling bounds the stored
 candidate set, not the prompt. Above it, narrow the eligible set instead.
 

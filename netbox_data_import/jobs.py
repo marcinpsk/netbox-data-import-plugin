@@ -63,7 +63,7 @@ def import_queue_task(job):
     import django_rq
 
     try:
-        queue = django_rq.get_queue(job.queue_name or "default")
+        queue = django_rq.get_queue(job.queue_name)
     except KeyError:
         return None
     try:

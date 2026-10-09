@@ -24,6 +24,7 @@ from django.template.defaultfilters import pluralize
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
+from netbox.constants import RQ_QUEUE_LOW
 from netbox.views import generic
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -4586,7 +4587,10 @@ class _ProposalRequests:
             candidate_snapshot=snapshot,
             requested_by=actor,
         )
-        job = ResolutionProposalJob.enqueue(name=ResolutionProposalJob.Meta.name, user=actor, proposal_id=proposal.pk)
+        # The low queue lets a trace sync queued later start before minutes of inference.
+        job = ResolutionProposalJob.enqueue(
+            name=ResolutionProposalJob.Meta.name, user=actor, queue_name=RQ_QUEUE_LOW, proposal_id=proposal.pk
+        )
         record_proposal_job(proposal.pk, job)
 
         def compensate():
