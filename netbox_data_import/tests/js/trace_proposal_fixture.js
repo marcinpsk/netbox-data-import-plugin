@@ -58,7 +58,7 @@ export function card(field, state = 'open', {revision = 4, proposal = 7} = {}) {
   const reasons = STATES[state];
   const query = [['field_key', field], ['trace', 'trace-1'], ...claimFields(revision)];
   const read = `${READ_URL}?${query.map(pair => pair.join('=')).join('&amp;')}`;
-  const poll = state === 'pending' ? `hx-get="${read}" hx-trigger="every 3s" hx-swap="outerHTML" hx-sync="this:abort"` : '';
+  const trigger = state === 'pending' ? 'hx-trigger="every 3s, ndi:read"' : 'hx-trigger="ndi:read"';
   const display = state === 'open' ? '' : `
     <div class="ndi-proposal-card mt-2" data-proposal-display>
       <span class="badge" data-proposal-badge>${state === 'pending' ? 'Queued' : 'Proposal - not applied'}</span>
@@ -70,7 +70,8 @@ export function card(field, state = 'open', {revision = 4, proposal = 7} = {}) {
   const fieldActions = ['request', 'cancel']
     .map(key => actionForm(id, field, key, reasons[key], revision, state === 'open' ? null : proposal)).join('');
   return `
-    <li class="card ndi-proposal-card mb-3" id="${id}" data-proposal-field="${field}" data-proposal-read="${read}" ${poll}>
+    <li class="card ndi-proposal-card mb-3" id="${id}" data-proposal-field="${field}"
+      hx-get="${read}" ${trigger} hx-swap="outerHTML" hx-sync="this:abort">
       <strong>${field}</strong>
       <span class="badge" data-proposal-state>${state === 'open' ? 'unresolved' : 'proposed'}</span>
       ${display}

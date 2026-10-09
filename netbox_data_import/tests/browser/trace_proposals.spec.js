@@ -13,7 +13,8 @@ const WORKSPACE_URL = `${ORIGIN}/plugins/data-import/trace-workspace/`;
 const atPath = path => url => url.pathname === path;
 const workspacePage = atPath('/plugins/data-import/trace-workspace/');
 const cardRead = atPath('/plugins/data-import/trace-workspace/proposals/');
-const htmxSource = readFileSync('node_modules/htmx.org/dist/htmx.min.js', 'utf8');
+// NetBox bundles htmx inside netbox.js and never sets window.htmx, so the release loads in a closure here too.
+const htmxSource = `(function () {\n${readFileSync('node_modules/htmx.org/dist/htmx.min.js', 'utf8')}\n}());`;
 // NetBox's own stylesheet builds on Bootstrap, which gives the spinner its size.
 const bootstrapCss = readFileSync('node_modules/bootstrap/dist/css/bootstrap.min.css', 'utf8');
 const scripts = `<script>${scriptSource('preview_claim.js')}</script><script>${scriptSource('trace_proposals.js')}</script>`;
@@ -127,6 +128,8 @@ test('a refused action reads its card again and shows the refusal there, without
   }));
   await page.route(cardRead, route =>
     route.fulfill(html(card('first', 'pending'))));
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
   const loads = await open(page, [card('first'), card('second')]);
 
   await actionOf(page, 'first', 'request').click();
@@ -137,6 +140,7 @@ test('a refused action reads its card again and shows the refusal there, without
   await expect(cardOf(page, 'second').locator('[data-proposal-error]')).toBeHidden();
   expect(await samePage(page)).toBe(true);
   expect(loads()).toBe(1);
+  expect(errors).toEqual([]);
 });
 
 test('a poll the server refuses stops polling and says why', async ({page}) => {

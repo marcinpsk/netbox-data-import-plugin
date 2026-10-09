@@ -2031,8 +2031,8 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
                 self.assertIn("csrfmiddlewaretoken", form)
                 target = 'hx-target="#page-content"' if key == "accept" else 'hx-target="closest [data-proposal-field]"'
                 self.assertIn(target, form)
-        # A settled proposal has nothing to wait for, so its card does not poll.
-        self.assertNotRegex(html, r"<li\b[^>]*data-proposal-field[^>]*hx-trigger=")
+        # A settled proposal has nothing to wait for, so its card reads only when the script asks.
+        self.assertRegex(html, r'<li\b[^>]*data-proposal-field[^>]*hx-trigger="ndi:read"')
 
     def test_a_queued_card_renders_the_background_job_line(self):
         """The operator reads the page, not the JSON, so the first render has to carry the line."""

@@ -2,8 +2,7 @@
 {# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
 {# One termination card. A proposal command and a poll answer with it alone, so it swaps in place. #}
 <li class="card ndi-proposal-card mb-3" id="{{ termination.card_id }}" data-proposal-field="{{ termination.field_key }}"
-    data-proposal-read="{{ termination.read_url }}"
-    {% if termination.proposal.pending %}hx-get="{{ termination.read_url }}" hx-trigger="every 3s" hx-swap="outerHTML" hx-sync="this:abort"{% endif %}>
+    hx-get="{{ termination.read_url }}" hx-trigger="{% if termination.proposal.pending %}every 3s, {% endif %}ndi:read" hx-swap="outerHTML" hx-sync="this:abort">
   <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
     <strong>{{ termination.label }}</strong>
     <span class="badge ndi-trace-state-{{ termination.proposal.state_style }}" data-proposal-state>{{ termination.proposal.field_state }}</span>

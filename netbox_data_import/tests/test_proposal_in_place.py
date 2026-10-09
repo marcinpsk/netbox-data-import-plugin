@@ -175,7 +175,7 @@ class ProposalInPlaceTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, CableTo
 
         key, html = self.card(response)
         self.assertEqual(key, self.first)
-        self.assertRegex(html, r'<li\b[^>]*hx-trigger="every 3s"')
+        self.assertRegex(html, r'<li\b[^>]*hx-trigger="every 3s, ndi:read"')
         self.assertIn("Waiting for the backend", html)
         claim = preview_claim(self.client)
         self.assertIn(f'value="{claim["preview_token"]}"', html)
@@ -193,7 +193,7 @@ class ProposalInPlaceTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, CableTo
         self.assertEqual(cancelled.status_code, 200, cancelled.content[:500])
         self.assertEqual(self.card(rejected)[0], self.first)
         self.assertEqual(self.card(cancelled)[0], self.second)
-        self.assertNotRegex(self.card(cancelled)[1], r"<li\b[^>]*hx-trigger=")
+        self.assertRegex(self.card(cancelled)[1], r'<li\b[^>]*hx-trigger="ndi:read"')
         self.assertEqual(ResolutionProposal.objects.get(pk=proposal.pk).decision, "rejected")
         self.assertEqual(ResolutionProposal.objects.get(pk=queued.pk).status, ProposalStatus.CANCELLED)
         self.assertEqual(preview_claim(self.client), claim)
@@ -226,7 +226,7 @@ class ProposalInPlaceTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, CableTo
         _key, content = self.card(response)
         self.assertRegex(content, r"<p\b[^>]*data-proposal-failure>[^<]*\(backend_refusal\)</p>")
         self.assertRegex(content, r'data-proposal-action="request"[^>]*>(<span[^>]*></span>)?Ask AI again</button>')
-        self.assertNotRegex(content, r"<li\b[^>]*hx-trigger=")
+        self.assertRegex(content, r'<li\b[^>]*hx-trigger="ndi:read"')
 
     def test_accept_swaps_the_workspace_and_its_new_claim_is_the_one_a_later_post_needs(self):
         proposal = self.completed(self.first)
@@ -365,7 +365,7 @@ class ProposalInPlaceTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, CableTo
         }
         read = reverse("plugins:netbox_data_import:trace_proposal")
         expected = [
-            ("li", {"hx-trigger": "every 3s", "hx-swap": "outerHTML", "hx-sync": "this:abort"}),
+            ("li", {"hx-trigger": "every 3s, ndi:read", "hx-swap": "outerHTML", "hx-sync": "this:abort"}),
             ("form", {"hx-post": reverse("plugins:netbox_data_import:trace_accept_proposal"), **accept}),
             ("form", {"hx-post": reverse("plugins:netbox_data_import:trace_reject_proposal"), **card_swap}),
             ("form", {"hx-post": reverse("plugins:netbox_data_import:trace_request_proposal"), **card_swap}),

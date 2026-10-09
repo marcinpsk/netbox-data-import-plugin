@@ -10,6 +10,8 @@
 
   // A read refused with one of these is refused again on the next interval, so the card stops polling.
   var HALTING = [401, 403, 404, 409];
+  // A refusal waits here, by card id, for the card its read swaps in.
+  var refusals = Object.create(null);
 
   function closestTo(event, selector) {
     // htmx dispatches a swap event on its target, so the element that sent the request is in requestConfig.
@@ -49,6 +51,7 @@
       show(card, '');
     } else if (card.hasAttribute('data-proposal-halted') || document.hidden) {
       // A halted card stays quiet, and a hidden tab asks again on the first interval after it shows.
+      delete refusals[card.id];
       event.preventDefault();
     }
   });
@@ -76,6 +79,7 @@
     var status = event.detail.xhr.status;
     var answer = refusal(event.detail.xhr);
     if (event.detail.elt === card) {
+      delete refusals[card.id];
       if (HALTING.indexOf(status) === -1) show(card, answer.error);
       else halt(card, answer.error);
       return;
@@ -85,11 +89,20 @@
       return;
     }
     // The action can lose a race with another operator, so the card first shows what the field holds now.
-    // The refused request still holds its card until this event returns, and htmx would queue the read.
+    // The refused request still holds its card until this event returns, so the read starts one task later.
+    // NetBox does not set window.htmx, so the card's own hx-get answers the event that its hx-trigger names.
     setTimeout(function () {
-      window.htmx.ajax('GET', card.dataset.proposalRead, {source: card, target: card, swap: 'outerHTML'})
-        .then(function () { show(document.getElementById(card.id) || card, answer.error); });
+      refusals[card.id] = answer.error;
+      card.dispatchEvent(new Event('ndi:read'));
     }, 0);
+  });
+
+  // htmx dispatches afterSwap on the card that the read swapped in.
+  document.addEventListener('htmx:afterSwap', function (event) {
+    var fresh = event.target;
+    if (!(fresh.id in refusals)) return;
+    show(fresh, refusals[fresh.id]);
+    delete refusals[fresh.id];
   });
 
   // Card answers can arrive out of order, so a count the database made earlier never replaces a later one.
@@ -102,6 +115,8 @@
 
   document.addEventListener('htmx:sendError', function (event) {
     var card = cardOf(event);
-    if (card) show(card, 'The proposal request did not reach NetBox. Try again.');
+    if (!card) return;
+    delete refusals[card.id];
+    show(card, 'The proposal request did not reach NetBox. Try again.');
   });
 }());

@@ -2,7 +2,7 @@
 /* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
 
 /* htmx sends the requests and swaps the cards; the script only reads the refusals htmx reports. These
- * tests dispatch the events htmx dispatches, and a fake htmx.ajax swaps in the card a read returns. */
+ * tests dispatch the events htmx dispatches, and answer a card's read event with the card a read returns. */
 import {readFileSync} from 'node:fs';
 import {afterEach, beforeAll, beforeEach, expect, it, vi} from 'vitest';
 import {card, workspace} from './trace_proposal_fixture.js';
@@ -31,22 +31,22 @@ function refuse(elt, status, body) {
   return emit(elt, 'htmx:responseError', {xhr: {status, responseText}});
 }
 
+/* htmx answers the card's own hx-trigger event with its hx-get, which here holds the active proposal. */
+function read(event) {
+  const before = event.target;
+  reads.push({event: event.type, url: before.getAttribute('hx-get'), card: before});
+  before.outerHTML = card(before.dataset.proposalField, 'pending');
+  emit(cardOf(before.dataset.proposalField), 'htmx:afterSwap', {target: before});
+}
+
 // The listeners sit on the document, which outlives each test, so the script runs once per file.
-beforeAll(() => { window.eval(source); });
-beforeEach(() => {
-  reads = [];
-  // A read answers with the field's card as it stands now, which here holds the active proposal.
-  window.htmx = {
-    ajax(verb, url, options) {
-      reads.push({verb, url, options});
-      options.target.outerHTML = card(options.target.dataset.proposalField, 'pending');
-      return Promise.resolve();
-    },
-  };
+beforeAll(() => {
+  window.eval(source);
+  document.addEventListener('ndi:read', read, true);
 });
+beforeEach(() => { reads = []; });
 afterEach(() => {
   document.body.replaceChildren();
-  delete window.htmx;
   vi.unstubAllGlobals();
 });
 
@@ -80,7 +80,8 @@ it('a refused action reads its card again and shows the refusal in the card that
   expect(reads).toEqual([]);
   await settled();
 
-  expect(reads).toEqual([{verb: 'GET', url: before.dataset.proposalRead, options: {source: before, target: before, swap: 'outerHTML'}}]);
+  expect(reads).toEqual([{event: 'ndi:read', url: before.getAttribute('hx-get'), card: before}]);
+  expect(before.getAttribute('hx-trigger')).toBe('ndi:read');
   expect(cardOf('field')).not.toBe(before);
   expect(cardOf('field').querySelector('[data-proposal-progress]')).not.toBeNull();
   expect(errorOf('field').hidden).toBe(false);
