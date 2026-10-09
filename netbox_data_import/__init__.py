@@ -6,7 +6,7 @@ from netbox.plugins import PluginConfig
 
 from .preview_limits import MAX_PLAN_BYTES
 
-__version__ = "2.10.0"
+__version__ = "2.11.0"
 
 
 class NetBoxDataImportConfig(PluginConfig):
