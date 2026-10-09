@@ -790,6 +790,8 @@ _SUMMARY_KEYS = {
 
 
 _SYNC_URL_NAME = "plugins:netbox_data_import:trace_sync"
+_SYNC_ALL_URL_NAME = "plugins:netbox_data_import:trace_sync_all"
+SYNC_ALL_NOTHING = "This preview has no actionable trace to synchronize."
 
 
 @dataclass(frozen=True)
@@ -805,6 +807,57 @@ class TraceAction:
     enabled: bool
     url_name: str
     reason: str = ""
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}{'' if number == 1 else 's'}"
+
+
+@dataclass(frozen=True)
+class SyncAllSelection:
+    """What `Sync all` queues: each actionable trace that can sync, with every unit its changes wait on.
+
+    `held_back` counts actionable traces left out because a unit they depend on cannot sync.
+    """
+
+    traces: tuple[str, ...]
+    units: tuple[str, ...]
+    blocked: int
+    invalid: int
+    held_back: int
+
+    @property
+    def label(self) -> str:
+        """Return the button text, which states how many traces the command synchronizes."""
+        return f"Sync {_count(len(self.traces), 'actionable trace')}"
+
+    @property
+    def action(self) -> TraceAction:
+        """Return the command, disabled with its reason when no trace can sync."""
+        return TraceAction(
+            key="sync_all",
+            label=self.label,
+            enabled=bool(self.units),
+            url_name=_SYNC_ALL_URL_NAME,
+            reason="" if self.units else SYNC_ALL_NOTHING,
+        )
+
+    @property
+    def unsynced_note(self) -> str:
+        """Return how many traces the command leaves unsynced and why, or nothing when it leaves none."""
+        parts = [
+            f"{number} {why}"
+            for number, why in (
+                (self.blocked, "blocked"),
+                (self.invalid, "invalid"),
+                (self.held_back, "with a dependency that cannot sync"),
+            )
+            if number
+        ]
+        total = self.blocked + self.invalid + self.held_back
+        if not total:
+            return ""
+        return f"{_count(total, 'trace')} {'stays' if total == 1 else 'stay'} unsynced: {', '.join(parts)}."
 
 
 def _termination_model_name(label: str) -> str:
@@ -1042,6 +1095,40 @@ class ReviewWorkspace:
                         queue.append(owner)
         return tuple(chosen)
 
+    @cached_property
+    def sync_all(self) -> SyncAllSelection:
+        """Return every actionable trace whose dependency closure can execute, in plan order.
+
+        The engine refuses a unit that is not actionable and a dependency the selection lacks, so a
+        trace that would need either is left out and counted, and never stops the others.
+        """
+        presented = {unit.identity: unit.disposition for unit in self._presentation_units}
+        changes = {unit.identity: unit.changes for unit in self.plan.units}
+        traces: list[str] = []
+        chosen: set[str] = set()
+        held_back = 0
+        for trace in self.traces:
+            if trace.disposition != Disposition.ACTIONABLE:
+                continue
+            closure = self.sync_selection(trace.identity)
+            carried = {change.identity for identity in closure for change in changes[identity]}
+            if closure and all(
+                presented.get(identity) == Disposition.ACTIONABLE
+                and all(set(change.dependencies) <= carried for change in changes[identity])
+                for identity in closure
+            ):
+                traces.append(trace.identity)
+                chosen.update(closure)
+            else:
+                held_back += 1
+        return SyncAllSelection(
+            traces=tuple(traces),
+            units=tuple(unit.identity for unit in self.plan.units if unit.identity in chosen),
+            blocked=sum(1 for trace in self.traces if trace.disposition == Disposition.BLOCKED),
+            invalid=sum(1 for trace in self.traces if trace.disposition == Disposition.INVALID),
+            held_back=held_back,
+        )
+
     @property
     def trace_summary(self) -> dict[str, int]:
         """Return the summary strip: what the reviewer still has to work through."""
@@ -1246,4 +1333,12 @@ def auto_match_devices(workspace, profile, actor, target) -> AutoMatchSummary:  
     return AutoMatchSummary(**counts)
 
 
-__all__ = ("AutoMatchSummary", "ReviewWorkspace", "WorkspaceUnit", "auto_match_devices", "refuse_moved_policy")
+__all__ = (
+    "SYNC_ALL_NOTHING",
+    "AutoMatchSummary",
+    "ReviewWorkspace",
+    "SyncAllSelection",
+    "WorkspaceUnit",
+    "auto_match_devices",
+    "refuse_moved_policy",
+)

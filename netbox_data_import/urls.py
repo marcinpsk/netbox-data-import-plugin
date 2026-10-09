@@ -184,6 +184,7 @@ urlpatterns = [
         name="trace_device_candidates",
     ),
     path("trace-workspace/sync/", views.TraceSyncView.as_view(), name="trace_sync"),
+    path("trace-workspace/sync/all/", views.TraceSyncAllView.as_view(), name="trace_sync_all"),
     path("trace-workspace/sync/status/", views.TraceSyncStatusView.as_view(), name="trace_sync_status"),
     path("trace-workspace/sync/cancel/", views.TraceSyncCancelView.as_view(), name="trace_sync_cancel"),
     path(

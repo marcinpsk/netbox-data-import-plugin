@@ -132,6 +132,7 @@ from .review_workspace import (
     TERMINATION_UNRESOLVABLE,
     IneligibleDeviceSelection,
     IneligibleLocationSelection,
+    SYNC_ALL_NOTHING,
     ProfilePolicyMoved,
     ReviewWorkspace,
     UnacceptablePolicyDecision,
@@ -3394,12 +3395,14 @@ def _trace_sync_block_reason(reviewed_plan: ImportPlan, live_plan: ImportPlan) -
     return ""
 
 
+def _held_sync(action, reason: str):
+    """Refuse a sync action the view would reject, so the page cannot offer what the POST refuses."""
+    return replace(action, enabled=False, reason=reason) if reason and action.enabled else action
+
+
 def _with_blocked_sync(trace, reason: str):
-    """Refuse the sync action the view would reject, so the page cannot offer what the POST refuses."""
-    actions = tuple(
-        replace(action, enabled=False, reason=reason) if action.key == "sync" and action.enabled else action
-        for action in trace.actions
-    )
+    """Hold the trace's own sync action for *reason*."""
+    actions = tuple(_held_sync(action, reason) if action.key == "sync" else action for action in trace.actions)
     return replace(trace, actions=actions)
 
 
@@ -3887,6 +3890,8 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
                 "segment_policy_forms": segment_policy_forms,
                 "summary": summary,
                 "ask_all_reason": ask_all_reason,
+                "sync_all": _held_sync(workspace.sync_all.action, block_reason),
+                "sync_all_note": workspace.sync_all.unsynced_note,
                 "location_tree": location_tree,
                 "has_locations": has_locations,
                 "import_location_unavailable": reader.location_unavailable,
@@ -3895,6 +3900,13 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
                 "plugin_version": _plugin_version,
             },
         )
+
+
+def _refuse_drifted_sync(preview) -> None:
+    """Refuse a trace sync that live NetBox has moved under."""
+    live = ImportEngine.plan(preview.profile, preview.document, preview.actor, preview.planning_context)
+    if reason := _trace_sync_block_reason(preview.plan, live):
+        raise PreviewCommandRefused(reason, 409)
 
 
 @dataclass(frozen=True)
@@ -3906,9 +3918,7 @@ class _TraceSync(QueueImport):
 
     def selection_for(self, preview):
         """Refuse a sync live NetBox has moved under, or a trace with nothing to synchronize."""
-        live = ImportEngine.plan(preview.profile, preview.document, preview.actor, preview.planning_context)
-        if reason := _trace_sync_block_reason(preview.plan, live):
-            raise PreviewCommandRefused(reason, 409)
+        _refuse_drifted_sync(preview)
         selection = preview.workspace.sync_selection(self.identity)
         if not selection:
             raise PreviewCommandRefused("That trace has no changes to synchronize.")
@@ -3929,6 +3939,31 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     def refusal_url(self, request):
         """Return the trace the sync was asked for."""
         return _trace_workspace_url(request.POST.get("identity", ""))
+
+
+class _TraceSyncAll(QueueImport):
+    """Queue every actionable Source Trace that can sync, with the units their changes depend on, as one Job."""
+
+    keeps_preview = True
+
+    def selection_for(self, preview):
+        """Refuse a sync live NetBox has moved under, or a preview with no trace that can sync."""
+        _refuse_drifted_sync(preview)
+        selection = preview.workspace.sync_all.units
+        if not selection:
+            raise PreviewCommandRefused(SYNC_ALL_NOTHING)
+        return list(selection)
+
+
+class TraceSyncAllView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Synchronize every actionable Source Trace and keep the workspace for the traces that remain."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Queue the reviewed plan for every trace that can sync, then show the Job's progress."""
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), _TraceSyncAll())
+        return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": result.outcome.job_id}))
 
 
 class TraceSyncStatusView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):

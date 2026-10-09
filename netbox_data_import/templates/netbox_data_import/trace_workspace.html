@@ -128,6 +128,16 @@
           <div><div class="text-secondary small">Invalid</div><div class="h2 mb-0">{{ summary.invalid }}</div></div>
           <div><div class="text-secondary small">No change</div><div class="h2 mb-0">{{ summary.no_change }}</div></div>
         </div>
+        {# One Job for every trace that can sync; the preview stays, so the operator resolves the rest after it. #}
+        <form class="ndi-trace-action ndi-sync-all mt-2" method="post" action="{% url sync_all.url_name %}">
+          {% csrf_token %}
+          {% include "netbox_data_import/inc/preview_claim.html" %}
+          <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
+          <button type="submit" class="btn btn-sm btn-primary" data-trace-sync-all
+                  {% if not sync_all.enabled %}disabled aria-describedby="syncAllReason"{% endif %}>{{ sync_all.label }}</button>
+          {% if not sync_all.enabled %}<div class="ndi-trace-reason mt-1" id="syncAllReason">{{ sync_all.reason }}</div>{% endif %}
+          {% if sync_all_note %}<div class="ndi-trace-reason mt-1" data-trace-sync-all-note>{{ sync_all_note }}</div>{% endif %}
+        </form>
       </section>
       <section data-trace-summary-group="terminations">
         <h2 class="h4 mb-2">Terminations</h2>
