@@ -84,7 +84,7 @@ repos:
         entry: scripts/check-review-patterns scan
         language: system
         pass_filenames: false
-        files: ^(netbox_data_import/.*\.py|\.opengrep/.*|scripts/check-review-patterns)$
+        files: ^(netbox_data_import/.*\.py|netbox_data_import/static/.*\.js|\.opengrep/.*|scripts/check-review-patterns)$
 
       - id: review-pattern-tests
         name: OpenGrep rule fixtures

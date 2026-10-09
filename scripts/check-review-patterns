@@ -28,17 +28,19 @@ case "${1:-scan}" in
   scan)
     # Explicit targets: OpenGrep's default ignore list drops `tests/`, and these rules exist to
     # check exactly that tree.
-    mapfile -t targets < <(find "$TREE" -name '*.py' -not -path '*/migrations/*' | sort)
+    mapfile -t targets < <(
+      { find "$TREE" -name '*.py' -not -path '*/migrations/*'; find "$TREE/static" -name '*.js'; } | sort
+    )
     "$OPENGREP" scan --quiet --error --config "$RULES" "${targets[@]}"
     ;;
   test)
     # `opengrep test` pairs <stem>.yaml with a same-stem fixture, so each pair is staged alone.
     staged="$(mktemp -d)"
     trap 'rm -rf "$staged"' EXIT
-    for fixture in "$RULES"/fixtures/*.py; do
-      stem="$(basename "$fixture" .py)"
-      cp "$RULES/$stem.yaml" "$staged/$stem.yaml"
-      cp "$fixture" "$staged/$stem.py"
+    for fixture in "$RULES"/fixtures/*; do
+      name="$(basename "$fixture")"
+      cp "$RULES/${name%.*}.yaml" "$staged/${name%.*}.yaml"
+      cp "$fixture" "$staged/$name"
     done
     "$OPENGREP" test "$staged"
     ;;

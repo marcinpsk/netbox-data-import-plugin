@@ -132,3 +132,16 @@ rules:
       - pattern: |
           if identity_text(getattr(self, ...)) != $KEY:
               ...
+
+  - id: nbdi-no-netbox-bundled-global
+    languages: [javascript]
+    severity: ERROR
+    message: >-
+      NetBox bundles htmx and Tom Select inside netbox.js and sets neither window.htmx nor
+      window.TomSelect, so this name is undefined on a NetBox page. Drive htmx through the
+      element's hx- attributes and its events, and reach Tom Select through `element.tomselect`.
+    pattern-either:
+      - pattern: window.htmx
+      - pattern: htmx.$MEMBER
+      - pattern: window.TomSelect
+      - pattern: new TomSelect(...)

@@ -17,8 +17,8 @@ OpenGrep pass for a repository whose CI already runs one. The ruleset is named `
 under `.opengrep/` for the same reason, because CodeRabbit also stands down for a root
 `opengrep.yml`, `semgrep.yml`, or their variants.
 
-The scan passes explicit file targets. OpenGrep's default ignore list drops `tests/`, and these
-rules exist to check exactly that tree.
+The scan covers the package's Python and its static JavaScript. It passes explicit file targets.
+OpenGrep's default ignore list drops `tests/`, and these rules exist to check exactly that tree.
 
 ## Rules
 
@@ -31,6 +31,7 @@ rules exist to check exactly that tree.
 | `nbdi-deadline-alarm-keeps-its-default-action` | a Python `SIGALRM` handler, which runs only once the interpreter regains control and so misses the deadline of a blocked resolver; `SIG_IGN` too, and `SIG_DFL` is allowed |
 | `nbdi-job-data-excludes-accepted-plan` | an accepted plan stored in `Job.data`, which NetBox exposes to Job readers |
 | `nbdi-source-spelling-allows-legacy-rows` | source-spelling comparisons that reject saved decisions with empty legacy spellings |
+| `nbdi-no-netbox-bundled-global` | plugin JavaScript that reads `window.htmx`, `htmx.*` or `window.TomSelect`, or calls `new TomSelect`: NetBox bundles both libraries and exposes neither |
 
 Taint mode carries the first rule through any binding form, so an alias, a tuple target, a walrus,
 an attribute target, and an `as` import are all covered without enumerating them. Its sink accepts
@@ -41,6 +42,7 @@ forms and had no notion of scope.
 
 ## Adding a rule
 
-One rule per class, one fixture named after the ruleset stem, carrying `# ruleid:` and `# ok:`
-annotations. Prove it red on real code and green on the fixed tree before committing. Fixtures are
-excluded from ruff: they are the violations, not source.
+One rule per class, with its cases in a fixture named after the ruleset stem (`boundaries.py` or
+`boundaries.js`), carrying `ruleid:` and `ok:` annotations. Prove it red on real code and green on
+the fixed tree before committing. Fixtures are excluded from ruff: they are the violations, not
+source.
