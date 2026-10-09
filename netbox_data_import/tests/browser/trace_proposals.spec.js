@@ -181,6 +181,34 @@ test('a retry that succeeds while the refused read is on its way does not show t
   await reads[0].fulfill(html(card('first', 'completed'))).catch(() => {});
 });
 
+test('a refusal whose card a workspace swap replaced never shows on the new card', async ({page}) => {
+  await page.clock.install({time: new Date('2026-09-11T08:00:00Z')});
+  await page.route(`${ORIGIN}${ACTION_URLS.request}`, route => route.fulfill({
+    status: 409, json: {ok: false, error: 'The backend is busy.'},
+  }));
+  const reads = [];
+  await page.route(cardRead, route => {
+    reads.push(route);
+    return reads.length === 1 ? undefined : route.fulfill(html(card('first', 'completed')));
+  });
+  await page.route(`${ORIGIN}${ASK_ALL_URL}`, route =>
+    route.fulfill(html(document(workspace([card('first', 'pending')])))));
+  await open(page, [card('first')]);
+
+  await actionOf(page, 'first', 'request').click();
+  await page.clock.runFor(10);
+  await expect.poll(() => reads.length).toBe(1);
+  await page.locator('[data-proposal-ask-all]').click();
+  await page.clock.runFor(100);
+  await expect(cardOf(page, 'first').locator('[data-proposal-progress]')).toBeVisible();
+  await page.clock.runFor(3100);
+
+  await expect(cardOf(page, 'first').locator('[data-proposal-badge]')).toHaveText('Proposal - not applied');
+  expect(reads).toHaveLength(2);
+  await expect(cardOf(page, 'first').locator('[data-proposal-error]')).toBeHidden();
+  await reads[0].fulfill(html(card('first', 'completed'))).catch(() => {});
+});
+
 test('a poll the server refuses stops polling and says why', async ({page}) => {
   await page.clock.install({time: new Date('2026-09-11T08:00:00Z')});
   let reads = 0;

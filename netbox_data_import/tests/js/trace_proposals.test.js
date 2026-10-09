@@ -36,7 +36,7 @@ function read(event) {
   const before = event.target;
   reads.push({event: event.type, url: before.getAttribute('hx-get'), card: before});
   before.outerHTML = card(before.dataset.proposalField, 'pending');
-  emit(cardOf(before.dataset.proposalField), 'htmx:afterSwap', {target: before});
+  emit(cardOf(before.dataset.proposalField), 'htmx:afterSwap', {target: before, requestConfig: {triggeringEvent: event}});
 }
 
 // The listeners sit on the document, which outlives each test, so the script runs once per file.
