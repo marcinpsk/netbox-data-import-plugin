@@ -126,8 +126,9 @@ test('a refused action reads its card again and shows the refusal there, without
   await page.route(`${ORIGIN}${ACTION_URLS.request}`, route => route.fulfill({
     status: 409, json: {ok: false, error: 'This field already has an active Resolution Proposal.'},
   }));
+  // A read answers with the card and the active proposal count, as the card view renders it.
   await page.route(cardRead, route =>
-    route.fulfill(html(card('first', 'pending'))));
+    route.fulfill(html(answer('first', 'pending', 1, 200))));
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   const loads = await open(page, [card('first'), card('second')]);
@@ -138,6 +139,7 @@ test('a refused action reads its card again and shows the refusal there, without
   await expect(cardOf(page, 'first').locator('[data-proposal-error]')).toHaveText(
     'This field already has an active Resolution Proposal.');
   await expect(cardOf(page, 'second').locator('[data-proposal-error]')).toBeHidden();
+  await expect(page.locator('#ndiActiveProposals')).toHaveText('1');
   expect(await samePage(page)).toBe(true);
   expect(loads()).toBe(1);
   expect(errors).toEqual([]);

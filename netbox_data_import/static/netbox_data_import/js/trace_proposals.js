@@ -96,9 +96,11 @@
   });
 
   // Only the swap that answers this read carries its refusal, so an aborted or replaced read drops it.
+  // The same answer also swaps the active proposal count out of band, which has no refusal slot.
   document.addEventListener('htmx:afterSwap', function (event) {
     var read = event.detail.requestConfig ? event.detail.requestConfig.triggeringEvent : null;
-    if (read && read.type === 'ndi:read') show(event.target, read.detail.refusal);
+    if (!read || read.type !== 'ndi:read' || !event.target.matches('[data-proposal-field]')) return;
+    show(event.target, read.detail.refusal);
   });
 
   // Card answers can arrive out of order, so a count the database made earlier never replaces a later one.
