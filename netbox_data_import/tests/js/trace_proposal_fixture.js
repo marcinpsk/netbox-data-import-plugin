@@ -1,42 +1,17 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
 
-export function payload(overrides = {}) {
-  return {
-    ok: true,
-    proposal: {id: 7},
-    presentation: {
-      pending: true, field_state: 'proposed', state_style: 'proposed', badge: 'Queued', candidate: '', explanation: '',
-      failure: '', failure_code: '',
-      job_status: 'Background job: Pending, requested 0 minutes ago', job_note: '', page_status: '',
-      actions: [
-        {key: 'request', label: 'Ask AI', reason: 'An active proposal exists.', url: '/request/'},
-        {key: 'cancel', label: 'Cancel', reason: '', url: '/cancel/'},
-        {key: 'accept', label: 'Accept', reason: 'Wait for a completed proposal.', url: '/accept/'},
-        {key: 'reject', label: 'Reject', reason: 'Wait for a completed proposal.', url: '/reject/'},
-      ],
-      ...overrides,
-    },
-    history_display: [{id: 7, created: '2026-09-11T08:00:00+00:00', status: 'Queued', outcome: 'No outcome'}],
-    history_has_more: false,
-    history_url: '/api/plugins/netbox-data-import/resolution-proposal-history/?profile_id=1&field_key=field',
-  };
-}
-
-export function completed(overrides = {}) {
-  return payload({
-    pending: false, field_state: 'proposed', state_style: 'proposed', badge: 'Proposal - not applied',
-    candidate: 'eth0 (Interface)', explanation: 'The labels name the same port.',
-    job_status: '', job_note: '', page_status: '',
-    actions: [
-      {key: 'request', label: 'Ask AI', reason: '', url: '/request/'},
-      {key: 'cancel', label: 'Cancel', reason: 'There is no active proposal.', url: '/cancel/'},
-      {key: 'accept', label: 'Accept', reason: '', url: '/accept/'},
-      {key: 'reject', label: 'Reject', reason: '', url: '/reject/'},
-    ],
-    ...overrides,
-  });
-}
+/* Termination cards as `_termination_card.html` renders them, with the same htmx attributes, so the
+ * scripts run against the markup the server sends. */
+export const READ_URL = '/plugins/data-import/trace-workspace/proposals/';
+export const ACTION_URLS = {
+  request: '/plugins/data-import/trace-workspace/proposals/request/',
+  cancel: '/plugins/data-import/trace-workspace/proposals/cancel/',
+  accept: '/plugins/data-import/trace-workspace/proposals/accept/',
+  reject: '/plugins/data-import/trace-workspace/proposals/reject/',
+};
+export const ASK_ALL_URL = '/plugins/data-import/trace-workspace/proposals/request-all/';
+export const CABLE_POLICY_URL = '/plugins/data-import/trace-workspace/cable-policy/';
 
 export function claimFields(revision = 4) {
   return [
@@ -44,42 +19,96 @@ export function claimFields(revision = 4) {
     ['preview_document', '11'], ['preview_profile', '3'],
   ];
 }
-export const CLAIM = claimFields();
 
-function card(key, initial) {
-  const actions = items => items.map(action => `
-    <button type="button" data-proposal-action="${action.key}">${action.label}</button>
-    <div data-proposal-reason="${action.key}" hidden></div>`).join('');
-  const proposal = `
-    <div data-proposal-display>
-      <span data-proposal-badge></span><span data-proposal-progress hidden>Waiting for the backend...</span>
-      <div data-proposal-job hidden></div><div data-proposal-job-note hidden></div>
-      <div data-proposal-page hidden></div>
-      <div data-proposal-candidate></div><div data-proposal-explanation></div><div data-proposal-failure></div>
-      ${actions(initial.presentation.actions.slice(2))}
-    </div>
-    <details open data-proposal-history-disclosure><summary>Proposal history</summary>
-      <ul data-proposal-history></ul><a data-proposal-history-link hidden>View all attempts</a></details>`;
+function claimInputs(revision) {
+  return claimFields(revision).map(([name, value]) => `<input type="hidden" name="${name}" value="${value}">`).join('');
+}
+
+/* The disabled reason of each action in each card state, as ProposalPresentation offers them. */
+const STATES = {
+  open: {request: '', cancel: 'There is no active proposal.'},
+  pending: {
+    request: 'An active proposal already exists for this field.', cancel: '',
+    accept: 'Wait for a completed proposal.', reject: 'Wait for a completed proposal.',
+  },
+  completed: {request: '', cancel: 'There is no active proposal.', accept: '', reject: ''},
+};
+const LABELS = {request: 'Ask AI', cancel: 'Cancel', accept: 'Accept', reject: 'Reject'};
+
+function actionForm(id, field, key, reason, revision, proposal) {
+  const target = key === 'accept'
+    ? 'hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true"'
+    : 'hx-target="closest [data-proposal-field]" hx-swap="outerHTML"';
+  const style = key === 'request' || key === 'accept' ? 'btn-primary' : 'btn-secondary';
   return `
-    <div data-proposal-field="${key}" data-proposal-url="/proposal/">
-      <span class="badge ndi-trace-state-unknown" data-proposal-state data-proposal-state-prefix="ndi-trace-state-"></span>
-      <div data-proposal-content>${initial.proposal ? proposal : ''}</div>
-      <template data-proposal-template>${proposal}</template>
-      <div data-proposal-field-actions>${actions(initial.presentation.actions.slice(0, 2))}</div>
-      <div data-proposal-error hidden></div>
+    <form class="ndi-trace-action" method="post" action="${ACTION_URLS[key]}" hx-post="${ACTION_URLS[key]}" ${target}
+          hx-sync="closest [data-proposal-field]:replace" hx-disabled-elt="#${id} [data-proposal-action]">
+      <input type="hidden" name="csrfmiddlewaretoken" value="fixture-token">${claimInputs(revision)}
+      <input type="hidden" name="trace" value="trace-1"><input type="hidden" name="field_key" value="${field}">
+      ${proposal ? `<input type="hidden" name="proposal_id" value="${proposal}">` : ''}
+      <button type="submit" class="btn btn-sm ${style}" data-proposal-action="${key}" ${reason ? 'disabled' : ''}><span
+        class="spinner-border spinner-border-sm ndi-busy" aria-hidden="true"></span>${LABELS[key]}</button>
+      <div class="ndi-trace-reason" data-proposal-reason="${key}" ${reason ? '' : 'hidden'}>${reason}</div>
+    </form>`;
+}
+
+/* One card for `field` in `state`: open, pending or completed. */
+export function card(field, state = 'open', {revision = 4, proposal = 7} = {}) {
+  const id = `proposalCard${field}`;
+  const reasons = STATES[state];
+  const query = [['field_key', field], ['trace', 'trace-1'], ...claimFields(revision)];
+  const read = `${READ_URL}?${query.map(pair => pair.join('=')).join('&amp;')}`;
+  const trigger = state === 'pending' ? 'hx-trigger="every 3s, ndi:read"' : 'hx-trigger="ndi:read"';
+  const display = state === 'open' ? '' : `
+    <div class="ndi-proposal-card mt-2" data-proposal-display>
+      <span class="badge" data-proposal-badge>${state === 'pending' ? 'Queued' : 'Proposal - not applied'}</span>
+      ${state === 'pending' ? '<span data-proposal-progress>Waiting for the backend...</span>' : ''}
+      <div class="ndi-trace-actions">
+        ${['accept', 'reject'].map(key => actionForm(id, field, key, reasons[key], revision, proposal)).join('')}
+      </div>
+    </div>`;
+  const fieldActions = ['request', 'cancel']
+    .map(key => actionForm(id, field, key, reasons[key], revision, state === 'open' ? null : proposal)).join('');
+  return `
+    <li class="card ndi-proposal-card mb-3" id="${id}" data-proposal-field="${field}"
+      hx-get="${read}" ${trigger} hx-swap="outerHTML" hx-sync="this:abort">
+      <strong>${field}</strong>
+      <span class="badge" data-proposal-state>${state === 'open' ? 'unresolved' : 'proposed'}</span>
+      ${display}
+      <div class="ndi-trace-actions mt-2" data-proposal-field-actions>${fieldActions}</div>
+      <div class="alert alert-danger" role="alert" data-proposal-error hidden></div>
+    </li>`;
+}
+
+/* The workspace content that the page and every swap of #page-content carry: the claim, the strip, the cards. */
+export function workspace(cards, {revision = 4, note = '', active = 0, countedAt = 100} = {}) {
+  return `
+    <div id="page-content">
+      <div class="ndi-trace-workspace">
+        <form id="ndi-preview-claim" hidden>${claimInputs(revision)}</form>
+        <output id="ndi-revision">${revision}</output>
+        <div id="ndiActiveProposals" data-counted-at="${countedAt}">${active}</div>
+        <p id="ndi-note">${note}</p>
+        <form class="ndi-trace-action" method="post" action="${ASK_ALL_URL}" hx-post="${ASK_ALL_URL}"
+              hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true"
+              hx-disabled-elt="find button">
+          <input type="hidden" name="csrfmiddlewaretoken" value="fixture-token">${claimInputs(revision)}
+          <input type="hidden" name="trace" value="trace-1">
+          <button type="submit" class="btn btn-primary" data-proposal-ask-all><span
+            class="spinner-border spinner-border-sm ndi-busy" aria-hidden="true"></span>Ask AI for all</button>
+        </form>
+        <form method="post" action="${CABLE_POLICY_URL}" hx-post="${CABLE_POLICY_URL}"
+              hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
+          <input type="hidden" name="csrfmiddlewaretoken" value="fixture-token">${claimInputs(revision)}
+          <button type="submit" class="btn btn-sm btn-primary" data-cable-policy-save>Save</button>
+        </form>
+        <ul class="list-unstyled">${cards.join('')}</ul>
+      </div>
     </div>`;
 }
 
-/* One card for `field`, plus one card for each further field key in `others`. */
-export function fixture(initial = payload(), others = {}, revision = 4) {
-  const fields = {field: initial, ...others};
-  const claim = claimFields(revision).map(([name, value]) => `<input type="hidden" name="${name}" value="${value}">`).join('');
-  return `
-    <base href="http://preview.test/">
-    <style>[hidden] { display: none !important; }</style>
-    <form id="ndi-preview-claim" hidden>${claim}</form>
-    <output id="ndi-revision">${revision}</output>
-    <form id="traceTerminationForm"><input name="csrfmiddlewaretoken" value="fixture-token"></form>
-    <script type="application/json" id="traceProposalFields">${JSON.stringify(fields).replaceAll('<', '\\u003c')}</script>
-    ${Object.entries(fields).map(([key, field]) => card(key, field)).join('')}`;
+/* A card answer as `_proposal_card_answer.html` renders it: the card, and the strip count out of band. */
+export function answer(field, state, active, countedAt) {
+  const count = `<div class="h2 mb-0" id="ndiActiveProposals" data-counted-at="${countedAt}" hx-swap-oob="true">${active}</div>`;
+  return `${card(field, state)}\n${count}`;
 }

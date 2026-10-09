@@ -119,6 +119,22 @@ def trace_segment(left, cable_class, right, corroboration=("", "", "")):
     )
 
 
+def power_hub_block(inlet, outlet, hub_cables, to_end, *, cable_class="Power Cable"):
+    """Return a power block as the source states it: a PDU fan-out under a From inlet, not a path.
+
+    The first row is the cord from the From inlet to its outlet. The other rows are the other cables
+    on that PDU, and the To line names an arbitrary leaf of the fan-out.
+    """
+    return (
+        trace_endpoint_line(inlet),
+        trace_endpoint_line(to_end),
+        (
+            trace_segment(inlet, cable_class, outlet),
+            *(trace_segment(left, cable_class, right) for left, right in hub_cables),
+        ),
+    )
+
+
 def trace_visit(termination):
     """Render one Trace List visit row."""
     device, cards, port, port_class = termination

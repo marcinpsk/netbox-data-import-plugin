@@ -28,6 +28,7 @@ __all__ = [
     "complete_proposal",
     "decide_proposal",
     "fail_proposal",
+    "fail_queued_proposal",
     "latest_proposal",
     "next_page_offset",
     "page_exhausted",
@@ -195,6 +196,14 @@ def fail_proposal(proposal_id, *, reason, response_diagnostic=None, backend_meta
         failure_reason=reason,
         response_diagnostic=response_diagnostic,
         backend_metadata=backend_metadata,
+    )
+
+
+def fail_queued_proposal(proposal_id, *, reason) -> bool:
+    """Fail a row no worker has taken yet. A running row belongs to its worker, whose answer must still land."""
+    _validate_choice(reason, ProposalFailureReason.CHOICES, name="proposal failure reason")
+    return _transition(
+        proposal_id, allowed_from=(ProposalStatus.QUEUED,), status=ProposalStatus.FAILED, failure_reason=reason
     )
 
 

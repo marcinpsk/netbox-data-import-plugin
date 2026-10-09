@@ -168,6 +168,18 @@ because adding or removing a port renumbers every page. The card says so instead
 page. It also restarts once the last page is reached. A request that failed, was cancelled, or is
 still waiting for your decision did not use its page up, so the next request asks that page again.
 
+Ask AI, Cancel and Reject update their termination card in place, so you can ask about several
+terminations without waiting for a page load. A waiting card refreshes itself every 3 seconds while
+its tab is visible. Accept writes the resolution and replans the preview, so it refreshes the whole
+workspace.
+
+**Ask AI for all**, in the summary strip, asks about every open termination of the preview at once.
+It skips a termination that has an active proposal, no resolved Device, no eligible candidates, or
+source spellings that disagree, and it reports how many it asked about and why it skipped the rest.
+Ask AI and **Ask AI for all** both refuse when no Inference Backend is enabled or configured as a
+fallback. No setting limits how many it asks about: each request is one background job, and the RQ workers
+run them in turn.
+
 A Device with more than 1024 eligible ports of one kind is refused. That ceiling bounds the stored
 candidate set, not the prompt. Above it, narrow the eligible set instead.
 

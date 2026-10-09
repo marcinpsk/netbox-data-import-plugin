@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 import difflib
+import hashlib
 import logging
 import time
 import uuid
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from functools import cached_property
+from typing import ClassVar
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from core.signals import clear_events
@@ -15,6 +20,7 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import DatabaseError, IntegrityError
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.template.defaultfilters import pluralize
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
@@ -97,6 +103,7 @@ from .preview_coordinator import (
     UNREADABLE_PREVIEW,
     CommandOutcome,
     DiscardPreview,
+    LockedPreview,
     PreviewClaim,
     PreviewCommand,
     PreviewCommandRefused,
@@ -1608,7 +1615,22 @@ class ImportRunView(_PreviewCommandMixin, PermissionRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": result.outcome.job_id}))
 
 
-class PreviewRereadView(_PreviewCommandMixin, PermissionRequiredMixin, View):
+SESSION_ENDED = "Your session has ended. Reload the page to log in again."
+
+
+class _SessionEndedRefusal:
+    """Refuse an ended session in the JSON envelope, so htmx never swaps the login page into the workspace."""
+
+    def handle_no_permission(self):
+        """Answer an anonymous script or htmx caller with 401; a plain form post still goes to the login page."""
+        if not self.request.user.is_authenticated and (
+            self.request.headers.get("HX-Request") == "true" or _wants_json(self.request)
+        ):
+            return JsonResponse({"ok": False, "error": SESSION_ENDED}, status=401)
+        return super().handle_no_permission()
+
+
+class PreviewRereadView(_SessionEndedRefusal, _PreviewCommandMixin, PermissionRequiredMixin, View):
     """Re-read the preview from its stored source against live NetBox, which also recovers a plan of an older schema."""
 
     permission_required = "netbox_data_import.change_importprofile"
@@ -3610,7 +3632,7 @@ def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]
     return unique
 
 
-class _TraceWorkspaceMixin(_PreviewCommandMixin):
+class _TraceWorkspaceMixin(_SessionEndedRefusal, _PreviewCommandMixin):
     """A trace workspace command: a refusal goes back to the trace it came from."""
 
     def refusal_url(self, request):
@@ -3618,9 +3640,10 @@ class _TraceWorkspaceMixin(_PreviewCommandMixin):
         return _trace_workspace_url(request.POST.get("trace", ""))
 
 
-def _claimed_snapshot(request, *, profile_action="change"):
+def _claimed_snapshot(request, *, profile_action="change", claim=None):
     """Return the preview a read answers for, which must be exactly the one its page displays."""
-    snapshot = read_preview(request, expected=PreviewClaim.posted(request.GET), profile_action=profile_action)
+    expected = PreviewClaim.posted(request.GET) if claim is None else claim
+    snapshot = read_preview(request, expected=expected, profile_action=profile_action)
     if not snapshot.active:
         raise StalePreview("No current import preview matches this request.")
     return snapshot
@@ -3636,6 +3659,101 @@ def _trace_workspace_url(identity: str) -> str:
     url = reverse("plugins:netbox_data_import:trace_workspace")
     # An identity the replan dropped selects nothing, and the page falls back to its first trace.
     return f"{url}?{urlencode({'trace': identity.strip()})}" if identity.strip() else url
+
+
+def _proposal_entries(workspace, terminations, *, profile, viewer, reader):
+    """Return the proposal display and each termination with its proposal read, as the workspace shows them."""
+    from .proposal_presentation import ProposalPresentation
+
+    display = ProposalPresentation(profile=profile, actor=viewer, reader=reader)
+    reads = display.fields(
+        [
+            {**field, "source_ambiguous": workspace.termination_sources.get(field["field_key"]) is None}
+            for field in terminations
+        ]
+    )
+    return display, [
+        {**field, "proposal": reads[field["field_key"]]["presentation"], "proposal_read": reads[field["field_key"]]}
+        for field in terminations
+    ]
+
+
+def _active_proposal_count(profile, workspace, display) -> tuple[int | str, int]:
+    """Return what the summary strip shows for the active proposals, and when the database counted them.
+
+    The time is the counting statement's own start, in microseconds, so a later count saw every commit an
+    earlier one saw, and the page can refuse an answer that arrives after a newer one.
+    """
+    from django.db.models import Count, DateTimeField, Func, Max
+    from django.db.models.functions import Coalesce
+
+    from .models import ProposalStatus, ResolutionProposal
+
+    counted_at = Func(function="statement_timestamp", output_field=DateTimeField())
+    result = ResolutionProposal.objects.filter(
+        profile=profile,
+        task_type=SELECT_TERMINATION_TASK,
+        field_key__in=list(workspace.termination_sources),
+        status__in=ProposalStatus.ACTIVE,
+    ).aggregate(count=Count("pk"), at=Coalesce(Max(counted_at), counted_at))
+    stamp = (result["at"] - datetime.fromtimestamp(0, tz=UTC)) // timedelta(microseconds=1)
+    return ("Not permitted" if display.view_reason else result["count"]), stamp
+
+
+def _termination_cards(terminations, trace, claim):
+    """Add what each termination card renders beyond its proposal: the resolved Device, an id, and its read."""
+    resolved = {
+        source_device_key(device["key"]): device["selected"] for device in trace.devices if device.get("selected")
+    }
+    read_url = reverse("plugins:netbox_data_import:trace_proposal")
+    return [
+        {
+            **termination,
+            "resolved_device": resolved.get(parse_termination_field_key(termination["field_key"])["device"], ""),
+            "card_id": "proposalCard" + hashlib.sha256(termination["field_key"].encode()).hexdigest()[:16],
+            "read_url": f"{read_url}?"
+            + urlencode({"field_key": termination["field_key"], "trace": trace.identity, **claim.fields()}),
+        }
+        for termination in terminations
+    ]
+
+
+def _proposal_card(request, snapshot, field_key: str, identity: str):
+    """Render one termination card of the preview the page displays, for a poll or after a proposal command."""
+    try:
+        workspace = snapshot.workspace(request.user)
+    except PlanError:
+        raise StalePreview(UNREADABLE_PREVIEW) from None
+    traces = [trace for trace in workspace.traces if any(item["field_key"] == field_key for item in trace.terminations)]
+    trace = next((trace for trace in traces if trace.identity == identity), traces[0] if traces else None)
+    if trace is None:
+        raise InvalidProposalTarget("This preview asked no question about that termination.")
+    field = next(item for item in trace.terminations if item["field_key"] == field_key)
+    try:
+        reader = _trace_reader(request.user, snapshot.profile, snapshot.planning_context)
+    except PlanningTargetUnavailable:
+        reader = None
+    display, entries = _proposal_entries(
+        workspace, [field], profile=snapshot.profile, viewer=request.user, reader=reader
+    )
+    active_proposals, counted_at = _active_proposal_count(snapshot.profile, workspace, display)
+    return render(
+        request,
+        "netbox_data_import/_proposal_card_answer.html",
+        {
+            "termination": _termination_cards(entries, trace, snapshot.claim)[0],
+            "selected_trace": trace,
+            "preview_claim": snapshot.claim,
+            "active_proposals": active_proposals,
+            "active_proposals_counted_at": counted_at,
+        },
+    )
+
+
+def _proposal_card_after(request, result, field_key: str):
+    """Render the card a proposal command changed, from the preview the command left behind."""
+    snapshot = _claimed_snapshot(request, profile_action="view", claim=result.claim)
+    return _proposal_card(request, snapshot, field_key, request.POST.get("trace", ""))
 
 
 class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
@@ -3677,7 +3795,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
             for model in (TerminationResolution, TraceDeviceResolution, TraceLocationResolution)
         )
         summary["preview_state"] = "changed in NetBox" if drift else "current"
-        from .proposal_presentation import ProposalPresentation, group_terminations
+        from .proposal_presentation import group_terminations
 
         try:
             reader = _trace_reader(request.user, profile, snapshot.planning_context)
@@ -3693,14 +3811,8 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
             paths=_workspace_location_paths(workspace),
             has_locations=has_locations,
         )
-        proposal_display = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
-        proposal_fields = proposal_display.fields(
-            [
-                {**field, "source_ambiguous": workspace.termination_sources.get(field["field_key"]) is None}
-                for field in selected.terminations
-            ]
-            if selected
-            else []
+        proposal_display, terminations = _proposal_entries(
+            workspace, selected.terminations if selected else [], profile=profile, viewer=request.user, reader=reader
         )
         if selected is not None:
             selected = replace(
@@ -3708,16 +3820,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
                 findings=(
                     _deduplicate_findings(selected.findings) if selected.disposition != "invalid" else selected.findings
                 ),
-                terminations=[
-                    {
-                        **field,
-                        "proposal": proposal_fields[field["field_key"]]["presentation"],
-                        "proposal_history": proposal_fields[field["field_key"]]["history_display"],
-                        "proposal_history_has_more": proposal_fields[field["field_key"]]["history_has_more"],
-                        "proposal_history_url": proposal_fields[field["field_key"]]["history_url"],
-                    }
-                    for field in selected.terminations
-                ],
+                terminations=terminations,
             )
         cable_policy_forms = _cable_policy_forms(profile, selected, request.user)
         segment_policy_forms = _segment_policy_forms(profile, selected, request.user)
@@ -3734,31 +3837,15 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
             for device in selected_devices
             if not device.get("selectable") and device.get("state_style") != "manual"
         ]
-        resolved_devices = {
-            source_device_key(device["key"]): device["selected"]
-            for device in selected_devices
-            if device.get("selected")
-        }
-        attention = [
-            {
-                **termination,
-                "resolved_device": resolved_devices.get(
-                    parse_termination_field_key(termination["field_key"])["device"], ""
-                ),
-            }
-            for termination in attention
-        ]
-        from .models import ProposalStatus, ResolutionProposal
-
-        if proposal_display.view_reason:
-            summary["active_proposals"] = "Not permitted"
-        else:
-            summary["active_proposals"] = ResolutionProposal.objects.filter(
-                profile=profile,
-                task_type=SELECT_TERMINATION_TASK,
-                field_key__in=list(workspace.termination_sources),
-                status__in=ProposalStatus.ACTIVE,
-            ).count()
+        attention = _termination_cards(attention, selected, snapshot.claim) if selected else []
+        summary["active_proposals"], summary["active_proposals_counted_at"] = _active_proposal_count(
+            profile, workspace, proposal_display
+        )
+        ask_all_reason = (
+            proposal_display.request_block_reason
+            or retained_reason
+            or ("" if summary["unresolved_terminations"] else "Every termination in this preview is resolved.")
+        )
         return render(
             request,
             "netbox_data_import/trace_workspace.html",
@@ -3766,7 +3853,6 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
                 "profile": profile,
                 "traces": traces,
                 "selected_trace": selected,
-                "proposal_fields": proposal_fields,
                 "attention_devices": attention_devices,
                 "manual_devices": manual_devices,
                 "settled_devices": settled_devices,
@@ -3775,6 +3861,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
                 "cable_policy_forms": cable_policy_forms,
                 "segment_policy_forms": segment_policy_forms,
                 "summary": summary,
+                "ask_all_reason": ask_all_reason,
                 "location_tree": location_tree,
                 "has_locations": has_locations,
                 "import_location_unavailable": reader.location_unavailable,
@@ -4394,54 +4481,76 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
             return JsonResponse({"ok": False, "error": "; ".join(exc.messages)}, status=400)
 
 
-@dataclass(frozen=True)
-class _RequestProposal(PreviewCommand):
-    """Freeze one unresolved field's evidence and queue its inference; the plan itself does not change."""
+PROPOSAL_QUEUE_UNAVAILABLE = "The proposal queue is unavailable. Try again later."
 
-    field_key: str
-    replans = False
-    reviews_policy = False
 
-    def apply(self, preview):
-        """Recheck the field against live NetBox, create the attempt row, and queue its Job."""
+def _refuse_without_backend() -> None:
+    """Refuse a proposal request that no Inference Backend can answer, before any attempt row exists."""
+    from .proposal_presentation import backend_unavailable_reason
+
+    if reason := backend_unavailable_reason():
+        raise PreviewCommandRefused(reason, 409)
+
+
+class _ProposalRequests:
+    """The live NetBox reads that every proposal request of one command shares."""
+
+    def __init__(self, preview: LockedPreview):
+        self.preview = preview
+
+    @cached_property
+    def reader(self):
+        """Return the operator's scoped reader for the preview's import target."""
+        return _trace_reader(self.preview.actor, self.preview.profile, self.preview.planning_context)
+
+    @cached_property
+    def inventories(self):
+        """Return the inventory cache that every request of this command shares."""
+        from .proposal_presentation import TerminationInventories
+
+        return TerminationInventories(profile=self.preview.profile, reader=self.reader)
+
+    @cached_property
+    def live_terminations(self) -> dict:
+        """Return each termination of a plan made against live NetBox now, by field key."""
+        preview = self.preview
+        live = ImportEngine.plan(preview.profile, preview.document, preview.actor, preview.planning_context)
+        fields: dict = {}
+        for trace in ReviewWorkspace(live, preview.actor).traces:
+            for item in trace.terminations:
+                fields.setdefault(item["field_key"], item)
+        return fields
+
+    def queue(self, field_key: str) -> Callable[[], None]:
+        """Recheck one field against live NetBox, create its attempt row and queue its Job.
+
+        Return the compensation that fails the attempt if the queue push after the commit fails.
+        """
         from core.choices import JobStatusChoices
-        from core.models import Job
-        from core.models import ObjectType
+        from core.models import Job, ObjectType
 
         from .cable_target import UNRESOLVED
-        from .field_keys import parse_termination_field_key
-        from .inference_backend import proposal_candidate_limit, proposal_eligible_set_limit
-        from .jobs import ResolutionProposalJob
+        from .inference_backend import proposal_candidate_limit
+        from .jobs import ResolutionProposalJob, import_queue_task
         from .models import ProposalFailureReason
         from .proposal_jobs import PROMPT_VERSION
         from .proposal_response import RESPONSE_SCHEMA_VERSION
-        from .proposal_tasks import proposal_task
         from .resolution_proposals import (
             ActiveProposalExists,
             active_proposal_exists,
-            fail_proposal,
+            fail_queued_proposal,
             next_page_offset,
             record_proposal_job,
             request_proposal,
         )
 
-        profile, actor, field_key = preview.profile, preview.actor, self.field_key
-        if field_key not in preview.workspace.termination_sources:
+        profile, actor = self.preview.profile, self.preview.actor
+        sources = self.preview.workspace.termination_sources
+        if field_key not in sources:
             raise InvalidProposalTarget("This preview asked no question about that termination.")
-        if preview.workspace.termination_sources[field_key] is None:
+        if sources[field_key] is None:
             raise InvalidProposalTarget(TERMINATION_UNRESOLVABLE)
-        reader = _trace_reader(actor, profile, preview.planning_context)
-        task = proposal_task(SELECT_TERMINATION_TASK)
-        live = ImportEngine.plan(profile, preview.document, actor, preview.planning_context)
-        field = next(
-            (
-                item
-                for trace in ReviewWorkspace(live, actor).traces
-                for item in trace.terminations
-                if item["field_key"] == field_key
-            ),
-            None,
-        )
+        field = self.live_terminations.get(field_key)
         if field is None:
             raise InvalidProposalTarget("This field is no longer in the preview.")
         if field["state"] != UNRESOLVED:
@@ -4449,9 +4558,7 @@ class _RequestProposal(PreviewCommand):
         # Refuse on the observed predecessor, not on the index: see active_proposal_exists.
         if active_proposal_exists(profile=profile, task_type=SELECT_TERMINATION_TASK, field_key=field_key):
             raise ActiveProposalExists("This field already has an active Resolution Proposal.")
-        inventory = task.inventory(
-            profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_eligible_set_limit()
-        )
+        inventory = self.inventories.get(field_key)
         device = inventory.resolved_device
         if device is None:
             raise PreviewCommandRefused("The resolved Device is unavailable or outside your view permission.", 409)
@@ -4484,15 +4591,80 @@ class _RequestProposal(PreviewCommand):
 
         def compensate():
             # The push runs after commit, so the attempt fails on its own row rather than staying queued.
-            fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)
-            Job.objects.filter(pk=job.pk, status=JobStatusChoices.STATUS_PENDING).update(
-                status=JobStatusChoices.STATUS_ERRORED
-            )
+            try:
+                pushed = import_queue_task(job) is not None
+            except (RedisConnectionError, RedisTimeoutError):
+                # A queue that cannot answer cannot show the task, so the attempt fails as before.
+                pushed = False
+            # A failed push stops only the later pushes, so a task that reached the queue keeps its attempt.
+            if pushed:
+                return
+            # A worker that took the attempt owns it, so only an attempt still queued fails here.
+            if fail_queued_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE):
+                Job.objects.filter(pk=job.pk, status=JobStatusChoices.STATUS_PENDING).update(
+                    status=JobStatusChoices.STATUS_ERRORED
+                )
 
-        return CommandOutcome(
-            payload={"proposal_id": proposal.pk, "status": proposal.status, "job_id": job.pk},
-            compensate=compensate,
+        return compensate
+
+
+@dataclass(frozen=True)
+class _RequestProposal(PreviewCommand):
+    """Freeze one unresolved field's evidence and queue its inference; the plan itself does not change."""
+
+    field_key: str
+    replans = False
+    # The plan is unchanged, so every claim the page holds stays current and the next field can ask.
+    advances = False
+    reviews_policy = False
+
+    def apply(self, preview):
+        """Queue one proposal for the field."""
+        _refuse_without_backend()
+        compensate = _ProposalRequests(preview).queue(self.field_key)
+        return CommandOutcome(payload={"field_key": self.field_key}, compensate=compensate)
+
+
+@dataclass(frozen=True)
+class _RequestAllProposals(PreviewCommand):
+    """Queue a proposal for every open termination of the preview that can be asked now."""
+
+    replans = False
+    advances = False
+    reviews_policy = False
+
+    def apply(self, preview: LockedPreview) -> CommandOutcome:
+        """Ask about each open termination once, and count each refusal by its reason instead of stopping."""
+        from .cable_target import UNRESOLVED
+        from .field_keys import TERMINATION_ROLE
+        from .proposal_tasks import UnusableCandidateSet
+        from .resolution_proposals import ActiveProposalExists
+        from .termination_proposal import InvalidProposalCandidate, UnsupportedProposalRole
+
+        _refuse_without_backend()
+        fields = dict.fromkeys(
+            item["field_key"]
+            for trace in preview.workspace.traces
+            for item in trace.terminations
+            if item.get("state", UNRESOLVED) == UNRESOLVED
+            and parse_termination_field_key(item["field_key"])["role"] == TERMINATION_ROLE
         )
+        requests = _ProposalRequests(preview)
+        compensations: list[Callable[[], None]] = []
+        skipped: Counter[str] = Counter()
+        for field_key in fields:
+            try:
+                compensations.append(requests.queue(field_key))
+            except (InvalidProposalTarget, InvalidProposalCandidate, UnsupportedProposalRole):
+                skipped[TERMINATION_UNRESOLVABLE] += 1
+            except (PreviewCommandRefused, ActiveProposalExists, UnusableCandidateSet) as exc:
+                skipped[exc.operator_message] += 1
+
+        def compensate():
+            for each in compensations:
+                each()
+
+        return CommandOutcome(payload={"queued": len(compensations), "skipped": skipped}, compensate=compensate)
 
 
 class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
@@ -4501,17 +4673,40 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Create the attempt row, then queue a job carrying its id alone."""
-        command = _RequestProposal(field_key=request.POST.get("field_key", "").strip())
+        """Create the attempt row, queue a job carrying its id alone, and answer with the field's card."""
+        field_key = request.POST.get("field_key", "").strip()
         try:
-            result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+            result = apply_preview_command(
+                request, PreviewClaim.posted(request.POST), _RequestProposal(field_key=field_key)
+            )
         except (RedisConnectionError, RedisTimeoutError):
             logger.exception("Failed to enqueue a resolution proposal")
-            return JsonResponse(
-                {"ok": False, "error": "The proposal queue is unavailable. Try again later."},
-                status=503,
-            )
-        return JsonResponse({"ok": True, **result.outcome.payload})
+            return JsonResponse({"ok": False, "error": PROPOSAL_QUEUE_UNAVAILABLE}, status=503)
+        return _proposal_card_after(request, result, field_key)
+
+
+class TraceRequestAllProposalsView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Ask AI about every open termination of the preview, and report what it skipped and why."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Queue the proposals in one command, then show the workspace with the outcome."""
+        try:
+            result = apply_preview_command(request, PreviewClaim.posted(request.POST), _RequestAllProposals())
+        except (RedisConnectionError, RedisTimeoutError):
+            logger.exception("Failed to enqueue resolution proposals")
+            return self._refusal(request, PROPOSAL_QUEUE_UNAVAILABLE, 503)
+        queued, skipped = result.outcome.payload["queued"], result.outcome.payload["skipped"]
+        if queued:
+            messages.success(request, f"Asked AI about {queued} termination{pluralize(queued)}.")
+        if skipped:
+            total = sum(skipped.values())
+            reasons = "; ".join(f"{reason} ({count})" for reason, count in skipped.items())
+            messages.warning(request, f"Skipped {total} termination{pluralize(total)}: {reasons}")
+        if not queued and not skipped:
+            messages.info(request, "No open termination needs a proposal.")
+        return redirect(_trace_workspace_url(request.POST.get("trace", "")))
 
 
 class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
@@ -4520,28 +4715,9 @@ class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
     permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request):
-        """Return the current proposal and name each freshness trigger."""
-        from .field_keys import parse_termination_field_key
-        from .proposal_presentation import ProposalPresentation
-
+        """Answer with the field's card as it stands now, which a pending card polls."""
         snapshot = _claimed_snapshot(request, profile_action="view")
-        try:
-            workspace = snapshot.workspace(request.user)
-        except PlanError:
-            raise StalePreview(UNREADABLE_PREVIEW) from None
-        field_key = request.GET.get("field_key", "").strip()
-        parse_termination_field_key(field_key)
-        field = next(
-            (item for trace in workspace.traces for item in trace.terminations if item["field_key"] == field_key),
-            {"field_key": field_key, "state": "", "offered": False},
-        )
-        try:
-            reader = _trace_reader(request.user, snapshot.profile, snapshot.planning_context)
-        except PlanningTargetUnavailable:
-            reader = None
-        field = {**field, "source_ambiguous": workspace.termination_sources.get(field_key) is None}
-        presentation = ProposalPresentation(profile=snapshot.profile, actor=request.user, reader=reader)
-        return JsonResponse(presentation.fields([field])[field_key])
+        return _proposal_card(request, snapshot, request.GET.get("field_key", "").strip(), request.GET.get("trace", ""))
 
 
 @dataclass(frozen=True)
@@ -4550,7 +4726,10 @@ class _ProposalAction(PreviewCommand):
 
     proposal_id: int
     replans = False
+    # An action that leaves the plan unchanged keeps every claim on the page current.
+    advances = False
     reviews_policy = False
+    message: ClassVar[str] = ""
 
     def apply(self, preview):
         """Refuse an unavailable attempt or a transition another operator already took."""
@@ -4565,10 +4744,7 @@ class _ProposalAction(PreviewCommand):
             raise PreviewCommandRefused(
                 "This proposal no longer permits that action. Re-read it before continuing.", 409
             )
-        proposal.refresh_from_db()
-        return CommandOutcome(
-            payload={"proposal_id": proposal.pk, "status": proposal.status, "decision": proposal.decision}
-        )
+        return CommandOutcome(message=self.message, payload={"field_key": proposal.field_key})
 
     def decide(self, proposal, preview) -> bool:
         """Apply the action, returning whether this caller moved the proposal."""
@@ -4582,13 +4758,17 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
     command_class: type[_ProposalAction]
 
     def post(self, request):
-        """Answer the JSON envelope the proposal card reads, then the card reloads the workspace."""
+        """Run the action, then answer with what it changed."""
         try:
             proposal_id = int(request.POST.get("proposal_id", ""))
         except ValueError:
             raise InvalidProposalId(INVALID_PROPOSAL_ID_ERROR) from None
         result = apply_preview_command(request, PreviewClaim.posted(request.POST), self.command_class(proposal_id))
-        return JsonResponse({"ok": True, **result.outcome.payload})
+        return self.answer(request, result)
+
+    def answer(self, request, result):
+        """Answer with the card the action changed, because the plan and the claim stay the same."""
+        return _proposal_card_after(request, result, result.outcome.payload["field_key"])
 
 
 @dataclass(frozen=True)
@@ -4616,7 +4796,9 @@ class _AcceptProposal(_ProposalAction):
     """Write the accepted resolution; the coordinator replans in the same transaction."""
 
     replans = True
+    advances = True
     reviews_policy = True
+    message = "The proposal was accepted and the preview was replanned."
 
     def decide(self, proposal, preview):
         """Record the accepted resolution through the existing acceptance transaction."""
@@ -4656,6 +4838,10 @@ class TraceAcceptProposalView(_TraceProposalActionView):
     """Accept a proposal and replan the preview in one coordinated transaction."""
 
     command_class = _AcceptProposal
+
+    def answer(self, request, result):
+        """Show the replanned workspace, whose every form carries the claim the acceptance advanced to."""
+        return _command_response(request, result, _trace_workspace_url(request.POST.get("trace", "")))
 
 
 class TraceRejectProposalView(_TraceProposalActionView):

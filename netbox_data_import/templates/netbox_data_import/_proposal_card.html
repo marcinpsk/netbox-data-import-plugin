@@ -15,7 +15,7 @@
   </div>
   <p class="fw-bold mt-2 mb-1" data-proposal-candidate>{{ termination.proposal.candidate }}</p>
   <p class="mb-2" data-proposal-explanation>{{ termination.proposal.explanation }}</p>
-  <p class="text-danger" data-proposal-failure>{{ termination.proposal.failure }}</p>
+  <p class="text-danger" data-proposal-failure>{% if termination.proposal.failure %}{{ termination.proposal.failure }} ({{ termination.proposal.failure_code }}){% endif %}</p>
   <div class="ndi-trace-actions mt-2">
     {% for action in termination.proposal.actions|slice:"2:" %}
       {% include 'netbox_data_import/_proposal_action.html' %}
@@ -24,10 +24,10 @@
   <details class="mt-2" data-proposal-history-disclosure>
     <summary>Proposal history</summary>
     <ul class="list-unstyled small" data-proposal-history>
-      {% for attempt in termination.proposal_history %}
+      {% for attempt in termination.proposal_read.history_display %}
         <li>#{{ attempt.id }} · {{ attempt.created }} · {{ attempt.status }} · {{ attempt.outcome }}{% if attempt.decision %} · {{ attempt.decision }}{% endif %}{% if attempt.failure %} · {{ attempt.failure }}{% endif %}</li>
       {% endfor %}
     </ul>
-    <a data-proposal-history-link{% if termination.proposal_history_url %} href="{{ termination.proposal_history_url }}"{% endif %} {% if not termination.proposal_history_has_more %}hidden{% endif %}>View all attempts</a>
+    <a data-proposal-history-link{% if termination.proposal_read.history_url %} href="{{ termination.proposal_read.history_url }}"{% endif %} {% if not termination.proposal_read.history_has_more %}hidden{% endif %}>View all attempts</a>
   </details>
 </div>

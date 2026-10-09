@@ -73,6 +73,7 @@ COMMANDS = frozenset(
         "trace_resolve_device",
         "trace_location_mapping",
         "trace_request_proposal",
+        "trace_request_all_proposals",
         "trace_cancel_proposal",
         "trace_accept_proposal",
         "trace_reject_proposal",

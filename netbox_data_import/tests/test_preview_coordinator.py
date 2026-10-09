@@ -788,6 +788,7 @@ TRACE_COMMANDS = {
     "trace_location_mapping": {"location_key": "ROOM 1", "location_id": "1"},
     "trace_location_mapping:clear": {"location_key": "ROOM 1", "clear": "1"},
     "trace_request_proposal": {"field_key": "key"},
+    "trace_request_all_proposals": {},
     "trace_cancel_proposal": {"proposal_id": "1"},
     "trace_accept_proposal": {"proposal_id": "1"},
     "trace_reject_proposal": {"proposal_id": "1"},
