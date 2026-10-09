@@ -2,6 +2,43 @@
 
 <!-- version list -->
 
+## v2.12.0 (2026-10-09)
+
+### Bug Fixes
+
+- Keep a refusal when the tab is hidden or a retry follows it
+  ([`2cbeaf5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2cbeaf5c684dbcb5ab1b82af68a20dbafc11455e))
+
+- Read a refused proposal card through its own hx-get
+  ([`e279ac4`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e279ac4ef1e3a72e1961545b9f6d48957125e13a))
+
+- Show a read's refusal only on the card it swaps in
+  ([`6259e8a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6259e8a8f38ef5140826f199cf4485b46a7ae818))
+
+- Show a refusal only in the swap that answers its read
+  ([`2eebf04`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2eebf0405b98c2189bd51c27d3c4c628cd97ac19))
+
+### Chores
+
+- **deps**: Bump source-map-js
+  ([`68f36e8`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/68f36e878d827716eb0a60a7e4d34ee46664e6e0))
+
+- **deps**: Bump virtualenv
+  ([`d983f5b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d983f5b70c4ae24ed60ca798054f17020d1c5b26))
+
+- **deps-dev**: Bump ruff from 0.16.8 to 0.16.9
+  ([`19955aa`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/19955aa000404932f5451ebdce7019d5febc329d))
+
+- **deps-dev**: Bump vitest from 5.0.1 to 5.0.2
+  ([`73bce2f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/73bce2f57212e0ba22adffde4d6dc1ec77e21eae))
+
+- **opengrep**: Refuse direct TomSelect member access in plugin JavaScript
+  ([`b6ba458`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b6ba458548d04f60ff6e61527979a223dfaabb1d))
+
+- **opengrep**: Refuse plugin JavaScript that reads a global NetBox does not set
+  ([`92e0eb7`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/92e0eb7409cab6585c305a4d0c6921e7d0e0ab88))
+
+
 ## v2.11.0 (2026-10-06)
 
 ### Bug Fixes
