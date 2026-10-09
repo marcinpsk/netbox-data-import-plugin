@@ -31,7 +31,7 @@ OpenGrep's default ignore list drops `tests/`, and these rules exist to check ex
 | `nbdi-deadline-alarm-keeps-its-default-action` | a Python `SIGALRM` handler, which runs only once the interpreter regains control and so misses the deadline of a blocked resolver; `SIG_IGN` too, and `SIG_DFL` is allowed |
 | `nbdi-job-data-excludes-accepted-plan` | an accepted plan stored in `Job.data`, which NetBox exposes to Job readers |
 | `nbdi-source-spelling-allows-legacy-rows` | source-spelling comparisons that reject saved decisions with empty legacy spellings |
-| `nbdi-no-netbox-bundled-global` | plugin JavaScript that reads `window.htmx`, `htmx.*` or `window.TomSelect`, or calls `new TomSelect`: NetBox bundles both libraries and exposes neither |
+| `nbdi-no-netbox-bundled-global` | plugin JavaScript that reads `window.htmx`, `htmx.*` or `window.TomSelect` or `TomSelect.*`, or calls `new TomSelect`: NetBox bundles both libraries and exposes neither |
 
 Taint mode carries the first rule through any binding form, so an alias, a tuple target, a walrus,
 an attribute target, and an `as` import are all covered without enumerating them. Its sink accepts

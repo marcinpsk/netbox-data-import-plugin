@@ -145,3 +145,4 @@ rules:
       - pattern: htmx.$MEMBER
       - pattern: window.TomSelect
       - pattern: new TomSelect(...)
+      - pattern: TomSelect.$MEMBER

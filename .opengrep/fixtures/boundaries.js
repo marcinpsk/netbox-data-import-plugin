@@ -15,6 +15,8 @@ function enhance(select) {
   if (window.TomSelect) return;
   // ruleid: nbdi-no-netbox-bundled-global
   new TomSelect(select, {});
+  // ruleid: nbdi-no-netbox-bundled-global
+  TomSelect.define('remove_button', function () {});
   // ok: nbdi-no-netbox-bundled-global
   select.tomselect.addOption({value: 'a', text: 'A'});
 }
