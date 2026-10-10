@@ -1598,7 +1598,8 @@ write rechecks the offer on the page, search, and offset that made it. A Locatio
 the Location is still visible to the actor and inside the selected Site. A resolved termination
 shows its selected object's own model, not the claimed kind. Each render rechecks view permission on
 every port and every resolved Device a cached plan names: a hidden or deleted port shows neither its
-name nor its model, and a hidden or deleted Device shows no name.
+name nor its model, and a hidden or deleted Device shows no name. A termination card links its
+resolved Device to the Device page in NetBox only while the viewer may view that Device.
 
 The workspace lists the source Location paths of the batch, at batch level and independent of the
 selected trace, as a tree of prefixes. Each node is a prefix key. A prefix key shows the spelling of

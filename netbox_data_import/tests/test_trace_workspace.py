@@ -3206,6 +3206,35 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
         self.assertEqual(ends[0][0], TERMINATION_HIDDEN)
         self.assertNotIn(TERMINATION_HIDDEN, [end for pair in ends for end in pair][1:])
 
+    def test_a_termination_card_links_its_device_only_while_the_viewer_may_view_it(self):
+        """The card links the resolved Device to its NetBox page, and a revoked view hides the name and the link."""
+        from users.models import ObjectPermission
+
+        from netbox_data_import.cable_disclosure import DEVICE_HIDDEN
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+
+        Device.objects.filter(pk=self.device_a.pk).update(name="Dev-A")
+        field_key = termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface")
+        link = reverse("dcim:device", kwargs={"pk": self.device_a.pk})
+        visible = self.open_workspace(
+            direct_path(
+                from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
+                to_end=trace_termination("DEV-B", "", "eth1", "Port"),
+            )
+        )
+        self.assertContains(visible, f'NetBox Device: <a href="{link}">Dev-A</a>')
+        permission = ObjectPermission.objects.get(name="trace-port-viewer Device view")
+        permission.constraints = {"name__in": ["DEV-B", "PANEL-1", "PANEL-2"]}
+        permission.save()
+        clear_user_permission_caches(self.viewer)
+
+        cached = self.reload()
+
+        card = next(item for item in cached.context["attention_terminations"] if item["field_key"] == field_key)
+        self.assertEqual((card["resolved_device"], card["resolved_device_url"]), (DEVICE_HIDDEN, ""))
+        self.assertNotContains(cached, f'href="{link}"')
+        self.assertNotContains(cached, "Dev-A")
+
     def test_a_saved_selection_the_viewer_cannot_view_names_no_port_in_any_copy(self):
         """A saved decision's stored port name reaches neither the plan, the page, nor the queued Job."""
         from core.models import Job, ObjectType
