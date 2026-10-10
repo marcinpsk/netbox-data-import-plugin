@@ -18,7 +18,7 @@ from extras.models import Tag
 
 from netbox_data_import.cable_disclosure import TERMINATION_HIDDEN, TERMINATION_SOURCES
 from netbox_data_import.cable_policy import cable_type_label
-from netbox_data_import.cable_target import AUTOMATICALLY_RESOLVED, ELIGIBLE_TERMINATION_LIMIT
+from netbox_data_import.cable_target import AUTOMATICALLY_RESOLVED, ELIGIBLE_TERMINATION_LIMIT, MANUALLY_RESOLVED
 from netbox_data_import import adapters as adapter_registry
 from netbox_data_import.adapters import TraceWorkbookAdapter
 from netbox_data_import.catalog import OutputKind
@@ -29,12 +29,14 @@ from netbox_data_import.models import (
     ImportProfile,
     PreviewState,
     TerminationResolution,
+    TraceDeviceResolution,
 )
 from netbox_data_import.plan import Disposition, ImportPlan, PlanInvalid, PlannedChange, SynchronizationUnit
 from netbox_data_import.preview_coordinator import (
-    RETAINED_SYNC_BLOCK_REASON,
     STALE_PREVIEW,
     SYNC_FINISHED,
+    SYNC_QUEUED,
+    SYNC_RUNNING,
     UNREADABLE_PREVIEW,
 )
 from netbox_data_import.review_workspace import _SUMMARY_KEYS, ReviewWorkspace
@@ -354,6 +356,21 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
         self.assertIn("PANEL-1 R1 &rarr; PANEL-2 R1", proposed)
         self.assertIn("PANEL-2 F1 &rarr; DEV-B eth1", proposed)
 
+    def test_the_three_topology_panels_start_collapsed_in_one_group(self):
+        """The panels are long and rarely read, so one closed group holds all three and counts the segments."""
+        response = self.open_workspace(patched_path())
+
+        page = response.content.decode()
+        group = re.search(r"<details\b[^>]*data-trace-topology[^>]*>.*?</details>", page, re.DOTALL)
+        self.assertIsNotNone(group)
+        self.assertNotRegex(group.group().split(">", 1)[0], r"\bopen\b")
+        for panel in ("Source evidence", "Current NetBox topology", "Proposed physical topology"):
+            self.assertIn(panel, group.group())
+        self.assertRegex(group.group(), r"<summary>\s*<span class=\"h3\">Topology</span>")
+        self.assertEqual(response.context["topology_summary"], "3 segments: 3 create")
+        self.assertIn("3 segments: 3 create</span>", group.group())
+        self.assertIn("netbox_data_import/js/trace_topology.js", page)
+
     def test_a_longer_proposed_topology_does_not_add_device_reads(self):
         def rendered_device_reads(block):
             self.open_workspace(block)
@@ -479,6 +496,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
                 [
                     reverse("plugins:netbox_data_import:preview_reread"),
                     reverse("plugins:netbox_data_import:trace_sync"),
+                    reverse("plugins:netbox_data_import:trace_sync_all"),
                     reverse("plugins:netbox_data_import:trace_request_all_proposals"),
                     reverse("plugins:netbox_data_import:trace_resolve_device"),
                     reverse("plugins:netbox_data_import:trace_resolve_termination"),
@@ -792,7 +810,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
 
         refused = _reread(self.client, follow=True)
 
-        self.assertContains(refused, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+        self.assertContains(refused, SYNC_QUEUED, status_code=409)
         coordinator = preview_coordinator(self.client)
         self.assertEqual((coordinator.state, coordinator.job_id), (PreviewState.SYNC_PENDING, job.pk))
         self.assertEqual(preview_claim(self.client), claim)
@@ -815,7 +833,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
         )
 
         self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
-        self.assertContains(refused, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+        self.assertContains(refused, SYNC_QUEUED, status_code=409)
 
     def test_the_queued_synchronization_disables_the_workspace_controls_with_its_reason(self):
         """The page cannot offer a command the POST refuses, so both controls state the same reason."""
@@ -826,7 +844,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
         body = response.content.decode()
         self.assertRegex(body, r'<button\b[^>]*data-trace-action="sync"[^>]*\sdisabled(?=[\s>])')
         self.assertRegex(body, r'<button\b[^>]*id="traceWorkspaceReread"[^>]*\sdisabled(?=[\s>])')
-        self.assertContains(response, "A trace synchronization is still running.")
+        self.assertContains(response, SYNC_QUEUED)
 
     def test_the_workspace_re_reads_again_once_the_queued_synchronization_ends(self):
         """The block lasts exactly as long as the job, so a terminal job restores every command."""
@@ -860,7 +878,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
             {"identity": workspace.context["traces"][0].identity, **claim},
         )
 
-        self.assertContains(refused, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+        self.assertContains(refused, SYNC_QUEUED, status_code=409)
         self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
         self.assertEqual(preview_claim(self.client), claim)
 
@@ -876,7 +894,8 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
 
                 refused = _reread(self.client, follow=True)
 
-                self.assertContains(refused, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+                expected = SYNC_RUNNING if status == JobStatusChoices.STATUS_RUNNING else SYNC_QUEUED
+                self.assertContains(refused, expected, status_code=409)
                 self.assertEqual(preview_coordinator(self.client).state, PreviewState.SYNC_PENDING)
 
     def test_a_stale_form_post_is_refused_by_the_sync_command(self):
@@ -1148,7 +1167,7 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             with self.subTest(route=route):
                 refused = self.client.post(reverse(f"plugins:netbox_data_import:{route}"), {**claim, **data})
 
-                self.assertContains(refused, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+                self.assertContains(refused, SYNC_QUEUED, status_code=409)
 
         self.assertEqual(preview_claim(self.client), claim)
         self.assertEqual(preview_coordinator(self.client).state, PreviewState.SYNC_PENDING)
@@ -1184,7 +1203,7 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
 
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"), follow=True)
 
-        self.assertContains(response, RETAINED_SYNC_BLOCK_REASON)
+        self.assertContains(response, SYNC_QUEUED)
         self.assertEqual(preview_claim(self.client), claim)
         self.assertEqual(preview_coordinator(self.client).state, PreviewState.SYNC_PENDING)
 
@@ -1198,7 +1217,7 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         refused = self.client.post(reverse("plugins:netbox_data_import:import_run"), preview_claim(self.client))
 
         self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
-        self.assertContains(refused, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+        self.assertContains(refused, SYNC_QUEUED, status_code=409)
 
     def test_a_running_whole_plan_import_does_not_block_a_later_workspace(self):
         """The wizard records its own Job on the preview, and that Job is not a retained trace sync."""
@@ -1213,7 +1232,8 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.upload(patched_path())
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
-        self.assertNotContains(response, "A trace synchronization is still running.")
+        self.assertNotContains(response, SYNC_QUEUED)
+        self.assertNotContains(response, 'id="ndiSyncStatus"')
         sync = next(action for action in response.context["traces"][0].actions if action.key == "sync")
         self.assertTrue(sync.enabled)
 
@@ -1256,7 +1276,7 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
 
         refused = _reread(self.client)
 
-        self.assertContains(refused, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+        self.assertContains(refused, SYNC_QUEUED, status_code=409)
         self.assertEqual(preview_claim(self.client), claim)
         self.assertEqual(preview_coordinator(self.client).state, PreviewState.SYNC_PENDING)
 
@@ -1281,7 +1301,7 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
 
         refused = _reread(self.client)
 
-        self.assertContains(refused, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+        self.assertContains(refused, SYNC_QUEUED, status_code=409)
         self.assertEqual(preview_claim(self.client), claim)
 
     def test_a_reread_is_refused_before_it_reads_while_the_sync_runs(self):
@@ -1313,7 +1333,7 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         with connection.execute_wrapper(complete_the_sync_once_the_read_starts):
             response = _reread(self.client)
 
-        self.assertContains(response, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+        self.assertContains(response, SYNC_QUEUED, status_code=409)
         # The guard refused first, so the planner never read and the sync is still the live one.
         self.assertEqual(completed, [])
         self.assertEqual(preview_coordinator(self.client).state, PreviewState.SYNC_PENDING)
@@ -1326,7 +1346,8 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.upload(patched_path())
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
-        self.assertNotContains(response, "A trace synchronization is still running.")
+        self.assertNotContains(response, SYNC_QUEUED)
+        self.assertNotContains(response, 'id="ndiSyncStatus"')
         sync = next(action for action in response.context["traces"][0].actions if action.key == "sync")
         self.assertTrue(sync.enabled)
 
@@ -1437,7 +1458,7 @@ class RetainedSyncEnqueueSerializationTest(IsolatedRQQueueTestMixin, CableTopolo
             holder.join(20)
 
         self.assertEqual(waited, [True], "the request never waited on the profile row the enqueue holds")
-        self.assertContains(response, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+        self.assertContains(response, SYNC_QUEUED, status_code=409)
         # Only the rival's Job exists, and the refused request left the preview as it found it.
         self.assertEqual(
             list(Job.objects.filter(data__job_type="netbox_data_import.import").values_list("pk", flat=True)), rivals
@@ -1694,7 +1715,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
 
                 refused = _reread(self.client)
 
-                self.assertContains(refused, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+                self.assertContains(refused, SYNC_RUNNING, status_code=409)
                 job.refresh_from_db()
                 self.assertEqual(job.status, JobStatusChoices.STATUS_RUNNING)
         finally:
@@ -1715,7 +1736,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         from django_rq.queues import DjangoRQ
         from redis.exceptions import ConnectionError as RedisConnectionError
 
-        from netbox_data_import.jobs import retained_sync_running
+        from netbox_data_import.jobs import retained_sync_jobs
 
         chosen = self._upload_and_choose()
         before = preview_coordinator(self.client)
@@ -1729,7 +1750,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
 
         stranded = Job.objects.get(data__job_type="netbox_data_import.import")
         self.assertEqual(stranded.status, JobStatusChoices.STATUS_ERRORED)
-        self.assertFalse(retained_sync_running(self.actor, self.profile.pk, before.source_document_id))
+        self.assertFalse(retained_sync_jobs(self.actor, self.profile.pk, before.source_document_id).exists())
         # The compensation returns this same generation to review, so the operator can sync again.
         after = preview_coordinator(self.client)
         self.assertEqual((after.state, after.job_id), (PreviewState.READY, None))
@@ -2179,6 +2200,30 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         states = {item["label"]: item["state"] for item in trace.terminations}
         self.assertEqual(states["DEV-A absent-port"], "manually resolved")
 
+    def test_a_saved_termination_survives_a_rename_of_its_device(self):
+        """A choice on a Device matched by name pins that Device, so a rename in NetBox keeps the choice."""
+        field_key = self.open_blocked_workspace()
+        saved = self.resolve(field_key, self.eth0)
+        self.assertEqual((saved.status_code, saved.json()["ok"]), (200, True), saved.content[:300])
+        self.device_a.name = "DEV-A-RENAMED"
+        self.device_a.save()
+
+        self.assertEqual(_reread(self.client).status_code, 302)
+        page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        field = next(item for item in page.context["selected_trace"].terminations if item["field_key"] == field_key)
+        self.assertEqual(
+            (field["state"], field["selected"], field.get("disclosure_source")),
+            (MANUALLY_RESOLVED, str(self.eth0), {"kind": "dcim.interface", "pk": self.eth0.pk}),
+        )
+        card = next(item for item in page.context["attention_terminations"] if item["field_key"] == field_key)
+        self.assertEqual(card["resolved_device"], "DEV-A-RENAMED")
+        pin = TraceDeviceResolution.objects.get(profile=self.profile)
+        self.assertEqual(
+            (pin.source_device_key, pin.source_device_label, pin.selected_device_id, pin.selected_display_name),
+            ("DEV-A", "DEV-A", self.device_a.pk, "DEV-A"),
+        )
+
     def test_a_termination_decision_returns_to_the_trace_it_was_made_on(self):
         """The picker is opened from one trace, so the page after the save has to show that trace."""
         Interface.objects.create(device=self.make_device("SEL-I"), name="eth0", type="1000base-t")
@@ -2248,7 +2293,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         )
 
         self.assertEqual(refused.status_code, 409, refused.content[:300])
-        self.assertIn("A trace synchronization is still running.", refused.json()["error"])
+        self.assertEqual(refused.json()["error"], SYNC_QUEUED)
         self.assertFalse(TerminationResolution.objects.filter(profile=self.profile, field_key=field_key).exists())
 
     def test_a_searched_candidate_beyond_the_first_page_can_be_saved(self):
@@ -3175,6 +3220,35 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
         ends = [(segment["left"], segment["right"]) for segment in cached.context["segment_policy_forms"]]
         self.assertEqual(ends[0][0], TERMINATION_HIDDEN)
         self.assertNotIn(TERMINATION_HIDDEN, [end for pair in ends for end in pair][1:])
+
+    def test_a_termination_card_links_its_device_only_while_the_viewer_may_view_it(self):
+        """The card links the resolved Device to its NetBox page, and a revoked view hides the name and the link."""
+        from users.models import ObjectPermission
+
+        from netbox_data_import.cable_disclosure import DEVICE_HIDDEN
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+
+        Device.objects.filter(pk=self.device_a.pk).update(name="Dev-A")
+        field_key = termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface")
+        link = reverse("dcim:device", kwargs={"pk": self.device_a.pk})
+        visible = self.open_workspace(
+            direct_path(
+                from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
+                to_end=trace_termination("DEV-B", "", "eth1", "Port"),
+            )
+        )
+        self.assertContains(visible, f'NetBox Device: <a href="{link}">Dev-A</a>')
+        permission = ObjectPermission.objects.get(name="trace-port-viewer Device view")
+        permission.constraints = {"name__in": ["DEV-B", "PANEL-1", "PANEL-2"]}
+        permission.save()
+        clear_user_permission_caches(self.viewer)
+
+        cached = self.reload()
+
+        card = next(item for item in cached.context["attention_terminations"] if item["field_key"] == field_key)
+        self.assertEqual((card["resolved_device"], card["resolved_device_url"]), (DEVICE_HIDDEN, ""))
+        self.assertNotContains(cached, f'href="{link}"')
+        self.assertNotContains(cached, "Dev-A")
 
     def test_a_saved_selection_the_viewer_cannot_view_names_no_port_in_any_copy(self):
         """A saved decision's stored port name reaches neither the plan, the page, nor the queued Job."""
@@ -4314,7 +4388,7 @@ class TraceWorkspaceSegmentOverrideTest(CableTopologyMixin, TransactionTestCase)
 
         response = _reread(self.client)
 
-        self.assertContains(response, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+        self.assertContains(response, SYNC_QUEUED, status_code=409)
         self.assertEqual(stored_plan(self.client), stale)
 
     def test_a_current_cached_plan_opens_the_workspace(self):

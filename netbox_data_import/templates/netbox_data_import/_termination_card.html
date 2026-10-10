@@ -7,7 +7,7 @@
     <strong>{{ termination.label }}</strong>
     <span class="badge ndi-trace-state-{{ termination.proposal.state_style }}" data-proposal-state>{{ termination.proposal.field_state }}</span>
     {% if termination.resolved_device %}
-      <span class="text-secondary">NetBox Device: {{ termination.resolved_device }}</span>
+      <span class="text-secondary">NetBox Device: {% if termination.resolved_device_url %}<a href="{{ termination.resolved_device_url }}">{{ termination.resolved_device }}</a>{% else %}{{ termination.resolved_device }}{% endif %}</span>
     {% endif %}
     {% if termination.selected %}
       <span class="text-secondary">{{ termination.selected }}{% if termination.selected_model %} ({{ termination.selected_model }}){% endif %}</span>
@@ -26,7 +26,7 @@
         <div class="ndi-trace-reason">{{ termination.reason }}</div>
       {% endif %}
     </div>
-    {% for action in termination.proposal.actions|slice:":2" %}
+    {% for action in termination.proposal.field_actions %}
       {% include 'netbox_data_import/_proposal_action.html' %}
     {% endfor %}
   </div>

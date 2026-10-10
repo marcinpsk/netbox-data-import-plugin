@@ -25,8 +25,14 @@ from .models import (
     index_digest,
     locked_profile_policy,
 )
-from .object_permissions import POLICY_WRITE_REFUSED, delete_permission_scoped_objects, save_permission_scoped_object
-from .plan import Diagnostic, Disposition, ImportPlan, Severity, SynchronizationUnit
+from .object_permissions import (
+    POLICY_WRITE_REFUSED,
+    assess_permission_scoped_save,
+    delete_permission_scoped_objects,
+    save_permission_scoped_object,
+)
+from .plan import Diagnostic, Disposition, ImportPlan, PlannedChange, Severity, SynchronizationUnit
+from .trace_device_resolution import source_device_key
 from .values import (
     effective_device_name,
     has_below_rack_position,
@@ -57,9 +63,10 @@ def save_termination_resolution_and_replan(
     selected_object_type,
     selected_object_id,
     selected_display_name,
+    device,
     reviewed_fingerprint,
 ):
-    """Persist one manual termination selection with its source spelling, then request a fresh Import Plan."""
+    """Persist one manual termination selection with its source spelling and its Device, then replan."""
     values = {
         "source_device": source["device"],
         "source_cards": source["cards"],
@@ -84,8 +91,37 @@ def save_termination_resolution_and_replan(
             lookup,
             values,
         )
+        pin_trace_device(profile=locked_profile, actor=actor, source_device=source["device"], device=device)
         # atomic-exit-safe: decision-saved-and-replanned
         return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+def _save_trace_device_resolution(actor, lookup, values) -> None:
+    """Validate and save one Trace Device Resolution inside the actor's permission scope."""
+    candidate = TraceDeviceResolution(**lookup, **values)
+    candidate.full_clean(validate_unique=False, validate_constraints=False)
+    save_permission_scoped_object(actor, TraceDeviceResolution, lookup, values)
+
+
+def pin_trace_device(*, profile, actor, source_device, device) -> None:
+    """Save the Device a termination choice was made on, unless a decision already names its source Device.
+
+    A Device matched by name has no saved decision, so a rename would leave the saved port without its Device.
+    An operator who may not save the decision still saves the termination, which then follows the name.
+    """
+    key = source_device_key(source_device)
+    digest = index_digest(key)
+    if TraceDeviceResolution.objects.filter(profile=profile, source_device_key_digest=digest).exists():
+        return
+    lookup = {"profile": profile, "source_device_key": key, "source_device_key_digest": digest}
+    values = {
+        "source_device_label": source_device,
+        "selected_device_id": device.pk,
+        "selected_display_name": str(device),
+    }
+    if not assess_permission_scoped_save(actor, TraceDeviceResolution, lookup, values).allowed:
+        return
+    _save_trace_device_resolution(actor, lookup, values)
 
 
 class ProfilePolicyMoved(PublicRefusal):
@@ -279,14 +315,7 @@ def save_trace_device_resolution_and_replan(
             "selected_device_id": chosen.pk,
             "selected_display_name": str(chosen),
         }
-        candidate = TraceDeviceResolution(**lookup, **values)
-        candidate.full_clean(validate_unique=False, validate_constraints=False)
-        save_permission_scoped_object(
-            actor,
-            TraceDeviceResolution,
-            lookup,
-            values,
-        )
+        _save_trace_device_resolution(actor, lookup, values)
         plan = ImportEngine.plan(locked_profile, source_document, actor, planning_context)
         # atomic-exit-safe: device-decision-saved-and-replanned
         return plan, chosen
@@ -790,6 +819,9 @@ _SUMMARY_KEYS = {
 
 
 _SYNC_URL_NAME = "plugins:netbox_data_import:trace_sync"
+_SYNC_ALL_URL_NAME = "plugins:netbox_data_import:trace_sync_all"
+SYNC_ALL_NOTHING = "This preview has no actionable trace to synchronize."
+SYNC_DEPENDENCY_HELD = "This trace depends on a change that cannot synchronize."
 
 
 @dataclass(frozen=True)
@@ -805,6 +837,68 @@ class TraceAction:
     enabled: bool
     url_name: str
     reason: str = ""
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}{'' if number == 1 else 's'}"
+
+
+@dataclass(frozen=True)
+class SyncAllSelection:
+    """What `Sync all` queues: each actionable trace that can sync, with every unit its changes wait on.
+
+    `held_back` counts actionable traces left out because a unit they depend on cannot sync.
+    """
+
+    traces: tuple[str, ...]
+    units: tuple[str, ...]
+    blocked: int
+    invalid: int
+    held_back: int
+
+    @property
+    def label(self) -> str:
+        """Return the button text, which states how many traces the command synchronizes."""
+        return f"Sync {_count(len(self.traces), 'actionable trace')}"
+
+    @property
+    def action(self) -> TraceAction:
+        """Return the command, disabled with its reason when no trace can sync."""
+        return TraceAction(
+            key="sync_all",
+            label=self.label,
+            enabled=bool(self.units),
+            url_name=_SYNC_ALL_URL_NAME,
+            reason="" if self.units else SYNC_ALL_NOTHING,
+        )
+
+    @property
+    def unsynced_note(self) -> str:
+        """Return how many traces the command leaves unsynced and why, or nothing when it leaves none."""
+        parts = [
+            f"{number} {why}"
+            for number, why in (
+                (self.blocked, "blocked"),
+                (self.invalid, "invalid"),
+                (self.held_back, "with a dependency that cannot sync"),
+            )
+            if number
+        ]
+        total = self.blocked + self.invalid + self.held_back
+        if not total:
+            return ""
+        return f"{_count(total, 'trace')} {'stays' if total == 1 else 'stay'} unsynced: {', '.join(parts)}."
+
+
+def held_sync(action: TraceAction, reason: str) -> TraceAction:
+    """Refuse a sync action the view would reject, so the page cannot offer what the POST refuses."""
+    return replace(action, enabled=False, reason=reason) if reason and action.enabled else action
+
+
+def with_blocked_sync(trace: TraceWorkspaceUnit, reason: str) -> TraceWorkspaceUnit:
+    """Hold the trace's own sync action for *reason*."""
+    actions = tuple(held_sync(action, reason) if action.key == "sync" else action for action in trace.actions)
+    return replace(trace, actions=actions)
 
 
 def _termination_model_name(label: str) -> str:
@@ -1002,7 +1096,15 @@ class ReviewWorkspace:
 
         Cached because one page reads it twice, and each build reserializes every change.
         """
-        return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self._presentation_units if _states_a_trace(unit))
+        traces = []
+        for unit in self._presentation_units:
+            if not _states_a_trace(unit):
+                continue
+            trace = TraceWorkspaceUnit.from_unit(unit)
+            if unit.disposition == Disposition.ACTIONABLE and self.cannot_sync(self.sync_selection(unit.identity)):
+                trace = with_blocked_sync(trace, SYNC_DEPENDENCY_HELD)
+            traces.append(trace)
+        return tuple(traces)
 
     @cached_property
     def termination_sources(self) -> MappingProxyType:
@@ -1018,29 +1120,125 @@ class ReviewWorkspace:
         return MappingProxyType(sources)
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:
-        """Return the unit and every unit owning a change it depends on, transitively.
+        """Return the unit and, transitively, one owner of each change it depends on and does not carry.
 
         `merge_changes` refuses a selection whose dependency is absent, so a review command that
         synchronizes one trace has to carry the units its changes wait on.
         """
-        units = {unit.identity: unit for unit in self.plan.units}
-        selected = units.get(identity)
+        selected = self.plan.unit(identity)
         if selected is None or selected.disposition != Disposition.ACTIONABLE:
             return ()
-        owner_of = {change.identity: unit.identity for unit in self.plan.units for change in unit.changes}
-        chosen: list[str] = []
+        chosen = [identity]
+        carried = {change.identity for change in self._planned_changes(identity)}
         queue = [identity]
         while queue:
-            current = queue.pop()
-            if current in chosen:
-                continue
-            chosen.append(current)
-            for change in units[current].changes:
+            for change in self._planned_changes(queue.pop()):
                 for dependency in change.dependencies:
-                    owner = owner_of.get(dependency)
-                    if owner is not None and owner not in chosen:
-                        queue.append(owner)
+                    owners = self._change_owners.get(dependency)
+                    if dependency in carried or not owners:
+                        continue
+                    # Identical changes are shared (section 4.4): prefer an owner whose own closure can sync.
+                    owner = next((unit for unit in owners if unit in self._executable_units), owners[0])
+                    chosen.append(owner)
+                    carried.update(owned.identity for owned in self._planned_changes(owner))
+                    queue.append(owner)
         return tuple(chosen)
+
+    @cached_property
+    def _change_owners(self) -> dict[str, tuple[str, ...]]:
+        """Return every unit that carries each planned change, in plan order, built once for every sync check."""
+        owners: dict[str, list[str]] = {}
+        for unit in self.plan.units:
+            for change in unit.changes:
+                owners.setdefault(change.identity, []).append(unit.identity)
+        return {identity: tuple(units) for identity, units in owners.items()}
+
+    @cached_property
+    def _executable_units(self) -> frozenset[str]:
+        """Return the largest set of actionable units in which some unit carries every dependency.
+
+        A unit outside it has no selection that `cannot_sync` accepts, so no closure may pick it as an owner.
+        """
+        units = {
+            identity
+            for identity, disposition in self._presented_dispositions.items()
+            if disposition == Disposition.ACTIONABLE
+        }
+        owners_left: dict[str, int] = {}
+        dependents: dict[str, list[str]] = {}
+        for identity in units:
+            for change in self._planned_changes(identity):
+                owners_left[change.identity] = owners_left.get(change.identity, 0) + 1
+                for dependency in change.dependencies:
+                    dependents.setdefault(dependency, []).append(identity)
+        stuck = [
+            identity
+            for dependency, waiting in dependents.items()
+            if not owners_left.get(dependency)
+            for identity in waiting
+        ]
+        while stuck:
+            identity = stuck.pop()
+            if identity not in units:
+                continue
+            units.remove(identity)
+            for change in self._planned_changes(identity):
+                owners_left[change.identity] -= 1
+                if not owners_left[change.identity]:
+                    stuck.extend(dependents.get(change.identity, ()))
+        return frozenset(units)
+
+    @cached_property
+    def _presented_dispositions(self) -> dict[str, str]:
+        """Return each unit's disposition as the viewer sees it."""
+        return {unit.identity: unit.disposition for unit in self._presentation_units}
+
+    def _planned_changes(self, identity: str) -> tuple[PlannedChange, ...]:
+        """Return the changes of one plan unit, read from the plan's own index."""
+        unit = self.plan.unit(identity)
+        if unit is None:
+            raise KeyError(identity)
+        return unit.changes
+
+    def cannot_sync(self, selection: tuple[str, ...]) -> bool:
+        """Return whether the engine refuses *selection*.
+
+        It refuses a unit the viewer does not see as actionable, and a dependency that no unit in the
+        selection carries. Sync all, the per-trace action and its POST all ask this one question.
+        """
+        carried = {change.identity for identity in selection for change in self._planned_changes(identity)}
+        return not all(
+            self._presented_dispositions.get(identity) == Disposition.ACTIONABLE
+            and all(set(change.dependencies) <= carried for change in self._planned_changes(identity))
+            for identity in selection
+        )
+
+    @cached_property
+    def sync_all(self) -> SyncAllSelection:
+        """Return every actionable trace whose dependency closure can execute, in plan order.
+
+        The engine refuses a unit that is not actionable and a dependency the selection lacks, so a
+        trace that would need either is left out and counted, and never stops the others.
+        """
+        traces: list[str] = []
+        chosen: set[str] = set()
+        held_back = 0
+        for trace in self.traces:
+            if trace.disposition != Disposition.ACTIONABLE:
+                continue
+            closure = self.sync_selection(trace.identity)
+            if closure and not self.cannot_sync(closure):
+                traces.append(trace.identity)
+                chosen.update(closure)
+            else:
+                held_back += 1
+        return SyncAllSelection(
+            traces=tuple(traces),
+            units=tuple(unit.identity for unit in self.plan.units if unit.identity in chosen),
+            blocked=sum(1 for trace in self.traces if trace.disposition == Disposition.BLOCKED),
+            invalid=sum(1 for trace in self.traces if trace.disposition == Disposition.INVALID),
+            held_back=held_back,
+        )
 
     @property
     def trace_summary(self) -> dict[str, int]:
@@ -1246,4 +1444,12 @@ def auto_match_devices(workspace, profile, actor, target) -> AutoMatchSummary:  
     return AutoMatchSummary(**counts)
 
 
-__all__ = ("AutoMatchSummary", "ReviewWorkspace", "WorkspaceUnit", "auto_match_devices", "refuse_moved_policy")
+__all__ = (
+    "SYNC_ALL_NOTHING",
+    "AutoMatchSummary",
+    "ReviewWorkspace",
+    "SyncAllSelection",
+    "WorkspaceUnit",
+    "auto_match_devices",
+    "refuse_moved_policy",
+)

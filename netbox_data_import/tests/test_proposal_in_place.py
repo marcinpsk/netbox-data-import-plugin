@@ -346,34 +346,49 @@ class ProposalInPlaceTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, CableTo
     def test_the_card_markup_is_the_htmx_contract_the_browser_fixture_copies(self):
         """The Playwright fixture copies these attributes, so the real render and the fixture must agree."""
         self.completed(self.first)
-        response = self.ask(self.second)
-        card_id = re.search(r'<li\b[^>]*\bid="([^"]+)"', response.content.decode()).group(1)
-        disable = f"#{card_id} [data-proposal-action]"
-        card_swap = {
-            "hx-target": "closest [data-proposal-field]",
-            "hx-swap": "outerHTML",
-            "hx-sync": "closest [data-proposal-field]:replace",
-            "hx-disabled-elt": disable,
-        }
-        accept = {
-            "hx-target": "#page-content",
-            "hx-select": "#page-content",
-            "hx-swap": "outerHTML",
-            "hx-push-url": "true",
-            "hx-sync": "closest [data-proposal-field]:replace",
-            "hx-disabled-elt": disable,
-        }
+        pending = self.ask(self.second)
+        completed = self.client.get(
+            reverse("plugins:netbox_data_import:trace_proposal"),
+            {**preview_claim(self.client), "field_key": self.first},
+            headers=HTMX,
+        )
         read = reverse("plugins:netbox_data_import:trace_proposal")
-        expected = [
-            ("li", {"hx-trigger": "every 3s, ndi:read", "hx-swap": "outerHTML", "hx-sync": "this:abort"}),
-            ("form", {"hx-post": reverse("plugins:netbox_data_import:trace_accept_proposal"), **accept}),
-            ("form", {"hx-post": reverse("plugins:netbox_data_import:trace_reject_proposal"), **card_swap}),
-            ("form", {"hx-post": reverse("plugins:netbox_data_import:trace_request_proposal"), **card_swap}),
-            ("form", {"hx-post": reverse("plugins:netbox_data_import:trace_cancel_proposal"), **card_swap}),
-            ("div", {"hx-swap-oob": "true"}),
-        ]
-        rendered = htmx_attributes(response.content.decode())
-        self.assertTrue(rendered[0][1].pop("hx-get").startswith(f"{read}?"))
+        expected = []
+        rendered = []
+        for response, trigger, keys in (
+            (pending, "every 3s, ndi:read", ("cancel",)),
+            (completed, "ndi:read", ("accept", "reject", "request")),
+        ):
+            card_id = re.search(r'<li\b[^>]*\bid="([^"]+)"', response.content.decode()).group(1)
+            disable = f"#{card_id} [data-proposal-action]"
+            swaps = {
+                "accept": {
+                    "hx-target": "#page-content",
+                    "hx-select": "#page-content",
+                    "hx-swap": "outerHTML",
+                    "hx-push-url": "true",
+                },
+                "other": {"hx-target": "closest [data-proposal-field]", "hx-swap": "outerHTML"},
+            }
+            expected += [
+                ("li", {"hx-trigger": trigger, "hx-swap": "outerHTML", "hx-sync": "this:abort"}),
+                *(
+                    (
+                        "form",
+                        {
+                            "hx-post": reverse(f"plugins:netbox_data_import:trace_{key}_proposal"),
+                            **swaps["accept" if key == "accept" else "other"],
+                            "hx-sync": "closest [data-proposal-field]:replace",
+                            "hx-disabled-elt": disable,
+                        },
+                    )
+                    for key in keys
+                ),
+                ("div", {"hx-swap-oob": "true"}),
+            ]
+            card = htmx_attributes(response.content.decode())
+            self.assertTrue(card[0][1].pop("hx-get").startswith(f"{read}?"))
+            rendered += card
         self.assertEqual(rendered, expected)
         fixture = FIXTURE.read_text(encoding="utf-8")
         for _tag, attributes in expected:
@@ -532,7 +547,7 @@ class AskAllQueueFailureTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, Cabl
         pushed = next(row for row in rows.values() if str(row.job.job_id) == pushes[0])
         self.assertEqual(pushed.status, ProposalStatus.QUEUED)
         self.assertEqual(pushed.job.status, JobStatusChoices.STATUS_PENDING)
-        self.assertIsNotNone(get_queue().fetch_job(pushes[0]))
+        self.assertIsNotNone(get_queue(pushed.job.queue_name).fetch_job(pushes[0]))
         others = [row for row in rows.values() if row.pk != pushed.pk]
         self.assertEqual(len(others), 2)
         self.assertEqual(

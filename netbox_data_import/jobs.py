@@ -3,17 +3,22 @@
 """Native NetBox background jobs for data imports."""
 
 import logging
+from dataclasses import dataclass, replace
 from datetime import timedelta
-
-from typing import NoReturn
+from functools import partial
+from typing import Any, NoReturn
 
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError, connection
+from django.db import DatabaseError, connection, transaction
 from django.utils import timezone
 from django_pg_utils import advisory_lock
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from rq import get_current_job
 from rq.exceptions import InvalidJobOperation, NoSuchJobError
 from rq.job import Job as RQJob, JobStatus
+from rq.utils import as_text
+from rq.worker import Worker, WorkerStatus
 
 from core.exceptions import JobFailed
 from netbox.context_managers import event_tracking
@@ -49,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 IMPORT_TASK_LOST = "The import task is no longer queued or running. Re-read its preview to recover."
 QUEUE_PUSH_GRACE = timedelta(minutes=1)
+QUEUE_UNREADABLE = "The job queue cannot be read now."
 
 
 def _import_job_lock(job):
@@ -63,7 +69,7 @@ def import_queue_task(job):
     import django_rq
 
     try:
-        queue = django_rq.get_queue(job.queue_name or "default")
+        queue = django_rq.get_queue(job.queue_name)
     except KeyError:
         return None
     try:
@@ -72,13 +78,10 @@ def import_queue_task(job):
         return None
 
 
-def import_job_abandoned(job) -> bool:
-    """Read whether a native active import has lost its queue task, without changing either."""
+def _task_lost(job, rq_job) -> bool:
+    """Return whether an active Job's queue task can no longer run it."""
     from core.choices import JobStatusChoices
 
-    if job.status not in JobStatusChoices.ENQUEUED_STATE_CHOICES:
-        return False
-    rq_job = import_queue_task(job)
     if rq_job is None:
         # The Job commits before its queue push, so a young pending Job may have no task yet.
         return not (job.status == JobStatusChoices.STATUS_PENDING and job.created > timezone.now() - QUEUE_PUSH_GRACE)
@@ -95,18 +98,120 @@ def import_job_abandoned(job) -> bool:
     )
 
 
+def import_job_abandoned(job) -> bool:
+    """Read whether a native active import has lost its queue task, without changing either."""
+    from core.choices import JobStatusChoices
+
+    return job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES and _task_lost(job, import_queue_task(job))
+
+
+QUEUED, RUNNING, LOST, ENDED = "queued", "running", "lost", "ended"
+
+
+@dataclass(frozen=True)
+class ImportJobStatus:
+    """What one import Job and its queue task say now, for a page that shows the Job."""
+
+    job: Any
+    state: str
+    phase: str = ""
+    processed: int = 0
+    total: int = 0
+    # Only for a queued Job whose task is in its queue: its place there (1 is next), and its queue's workers.
+    position: int | None = None
+    workers: int | None = None
+    busy: int = 0
+    queue_readable: bool = True
+
+    @property
+    def active(self) -> bool:
+        """Return whether the Job still waits in its queue or runs."""
+        return self.state in (QUEUED, RUNNING)
+
+    @property
+    def queue_note(self) -> str:
+        """Return what a page says when Redis did not answer, or "" when it did."""
+        return "" if self.queue_readable else QUEUE_UNREADABLE
+
+
+def import_job_status(job) -> ImportJobStatus:
+    """Read one import Job, its queue task and its queue, without changing any of them."""
+    from core.choices import JobStatusChoices
+
+    data = job.data or {}
+    status = ImportJobStatus(
+        job,
+        ENDED,
+        phase=str(data.get("phase") or ""),
+        processed=int(data.get("processed") or 0),
+        total=int(data.get("total") or 0),
+    )
+    if job.status not in JobStatusChoices.ENQUEUED_STATE_CHOICES:
+        return status
+    try:
+        return _with_queue_evidence(status)
+    except (RedisConnectionError, RedisTimeoutError):
+        # An outage says nothing about the task, so the Job row alone decides the state.
+        state = RUNNING if job.status == JobStatusChoices.STATUS_RUNNING else QUEUED
+        return replace(status, state=state, queue_readable=False)
+
+
+def _with_queue_evidence(status: ImportJobStatus) -> ImportJobStatus:
+    """Add what the Job's queue task and its queue say; Redis errors reach the caller."""
+    from core.choices import JobStatusChoices
+
+    job = status.job
+    rq_job = import_queue_task(job)
+    if _task_lost(job, rq_job):
+        return replace(status, state=LOST)
+    if rq_job is None:
+        # The queue push follows the commit, so the queue knows nothing of this Job yet.
+        return replace(status, state=QUEUED)
+    # The worker publishes row progress to the task, not to the Job row.
+    status = replace(
+        status,
+        phase=str(rq_job.meta.get("phase") or status.phase),
+        processed=int(rq_job.meta.get("processed") or status.processed),
+        total=int(rq_job.meta.get("total") or status.total),
+    )
+    if job.status == JobStatusChoices.STATUS_RUNNING:
+        return replace(status, state=RUNNING)
+    return _with_queue_place(replace(status, state=QUEUED), rq_job)
+
+
+def _with_queue_place(status: ImportJobStatus, rq_job) -> ImportJobStatus:
+    """Add the task's place in its own queue, and the live workers of that queue; a read that writes nothing."""
+    import django_rq
+
+    queue = django_rq.get_queue(status.job.queue_name)
+    # Worker.all() removes the registration of an expired worker, so read each worker hash directly.
+    states = [queue.connection.hget(key, "state") for key in Worker.all_keys(queue=queue)]
+    live = [as_text(state) for state in states if state is not None]
+    position = rq_job.get_position()
+    return replace(
+        status,
+        position=None if position is None else position + 1,
+        workers=len(live),
+        busy=live.count(WorkerStatus.BUSY),
+    )
+
+
+def _try_import_job_lock(job) -> bool:
+    """Take the Job lock until the transaction ends, or return False at once when a worker holds it."""
+    if not connection.in_atomic_block:
+        raise RuntimeError("The import Job lock requires the preview command transaction.")
+    # Never wait for a worker while holding its profile. PostgreSQL holds this lock through commit or rollback.
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [_import_job_lock(job)])
+        return cursor.fetchone()[0]
+
+
 def recover_abandoned_import_job(job) -> None:
     """Fail a lost task under the profile lock, unless a worker still owns its delivery."""
     from core.choices import JobStatusChoices
     from core.models import Job
 
-    if not connection.in_atomic_block:
-        raise RuntimeError("Job recovery requires the preview command transaction.")
-    # Never wait for a worker while holding its profile. PostgreSQL holds this lock through commit or rollback.
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [_import_job_lock(job)])
-        acquired = cursor.fetchone()[0]
-    if acquired:
+    if _try_import_job_lock(job):
         job.refresh_from_db()
         if import_job_abandoned(job):
             Job.objects.filter(pk=job.pk, status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES).update(
@@ -115,6 +220,49 @@ def recover_abandoned_import_job(job) -> None:
                 error=IMPORT_TASK_LOST,
                 data={**(job.data or {}), "phase": "failed", "message": IMPORT_TASK_LOST},
             )
+
+
+def cancel_queued_import_job(job, message: str) -> bool:
+    """Fail a Job that no worker has started, and cancel its queue task after the commit.
+
+    Return False, and change nothing, when a worker holds the Job lock or the Job has left the queue.
+    """
+    from core.choices import JobStatusChoices
+    from core.models import Job
+
+    if not _try_import_job_lock(job):
+        return False
+    job.refresh_from_db()
+    waiting = (JobStatusChoices.STATUS_PENDING, JobStatusChoices.STATUS_SCHEDULED)
+    if job.status not in waiting or job.started is not None:
+        return False
+    # NetBox has no cancelled status; a failed Job with this phase is one the operator stopped.
+    Job.objects.filter(pk=job.pk).update(
+        status=JobStatusChoices.STATUS_FAILED,
+        completed=timezone.now(),
+        error=message,
+        data={**(job.data or {}), "phase": "cancelled", "message": message},
+    )
+    transaction.on_commit(partial(_cancel_queue_task, job))
+    return True
+
+
+def _cancel_queue_task(job) -> None:
+    """Take a cancelled Job's task out of its queue; a worker that already took it skips the Job."""
+    try:
+        rq_job = import_queue_task(job)
+        if rq_job is not None and rq_job.get_status(refresh=True) in (
+            JobStatus.QUEUED,
+            JobStatus.SCHEDULED,
+            JobStatus.DEFERRED,
+        ):
+            rq_job.cancel()
+    except (InvalidJobOperation, NoSuchJobError):
+        # Another actor, such as NetBox Job.delete(), removed the task first, which is the goal.
+        logger.debug("The queue task of cancelled import Job %s was already gone.", job.pk)
+    except (RedisConnectionError, RedisTimeoutError):
+        # The Job row is the record: ImportJobRunner.handle runs only a Job that is still enqueued.
+        logger.warning("The queue task of cancelled import Job %s stays in its queue.", job.pk)
 
 
 class ImportJobRunner(JobRunner):
@@ -257,24 +405,20 @@ class ImportJobRunner(JobRunner):
         )
 
 
-def retained_sync_running(user, profile_id, document_id) -> bool:
-    """Return whether a per-trace sync Job for this source still runs, whichever preview queued it.
+def retained_sync_jobs(user, profile_id, document_id):
+    """Return the active per-trace sync Jobs of one source, whichever preview queued them.
 
     The Job rows are the record, so a request that lost a race to the coordinator still sees the sync.
     """
     from core.choices import JobStatusChoices
 
-    return (
-        ImportJobRunner.get_jobs()
-        .filter(
-            user=user,
-            data__job_type=ImportJobRunner.job_type,
-            data__keeps_preview=True,
-            data__profile_id=profile_id,
-            data__source_document_id=document_id,
-            status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
-        )
-        .exists()
+    return ImportJobRunner.get_jobs().filter(
+        user=user,
+        data__job_type=ImportJobRunner.job_type,
+        data__keeps_preview=True,
+        data__profile_id=profile_id,
+        data__source_document_id=document_id,
+        status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
     )
 
 
