@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v2.13.0 (2026-10-10)
+
+### Testing
+
+- **branching**: Accept the upstream cable revert failure in the dry run
+  ([`0a322f0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0a322f09b412af3196f48df0412c6d3e6c00dd71))
+
+
 ## v2.12.0 (2026-10-09)
 
 ### Bug Fixes
