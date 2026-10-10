@@ -33,7 +33,7 @@ from utilities.views import ConditionalLoginRequiredMixin
 
 from . import __version__ as _plugin_version
 from . import adapters, ip_assignment
-from .cable_disclosure import POLICY_HIDDEN, POLICY_VISIBLE, policy_row_is_disclosed
+from .cable_disclosure import DEVICE_ROW, DISCLOSURE_SOURCE, POLICY_HIDDEN, POLICY_VISIBLE, policy_row_is_disclosed
 from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
 from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS, OutputKind
 from .contact_resolution import PrimaryContactResolver, contact_identity, suggest_contact_roles
@@ -3597,6 +3597,15 @@ def _segment_policy_forms(profile, trace, viewer) -> list:
     return forms
 
 
+def _topology_summary(segments) -> str:
+    """Count the proposed segments by status, for the line the collapsed topology group shows."""
+    if not segments:
+        return "No segment planned"
+    counts = Counter(segment["status"] or "not planned" for segment in segments)
+    statuses = ", ".join(f"{count} {status}" for status, count in counts.items())
+    return f"{len(segments)} segment{pluralize(len(segments))}: {statuses}"
+
+
 def _segment_override_reason(segment) -> str:
     """Return why one segment cannot take an override now, or an empty string when it can."""
     if not segment["segment_key"]:
@@ -3719,21 +3728,28 @@ def _active_proposal_count(profile, workspace, display) -> tuple[int | str, int]
     return ("Not permitted" if display.view_reason else result["count"]), stamp
 
 
+def _device_url(question) -> str:
+    """Return the NetBox page of a Device question's resolved Device, while the viewer may still view it."""
+    # The live disclosure check drops this source from a question that names a hidden Device.
+    source = question.get(DISCLOSURE_SOURCE)
+    return reverse("dcim:device", kwargs={"pk": source["pk"]}) if source and source["kind"] == DEVICE_ROW else ""
+
+
 def _termination_cards(terminations, trace, claim):
     """Add what each termination card renders beyond its proposal: the resolved Device, an id, and its read."""
-    resolved = {
-        source_device_key(device["key"]): device["selected"] for device in trace.devices if device.get("selected")
-    }
+    resolved = {source_device_key(device["key"]): device for device in trace.devices if device.get("selected")}
     read_url = reverse("plugins:netbox_data_import:trace_proposal")
     return [
         {
             **termination,
-            "resolved_device": resolved.get(parse_termination_field_key(termination["field_key"])["device"], ""),
+            "resolved_device": device["selected"] if device else "",
+            "resolved_device_url": _device_url(device) if device else "",
             "card_id": "proposalCard" + hashlib.sha256(termination["field_key"].encode()).hexdigest()[:16],
             "read_url": f"{read_url}?"
             + urlencode({"field_key": termination["field_key"], "trace": trace.identity, **claim.fields()}),
         }
         for termination in terminations
+        for device in (resolved.get(parse_termination_field_key(termination["field_key"])["device"]),)
     ]
 
 
@@ -3878,6 +3894,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
                 "settled_terminations": settled,
                 "cable_policy_forms": cable_policy_forms,
                 "segment_policy_forms": segment_policy_forms,
+                "topology_summary": _topology_summary(segment_policy_forms),
                 "summary": summary,
                 "ask_all_reason": ask_all_reason,
                 "sync_all": held_sync(workspace.sync_all.action, block_reason),
@@ -4495,6 +4512,7 @@ class _ResolveTermination(PreviewCommand):
             selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
             selected_object_id=chosen.pk,
             selected_display_name=str(chosen),
+            device=chosen.device,
             reviewed_fingerprint=preview.reviewed_fingerprint,
         )
         return CommandOutcome(message=f"Termination resolved to '{chosen}'.", plan=plan)

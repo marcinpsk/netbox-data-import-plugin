@@ -25,8 +25,14 @@ from .models import (
     index_digest,
     locked_profile_policy,
 )
-from .object_permissions import POLICY_WRITE_REFUSED, delete_permission_scoped_objects, save_permission_scoped_object
+from .object_permissions import (
+    POLICY_WRITE_REFUSED,
+    assess_permission_scoped_save,
+    delete_permission_scoped_objects,
+    save_permission_scoped_object,
+)
 from .plan import Diagnostic, Disposition, ImportPlan, PlannedChange, Severity, SynchronizationUnit
+from .trace_device_resolution import source_device_key
 from .values import (
     effective_device_name,
     has_below_rack_position,
@@ -57,9 +63,10 @@ def save_termination_resolution_and_replan(
     selected_object_type,
     selected_object_id,
     selected_display_name,
+    device,
     reviewed_fingerprint,
 ):
-    """Persist one manual termination selection with its source spelling, then request a fresh Import Plan."""
+    """Persist one manual termination selection with its source spelling and its Device, then replan."""
     values = {
         "source_device": source["device"],
         "source_cards": source["cards"],
@@ -84,8 +91,37 @@ def save_termination_resolution_and_replan(
             lookup,
             values,
         )
+        pin_trace_device(profile=locked_profile, actor=actor, source_device=source["device"], device=device)
         # atomic-exit-safe: decision-saved-and-replanned
         return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+def _save_trace_device_resolution(actor, lookup, values) -> None:
+    """Validate and save one Trace Device Resolution inside the actor's permission scope."""
+    candidate = TraceDeviceResolution(**lookup, **values)
+    candidate.full_clean(validate_unique=False, validate_constraints=False)
+    save_permission_scoped_object(actor, TraceDeviceResolution, lookup, values)
+
+
+def pin_trace_device(*, profile, actor, source_device, device) -> None:
+    """Save the Device a termination choice was made on, unless a decision already names its source Device.
+
+    A Device matched by name has no saved decision, so a rename would leave the saved port without its Device.
+    An operator who may not save the decision still saves the termination, which then follows the name.
+    """
+    key = source_device_key(source_device)
+    digest = index_digest(key)
+    if TraceDeviceResolution.objects.filter(profile=profile, source_device_key_digest=digest).exists():
+        return
+    lookup = {"profile": profile, "source_device_key": key, "source_device_key_digest": digest}
+    values = {
+        "source_device_label": source_device,
+        "selected_device_id": device.pk,
+        "selected_display_name": str(device),
+    }
+    if not assess_permission_scoped_save(actor, TraceDeviceResolution, lookup, values).allowed:
+        return
+    _save_trace_device_resolution(actor, lookup, values)
 
 
 class ProfilePolicyMoved(PublicRefusal):
@@ -279,14 +315,7 @@ def save_trace_device_resolution_and_replan(
             "selected_device_id": chosen.pk,
             "selected_display_name": str(chosen),
         }
-        candidate = TraceDeviceResolution(**lookup, **values)
-        candidate.full_clean(validate_unique=False, validate_constraints=False)
-        save_permission_scoped_object(
-            actor,
-            TraceDeviceResolution,
-            lookup,
-            values,
-        )
+        _save_trace_device_resolution(actor, lookup, values)
         plan = ImportEngine.plan(locked_profile, source_document, actor, planning_context)
         # atomic-exit-safe: device-decision-saved-and-replanned
         return plan, chosen

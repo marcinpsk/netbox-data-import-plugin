@@ -13,14 +13,29 @@
     <div class="text-secondary small" data-proposal-page
          {% if not termination.proposal.page_status %}hidden{% endif %}>{{ termination.proposal.page_status }}</div>
   </div>
-  <p class="fw-bold mt-2 mb-1" data-proposal-candidate>{{ termination.proposal.candidate }}</p>
-  <p class="mb-2" data-proposal-explanation>{{ termination.proposal.explanation }}</p>
-  <p class="text-danger" data-proposal-failure>{% if termination.proposal.failure %}{{ termination.proposal.failure }} ({{ termination.proposal.failure_code }}){% endif %}</p>
-  <div class="ndi-trace-actions mt-2">
-    {% for action in termination.proposal.actions|slice:"2:" %}
-      {% include 'netbox_data_import/_proposal_action.html' %}
-    {% endfor %}
-  </div>
+  {% if termination.proposal.candidate %}
+    <p class="fw-bold mt-2 mb-1" data-proposal-candidate>{{ termination.proposal.candidate }}</p>
+  {% elif termination.proposal.no_match %}
+    <p class="fw-bold mt-2 mb-1" data-proposal-candidate>No match found</p>
+  {% endif %}
+  {% if termination.proposal.failure %}
+    <p class="text-danger mt-2 mb-1" id="proposalNotice{{ termination.card_id }}" data-proposal-failure>The proposal failed: {{ termination.proposal.failure }} ({{ termination.proposal.failure_code }})</p>
+  {% elif termination.proposal.warning %}
+    <p class="small mt-1 mb-1" id="proposalNotice{{ termination.card_id }}" data-proposal-warning><i class="mdi mdi-alert text-warning" aria-hidden="true"></i> {{ termination.proposal.warning }}</p>
+  {% endif %}
+  {% if termination.proposal.explanation %}
+    <details class="mt-1" data-proposal-explanation-disclosure>
+      <summary>Explanation</summary>
+      <p class="mb-0 mt-1" data-proposal-explanation>{{ termination.proposal.explanation }}</p>
+    </details>
+  {% endif %}
+  {% if termination.proposal.decision_actions %}
+    <div class="ndi-trace-actions mt-2">
+      {% for action in termination.proposal.decision_actions %}
+        {% include 'netbox_data_import/_proposal_action.html' %}
+      {% endfor %}
+    </div>
+  {% endif %}
   <details class="mt-2" data-proposal-history-disclosure>
     <summary>Proposal history</summary>
     <ul class="list-unstyled small" data-proposal-history>

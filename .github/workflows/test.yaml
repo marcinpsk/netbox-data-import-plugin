@@ -29,7 +29,7 @@ jobs:
           # `coverage` marks the row that publishes the report, so a version bump cannot miss it.
           # Python 3.14 and the ICU of postgres:18 state Unicode 16, which the name identity guard needs.
           - python-version: "3.14"
-            netbox-version: "v4.7.0"
+            netbox-version: "v4.7.2"
             coverage: true
           - python-version: "3.14"
             netbox-version: "v4.6.10"
@@ -147,7 +147,7 @@ jobs:
 
   test-netbox-branching:
     # netbox-branching 1.2.x supports NetBox 4.7 only, so this job has one row.
-    name: test-netbox-branching (3.14, v4.7.0)
+    name: test-netbox-branching (3.14, v4.7.2)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -191,7 +191,7 @@ jobs:
         with:
           repository: "netbox-community/netbox"
           path: netbox
-          ref: v4.7.0
+          ref: v4.7.2
           persist-credentials: false
 
       - name: Install system dependencies

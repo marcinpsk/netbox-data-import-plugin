@@ -713,7 +713,12 @@ Each Termination Reference resolves inside its resolved Device. Device resolutio
 resolution begins. A saved `TraceDeviceResolution` maps the name identity of a source Device label
 (section 5.9) to one NetBox Device for the Import Profile. The mapping applies to every port under
 that label and to later source documents whose label has the same identity, whatever its case and
-whitespace. A saved choice takes precedence over exact-name matching.
+whitespace. A saved choice takes precedence over exact-name matching. A saved termination
+choice stores its port by ID, but it applies only inside a resolved Device. Thus saving a
+termination choice, from the picker or by accepting a proposal, also saves a `TraceDeviceResolution`
+for the Device of the chosen port when its source Device label has none. A later rename of that
+Device in NetBox then keeps the choice. An operator who may not save a `TraceDeviceResolution` still
+saves the termination choice, which then follows the Device name.
 
 Without a saved choice, one exact Device-name match inside the actor's view scope and selected Site
 resolves automatically. Zero or several matches leave one Device question open in the Trace Review
@@ -1575,7 +1580,9 @@ The workspace is one page per preview. Layout:
 - **Trace list** with a disposition badge per Source Trace.
 - **Three panels** for the selected trace: source evidence (From and To plus the ordered Segment
   Evidence with implied Pass-Through Claims), current NetBox topology, and proposed physical topology
-  with a per-segment status of create, reuse existing, delete Logical Cable, or conflict.
+  with a per-segment status of create, reuse existing, delete Logical Cable, or conflict. The three
+  panels sit side by side in one Topology group, which is collapsed by default and counts the
+  segments by status. The browser remembers whether the viewer left the group open.
 - **Cable policy** for the selected trace: the policy in force on each stated CableClass, editable
   in place, and the policy in force on each resolved segment with the action that forces one segment
   to its own Cable Type and Cable Profile.
@@ -1593,7 +1600,8 @@ write rechecks the offer on the page, search, and offset that made it. A Locatio
 the Location is still visible to the actor and inside the selected Site. A resolved termination
 shows its selected object's own model, not the claimed kind. Each render rechecks view permission on
 every port and every resolved Device a cached plan names: a hidden or deleted port shows neither its
-name nor its model, and a hidden or deleted Device shows no name.
+name nor its model, and a hidden or deleted Device shows no name. A termination card links its
+resolved Device to the Device page in NetBox only while the viewer may view that Device.
 
 The workspace lists the source Location paths of the batch, at batch level and independent of the
 selected trace, as a tree of prefixes. Each node is a prefix key. A prefix key shows the spelling of
@@ -1631,17 +1639,28 @@ Proposal card contract:
 | Card state | Contents |
 | --- | --- |
 | Completed with a candidate | A "Proposal - not applied" badge, the suggested candidate with its kind, the required explanation, and explicit Accept and Reject buttons |
-| Completed and stale | The same card with a "Proposal - stale, not applied" badge and a disabled Accept action showing its reason |
-| Completed with no match | The backend's own explanation of why the evidence did not distinguish the candidates, and a disabled accept action naming that reason |
-| Failed | The typed failure reason, including `backend_refusal` for a refusal or an empty-content completion, and an Ask AI again action that creates a new proposal |
+| Completed and stale | The same card with a "Proposal - stale, not applied" badge, a warning that names what changed, and a disabled Accept action |
+| Completed with no match | A "No match found" line, the backend's own explanation of why the evidence did not distinguish the candidates, and Reject. It offers no Accept, because there is no candidate. A stale no-match shows the same warning |
+| Failed | The typed failure reason, including `backend_refusal` for a refusal or an empty-content completion, disabled Accept and Reject actions, and an Ask AI again action that creates a new proposal |
 | Queued or running | Live progress refreshed in place, with its own cancel action |
 
 A pending card polls its own state every 3 seconds and stops on a terminal state (spec default). The
 operator never leaves the field to learn what the Inference Backend is doing.
 
-Every action is always visible. An illegal action renders disabled with its reason underneath, never
-hidden: an absent control tells the operator nothing about why it is absent. The proposal card itself
-appears only once a proposal exists, so Accept and Reject are card actions and not field actions.
+The card always states what the proposal is: the candidate, or "No match found". The explanation sits
+in a disclosure that is collapsed by default. A failure, a job note, and every other error or warning
+stay visible. A failed or stale proposal refuses its decisions as a whole, so the card states the
+failure or the staleness warning once, and the disabled Accept and Reject actions do not repeat it.
+
+An action the operator cannot take for a reason that the operator can act on renders disabled, with
+its own reason underneath: a missing permission, an unavailable or invalid Inference Backend, or an
+ambiguous source. An action that the lifecycle state rules out is
+hidden, because a reason there only repeats what the card already shows: Ask AI on a resolved field or
+while a proposal is active, Cancel with no active proposal, Accept and Reject while the proposal waits
+or after its decision, and Accept on a no-match. An operator who may not view proposals sees every
+field action disabled with that reason, because the card cannot show the lifecycle state. The proposal
+card itself appears only once a proposal exists, so Accept and Reject are card actions and not field
+actions.
 
 A per-field proposal history list shows the ten most recent attempts, their status, and their outcome.
 The list links to a field-filtered, paginated history endpoint for all older attempts.
@@ -2132,7 +2151,8 @@ variables.
 
 **Acceptance criteria.**
 
-- Every action is always visible; an illegal action renders disabled with its reason.
+- An action the operator cannot take for a reason the operator can act on renders disabled with its
+  reason. An action that the lifecycle state rules out is hidden (section 10.2).
 - The proposed panel shows a per-segment status of create, reuse existing, delete Logical Cable, or
   conflict.
 - The picker lists only eligible candidates of the models the claimed kind admits on the resolved
@@ -2145,7 +2165,8 @@ variables.
   Location evidence compares only through a `TraceLocationResolution` mapping, and the import-page
   Location ranks candidates after source evidence without filtering them.
 - Selecting a candidate writes a `TerminationResolution` row through its owning model and triggers a
-  replan; no review command edits an Import Plan.
+  replan; no review command edits an Import Plan. When the source Device label has no
+  `TraceDeviceResolution`, the same transaction saves one for the Device of the chosen port.
 - A termination matched by the exact-name rule shows `automatically resolved`; one selected by an
   operator shows `manually resolved`.
 - The drift strip appears when the freshly computed plan fingerprint differs from the reviewed one,
@@ -2247,13 +2268,13 @@ permissions at the view boundary.
 
 **Acceptance criteria.**
 
-- Ask AI is disabled with its reason when the field is already resolved, when an active proposal
-  exists, when no Inference Backend is enabled, or when the operator lacks the permission.
+- Ask AI is hidden when the field is already resolved or an active proposal exists. It is disabled
+  with its reason when no Inference Backend is enabled or when the operator lacks the permission.
 - A pending card shows progress in place, polls until a terminal state, and offers cancel.
 - A completed card shows the "Proposal - not applied" badge, the candidate with its kind, the
   explanation, and explicit Accept and Reject buttons.
 - A stale card shows the stale badge and a disabled Accept with its reason.
-- A no-match card has a disabled accept action with its reason; a failed card offers Ask AI again.
+- A no-match card says "No match found" and offers no Accept; a failed card offers Ask AI again.
 - Accepting writes a `TerminationResolution` row, marks the termination `accepted`, and triggers a
   replan.
 - Cancel is offered to any operator with request permission, not only the requester.
