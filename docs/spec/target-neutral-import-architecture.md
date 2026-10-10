@@ -2151,7 +2151,8 @@ variables.
 
 **Acceptance criteria.**
 
-- Every action is always visible; an illegal action renders disabled with its reason.
+- An action the operator cannot take for a reason the operator can act on renders disabled with its
+  reason. An action that the lifecycle state rules out is hidden (section 10.2).
 - The proposed panel shows a per-segment status of create, reuse existing, delete Logical Cable, or
   conflict.
 - The picker lists only eligible candidates of the models the claimed kind admits on the resolved
