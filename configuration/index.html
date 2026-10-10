@@ -879,6 +879,10 @@ source spellings that disagree, and it reports how many it asked about and why i
 Ask AI and <strong>Ask AI for all</strong> both refuse when no Inference Backend is enabled or configured as a
 fallback. No setting limits how many it asks about: each request is one background job, and the RQ workers
 run them in turn.</p>
+<p>Proposal jobs wait in NetBox's <code>low</code> queue. A worker takes jobs from the <code>high</code> and <code>default</code> queues
+first, so an import or a trace sync that you queue after many proposals does not wait for them. A
+<code>manage.py rqworker</code> with no queue names serves all three queues. If you start a worker for named
+queues, include <code>low</code>, or no proposal runs.</p>
 <p>A Device with more than 1024 eligible ports of one kind is refused. That ceiling bounds the stored
 candidate set, not the prompt. Above it, narrow the eligible set instead.</p>
 <h2 id="native-primary-contacts">Native primary contacts</h2>
@@ -901,6 +905,14 @@ candidate set, not the prompt. Above it, narrow the eligible set instead.</p>
 <p>When you submit the import setup form, the page shows a loading indicator while it reads the workbook and generates the preview. You can leave an unsubmitted preview and return to it later. Open <strong>Run Import</strong> and select <strong>Resume preview</strong>.</p>
 <p>After you confirm a preview, the plugin queues a native NetBox background Job and opens its progress page. The page uses NetBox's HTMX support to show the number of processed source rows and update the progress bar automatically.</p>
 <p>The Job writes a NetBox change log record for each NetBox object that it creates, changes, or deletes. The record names the user who started the import, and its request ID is the Job UUID. Event rules and webhooks run for these changes after a successful import. A failed import sends no events.</p>
+<p>A trace sync, for one trace or for all actionable traces, keeps its preview until the Job ends. The
+trace workspace and the progress page say whether the Job waits for a worker or runs. A waiting Job
+shows its position in its own queue, where 1 is the next job, and how many workers of that queue are
+busy. Jobs in a queue that a worker serves first, such as <code>high</code>, can still start before it. A
+running Job shows its phase and its steps. If Redis does not answer, the page says that the job
+queue cannot be read now. The workspace checks the Job every 3 seconds and loads the page again when
+the Job ends. Then re-read the preview before the next decision. While no worker has started the
+Job, <strong>Cancel sync</strong> stops it and re-reads the preview.</p>
 <p>You can leave the progress page while the Job runs. Open <strong>Run Import</strong> and select <strong>Resume import</strong> to return to the latest active Job. The direct progress URL also restores a completed result or a refreshed preview after a safe validation failure.</p>
 <h2 id="device-import-record">Device import record</h2>
 <p>The plugin keeps one import record per imported Device: the source ID, the profile that wrote it,
@@ -1057,6 +1069,15 @@ Location.</p>
 <p>The Location you select on the import page also ranks candidates, after the source hints, and never
 removes one. If that Location is deleted, hidden from you, or moved to another Site, the workspace
 shows a notice and keeps the preview.</p>
+<p>Each trace has <strong>Sync with dependencies</strong>, which synchronizes that trace and the traces whose
+changes it needs. It is disabled, with its reason, when one of those changes cannot sync.
+<strong>Sync N actionable traces</strong>, under the trace counts, synchronizes every actionable
+trace, with the traces their changes need, in one background Job. It leaves blocked, invalid and
+unchanged traces alone. A trace that needs a change from a trace that cannot sync is left out too.
+The line under the button says how many traces stay unsynced, and why. The button is disabled, with
+its reason, when no trace can sync, when NetBox changed since the last re-read, or while a trace sync
+holds the preview. Both commands keep the workspace: when the Job ends, re-read the preview and
+resolve the traces that remain.</p>
 <p>The trace workbook layout is not configurable in this release. A later adapter setting can map other
 sheet names and columns to the same Source Trace values. Device choices do not depend on Excel column
 names, so they remain reusable across that change.</p>

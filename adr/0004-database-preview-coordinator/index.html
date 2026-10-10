@@ -523,6 +523,21 @@ several terminations from one page load, and each card updates in place. The pro
 the revision, orders two such commands: the partial unique index and the conditional updates refuse a
 second active proposal or a second decision. A command that writes policy or replans, which includes
 proposal acceptance, still advances the revision.</p>
+<p>Amended 2026-10-09: the operator can cancel the preview's own trace sync while no worker has started
+it. Cancel is a preview command. It takes the Job lock that a worker takes before it runs the Job,
+without waiting. If a worker holds the lock, the command refuses. Under the lock, a Job that is still
+pending or scheduled and was never started becomes failed, with the phase <code>cancelled</code>. NetBox has no cancelled
+status. The command refuses while another sync of the same source is active, because the replan reads
+NetBox. Then the coordinator replans the preview to ready and advances the revision. The queue task is
+cancelled after the commit. A worker that already took the task skips it, because the Job is no
+longer enqueued.</p>
+<p>Amended 2026-10-09: a trace workspace command synchronizes all actionable traces. It is a selective
+execution, not the final import: it queues one Job for every actionable trace whose dependency
+closure can execute, with that closure, and it keeps the preview pending like a per-trace sync. A
+trace whose closure holds a unit that is not actionable, or a dependency no unit carries, is left out
+and counted on the page, so blocked and invalid traces never stop the others. The command refuses on
+drift and while another sync of the same source waits or runs, with the same checks as a per-trace
+sync. The final import still refuses while any unit is in error.</p>
 <h2 id="considered-options">Considered options</h2>
 <ul>
 <li>A lock around the session helpers: rejected. Response middleware saves the session after the lock
