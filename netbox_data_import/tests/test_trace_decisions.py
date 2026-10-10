@@ -649,6 +649,7 @@ class TerminationResolutionPersistenceTest(TestCase):
             selected_object_type=self.interface_type,
             selected_object_id=self.interface.pk,
             selected_display_name=str(self.interface),
+            device=self.interface.device,
             reviewed_fingerprint=_reviewed(self.profile),
         )
 
@@ -697,6 +698,7 @@ class TerminationResolutionPersistenceTest(TestCase):
                 selected_object_type=self.interface_type,
                 selected_object_id=self.interface.pk,
                 selected_display_name=str(self.interface),
+                device=self.interface.device,
                 reviewed_fingerprint=_reviewed(flat_profile),
             )
 
@@ -757,6 +759,7 @@ class TerminationResolutionLockOrderingTest(TransactionTestCase):
                     selected_object_type=self.interface_type,
                     selected_object_id=self.interface.pk,
                     selected_display_name=str(self.interface),
+                    device=self.interface.device,
                     reviewed_fingerprint=reviewed_flat.planning_fingerprint,
                 )
 
@@ -852,6 +855,7 @@ class ReplanUnderThePolicyLockTest(TransactionTestCase):
                 selected_object_type=self.interface_type,
                 selected_object_id=self.interface.pk,
                 selected_display_name=str(self.interface),
+                device=self.interface.device,
                 reviewed_fingerprint=reviewed,
             )
 

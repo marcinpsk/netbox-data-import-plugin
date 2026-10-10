@@ -33,6 +33,7 @@ from netbox_data_import.models import (
     ResolutionProposal,
     SourceDocument,
     TerminationResolution,
+    TraceDeviceResolution,
 )
 from netbox_data_import.preview_coordinator import CLAIM_INVALID, STALE_PREVIEW, SYNC_QUEUED
 from netbox_data_import.proposal_tasks import CandidateSnapshot
@@ -956,6 +957,63 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         self.assertFalse(page.context["drift"])
         self.assertEqual(self.page_reads(page)[self.field_key]["presentation"]["field_state"], "accepted")
+
+    def test_an_accepted_termination_survives_a_rename_of_its_device(self):
+        """Acceptance pins the Device matched by name, so a rename in NetBox keeps the accepted port."""
+        from netbox_data_import.cable_target import MANUALLY_RESOLVED
+
+        proposal = self.completed()
+        response = self.call("accept_proposal", accept=None, proposal_id=proposal.pk)
+        self.assertEqual(response.status_code, 302, response.content[:300])
+        self.device_a.name = "DEV-A-RENAMED"
+        self.device_a.save()
+
+        self.reread()
+        page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        field = next(
+            item for item in page.context["selected_trace"].terminations if item["field_key"] == self.field_key
+        )
+        self.assertEqual((field["state"], field["selected"]), (MANUALLY_RESOLVED, str(self.eth0)))
+        self.assertEqual(field["proposal"]["field_state"], "accepted")
+        card = next(item for item in page.context["attention_terminations"] if item["field_key"] == self.field_key)
+        self.assertEqual(card["resolved_device"], "DEV-A-RENAMED")
+        pin = TraceDeviceResolution.objects.get(profile=self.profile)
+        self.assertEqual(
+            (pin.source_device_key, pin.source_device_label, pin.selected_device_id, pin.selected_display_name),
+            ("DEV-A", "DEV-A", self.device_a.pk, "DEV-A"),
+        )
+
+    def test_acceptance_without_the_device_resolution_permission_saves_the_termination_unpinned(self):
+        """The pin is an extra row, so an operator who may not save one still accepts the termination."""
+        proposal = self.completed()
+        self.operator(decide=True)
+
+        response = self.call("accept_proposal", accept=None, proposal_id=proposal.pk)
+
+        self.assertEqual(response.status_code, 302, response.content[:300])
+        self.assertEqual(TerminationResolution.objects.get(profile=self.profile).selected_object_id, self.eth0.pk)
+        self.assertFalse(TraceDeviceResolution.objects.exists())
+
+    def test_acceptance_keeps_an_existing_device_decision(self):
+        """A saved Device decision already pins the source Device, so acceptance leaves that row as it is."""
+        decision = TraceDeviceResolution.objects.create(
+            profile=self.profile,
+            source_device_key="DEV-A",
+            source_device_label="dev-a",
+            selected_device_id=self.device_a.pk,
+            selected_display_name="Earlier choice",
+        )
+        self.reread()
+        proposal = self.completed()
+
+        response = self.call("accept_proposal", accept=None, proposal_id=proposal.pk)
+
+        self.assertEqual(response.status_code, 302, response.content[:300])
+        self.assertEqual(
+            list(TraceDeviceResolution.objects.values_list("pk", "source_device_label", "selected_display_name")),
+            [(decision.pk, "dev-a", "Earlier choice")],
+        )
 
     def test_accepting_a_power_port_that_shares_an_interface_id_saves_the_power_port(self):
         """The accept view writes the candidate's own model, never another model with the same numeric id."""

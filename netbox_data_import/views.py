@@ -4495,6 +4495,7 @@ class _ResolveTermination(PreviewCommand):
             selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
             selected_object_id=chosen.pk,
             selected_display_name=str(chosen),
+            device=chosen.device,
             reviewed_fingerprint=preview.reviewed_fingerprint,
         )
         return CommandOutcome(message=f"Termination resolved to '{chosen}'.", plan=plan)

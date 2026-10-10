@@ -202,13 +202,19 @@ class SelectTerminationTask:
         )
         if proposal_inventory_staleness(proposal, inventory).is_stale:
             return None
-        return self.write_resolution(
+        receipt = self.write_resolution(
             profile=proposal.profile,
             field_key=proposal.field_key,
             entry=entry,
             source=source,
             actor=actor,
         )
+        from .review_workspace import pin_trace_device
+
+        pin_trace_device(
+            profile=proposal.profile, actor=actor, source_device=source["device"], device=inventory.resolved_device
+        )
+        return receipt
 
 
 register_proposal_task(SELECT_TERMINATION_TASK, SelectTerminationTask())

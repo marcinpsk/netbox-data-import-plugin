@@ -713,7 +713,12 @@ Each Termination Reference resolves inside its resolved Device. Device resolutio
 resolution begins. A saved `TraceDeviceResolution` maps the name identity of a source Device label
 (section 5.9) to one NetBox Device for the Import Profile. The mapping applies to every port under
 that label and to later source documents whose label has the same identity, whatever its case and
-whitespace. A saved choice takes precedence over exact-name matching.
+whitespace. A saved choice takes precedence over exact-name matching. A saved termination
+choice stores its port by ID, but it applies only inside a resolved Device. Thus saving a
+termination choice, from the picker or by accepting a proposal, also saves a `TraceDeviceResolution`
+for the Device of the chosen port when its source Device label has none. A later rename of that
+Device in NetBox then keeps the choice. An operator who may not save a `TraceDeviceResolution` still
+saves the termination choice, which then follows the Device name.
 
 Without a saved choice, one exact Device-name match inside the actor's view scope and selected Site
 resolves automatically. Zero or several matches leave one Device question open in the Trace Review
@@ -2145,7 +2150,8 @@ variables.
   Location evidence compares only through a `TraceLocationResolution` mapping, and the import-page
   Location ranks candidates after source evidence without filtering them.
 - Selecting a candidate writes a `TerminationResolution` row through its owning model and triggers a
-  replan; no review command edits an Import Plan.
+  replan; no review command edits an Import Plan. When the source Device label has no
+  `TraceDeviceResolution`, the same transaction saves one for the Device of the chosen port.
 - A termination matched by the exact-name rule shows `automatically resolved`; one selected by an
   operator shows `manually resolved`.
 - The drift strip appears when the freshly computed plan fingerprint differs from the reviewed one,
