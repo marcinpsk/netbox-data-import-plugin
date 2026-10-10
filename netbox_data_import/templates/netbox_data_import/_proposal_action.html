@@ -11,8 +11,8 @@
   <input type="hidden" name="field_key" value="{{ termination.field_key }}">
   {% if termination.proposal_read.proposal %}<input type="hidden" name="proposal_id" value="{{ termination.proposal_read.proposal.id }}">{% endif %}
   <button type="submit" class="btn btn-sm {% if action.key == 'request' or action.key == 'accept' %}btn-primary{% else %}btn-secondary{% endif %}"
-          data-proposal-action="{{ action.key }}" aria-describedby="proposalReason{{ termination.card_id }}{{ action.key }}"
-          {% if action.reason %}disabled{% endif %}><span class="spinner-border spinner-border-sm ndi-busy" aria-hidden="true"></span>{{ action.label }}</button>
+          data-proposal-action="{{ action.key }}" aria-describedby="{% if action.disabled and not action.reason %}proposalNotice{{ termination.card_id }}{% else %}proposalReason{{ termination.card_id }}{{ action.key }}{% endif %}"
+          {% if action.disabled %}disabled{% endif %}><span class="spinner-border spinner-border-sm ndi-busy" aria-hidden="true"></span>{{ action.label }}</button>
   <div class="ndi-trace-reason" data-proposal-reason="{{ action.key }}"
        id="proposalReason{{ termination.card_id }}{{ action.key }}"
        {% if not action.reason %}hidden{% endif %}>{{ action.reason }}</div>

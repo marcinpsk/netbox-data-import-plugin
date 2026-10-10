@@ -69,11 +69,21 @@ def backend_unavailable_reason() -> str:
     return ""
 
 
-def _action(key, label, reason):
+#: The commands each card renders beside the termination picker; the others sit in the proposal display.
+FIELD_ACTIONS = frozenset({"request", "cancel"})
+
+
+def _action(key, label, reason, *, hidden, disabled=None):
+    """Return one command. A hidden command shows nothing; a disabled one states only its own refusal.
+
+    A failed or stale proposal refuses its decisions as a whole, and the card states that once.
+    """
     return {
         "key": key,
         "label": label,
-        "reason": reason,
+        "reason": "" if hidden else reason,
+        "hidden": hidden,
+        "disabled": not hidden and (bool(reason) if disabled is None else disabled),
         "url": reverse(f"plugins:netbox_data_import:trace_{key}_proposal"),
     }
 
@@ -289,7 +299,14 @@ class ProposalPresentation:
             "job_status": self.job_status(proposal) if pending else "",
             "job_note": self.job_note(proposal) if pending else "",
             "page_status": self.page_status(offered) if completed else "",
+            "no_match": completed and proposal.outcome == ProposalOutcome.NO_MATCH,
+            # Accept can be hidden, so the card itself warns that an undecided answer no longer applies.
+            "warning": stale_reason if completed and not proposal.decision else "",
             "actions": actions,
+            "field_actions": [action for action in actions if action["key"] in FIELD_ACTIONS and not action["hidden"]],
+            "decision_actions": [
+                action for action in actions if action["key"] not in FIELD_ACTIONS and not action["hidden"]
+            ],
         }
 
     @staticmethod
@@ -339,69 +356,58 @@ class ProposalPresentation:
         return f"{entry.display_name} ({str(proposal.selected_object_type.name).capitalize()})", False, entry
 
     def actions(self, field, proposal, state, pending, completed, stale_reason, selected_entry, inventory, offered):
-        """Return every command with its current permission and lifecycle refusal."""
-        permission_reason = self.action_permission_reason(field, inventory)
-        request_reason = self.request_permission_reason(field, inventory)
-        if not request_reason and state != UNRESOLVED:
-            request_reason = "This termination is already resolved."
-        if not request_reason and pending:
-            request_reason = "An active proposal already exists for this field."
-        request_reason = request_reason or self.backend_reason
-        decision_reason = "" if completed else "Wait for a completed proposal."
-        if proposal is not None and proposal.status == ProposalStatus.FAILED:
-            decision_reason = (
-                f"The proposal failed: {proposal.get_failure_reason_display()} ({proposal.failure_reason})."
-            )
-        accept_reason = decision_reason
-        if not accept_reason and proposal.outcome == ProposalOutcome.NO_MATCH:
-            # A changed set restarts the search, so a stale card must promise no continuation.
-            offering = 0 if stale_reason else self.next_page_size(offered)
-            accept_reason = (
-                f"No match in candidates {offered.page_offset + 1}-{offered.page_end} of {offered.total}. "
-                f"Ask AI for the next {offering}."
-                if offering
-                else ""
-                if stale_reason
-                else "The backend found no match. There is no candidate to accept."
-            )
-        accept_reason = accept_reason or stale_reason
-        if field.get("source_ambiguous", False):
-            accept_reason = TERMINATION_UNRESOLVABLE
-        if not self.preview_allowed:
-            accept_reason = "You do not have permission to save a termination resolution."
-        elif selected_entry is not None and "source" in field:
-            assessment_key = (
-                proposal.field_key,
-                tuple(field["source"][part] for part in ("device", "cards", "port")),
-                selected_entry.object_type,
-                selected_entry.object_id,
-                selected_entry.display_name,
-            )
-            if assessment_key not in self._write_assessments:
-                self._write_assessments[assessment_key] = proposal_task(
-                    SELECT_TERMINATION_TASK
-                ).assess_resolution_write(
-                    profile=self.profile,
-                    field_key=proposal.field_key,
-                    entry=selected_entry,
-                    source=field["source"],
-                    actor=self.actor,
-                )
-            assessment = self._write_assessments[assessment_key]
-            if not assessment.allowed:
-                accept_reason = "You do not have permission to save a termination resolution."
-        reject_reason = (
-            decision_reason if self.profile_view_allowed else "You do not have permission to reject proposals."
+        """Return every command with its own refusal, hiding a command the lifecycle rules out."""
+        failed = proposal is not None and proposal.status == ProposalStatus.FAILED
+        decided = proposal is not None and bool(proposal.decision)
+        decision_hidden = decided or not (completed or failed)
+        no_match = completed and proposal.outcome == ProposalOutcome.NO_MATCH
+        accept_reason = TERMINATION_UNRESOLVABLE if field.get("source_ambiguous", False) else ""
+        write_refused = not self.preview_allowed or (
+            selected_entry is not None and "source" in field and not self.write_allowed(field, proposal, selected_entry)
         )
-        if proposal is not None and proposal.decision:
-            accept_reason = reject_reason = "This proposal already has a decision."
+        if write_refused:
+            accept_reason = "You do not have permission to save a termination resolution."
+        reject_reason = "" if self.profile_view_allowed else "You do not have permission to reject proposals."
         actions = [
-            _action("request", self.request_label(proposal, offered, stale_reason), request_reason),
-            _action("cancel", "Cancel", permission_reason or ("" if pending else "There is no active proposal.")),
-            _action("accept", "Accept", accept_reason),
-            _action("reject", "Reject", reject_reason),
+            _action(
+                "request",
+                self.request_label(proposal, offered, stale_reason),
+                self.request_permission_reason(field, inventory) or self.backend_reason,
+                hidden=state != UNRESOLVED or pending,
+            ),
+            _action("cancel", "Cancel", self.action_permission_reason(field, inventory), hidden=not pending),
+            _action(
+                "accept",
+                "Accept",
+                accept_reason,
+                hidden=decision_hidden or no_match,
+                disabled=failed or bool(stale_reason) or bool(accept_reason),
+            ),
+            _action("reject", "Reject", reject_reason, hidden=decision_hidden, disabled=failed or bool(reject_reason)),
         ]
-        return [{**action, "reason": self.view_reason or action["reason"]} for action in actions]
+        if self.view_reason:
+            # Without view access the card shows no proposal, so it states the refusal on every command.
+            return [{**action, "reason": self.view_reason, "hidden": False, "disabled": True} for action in actions]
+        return actions
+
+    def write_allowed(self, field, proposal, selected_entry) -> bool:
+        """Return whether this actor may write the resolution the selected candidate names, read once per write."""
+        assessment_key = (
+            proposal.field_key,
+            tuple(field["source"][part] for part in ("device", "cards", "port")),
+            selected_entry.object_type,
+            selected_entry.object_id,
+            selected_entry.display_name,
+        )
+        if assessment_key not in self._write_assessments:
+            self._write_assessments[assessment_key] = proposal_task(SELECT_TERMINATION_TASK).assess_resolution_write(
+                profile=self.profile,
+                field_key=proposal.field_key,
+                entry=selected_entry,
+                source=field["source"],
+                actor=self.actor,
+            )
+        return self._write_assessments[assessment_key].allowed
 
     @staticmethod
     def next_page_size(offered) -> int:

@@ -26,7 +26,7 @@
         <div class="ndi-trace-reason">{{ termination.reason }}</div>
       {% endif %}
     </div>
-    {% for action in termination.proposal.actions|slice:":2" %}
+    {% for action in termination.proposal.field_actions %}
       {% include 'netbox_data_import/_proposal_action.html' %}
     {% endfor %}
   </div>

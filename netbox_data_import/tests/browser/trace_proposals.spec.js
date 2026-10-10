@@ -49,7 +49,8 @@ test('Ask AI on two fields posts one claim twice, shows both busy, and swaps eac
   await page.route(`${ORIGIN}${ACTION_URLS.request}`, async route => {
     held.push({route, posted: await postedFields(route.request())});
   });
-  const loads = await open(page, [card('first'), card('second')]);
+  // A completed card offers Ask AI beside its decisions, so the busy state has another action to hold.
+  const loads = await open(page, [card('first', 'completed'), card('second', 'completed')]);
 
   await actionOf(page, 'first', 'request').click();
   await actionOf(page, 'second', 'request').click();
@@ -59,7 +60,7 @@ test('Ask AI on two fields posts one claim twice, shows both busy, and swaps eac
     await expect(actionOf(page, field, 'request')).toBeDisabled();
     await expect(actionOf(page, field, 'request').locator('.ndi-busy')).toBeVisible();
     // The other action of a busy card waits too, so one card never sends two commands at once.
-    await expect(actionOf(page, field, 'cancel')).toBeDisabled();
+    await expect(actionOf(page, field, 'reject')).toBeDisabled();
   }
   expect(held.map(({posted}) => [posted.field_key, posted.preview_revision, posted.csrfmiddlewaretoken])).toEqual([
     ['first', '4', 'fixture-token'], ['second', '4', 'fixture-token'],

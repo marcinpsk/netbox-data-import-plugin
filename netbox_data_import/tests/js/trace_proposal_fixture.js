@@ -24,14 +24,12 @@ function claimInputs(revision) {
   return claimFields(revision).map(([name, value]) => `<input type="hidden" name="${name}" value="${value}">`).join('');
 }
 
-/* The disabled reason of each action in each card state, as ProposalPresentation offers them. */
+/* The actions each card state renders, with their disabled reasons, as ProposalPresentation offers them.
+ * An action the lifecycle rules out is hidden, so the state omits it. */
 const STATES = {
-  open: {request: '', cancel: 'There is no active proposal.'},
-  pending: {
-    request: 'An active proposal already exists for this field.', cancel: '',
-    accept: 'Wait for a completed proposal.', reject: 'Wait for a completed proposal.',
-  },
-  completed: {request: '', cancel: 'There is no active proposal.', accept: '', reject: ''},
+  open: {request: ''},
+  pending: {cancel: ''},
+  completed: {request: '', accept: '', reject: ''},
 };
 const LABELS = {request: 'Ask AI', cancel: 'Cancel', accept: 'Accept', reject: 'Reject'};
 
@@ -63,11 +61,11 @@ export function card(field, state = 'open', {revision = 4, proposal = 7} = {}) {
     <div class="ndi-proposal-card mt-2" data-proposal-display>
       <span class="badge" data-proposal-badge>${state === 'pending' ? 'Queued' : 'Proposal - not applied'}</span>
       ${state === 'pending' ? '<span data-proposal-progress>Waiting for the backend...</span>' : ''}
-      <div class="ndi-trace-actions">
+      ${state === 'completed' ? `<div class="ndi-trace-actions">
         ${['accept', 'reject'].map(key => actionForm(id, field, key, reasons[key], revision, proposal)).join('')}
-      </div>
+      </div>` : ''}
     </div>`;
-  const fieldActions = ['request', 'cancel']
+  const fieldActions = ['request', 'cancel'].filter(key => key in reasons)
     .map(key => actionForm(id, field, key, reasons[key], revision, state === 'open' ? null : proposal)).join('');
   return `
     <li class="card ndi-proposal-card mb-3" id="${id}" data-proposal-field="${field}"
