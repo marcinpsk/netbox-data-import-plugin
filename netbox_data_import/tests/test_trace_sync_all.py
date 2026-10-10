@@ -5,6 +5,8 @@
 from contextlib import nullcontext
 from dataclasses import replace
 from io import BytesIO
+from itertools import combinations
+from random import Random
 
 from core.choices import JobStatusChoices
 from core.models import Job
@@ -150,6 +152,62 @@ class SyncAllSelectionTest(CableTopologyMixin, TestCase):
         (sync,) = next(trace.actions for trace in workspace.traces if trace.identity == "cable:trace:waits")
         self.assertEqual((sync.enabled, sync.reason), (True, ""))
         self.assertEqual(workspace.sync_all.traces, ("cable:trace:owner", "cable:trace:waits"))
+
+    def test_a_shared_dependency_skips_an_actionable_owner_whose_own_dependency_cannot_sync(self):
+        plan = ImportPlan(
+            units=(
+                _trace_unit(
+                    "cable:trace:first", _change("cable:delete:7"), _change("cable:create:f", "cable:delete:9")
+                ),
+                _trace_unit("cable:trace:held", _change("cable:delete:9"), disposition=Disposition.BLOCKED),
+                _trace_unit("cable:trace:second", _change("cable:delete:7")),
+                _trace_unit("cable:trace:waits", _change("cable:create:w", "cable:delete:7")),
+            )
+        )
+        workspace = ReviewWorkspace(plan, self.actor)
+
+        self.assertEqual(workspace.sync_selection("cable:trace:waits"), ("cable:trace:waits", "cable:trace:second"))
+        actions = {trace.identity: trace.actions for trace in workspace.traces}
+        (sync,) = actions["cable:trace:waits"]
+        self.assertEqual((sync.enabled, sync.reason), (True, ""))
+        (first,) = actions["cable:trace:first"]
+        self.assertEqual((first.enabled, first.reason), (False, SYNC_DEPENDENCY_HELD))
+        self.assertEqual(workspace.sync_all.traces, ("cable:trace:second", "cable:trace:waits"))
+        self.assertEqual(workspace.sync_all.held_back, 1)
+
+    def test_a_selection_syncs_whenever_some_selection_with_the_unit_can_sync(self):
+        """Compare each closure with every subset of small random plans, so no owner choice hides a valid one."""
+        rng = Random(220)
+        dispositions = (Disposition.ACTIONABLE,) * 3 + (Disposition.BLOCKED,)
+        for _ in range(300):
+            pool = [f"cable:create:{n}" for n in range(5)]
+            dependencies = {
+                change: tuple(rng.sample([*pool[:n], "cable:delete:404"], rng.randint(0, min(2, n + 1))))
+                for n, change in enumerate(pool)
+            }
+            plan = ImportPlan(
+                units=tuple(
+                    _trace_unit(
+                        f"cable:trace:{n}",
+                        *(_change(c, *dependencies[c]) for c in rng.sample(pool, rng.randint(1, 2))),
+                        disposition=rng.choice(dispositions),
+                    )
+                    for n in range(5)
+                )
+            )
+            workspace = ReviewWorkspace(plan, self.actor)
+            identities = [unit.identity for unit in plan.units]
+            for unit in plan.units:
+                if unit.disposition != Disposition.ACTIONABLE:
+                    continue
+                others = [identity for identity in identities if identity != unit.identity]
+                possible = any(
+                    not workspace.cannot_sync((unit.identity, *subset))
+                    for size in range(len(others) + 1)
+                    for subset in combinations(others, size)
+                )
+                with self.subTest(plan=plan.to_dict(), unit=unit.identity):
+                    self.assertEqual(not workspace.cannot_sync(workspace.sync_selection(unit.identity)), possible)
 
     def _plan_reads(self, count):
         """Return how often one workspace load reads a plan of *count* traces that share one dependency."""

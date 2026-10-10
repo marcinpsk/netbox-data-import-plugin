@@ -1108,11 +1108,8 @@ class ReviewWorkspace:
                     owners = self._change_owners.get(dependency)
                     if dependency in carried or not owners:
                         continue
-                    # Identical changes are shared (section 4.4): prefer an owner that can sync.
-                    owner = next(
-                        (unit for unit in owners if self._presented_dispositions.get(unit) == Disposition.ACTIONABLE),
-                        owners[0],
-                    )
+                    # Identical changes are shared (section 4.4): prefer an owner whose own closure can sync.
+                    owner = next((unit for unit in owners if unit in self._executable_units), owners[0])
                     chosen.append(owner)
                     carried.update(owned.identity for owned in self._planned_changes(owner))
                     queue.append(owner)
@@ -1126,6 +1123,41 @@ class ReviewWorkspace:
             for change in unit.changes:
                 owners.setdefault(change.identity, []).append(unit.identity)
         return {identity: tuple(units) for identity, units in owners.items()}
+
+    @cached_property
+    def _executable_units(self) -> frozenset[str]:
+        """Return the largest set of actionable units in which some unit carries every dependency.
+
+        A unit outside it has no selection that `cannot_sync` accepts, so no closure may pick it as an owner.
+        """
+        units = {
+            identity
+            for identity, disposition in self._presented_dispositions.items()
+            if disposition == Disposition.ACTIONABLE
+        }
+        owners_left: dict[str, int] = {}
+        dependents: dict[str, list[str]] = {}
+        for identity in units:
+            for change in self._planned_changes(identity):
+                owners_left[change.identity] = owners_left.get(change.identity, 0) + 1
+                for dependency in change.dependencies:
+                    dependents.setdefault(dependency, []).append(identity)
+        stuck = [
+            identity
+            for dependency, waiting in dependents.items()
+            if not owners_left.get(dependency)
+            for identity in waiting
+        ]
+        while stuck:
+            identity = stuck.pop()
+            if identity not in units:
+                continue
+            units.remove(identity)
+            for change in self._planned_changes(identity):
+                owners_left[change.identity] -= 1
+                if not owners_left[change.identity]:
+                    stuck.extend(dependents.get(change.identity, ()))
+        return frozenset(units)
 
     @cached_property
     def _presented_dispositions(self) -> dict[str, str]:

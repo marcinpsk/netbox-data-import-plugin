@@ -141,8 +141,8 @@ max-complexity = 15
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 "*/migrations/*.py" = ["D"]
-# A test asserts, names throwaway credentials, shells out, and nests its context managers.
-"*/tests/*.py" = ["D", "S101", "S105", "S106", "S603", "S607", "SIM117", "B018", "PTH", "T20"]
+# A test asserts, names throwaway credentials, shells out, seeds random plans, and nests its context managers.
+"*/tests/*.py" = ["D", "S101", "S105", "S106", "S311", "S603", "S607", "SIM117", "B018", "PTH", "T20"]
 # Operator scripts print, and they read fixtures from paths this repository controls.
 ".devcontainer/**" = ["D", "S101", "S108", "S110", "S310", "T20", "PTH", "B904", "BLE001"]
 "scripts/**" = ["T20", "S101", "PTH"]
