@@ -379,7 +379,10 @@ different payloads or preconditions makes the plan invalid.
 Target-owned supporting changes stay inside their Synchronization Unit. A dependency on another
 Synchronization Unit must already be reconciled or be included explicitly. Selective synchronization
 never expands silently. The Review Workspace offers a visible `Sync with dependencies` selection for
-operator confirmation.
+operator confirmation. It offers that selection only when the engine accepts it: each unit in the
+closure is actionable and the closure carries each dependency. Otherwise the action is disabled with
+its reason, and the server refuses it before it queues a Job. Sync of all actionable traces applies
+the same check.
 
 Preview presents an accepted Import Plan. Execution regenerates the current plan from the same source
 and configuration before it writes. Selective execution compares the accepted unit and its explicit
@@ -392,7 +395,10 @@ replan rolls back both, the failed audit row stays, and the preview keeps its re
 ### 4.6 Transactions
 
 One outer database transaction covers one complete execution request. Final execution applies all
-currently actionable remaining units in that one transaction. Each selective execution also uses one
+currently actionable remaining units in that one transaction. The trace workspace's sync of all
+actionable traces is a selective execution, not final execution: it selects every actionable trace
+whose explicit dependency closure is actionable, with that closure, leaves out and counts each other
+trace, and keeps the preview (ADR 0004). Each selective execution also uses one
 transaction for its whole selection. No unit commits independently. Blocked, invalid, excluded, and
 no-op units never enter an execution transaction.
 
@@ -1662,7 +1668,8 @@ an HTMX redirect, and writes nothing. A page load is read-only. Re-read, discard
 and the return to a preview after a failed import are POST commands. After each successful command
 that advances the revision, the page content is rendered again, so the displayed plan and the claim
 always belong together. While a per-trace
-sync Job runs, the preview refuses decisions, re-reads, and syncs; after the Job ends, the operator
+sync Job, or the Job that syncs all actionable traces, runs, the preview refuses decisions, re-reads,
+and syncs; after the Job ends, the operator
 re-reads before the next decision.
 
 A drift warning strip appears when live NetBox differs from the reviewed snapshot, with a re-read

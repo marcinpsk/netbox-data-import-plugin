@@ -780,6 +780,7 @@ FLAT_COMMANDS = {
 }
 TRACE_COMMANDS = {
     "trace_sync": {"identity": "trace"},
+    "trace_sync_all": {},
     "trace_sync_cancel": {"job_id": "1"},
     "trace_cable_policy": {"cable_class": "Patch", "cable_type": "mmf-om4", "cable_profile": "single-1c1p"},
     "trace_segment_policy": {"segment": "0", "cable_type": "mmf-om4", "cable_profile": "single-1c1p"},

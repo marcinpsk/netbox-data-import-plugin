@@ -85,6 +85,14 @@ NetBox. Then the coordinator replans the preview to ready and advances the revis
 cancelled after the commit. A worker that already took the task skips it, because the Job is no
 longer enqueued.
 
+Amended 2026-10-09: a trace workspace command synchronizes all actionable traces. It is a selective
+execution, not the final import: it queues one Job for every actionable trace whose dependency
+closure can execute, with that closure, and it keeps the preview pending like a per-trace sync. A
+trace whose closure holds a unit that is not actionable, or a dependency no unit carries, is left out
+and counted on the page, so blocked and invalid traces never stop the others. The command refuses on
+drift and while another sync of the same source waits or runs, with the same checks as a per-trace
+sync. The final import still refuses while any unit is in error.
+
 ## Considered options
 
 - A lock around the session helpers: rejected. Response middleware saves the session after the lock
