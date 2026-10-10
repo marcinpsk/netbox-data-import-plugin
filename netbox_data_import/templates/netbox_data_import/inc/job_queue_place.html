@@ -1,0 +1,9 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
+{# Where a queued Job waits in its own queue, and whether a worker serves that queue. #}
+{% if status.position is not None %}<span>Position in the {{ status.job.queue_name }} queue: {{ status.position }}.</span>{% endif %}
+{% if status.workers %}
+  <span>Busy workers: {{ status.busy }} of {{ status.workers }}.</span>
+{% elif status.workers is not None %}
+  <span>No worker serves the {{ status.job.queue_name }} queue. The Job starts when a worker is available.</span>
+{% endif %}

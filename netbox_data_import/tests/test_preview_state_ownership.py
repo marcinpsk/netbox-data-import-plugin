@@ -67,6 +67,8 @@ COMMANDS = frozenset(
         "match_existing_device",
         "auto_match_devices",
         "trace_sync",
+        "trace_sync_all",
+        "trace_sync_cancel",
         "trace_cable_policy",
         "trace_segment_policy",
         "trace_resolve_termination",
@@ -89,6 +91,7 @@ CLAIMED_READS = frozenset(
         "trace_device_candidates",
         "trace_location_candidates",
         "trace_proposal",
+        "trace_sync_status",
     }
 )
 # A page load reads the preview and writes nothing.

@@ -34,6 +34,7 @@
   .ndi-busy { display: none; margin-right: .375rem; vertical-align: -.125em; }
   .htmx-request .ndi-busy { display: inline-block; }
   .ndi-ask-all { max-width: 14rem; }
+  .ndi-sync-status-text { flex: 1 1 16rem; min-width: 0; }
   .ndi-trace-status-create { background-color: var(--tblr-success) !important; color: #fff !important; }
   .ndi-trace-status-reuse { background-color: var(--tblr-secondary) !important; color: #fff !important; }
   .ndi-trace-status-conflict { background-color: var(--tblr-danger) !important; color: #fff !important; }
@@ -97,9 +98,6 @@
     {% else %}
       <span class="text-secondary">This workspace matches what NetBox holds now.</span>
     {% endif %}
-    {% if retained_sync_reason %}
-      <div class="ndi-trace-reason mt-1">{{ retained_sync_reason }}</div>
-    {% endif %}
   </div>
   <form id="traceWorkspaceRereadForm" method="post"
         action="{% url 'plugins:netbox_data_import:preview_reread' %}" class="ms-3"
@@ -110,11 +108,13 @@
     <input type="hidden" name="next" value="{{ reread_next }}">
     <button type="submit" id="traceWorkspaceReread"
             class="btn {% if drift or retained_sync_reason %}btn-warning{% else %}btn-secondary{% endif %}"
-            {% if sync_running %}disabled title="{{ retained_sync_reason }}"{% endif %}>
+            {% if sync_active %}disabled title="{{ retained_sync_reason }}"{% endif %}>
       Re-read from NetBox
     </button>
   </form>
 </div>
+
+{% if retained_sync_reason %}{% include "netbox_data_import/_trace_sync_status.html" %}{% endif %}
 
 <div class="card mb-3">
   <div class="card-body">
@@ -128,6 +128,16 @@
           <div><div class="text-secondary small">Invalid</div><div class="h2 mb-0">{{ summary.invalid }}</div></div>
           <div><div class="text-secondary small">No change</div><div class="h2 mb-0">{{ summary.no_change }}</div></div>
         </div>
+        {# One Job for every trace that can sync; the preview stays, so the operator resolves the rest after it. #}
+        <form class="ndi-trace-action ndi-sync-all mt-2" method="post" action="{% url sync_all.url_name %}">
+          {% csrf_token %}
+          {% include "netbox_data_import/inc/preview_claim.html" %}
+          <input type="hidden" name="trace" value="{{ selected_trace.identity }}">
+          <button type="submit" class="btn btn-sm btn-primary" data-trace-sync-all
+                  {% if not sync_all.enabled %}disabled aria-describedby="syncAllReason"{% endif %}>{{ sync_all.label }}</button>
+          {% if not sync_all.enabled %}<div class="ndi-trace-reason mt-1" id="syncAllReason">{{ sync_all.reason }}</div>{% endif %}
+          {% if sync_all_note %}<div class="ndi-trace-reason mt-1" data-trace-sync-all-note>{{ sync_all_note }}</div>{% endif %}
+        </form>
       </section>
       <section data-trace-summary-group="terminations">
         <h2 class="h4 mb-2">Terminations</h2>

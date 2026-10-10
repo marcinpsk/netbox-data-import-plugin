@@ -532,7 +532,7 @@ class AskAllQueueFailureTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, Cabl
         pushed = next(row for row in rows.values() if str(row.job.job_id) == pushes[0])
         self.assertEqual(pushed.status, ProposalStatus.QUEUED)
         self.assertEqual(pushed.job.status, JobStatusChoices.STATUS_PENDING)
-        self.assertIsNotNone(get_queue().fetch_job(pushes[0]))
+        self.assertIsNotNone(get_queue(pushed.job.queue_name).fetch_job(pushes[0]))
         others = [row for row in rows.values() if row.pk != pushed.pk]
         self.assertEqual(len(others), 2)
         self.assertEqual(

@@ -780,6 +780,8 @@ FLAT_COMMANDS = {
 }
 TRACE_COMMANDS = {
     "trace_sync": {"identity": "trace"},
+    "trace_sync_all": {},
+    "trace_sync_cancel": {"job_id": "1"},
     "trace_cable_policy": {"cable_class": "Patch", "cable_type": "mmf-om4", "cable_profile": "single-1c1p"},
     "trace_segment_policy": {"segment": "0", "cable_type": "mmf-om4", "cable_profile": "single-1c1p"},
     "trace_segment_policy:clear": {"segment": "0", "clear": "1"},
@@ -799,6 +801,7 @@ CLAIMED_READS = (
     "trace_device_candidates",
     "trace_location_candidates",
     "trace_proposal",
+    "trace_sync_status",
 )
 FORMATS = {
     "html": {},
@@ -1104,7 +1107,7 @@ class TraceQueueOrderingTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
         from dcim.models import Cable
         from django_rq import get_queue
         from netbox_data_import.models import PreviewState
-        from netbox_data_import.preview_coordinator import RETAINED_SYNC_BLOCK_REASON
+        from netbox_data_import.preview_coordinator import SYNC_QUEUED
         from netbox_data_import.tests.helpers import preview_claim
 
         queued = _UnpublishedQueueRequest(
@@ -1123,7 +1126,7 @@ class TraceQueueOrderingTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
                 reverse("plugins:netbox_data_import:preview_reread"),
                 preview_claim(self.client),
             )
-            self.assertContains(refused, RETAINED_SYNC_BLOCK_REASON, status_code=409)
+            self.assertContains(refused, SYNC_QUEUED, status_code=409)
             job.refresh_from_db()
             self.assertEqual(job.status, JobStatusChoices.STATUS_PENDING)
             self.assertEqual(_coordinator(self.client).revision, before.revision)

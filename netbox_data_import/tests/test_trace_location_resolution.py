@@ -1668,7 +1668,7 @@ class LocationMappingRefusalTest(LocationWorkspaceMixin, TestCase):
         self.assertFalse(TraceLocationResolution.objects.exists())
 
     def test_a_retained_sync_refuses_the_command(self):
-        from netbox_data_import.preview_coordinator import RETAINED_SYNC_BLOCK_REASON
+        from netbox_data_import.preview_coordinator import SYNC_QUEUED
 
         self.open_workspace()
         coordinator = preview_coordinator(self.client)
@@ -1678,7 +1678,7 @@ class LocationMappingRefusalTest(LocationWorkspaceMixin, TestCase):
         refused = self.post_mapping(location_id=self.hall.pk)
 
         self.assertEqual(refused.status_code, 409)
-        self.assertEqual(refused.json()["error"], RETAINED_SYNC_BLOCK_REASON)
+        self.assertEqual(refused.json()["error"], SYNC_QUEUED)
         self.assertFalse(TraceLocationResolution.objects.exists())
 
     def test_an_adapter_this_release_dropped_refuses_the_command(self):
