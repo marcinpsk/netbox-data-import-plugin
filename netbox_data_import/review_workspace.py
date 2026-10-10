@@ -1091,7 +1091,7 @@ class ReviewWorkspace:
         return MappingProxyType(sources)
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:
-        """Return the unit and every unit owning a change it depends on, transitively.
+        """Return the unit and, transitively, one owner of each change it depends on and does not carry.
 
         `merge_changes` refuses a selection whose dependency is absent, so a review command that
         synchronizes one trace has to carry the units its changes wait on.
@@ -1099,24 +1099,33 @@ class ReviewWorkspace:
         selected = self.plan.unit(identity)
         if selected is None or selected.disposition != Disposition.ACTIONABLE:
             return ()
-        chosen: list[str] = []
+        chosen = [identity]
+        carried = {change.identity for change in self._planned_changes(identity)}
         queue = [identity]
         while queue:
-            current = queue.pop()
-            if current in chosen:
-                continue
-            chosen.append(current)
-            for change in self._planned_changes(current):
+            for change in self._planned_changes(queue.pop()):
                 for dependency in change.dependencies:
-                    owner = self._change_owners.get(dependency)
-                    if owner is not None and owner not in chosen:
-                        queue.append(owner)
+                    owners = self._change_owners.get(dependency)
+                    if dependency in carried or not owners:
+                        continue
+                    # Identical changes are shared (section 4.4): prefer an owner that can sync.
+                    owner = next(
+                        (unit for unit in owners if self._presented_dispositions.get(unit) == Disposition.ACTIONABLE),
+                        owners[0],
+                    )
+                    chosen.append(owner)
+                    carried.update(owned.identity for owned in self._planned_changes(owner))
+                    queue.append(owner)
         return tuple(chosen)
 
     @cached_property
-    def _change_owners(self) -> dict[str, str]:
-        """Return the unit that owns each planned change, built once for every sync check."""
-        return {change.identity: unit.identity for unit in self.plan.units for change in unit.changes}
+    def _change_owners(self) -> dict[str, tuple[str, ...]]:
+        """Return every unit that carries each planned change, in plan order, built once for every sync check."""
+        owners: dict[str, list[str]] = {}
+        for unit in self.plan.units:
+            for change in unit.changes:
+                owners.setdefault(change.identity, []).append(unit.identity)
+        return {identity: tuple(units) for identity, units in owners.items()}
 
     @cached_property
     def _presented_dispositions(self) -> dict[str, str]:

@@ -125,6 +125,32 @@ class SyncAllSelectionTest(CableTopologyMixin, TestCase):
         (free,) = actions["cable:trace:free"]
         self.assertEqual((free.key, free.enabled, free.reason), ("sync", True, ""))
 
+    def test_a_dependency_the_trace_carries_itself_adds_no_other_trace(self):
+        """Identical changes are shared (section 4.4), so another owner of a carried change is not a dependency."""
+        plan = ImportPlan(
+            units=(
+                _trace_unit("cable:trace:a", _change("cable:delete:7"), _change("cable:create:a", "cable:delete:7")),
+                _trace_unit("cable:trace:b", _change("cable:delete:7"), _change("cable:create:b")),
+            )
+        )
+
+        self.assertEqual(ReviewWorkspace(plan, self.actor).sync_selection("cable:trace:a"), ("cable:trace:a",))
+
+    def test_a_shared_dependency_is_taken_from_an_owner_that_can_sync(self):
+        plan = ImportPlan(
+            units=(
+                _trace_unit("cable:trace:owner", _change("cable:delete:7")),
+                _trace_unit("cable:trace:blocked", _change("cable:delete:7"), disposition=Disposition.BLOCKED),
+                _trace_unit("cable:trace:waits", _change("cable:create:w", "cable:delete:7")),
+            )
+        )
+        workspace = ReviewWorkspace(plan, self.actor)
+
+        self.assertEqual(workspace.sync_selection("cable:trace:waits"), ("cable:trace:waits", "cable:trace:owner"))
+        (sync,) = next(trace.actions for trace in workspace.traces if trace.identity == "cable:trace:waits")
+        self.assertEqual((sync.enabled, sync.reason), (True, ""))
+        self.assertEqual(workspace.sync_all.traces, ("cable:trace:owner", "cable:trace:waits"))
+
     def _plan_reads(self, count):
         """Return how often one workspace load reads a plan of *count* traces that share one dependency."""
         plan = ImportPlan(
