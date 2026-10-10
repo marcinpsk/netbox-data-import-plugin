@@ -428,7 +428,8 @@ removes one. If that Location is deleted, hidden from you, or moved to another S
 shows a notice and keeps the preview.
 
 Each trace has **Sync with dependencies**, which synchronizes that trace and the traces whose
-changes it needs. **Sync N actionable traces**, under the trace counts, synchronizes every actionable
+changes it needs. It is disabled, with its reason, when one of those changes cannot sync.
+**Sync N actionable traces**, under the trace counts, synchronizes every actionable
 trace, with the traces their changes need, in one background Job. It leaves blocked, invalid and
 unchanged traces alone. A trace that needs a change from a trace that cannot sync is left out too.
 The line under the button says how many traces stay unsynced, and why. The button is disabled, with

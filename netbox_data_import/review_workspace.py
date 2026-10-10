@@ -26,7 +26,7 @@ from .models import (
     locked_profile_policy,
 )
 from .object_permissions import POLICY_WRITE_REFUSED, delete_permission_scoped_objects, save_permission_scoped_object
-from .plan import Diagnostic, Disposition, ImportPlan, Severity, SynchronizationUnit
+from .plan import Diagnostic, Disposition, ImportPlan, PlannedChange, Severity, SynchronizationUnit
 from .values import (
     effective_device_name,
     has_below_rack_position,
@@ -792,6 +792,7 @@ _SUMMARY_KEYS = {
 _SYNC_URL_NAME = "plugins:netbox_data_import:trace_sync"
 _SYNC_ALL_URL_NAME = "plugins:netbox_data_import:trace_sync_all"
 SYNC_ALL_NOTHING = "This preview has no actionable trace to synchronize."
+SYNC_DEPENDENCY_HELD = "This trace depends on a change that cannot synchronize."
 
 
 @dataclass(frozen=True)
@@ -858,6 +859,17 @@ class SyncAllSelection:
         if not total:
             return ""
         return f"{_count(total, 'trace')} {'stays' if total == 1 else 'stay'} unsynced: {', '.join(parts)}."
+
+
+def held_sync(action: TraceAction, reason: str) -> TraceAction:
+    """Refuse a sync action the view would reject, so the page cannot offer what the POST refuses."""
+    return replace(action, enabled=False, reason=reason) if reason and action.enabled else action
+
+
+def with_blocked_sync(trace: TraceWorkspaceUnit, reason: str) -> TraceWorkspaceUnit:
+    """Hold the trace's own sync action for *reason*."""
+    actions = tuple(held_sync(action, reason) if action.key == "sync" else action for action in trace.actions)
+    return replace(trace, actions=actions)
 
 
 def _termination_model_name(label: str) -> str:
@@ -1055,7 +1067,15 @@ class ReviewWorkspace:
 
         Cached because one page reads it twice, and each build reserializes every change.
         """
-        return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self._presentation_units if _states_a_trace(unit))
+        traces = []
+        for unit in self._presentation_units:
+            if not _states_a_trace(unit):
+                continue
+            trace = TraceWorkspaceUnit.from_unit(unit)
+            if unit.disposition == Disposition.ACTIONABLE and self.cannot_sync(self.sync_selection(unit.identity)):
+                trace = with_blocked_sync(trace, SYNC_DEPENDENCY_HELD)
+            traces.append(trace)
+        return tuple(traces)
 
     @cached_property
     def termination_sources(self) -> MappingProxyType:
@@ -1076,11 +1096,9 @@ class ReviewWorkspace:
         `merge_changes` refuses a selection whose dependency is absent, so a review command that
         synchronizes one trace has to carry the units its changes wait on.
         """
-        units = {unit.identity: unit for unit in self.plan.units}
-        selected = units.get(identity)
+        selected = self.plan.unit(identity)
         if selected is None or selected.disposition != Disposition.ACTIONABLE:
             return ()
-        owner_of = {change.identity: unit.identity for unit in self.plan.units for change in unit.changes}
         chosen: list[str] = []
         queue = [identity]
         while queue:
@@ -1088,12 +1106,42 @@ class ReviewWorkspace:
             if current in chosen:
                 continue
             chosen.append(current)
-            for change in units[current].changes:
+            for change in self._planned_changes(current):
                 for dependency in change.dependencies:
-                    owner = owner_of.get(dependency)
+                    owner = self._change_owners.get(dependency)
                     if owner is not None and owner not in chosen:
                         queue.append(owner)
         return tuple(chosen)
+
+    @cached_property
+    def _change_owners(self) -> dict[str, str]:
+        """Return the unit that owns each planned change, built once for every sync check."""
+        return {change.identity: unit.identity for unit in self.plan.units for change in unit.changes}
+
+    @cached_property
+    def _presented_dispositions(self) -> dict[str, str]:
+        """Return each unit's disposition as the viewer sees it."""
+        return {unit.identity: unit.disposition for unit in self._presentation_units}
+
+    def _planned_changes(self, identity: str) -> tuple[PlannedChange, ...]:
+        """Return the changes of one plan unit, read from the plan's own index."""
+        unit = self.plan.unit(identity)
+        if unit is None:
+            raise KeyError(identity)
+        return unit.changes
+
+    def cannot_sync(self, selection: tuple[str, ...]) -> bool:
+        """Return whether the engine refuses *selection*.
+
+        It refuses a unit the viewer does not see as actionable, and a dependency that no unit in the
+        selection carries. Sync all, the per-trace action and its POST all ask this one question.
+        """
+        carried = {change.identity for identity in selection for change in self._planned_changes(identity)}
+        return not all(
+            self._presented_dispositions.get(identity) == Disposition.ACTIONABLE
+            and all(set(change.dependencies) <= carried for change in self._planned_changes(identity))
+            for identity in selection
+        )
 
     @cached_property
     def sync_all(self) -> SyncAllSelection:
@@ -1102,8 +1150,6 @@ class ReviewWorkspace:
         The engine refuses a unit that is not actionable and a dependency the selection lacks, so a
         trace that would need either is left out and counted, and never stops the others.
         """
-        presented = {unit.identity: unit.disposition for unit in self._presentation_units}
-        changes = {unit.identity: unit.changes for unit in self.plan.units}
         traces: list[str] = []
         chosen: set[str] = set()
         held_back = 0
@@ -1111,12 +1157,7 @@ class ReviewWorkspace:
             if trace.disposition != Disposition.ACTIONABLE:
                 continue
             closure = self.sync_selection(trace.identity)
-            carried = {change.identity for identity in closure for change in changes[identity]}
-            if closure and all(
-                presented.get(identity) == Disposition.ACTIONABLE
-                and all(set(change.dependencies) <= carried for change in changes[identity])
-                for identity in closure
-            ):
+            if closure and not self.cannot_sync(closure):
                 traces.append(trace.identity)
                 chosen.update(closure)
             else:

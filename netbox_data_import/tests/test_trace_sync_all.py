@@ -3,6 +3,7 @@
 """Sync all actionable traces: one workspace command queues every trace that can sync, and keeps the preview."""
 
 from contextlib import nullcontext
+from dataclasses import replace
 from io import BytesIO
 
 from core.choices import JobStatusChoices
@@ -15,7 +16,7 @@ from netbox_data_import.jobs import ImportJobRunner
 from netbox_data_import.models import ExecutionOutcome, ImportExecution, ImportProfile, PreviewState, SourceDocument
 from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
 from netbox_data_import.preview_coordinator import SYNC_FINISHED, SYNC_QUEUED
-from netbox_data_import.review_workspace import SYNC_ALL_NOTHING, ReviewWorkspace
+from netbox_data_import.review_workspace import SYNC_ALL_NOTHING, SYNC_DEPENDENCY_HELD, ReviewWorkspace
 from netbox_data_import.tests.helpers import (
     cables_on,
     preview_claim,
@@ -49,6 +50,31 @@ def _change(identity, *dependencies):
     )
 
 
+HELD = ("cable:trace:waits", "cable:trace:dangling")
+
+
+def _held_plan():
+    """Return a trace waiting on a blocked owner, a trace with a dangling dependency, and a free trace."""
+    return ImportPlan(
+        units=(
+            _trace_unit("cable:trace:waits", _change("cable:create:w", "cable:delete:9")),
+            _trace_unit("cable:trace:owner", _change("cable:delete:9"), disposition=Disposition.BLOCKED),
+            _trace_unit("cable:trace:dangling", _change("cable:create:d", "cable:delete:404")),
+            _trace_unit("cable:trace:free", _change("cable:create:f")),
+        )
+    )
+
+
+class _CountingUnits(tuple):
+    """A plan's units that count each full read of the plan."""
+
+    iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        return super().__iter__()
+
+
 class SyncAllSelectionTest(CableTopologyMixin, TestCase):
     """The selection is explicit: each trace that can sync, and every unit its changes wait on."""
 
@@ -78,16 +104,7 @@ class SyncAllSelectionTest(CableTopologyMixin, TestCase):
 
     def test_a_trace_whose_dependency_cannot_sync_is_left_out_and_counted(self):
         """The engine refuses a selection with a unit that is not actionable, so the trace cannot join it."""
-        plan = ImportPlan(
-            units=(
-                _trace_unit("cable:trace:waits", _change("cable:create:w", "cable:delete:9")),
-                _trace_unit("cable:trace:owner", _change("cable:delete:9"), disposition=Disposition.BLOCKED),
-                _trace_unit("cable:trace:dangling", _change("cable:create:d", "cable:delete:404")),
-                _trace_unit("cable:trace:free", _change("cable:create:f")),
-            )
-        )
-
-        selection = ReviewWorkspace(plan, self.actor).sync_all
+        selection = ReviewWorkspace(_held_plan(), self.actor).sync_all
 
         self.assertEqual(selection.traces, ("cable:trace:free",))
         self.assertEqual(selection.units, ("cable:trace:free",))
@@ -97,6 +114,40 @@ class SyncAllSelectionTest(CableTopologyMixin, TestCase):
             selection.unsynced_note,
             "3 traces stay unsynced: 1 blocked, 2 with a dependency that cannot sync.",
         )
+
+    def test_a_trace_whose_dependency_cannot_sync_shows_its_own_sync_disabled(self):
+        """The per-trace command uses the same check as sync all, so it cannot offer what the engine refuses."""
+        actions = {trace.identity: trace.actions for trace in ReviewWorkspace(_held_plan(), self.actor).traces}
+
+        for identity in HELD:
+            (sync,) = actions[identity]
+            self.assertEqual((sync.key, sync.enabled, sync.reason), ("sync", False, SYNC_DEPENDENCY_HELD))
+        (free,) = actions["cable:trace:free"]
+        self.assertEqual((free.key, free.enabled, free.reason), ("sync", True, ""))
+
+    def _plan_reads(self, count):
+        """Return how often one workspace load reads a plan of *count* traces that share one dependency."""
+        plan = ImportPlan(
+            units=(
+                _trace_unit("cable:trace:0", _change("cable:delete:0")),
+                *(
+                    _trace_unit(f"cable:trace:{n}", _change(f"cable:create:{n}", "cable:delete:0"))
+                    for n in range(1, count)
+                ),
+            )
+        )
+        units = _CountingUnits(plan.units)
+        # ImportPlan copies the tuple it receives, so the counter replaces the copy.
+        object.__setattr__(plan, "units", units)
+        workspace = ReviewWorkspace(plan, self.actor)
+
+        self.assertEqual(len(workspace.sync_all.traces), count)
+        self.assertEqual(len(workspace.traces), count)
+        return units.iterations
+
+    def test_a_workspace_load_reads_the_plan_a_fixed_number_of_times(self):
+        """Each trace's sync check reuses one index of the plan instead of rebuilding it per trace."""
+        self.assertEqual(self._plan_reads(30), self._plan_reads(3))
 
     def test_nothing_to_select_names_no_unsynced_trace(self):
         plan = ImportPlan(units=(_trace_unit("cable:trace:same", disposition=Disposition.NO_OP),))
@@ -167,6 +218,57 @@ class _SyncAllMixin:
 
     def import_jobs(self):
         return Job.objects.filter(data__job_type=ImportJobRunner.job_type)
+
+
+class HeldTraceSyncTest(_SyncAllMixin, IsolatedRQQueueTestMixin, CableTopologyMixin, TestCase):
+    """A trace whose dependency cannot sync shows its sync disabled, and its POST queues no Job."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_login(self.actor)
+        self.upload(direct_path())
+        uploaded = preview_coordinator(self.client)
+        planned = ImportPlan.from_dict(uploaded.plan)
+        # The coordinator refuses a plan made for another preview, so the synthetic plan keeps these inputs.
+        held = replace(
+            _held_plan(),
+            actor=planned.actor,
+            source_fingerprint=planned.source_fingerprint,
+            profile_fingerprint=planned.profile_fingerprint,
+            planning_context=planned.planning_context,
+        )
+        seed_preview(
+            self.client,
+            profile=self.profile,
+            document=SourceDocument.objects.get(pk=uploaded.source_document_id),
+            plan=held,
+            context=uploaded.context,
+        )
+
+    def test_the_page_disables_the_held_sync_and_states_why(self):
+        for identity in HELD:
+            page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), {"trace": identity})
+
+            self.assertEqual(page.status_code, 200)
+            self.assertEqual(page.context["selected_trace"].identity, identity)
+            self.assertRegex(page.content.decode(), r'data-trace-action="sync"\s+disabled')
+            self.assertContains(page, SYNC_DEPENDENCY_HELD)
+
+    def test_the_post_is_refused_before_a_job_exists(self):
+        for identity in HELD:
+            refused = self.client.post(
+                reverse("plugins:netbox_data_import:trace_sync"),
+                {**preview_claim(self.client), "identity": identity},
+                **JSON,
+            )
+
+            self.assertEqual((refused.status_code, refused.json()["error"]), (400, SYNC_DEPENDENCY_HELD))
+        self.assertFalse(self.import_jobs().exists())
+        self.assertEqual(preview_coordinator(self.client).state, PreviewState.READY)
 
 
 class SyncAllExecutionTest(_SyncAllMixin, IsolatedRQQueueTestMixin, CableTopologyMixin, TransactionTestCase):

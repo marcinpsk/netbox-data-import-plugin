@@ -379,7 +379,10 @@ different payloads or preconditions makes the plan invalid.
 Target-owned supporting changes stay inside their Synchronization Unit. A dependency on another
 Synchronization Unit must already be reconciled or be included explicitly. Selective synchronization
 never expands silently. The Review Workspace offers a visible `Sync with dependencies` selection for
-operator confirmation.
+operator confirmation. It offers that selection only when the engine accepts it: each unit in the
+closure is actionable and the closure carries each dependency. Otherwise the action is disabled with
+its reason, and the server refuses it before it queues a Job. Sync of all actionable traces applies
+the same check.
 
 Preview presents an accepted Import Plan. Execution regenerates the current plan from the same source
 and configuration before it writes. Selective execution compares the accepted unit and its explicit
