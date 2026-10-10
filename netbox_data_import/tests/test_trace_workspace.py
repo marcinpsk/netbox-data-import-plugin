@@ -356,6 +356,21 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
         self.assertIn("PANEL-1 R1 &rarr; PANEL-2 R1", proposed)
         self.assertIn("PANEL-2 F1 &rarr; DEV-B eth1", proposed)
 
+    def test_the_three_topology_panels_start_collapsed_in_one_group(self):
+        """The panels are long and rarely read, so one closed group holds all three and counts the segments."""
+        response = self.open_workspace(patched_path())
+
+        page = response.content.decode()
+        group = re.search(r"<details\b[^>]*data-trace-topology[^>]*>.*?</details>", page, re.DOTALL)
+        self.assertIsNotNone(group)
+        self.assertNotRegex(group.group().split(">", 1)[0], r"\bopen\b")
+        for panel in ("Source evidence", "Current NetBox topology", "Proposed physical topology"):
+            self.assertIn(panel, group.group())
+        self.assertRegex(group.group(), r"<summary>\s*<span class=\"h3\">Topology</span>")
+        self.assertEqual(response.context["topology_summary"], "3 segments: 3 create")
+        self.assertIn("3 segments: 3 create</span>", group.group())
+        self.assertIn("netbox_data_import/js/trace_topology.js", page)
+
     def test_a_longer_proposed_topology_does_not_add_device_reads(self):
         def rendered_device_reads(block):
             self.open_workspace(block)

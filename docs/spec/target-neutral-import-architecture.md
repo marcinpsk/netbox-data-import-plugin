@@ -1580,7 +1580,9 @@ The workspace is one page per preview. Layout:
 - **Trace list** with a disposition badge per Source Trace.
 - **Three panels** for the selected trace: source evidence (From and To plus the ordered Segment
   Evidence with implied Pass-Through Claims), current NetBox topology, and proposed physical topology
-  with a per-segment status of create, reuse existing, delete Logical Cable, or conflict.
+  with a per-segment status of create, reuse existing, delete Logical Cable, or conflict. The three
+  panels sit side by side in one Topology group, which is collapsed by default and counts the
+  segments by status. The browser remembers whether the viewer left the group open.
 - **Cable policy** for the selected trace: the policy in force on each stated CableClass, editable
   in place, and the policy in force on each resolved segment with the action that forces one segment
   to its own Cable Type and Cable Profile.

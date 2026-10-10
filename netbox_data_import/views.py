@@ -3597,6 +3597,15 @@ def _segment_policy_forms(profile, trace, viewer) -> list:
     return forms
 
 
+def _topology_summary(segments) -> str:
+    """Count the proposed segments by status, for the line the collapsed topology group shows."""
+    if not segments:
+        return "No segment planned"
+    counts = Counter(segment["status"] or "not planned" for segment in segments)
+    statuses = ", ".join(f"{count} {status}" for status, count in counts.items())
+    return f"{len(segments)} segment{pluralize(len(segments))}: {statuses}"
+
+
 def _segment_override_reason(segment) -> str:
     """Return why one segment cannot take an override now, or an empty string when it can."""
     if not segment["segment_key"]:
@@ -3885,6 +3894,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
                 "settled_terminations": settled,
                 "cable_policy_forms": cable_policy_forms,
                 "segment_policy_forms": segment_policy_forms,
+                "topology_summary": _topology_summary(segment_policy_forms),
                 "summary": summary,
                 "ask_all_reason": ask_all_reason,
                 "sync_all": held_sync(workspace.sync_all.action, block_reason),
