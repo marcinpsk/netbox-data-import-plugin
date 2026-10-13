@@ -97,7 +97,9 @@ class _QueuedSyncMixin:
 
     def ask_all(self):
         """Ask AI about every open termination and return the proposal Jobs it queued."""
-        with override_plugins_config(netbox_data_import=BACKEND):
+        # Two request slots, so each of the two proposals gets its Job in the low queue at once.
+        two_slots = {**BACKEND, "inference_backend": {**FALLBACK, "max_concurrent_requests": 2}}
+        with override_plugins_config(netbox_data_import=two_slots):
             response = self.post("trace_request_all_proposals", {}, headers=HTMX)
         self.assertEqual(response.status_code, 302, response.content[:500])
         jobs = list(ResolutionProposalJob.get_jobs().order_by("pk"))

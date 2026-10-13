@@ -385,6 +385,7 @@ class BackgroundRefusalTest(TransactionTestCase):
 
     def test_a_refused_proposal_job_fails_its_proposal_and_frees_the_field(self):
         from netbox_data_import.field_keys import SELECT_TERMINATION_TASK
+        from netbox_data_import.proposal_dispatch import dispatch_proposals
         from netbox_data_import.proposal_tasks import CandidateSnapshot
         from netbox_data_import.resolution_proposals import request_proposal
 
@@ -406,13 +407,14 @@ class BackgroundRefusalTest(TransactionTestCase):
         job = Job.objects.create(name="Proposal in a branch", job_id=uuid.uuid4(), user=self.user)
 
         queries = self._plugin_queries_in_branch(partial(ResolutionProposalJob.handle, job, proposal_id=proposal.pk))
+        # After the refusal the Job hands its request slot on, which is the dispatcher's own reads alone.
+        dispatcher = self._plugin_queries_in_branch(dispatch_proposals)
 
         proposal.refresh_from_db()
         job.refresh_from_db()
         self.assertEqual((proposal.status, proposal.failure_reason), ("failed", "branch_active"))
-        self.assertEqual(
-            [query.split(" SET ")[0] for query in queries], ['UPDATE "netbox_data_import_resolutionproposal"']
-        )
+        self.assertEqual(queries[0].split(" SET ")[0], 'UPDATE "netbox_data_import_resolutionproposal"')
+        self.assertEqual(queries[1:], dispatcher)
         self.assertEqual(job.status, JobStatusChoices.STATUS_FAILED)
         self.assertIn(branching.refusal_message(self.branch), [entry["message"] for entry in job.log_entries])
         self.assertNotEqual(ask().pk, proposal.pk)

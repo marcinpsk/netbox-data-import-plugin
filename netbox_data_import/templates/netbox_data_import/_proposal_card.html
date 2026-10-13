@@ -4,7 +4,7 @@
   <div role="status" aria-live="polite">
     <span class="badge ndi-proposal-badge" data-proposal-badge>{{ termination.proposal.badge }}</span>
     <span data-proposal-progress {% if not termination.proposal.pending %}hidden{% endif %}>
-      <i class="mdi mdi-loading mdi-spin" aria-hidden="true"></i> Waiting for the backend...
+      <i class="mdi mdi-loading mdi-spin" aria-hidden="true"></i> {{ termination.proposal.progress }}
     </span>
     <div class="text-secondary small" data-proposal-job
          {% if not termination.proposal.job_status %}hidden{% endif %}>{{ termination.proposal.job_status }}</div>

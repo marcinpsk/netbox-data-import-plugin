@@ -1111,6 +1111,34 @@ worker makes it and the request does not carry it.
 The job issues one Inference Backend request at a time through the existing NetBox job system. Vault
 credentials resolve in the worker.
 
+A request creates the queued row without a Job. A dispatcher gives the oldest waiting rows, by
+creation time and then id, one Job each while the active backend has a free request slot; the
+backend's `max_concurrent_requests` is the number of slots. A slot is in use while a proposal's Job
+is pending, scheduled, or running, whatever the proposal's status, because the worker of a cancelled
+row can still be inside its backend call. The dispatcher holds a PostgreSQL transaction-scoped
+advisory lock, so two dispatchers cannot fill the same slot. It runs after each request commits,
+after each proposal Job ends however it ended, and on card reads, which are the backstop for a
+worker that was killed. All card reads share at most one dispatch every 5 seconds, through a key in
+the NetBox cache, so many pending cards do not queue on the lock. No worker waits for a slot. A
+worker holds its Job lock, the same session advisory lock that import Jobs use, for the whole
+delivery. Before it fills slots, the dispatcher tries that lock for each slot without waiting. When
+a worker holds it, the slot stays in use, whatever the queue or the clock say. A free lock alone is
+no proof that the worker stopped, because PostgreSQL also releases it when it ends the worker's
+session. So the dispatcher frees a slot only when the lock is free and the queue task is lost: the
+queue no longer holds it as queued, started or deferred, after the push grace. A worker that was
+killed is therefore freed when the queue's own cleanup marks its started task failed. The dispatcher
+then marks the Job errored and fails its active proposal with `queue_unavailable`, because the job
+system lost the run, not the backend. It never reads the backend's timeouts to free a slot. A
+running Job that an operator deletes leaves slot accounting, because the proposal's Job link is
+cleared. A redelivered Job whose proposal an earlier delivery of the same Job claimed fails that
+proposal with `queue_unavailable`, and the Job ends failed. When no backend resolves, each waiting
+row fails with the reason its Job would record. A queue push that fails after the dispatch commits
+fails that attempt with `queue_unavailable`.
+
+Each proposal Job is enqueued with a time limit derived from the active backend: three attempts of the
+backend connect and read timeouts plus the Vault connect and read timeouts, the longest backoff
+before each retry (the 60-second `Retry-After` cap), and a 30-second margin.
+
 Transient typed failures (rate limit, temporary backend failure, timeout, credential infrastructure
 failure) retry automatically at most twice with backoff inside the same proposal, then fail.
 Non-transient failures (backend authentication failure, invalid configuration, malformed response,
@@ -1272,6 +1300,7 @@ A plugin-level model holds named Inference Backend rows with at most one enabled
 | `response_mode` | Required | `prompt_json` by default. `json_object` and `json_schema` are allowed only after an operator verifies the exact backend and model. |
 | `credential_reference` | Required | A typed Vault KV v2 reference |
 | `connect_timeout`, `read_timeout` | Required | Finite transport limits. Defaults: 5 seconds and 60 seconds (spec default). |
+| `max_concurrent_requests` | Required | How many Resolution Proposals may call this backend at the same time (section 7.5). A whole number of 1 or more. Default: 1. |
 | `enabled` | Required | Whether Ask AI may use this row |
 
 The active Inference Backend is the enabled database row. The `inference_backend` plugin setting is
@@ -1286,7 +1315,7 @@ All three settings live under the plugin's `PLUGINS_CONFIG` entry.
 | Setting | Shape |
 | --- | --- |
 | `inference_backend_origin_allowlist` | A list of exact origin strings, each with scheme, host, and port, for example `https://backend.example.invalid:443`. No wildcards, no path component, no bare host. |
-| `inference_backend` | The file-backed fallback: one mapping holding exactly the `InferenceBackend` row fields minus the backend key and `enabled`, namely `display_name`, `adapter_type`, `api_root`, `model`, `authentication`, `response_mode`, `credential_reference`, `connect_timeout`, and `read_timeout`. Its backend key is the fixed value `file-fallback`. |
+| `inference_backend` | The file-backed fallback: one mapping holding exactly the `InferenceBackend` row fields minus the backend key and `enabled`, namely `display_name`, `adapter_type`, `api_root`, `model`, `authentication`, `response_mode`, `credential_reference`, `connect_timeout`, and `read_timeout`, plus the optional `max_concurrent_requests`, which defaults to 1 when omitted. Its backend key is the fixed value `file-fallback`. |
 | `vault` | A mapping with `address` (Vault Proxy or Vault server address), `auth_method`, `namespace` (optional, Vault Enterprise only), `ca_bundle` (optional path), `connect_timeout`, and `read_timeout`. |
 
 `vault.auth_method` has exactly two permitted values:

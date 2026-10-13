@@ -1383,6 +1383,11 @@ class InferenceBackend(NetBoxModel):
     read_timeout = models.PositiveIntegerField(
         default=60, validators=[MinValueValidator(_inference_settings.TIMEOUT_MIN)]
     )
+    max_concurrent_requests = models.PositiveIntegerField(
+        default=_inference_settings.MAX_CONCURRENT_REQUESTS_DEFAULT,
+        validators=[MinValueValidator(_inference_settings.MAX_CONCURRENT_REQUESTS_MIN)],
+        help_text="How many Resolution Proposals may call this backend at the same time. The others wait.",
+    )
     enabled = models.BooleanField(default=False, help_text="Whether Ask AI may use this backend.")
 
     class Meta:
@@ -1568,7 +1573,7 @@ class ResolutionProposal(DigestIndexedMixin, models.Model):
     response_diagnostic = models.JSONField(null=True, blank=True)
 
     failure_reason = models.CharField(max_length=50, choices=ProposalFailureReason.CHOICES, blank=True, default="")
-    # Set after the row commits, because the enqueue needs the id the request writes.
+    # Null while the row waits for a request slot; the dispatcher sets it when it enqueues the Job.
     job = models.OneToOneField(
         "core.Job", on_delete=models.SET_NULL, null=True, blank=True, related_name="resolution_proposal"
     )

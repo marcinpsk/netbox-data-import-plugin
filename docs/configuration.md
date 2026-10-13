@@ -144,6 +144,40 @@ the exact model id manually.
 The foreground test has one overall time limit. The limit is the backend connect timeout plus its read
 timeout. Credential resolution, model discovery, and the completion request share this time.
 
+## Ask AI concurrent requests
+
+**Max concurrent requests** on the AI backend sets how many Resolution Proposals can call the backend
+at the same time. The default is 1. The value must be a whole number of 1 or more. Many local
+inference servers answer one request after another, so more concurrent requests only make each
+request wait longer, and requests then fail with a timeout. Increase the value only for a backend
+that answers requests in parallel.
+
+The file fallback takes the same value as the optional `max_concurrent_requests` key. When you omit
+the key, the value is 1. An invalid value stops startup.
+
+```python
+PLUGINS_CONFIG = {
+    "netbox_data_import": {
+        "inference_backend": {
+            # ...the other backend fields...
+            "max_concurrent_requests": 2,
+        },
+    },
+}
+```
+
+A proposal that cannot get a request slot waits as **Queued**, and its card says that it waits for a
+free AI backend slot. The plugin starts the next waiting proposal, oldest first, when a proposal job
+ends. A waiting card also checks for a free slot each time it refreshes. A slot stays in use while
+its job can still run, also after you cancel its proposal, because the worker can still be inside
+its backend call. A slot is freed only when no worker holds a lock on its job and the RQ queue no
+longer has its task. When an RQ worker is killed, RQ marks its task failed once the worker's heartbeat
+expires, and the plugin then frees the slot and fails the proposal with `queue_unavailable`.
+
+Each proposal job gets a time limit from the active backend: three attempts of the connect timeout,
+the read timeout and the Vault connect and read timeouts, plus the longest wait between attempts
+(60 seconds each), plus 30 seconds. A higher read timeout therefore gives the job more time too.
+
 ## Ask AI candidates per request
 
 `inference_proposal_candidate_limit` sets how many candidates one Ask AI request sends to the
@@ -177,8 +211,11 @@ workspace.
 It skips a termination that has an active proposal, no resolved Device, no eligible candidates, or
 source spellings that disagree, and it reports how many it asked about and why it skipped the rest.
 Ask AI and **Ask AI for all** both refuse when no Inference Backend is enabled or configured as a
-fallback. No setting limits how many it asks about: each request is one background job, and the RQ workers
-run them in turn.
+fallback. Each proposal gets its own background job, but only as many jobs run at the same time as
+the backend's **Max concurrent requests** allows. The other proposals wait for a free slot (see
+[Ask AI concurrent requests](#ask-ai-concurrent-requests)). If no backend is available when a
+waiting proposal would start, the proposal fails with the reason its job would record, for example
+`invalid_configuration`.
 
 Proposal jobs wait in NetBox's `low` queue. A worker takes jobs from the `high` and `default` queues
 first, so an import or a trace sync that you queue after many proposals does not wait for them. A
@@ -426,6 +463,10 @@ Location.
 The Location you select on the import page also ranks candidates, after the source hints, and never
 removes one. If that Location is deleted, hidden from you, or moved to another Site, the workspace
 shows a notice and keeps the preview.
+
+Above the trace list, one button per disposition, for example **blocked 4**, filters the list. Select
+more than one to show the traces of each. Select none to show all traces. The trace that is open
+always stays in the list. Your browser keeps the filter for every preview.
 
 Each trace has **Sync with dependencies**, which synchronizes that trace and the traces whose
 changes it needs. It is disabled, with its reason, when one of those changes cannot sync.

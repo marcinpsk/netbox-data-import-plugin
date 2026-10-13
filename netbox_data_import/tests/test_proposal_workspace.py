@@ -372,16 +372,31 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
         self.assertIn("Errored", card["job_status"])
         self.assertIn("ended without recording a result", card["job_note"])
 
-    def test_a_card_says_when_no_background_job_is_recorded(self):
-        """The job row can go, and a queued attempt with no job is never going to run."""
+    def test_a_card_says_when_a_running_attempt_has_no_background_job(self):
+        """The job row can go, and a running attempt with no job is never going to answer."""
         self.operator()
         proposal = self.request_proposal()
+        self.assertTrue(claim_proposal(proposal.pk))
         Job.objects.filter(pk=proposal.job_id).delete()
 
         card = self.card()
 
         self.assertIn("none recorded", card["job_status"])
         self.assertIn("No background job is recorded", card["job_note"])
+
+    def test_a_queued_attempt_whose_job_was_deleted_gets_a_new_one_at_the_next_poll(self):
+        """A queued row without a Job is one the dispatcher has not started, so the poll starts it."""
+        self.operator()
+        proposal = self.request_proposal()
+        Job.objects.filter(pk=proposal.job_id).delete()
+
+        card = self.card()
+
+        proposal.refresh_from_db()
+        self.assertIsNotNone(proposal.job_id)
+        self.assertEqual(card["progress"], "Waiting for the backend...")
+        self.assertIn("Pending", card["job_status"])
+        self.assertEqual(card["job_note"], "")
 
     def test_a_settled_card_reports_no_background_job(self):
         """Once the attempt has its answer the job is spent, so the line would only be noise."""

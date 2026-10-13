@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from functools import cached_property
@@ -1239,6 +1240,12 @@ class ReviewWorkspace:
             invalid=sum(1 for trace in self.traces if trace.disposition == Disposition.INVALID),
             held_back=held_back,
         )
+
+    @property
+    def trace_dispositions(self) -> tuple[tuple[str, int], ...]:
+        """Return each disposition the trace list holds with its trace count, in summary order."""
+        counts = Counter(trace.disposition for trace in self.traces)
+        return tuple((disposition, counts[disposition]) for disposition in _SUMMARY_KEYS if counts[disposition])
 
     @property
     def trace_summary(self) -> dict[str, int]:

@@ -27,6 +27,7 @@ __all__ = [
     "claim_proposal",
     "complete_proposal",
     "decide_proposal",
+    "fail_abandoned_proposal",
     "fail_proposal",
     "fail_queued_proposal",
     "latest_proposal",
@@ -133,7 +134,7 @@ def next_page_offset(*, profile, task_type, field_key, inventory) -> int:
 
 
 def record_proposal_job(proposal_id, job) -> None:
-    """Bind the enqueued Job to its attempt. A blind UPDATE, so a worker already running wins."""
+    """Bind the enqueued Job to its attempt, in the dispatch transaction before the queue push."""
     ResolutionProposal.objects.filter(pk=proposal_id).update(job=job)
 
 
@@ -197,6 +198,16 @@ def fail_proposal(proposal_id, *, reason, response_diagnostic=None, backend_meta
         response_diagnostic=response_diagnostic,
         backend_metadata=backend_metadata,
     )
+
+
+def fail_abandoned_proposal(proposal_id, *, job) -> bool:
+    """Fail a running row that an earlier delivery of *job* claimed and never finished."""
+    moved = ResolutionProposal.objects.filter(pk=proposal_id, status=ProposalStatus.RUNNING, job=job).update(
+        status=ProposalStatus.FAILED,
+        failure_reason=ProposalFailureReason.QUEUE_UNAVAILABLE,
+        last_updated=timezone.now(),
+    )
+    return moved == 1
 
 
 def fail_queued_proposal(proposal_id, *, reason) -> bool:
