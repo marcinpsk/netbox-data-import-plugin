@@ -53,6 +53,7 @@ _PROGRESS_REPORT_INTERVAL = 25
 logger = logging.getLogger(__name__)
 
 IMPORT_TASK_LOST = "The import task is no longer queued or running. Re-read its preview to recover."
+PROPOSAL_RUN_ABANDONED = "An earlier delivery of this Job claimed its proposal and ended without a result."
 QUEUE_PUSH_GRACE = timedelta(minutes=1)
 QUEUE_UNREADABLE = "The job queue cannot be read now."
 
@@ -472,7 +473,7 @@ class ResolutionProposalJob(OwnedJobRunner):
     def run(self, proposal_id):
         """Resolve backend configuration on the worker after claiming the proposal."""
         from .proposal_jobs import run_proposal
-        from .resolution_proposals import fail_proposal
+        from .resolution_proposals import fail_abandoned_proposal, fail_proposal
 
         try:
             branching.fail_job_in_branch(self)
@@ -480,7 +481,12 @@ class ResolutionProposalJob(OwnedJobRunner):
             # The row is main-only, so this write lands in main and frees the field for a new request.
             fail_proposal(proposal_id, reason=ProposalFailureReason.BRANCH_ACTIVE)
             raise
-        return run_proposal(proposal_id)
+        if run_proposal(proposal_id):
+            return
+        # The Job lock makes this the only delivery, so a row this Job claimed earlier has no worker left.
+        if fail_abandoned_proposal(proposal_id, job=self.job):
+            self.logger.error(PROPOSAL_RUN_ABANDONED)
+            raise JobFailed(PROPOSAL_RUN_ABANDONED)
 
 
 __all__ = (

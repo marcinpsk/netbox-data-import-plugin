@@ -4,8 +4,8 @@
 
 A requested proposal waits as a queued row without a Job. The dispatcher gives the oldest waiting rows
 a Job while slots are free. A slot is in use while a proposal's Job can still run, whatever the
-proposal's status: the worker of a cancelled row can still be inside its backend call. A worker holds
-its Job lock for the whole delivery, so a slot whose Job lock is taken is never released.
+proposal's status: the worker of a cancelled row can still be inside its backend call. A slot is
+released only when no worker holds its Job lock and the queue no longer has its task.
 """
 
 import logging
@@ -27,7 +27,6 @@ from .resolution_proposals import fail_proposal, fail_queued_proposal, record_pr
 logger = logging.getLogger(__name__)
 
 SLOT_TASK_LOST = "The proposal task is no longer queued or running."
-SLOT_WORKER_GONE = "The proposal Job is running, but no worker holds it."
 _DISPATCH_LOCK = "netbox-data-import-proposal-dispatch"
 
 
@@ -101,19 +100,20 @@ def _release_leaked_slots() -> int:
         if not _try_job_lock(job):
             in_use += 1
             continue
-        job.refresh_from_db()
+        try:
+            job.refresh_from_db()
+        except Job.DoesNotExist:
+            # The Job was deleted after the holder query, and a deleted Job holds no slot.
+            continue
         if job.status not in JobStatusChoices.ENQUEUED_STATE_CHOICES:
             continue
-        if job.status == JobStatusChoices.STATUS_RUNNING:
-            message = SLOT_WORKER_GONE
-        elif _task_lost(job, import_queue_task(job)):
-            message = SLOT_TASK_LOST
-        else:
+        # A free lock is no proof alone: a dropped database session releases it while the call goes on.
+        if not _task_lost(job, import_queue_task(job)):
             in_use += 1
             continue
-        logger.warning("Released the request slot of Resolution Proposal %s: %s", proposal.pk, message)
+        logger.warning("Released the request slot of Resolution Proposal %s: %s", proposal.pk, SLOT_TASK_LOST)
         Job.objects.filter(pk=job.pk, status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES).update(
-            status=JobStatusChoices.STATUS_ERRORED, completed=timezone.now(), error=message
+            status=JobStatusChoices.STATUS_ERRORED, completed=timezone.now(), error=SLOT_TASK_LOST
         )
         # The job system lost the run, not the backend; a terminal row keeps its status.
         fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)

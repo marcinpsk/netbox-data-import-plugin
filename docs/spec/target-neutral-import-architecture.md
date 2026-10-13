@@ -1121,10 +1121,16 @@ after each proposal Job ends however it ended, and on each card read, which is t
 worker that was killed. No worker waits for a slot. A worker holds its Job lock, the same session
 advisory lock that import Jobs use, for the whole delivery. Before it fills slots, the dispatcher
 tries that lock for each slot without waiting. When a worker holds it, the slot stays in use,
-whatever the queue or the clock say. When the lock is free, a running Job has lost its worker, and a
-pending or scheduled Job has lost its run only when its queue task is lost; the dispatcher then marks
-the Job errored and fails its active proposal with `queue_unavailable`, because the job system lost
-the run, not the backend. The dispatcher never reads the backend's timeouts to free a slot. When
+whatever the queue or the clock say. A free lock alone is no proof that the worker stopped, because
+PostgreSQL also releases it when it ends the worker's session. So the dispatcher frees a slot only
+when the lock is free and the queue task is lost: the queue no longer holds it as queued, started or
+deferred, after the push grace. A worker that was killed is therefore freed when the queue's own
+cleanup marks its started task failed. The dispatcher then marks the Job errored and fails its active
+proposal with `queue_unavailable`, because the job system lost the run, not the backend. It never
+reads the backend's timeouts to free a slot. A running Job that an operator deletes leaves slot
+accounting, because the proposal's Job link is cleared. A redelivered Job whose proposal an earlier
+delivery of the same Job claimed fails that proposal with `queue_unavailable`, and the Job ends
+failed. When
 no backend resolves, each waiting row fails with the reason its Job would record. A queue push that
 fails after the dispatch commits fails that attempt with `queue_unavailable`.
 

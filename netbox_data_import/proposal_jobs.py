@@ -127,11 +127,14 @@ def _backoff(attempt, error):
     time.sleep(_retry_delay(attempt, error))
 
 
-def run_proposal(proposal_id):
-    """Claim, call and record one proposal. Conditional transitions let cancellation win."""
+def run_proposal(proposal_id) -> bool:
+    """Claim, call and record one proposal, and return whether this call claimed it.
+
+    Conditional transitions let cancellation win.
+    """
     if not claim_proposal(proposal_id):
-        return
-    metadata = {"attempts": []}
+        return False
+    metadata: dict = {"attempts": []}
     try:
         _run_claimed_proposal(proposal_id, metadata)
     except Exception:
@@ -141,6 +144,7 @@ def run_proposal(proposal_id):
             backend_metadata=metadata,
         )
         raise
+    return True
 
 
 def _run_claimed_proposal(proposal_id, metadata):

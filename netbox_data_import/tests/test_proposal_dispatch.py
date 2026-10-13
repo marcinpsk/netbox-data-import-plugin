@@ -3,6 +3,7 @@
 """Proposal Jobs start only while the active Inference Backend has a free request slot."""
 
 import json
+import time
 from contextlib import contextmanager
 from datetime import timedelta
 from threading import Event, Thread
@@ -18,6 +19,8 @@ from django.utils import timezone
 from django_pg_utils import advisory_lock
 from django_rq import get_queue
 from netbox.constants import RQ_QUEUE_LOW
+from rq.executions import Execution
+from rq.job import JobStatus
 
 from netbox_data_import.forms import InferenceBackendForm
 from netbox_data_import.inference_settings import InvalidInferenceConfiguration, validate_file_fallback
@@ -187,6 +190,8 @@ class ProposalDispatchTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTo
         self.assertEqual(seen, [])
         rows = self.rows()
         self.assertEqual(rows[0].status, ProposalStatus.CANCELLED)
+        # A cancelled row is not abandoned, so its Job ends quietly.
+        self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_COMPLETED)
         self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
 
     def test_a_cancelled_waiting_proposal_is_never_dispatched(self):
@@ -244,10 +249,29 @@ class ProposalDispatchTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTo
         self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_RUNNING)
         self.assertEqual([row.job_id is not None for row in rows], [True, False, False])
 
-    def test_a_running_job_whose_worker_is_gone_releases_its_slot_at_the_next_poll(self):
-        """No worker holds the Job's lock, so nothing can still be inside the backend call."""
+    def test_a_running_job_keeps_its_slot_while_rq_runs_its_task_even_without_the_job_lock(self):
+        """A dropped database session frees the Job lock while the worker's backend call goes on."""
         first, second, _third = self.ask_all()
         job = self.start(first)
+        queue = get_queue(RQ_QUEUE_LOW)
+        task = queue.fetch_job(str(job.job_id))
+        # Start the task the way an RQ worker does, with an execution that is already past its heartbeat.
+        queue.remove(task)
+        with queue.connection.pipeline() as pipeline:
+            task.prepare_for_execution("lost-session-worker", pipeline)
+            Execution.create(task, ttl=1, pipeline=pipeline, worker_name="lost-session-worker")
+            pipeline.execute()
+
+        self.poll(second.field_key)
+
+        rows = self.rows()
+        self.assertEqual((rows[0].status, rows[0].failure_reason), (ProposalStatus.RUNNING, ""))
+        self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_RUNNING)
+        self.assertEqual([row.job_id is not None for row in rows], [True, False, False])
+
+        # RQ's own cleanup marks the task of a dead worker failed once its heartbeat expires.
+        queue.started_job_registry.cleanup(timestamp=time.time() + 60)
+        self.assertEqual(task.get_status(refresh=True), JobStatus.FAILED)
 
         self.poll(second.field_key)
 
@@ -256,6 +280,22 @@ class ProposalDispatchTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTo
             (rows[0].status, rows[0].failure_reason), (ProposalStatus.FAILED, ProposalFailureReason.QUEUE_UNAVAILABLE)
         )
         self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_ERRORED)
+        self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
+
+    def test_a_redelivered_job_fails_the_proposal_its_dead_delivery_claimed(self):
+        """An operator requeues the task of a worker that died after its claim; the field must not stay running."""
+        first, _second, _third = self.ask_all()
+        job = self.start(first)
+
+        with self.answering_backend() as seen:
+            self.run_job(first)
+
+        self.assertEqual(seen, [])
+        rows = self.rows()
+        self.assertEqual(
+            (rows[0].status, rows[0].failure_reason), (ProposalStatus.FAILED, ProposalFailureReason.QUEUE_UNAVAILABLE)
+        )
+        self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_FAILED)
         self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
 
     def test_a_pending_job_releases_its_slot_only_once_its_task_is_lost(self):
@@ -387,6 +427,40 @@ class OwnedDeliveryTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTopol
         rows = self.rows()
         self.assertEqual(rows[0].status, ProposalStatus.COMPLETED)
         self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
+
+
+class DeletedJobRaceTest(IsolatedRQQueueTestMixin, TransactionTestCase):
+    """A Job deleted between the holder read and its refresh holds no slot and does not stop the dispatch."""
+
+    def setUp(self):
+        super().setUp()
+        ProposalFixture.setUpTestData.__func__(type(self))
+        self.enterContext(override_plugins_config(netbox_data_import=backend_config()))
+        self.first = ProposalFixture.make_proposal(self, field_key=self.field_key)
+        self.second = ProposalFixture.make_proposal(self, field_key=self.other_field_key)
+
+    def test_a_job_deleted_after_its_lock_is_taken_frees_its_slot(self) -> None:
+        from netbox_data_import.proposal_dispatch import dispatch_proposals
+        from netbox_data_import.tests.helpers import run_on_separate_connection
+
+        self.assertEqual(dispatch_proposals(), [self.first.pk])
+        deleted = ResolutionProposal.objects.get(pk=self.first.pk).job_id
+
+        def delete_the_job_after_the_lock(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if "pg_try_advisory_xact_lock" in sql:
+                with run_on_separate_connection(lambda: Job.objects.filter(pk=deleted).delete()):
+                    pass
+            return result
+
+        with connection.execute_wrapper(delete_the_job_after_the_lock):
+            dispatched = dispatch_proposals()
+
+        self.assertFalse(Job.objects.filter(pk=deleted).exists())
+        # The SET_NULL left the queued row without a Job, so it waits again and is the oldest one.
+        self.assertEqual(dispatched, [self.first.pk])
+        self.assertNotEqual(ResolutionProposal.objects.get(pk=self.first.pk).job_id, None)
+        self.assertIsNone(ResolutionProposal.objects.get(pk=self.second.pk).job_id)
 
 
 class DispatchRaceTest(IsolatedRQQueueTestMixin, TransactionTestCase):
