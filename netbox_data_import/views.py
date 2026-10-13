@@ -4794,12 +4794,11 @@ class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
 
     def get(self, request):
         """Answer with the field's card as it stands now, which a pending card polls."""
-        from .proposal_dispatch import dispatch_proposals
+        from .proposal_dispatch import dispatch_proposals_on_poll
 
         snapshot = _claimed_snapshot(request, profile_action="view")
-        # The poll is the backstop for a slot that a killed worker never handed on.
         try:
-            dispatch_proposals()
+            dispatch_proposals_on_poll()
         except (RedisConnectionError, RedisTimeoutError):
             logger.warning("The proposal queue did not answer; the card shows its proposal as it stands.")
         return _proposal_card(request, snapshot, request.GET.get("field_key", "").strip(), request.GET.get("trace", ""))

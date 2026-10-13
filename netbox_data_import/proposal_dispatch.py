@@ -10,6 +10,7 @@ released only when no worker holds its Job lock and the queue no longer has its 
 
 import logging
 
+from django.core.cache import cache
 from django.db import connection, transaction
 from django.utils import timezone
 from netbox.constants import RQ_QUEUE_LOW
@@ -28,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 SLOT_TASK_LOST = "The proposal task is no longer queued or running."
 _DISPATCH_LOCK = "netbox-data-import-proposal-dispatch"
+POLL_DISPATCH_KEY = "netbox-data-import-proposal-poll-dispatch"
+POLL_DISPATCH_INTERVAL_SECONDS = 5
 
 
 def dispatch_proposals() -> list[int]:
@@ -52,6 +55,17 @@ def dispatch_proposals() -> list[int]:
                 _fail_unpushed(proposal_id, job)
         raise
     return [proposal_id for proposal_id, _job in dispatched]
+
+
+def dispatch_proposals_on_poll() -> list[int]:
+    """Dispatch at most once per interval for all pending-card polls together.
+
+    The poll is only the backstop for a slot that a killed worker never handed on: a request and the
+    end of each proposal Job dispatch at once. The cache is shared by every NetBox process.
+    """
+    if not cache.add(POLL_DISPATCH_KEY, True, timeout=POLL_DISPATCH_INTERVAL_SECONDS):
+        return []
+    return dispatch_proposals()
 
 
 def _fill_free_slots() -> list[tuple[int, object]]:
@@ -140,4 +154,4 @@ def _fail_unpushed(proposal_id: int, job) -> None:
         )
 
 
-__all__ = ("dispatch_proposals",)
+__all__ = ("dispatch_proposals", "dispatch_proposals_on_poll")

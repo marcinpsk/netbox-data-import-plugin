@@ -11,6 +11,7 @@ from time import monotonic, sleep
 
 from core.choices import JobStatusChoices
 from core.models import Job
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import connection, connections, transaction
 from django.test import SimpleTestCase, TestCase, TransactionTestCase
@@ -96,8 +97,12 @@ class _DispatchViewMixin(InPlacePreviewMixin):
     def rows(self):
         return list(ResolutionProposal.objects.order_by("created", "pk"))
 
-    def poll(self, field_key, **fallback):
+    def poll(self, field_key, *, next_interval=True, **fallback):
         """Read one card as a pending card polls it, which is the dispatcher's backstop."""
+        from netbox_data_import.proposal_dispatch import POLL_DISPATCH_KEY
+
+        if next_interval:
+            cache.delete(POLL_DISPATCH_KEY)
         with override_plugins_config(netbox_data_import=backend_config(**fallback)):
             response = self.client.get(
                 reverse("plugins:netbox_data_import:trace_proposal"),
@@ -321,6 +326,27 @@ class ProposalDispatchTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTo
             (rows[0].status, rows[0].failure_reason), (ProposalStatus.FAILED, ProposalFailureReason.QUEUE_UNAVAILABLE)
         )
         self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_ERRORED)
+        self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
+
+    def test_all_polls_inside_one_interval_dispatch_once(self):
+        """Every pending card polls every 3 seconds, so the polls share one dispatch per interval."""
+        from netbox_data_import.jobs import QUEUE_PUSH_GRACE
+
+        first, second, third = self.ask_all()
+        self.poll(third.field_key)
+        job = Job.objects.get(pk=first.job_id)
+        get_queue(RQ_QUEUE_LOW).fetch_job(str(job.job_id)).delete()
+        Job.objects.filter(pk=job.pk).update(created=timezone.now() - QUEUE_PUSH_GRACE - timedelta(seconds=5))
+
+        self.poll(second.field_key, next_interval=False)
+
+        self.assertEqual(ResolutionProposal.objects.get(pk=first.pk).status, ProposalStatus.QUEUED)
+        self.assertIsNone(ResolutionProposal.objects.get(pk=second.pk).job_id)
+
+        self.poll(second.field_key)
+
+        rows = self.rows()
+        self.assertEqual(rows[0].status, ProposalStatus.FAILED)
         self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
 
     def test_the_job_timeout_covers_every_attempt_of_the_active_backend(self):
