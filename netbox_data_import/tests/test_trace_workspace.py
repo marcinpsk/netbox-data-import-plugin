@@ -250,6 +250,12 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(sum(summary[key] for key in _SUMMARY_KEYS.values()), summary["traces"])
 
+    def test_the_list_filter_counts_only_the_dispositions_the_traces_carry(self):
+        """One filter pill per disposition that occurs, in summary order, so no pill filters to nothing."""
+        workspace = ReviewWorkspace(self.plan(patched_path(), self.separate_blocked_path("F")), self.actor)
+
+        self.assertEqual(workspace.trace_dispositions, ((Disposition.ACTIONABLE, 1), (Disposition.BLOCKED, 1)))
+
     def test_the_summary_names_every_disposition_a_trace_can_carry(self):
         """Only `cable_target` states a trace, and it never assigns EXCLUDED; a new member must decide."""
         self.assertEqual(set(_SUMMARY_KEYS), set(Disposition.ALL) - {Disposition.EXCLUDED})
@@ -446,6 +452,36 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
         # Both traces are listed, and only the selected one contributes a proposed-topology panel.
         self.assertContains(response, "SEL-A eth0")
         self.assertContains(response, "Proposed physical topology", count=1)
+
+    def test_the_list_renders_one_filter_pill_per_disposition_with_its_count(self):
+        """The filter script reads the disposition of each list item, and each pill states its trace count."""
+        blocked = []
+        for suffix in ("FA", "FB"):
+            Interface.objects.create(device=self.make_device(f"SRC-{suffix}"), name="eth0", type="1000base-t")
+            Interface.objects.create(device=self.make_device(f"DST-{suffix}"), name="eth0", type="1000base-t")
+            blocked.append(
+                direct_path(
+                    from_end=trace_termination(f"SRC-{suffix}", "", "absent-port", "Port"),
+                    to_end=trace_termination(f"DST-{suffix}", "", "eth0", "Port"),
+                )
+            )
+
+        response = self.open_workspace(patched_path(), *blocked)
+
+        page = response.content.decode()
+        self.assertEqual(response.context["trace_dispositions"], (("actionable", 1), ("blocked", 2)))
+        for disposition, count in (("actionable", 1), ("blocked", 2)):
+            self.assertRegex(
+                page,
+                rf'<button type="button" class="[^"]*\bndi-trace-filter\b[^"]*"\s+data-trace-filter="{disposition}" '
+                rf'aria-pressed="false">\s*<span class="badge ndi-trace-disposition-{disposition}">{disposition}</span>'
+                rf"\s*<span data-trace-filter-count>{count}</span>",
+            )
+            self.assertEqual(page.count(f'data-disposition="{disposition}"'), count)
+        self.assertNotIn('data-trace-filter="invalid"', page)
+        self.assertNotIn('data-trace-filter="no-op"', page)
+        self.assertRegex(page, r"<div [^>]*data-trace-filter-empty hidden>No trace matches the filter.</div>")
+        self.assertIn("netbox_data_import/js/trace_list_filter.js", page)
 
     def test_the_list_selects_the_trace_the_query_names(self):
         """The operator moves through the list, so the page has to follow the one they picked."""

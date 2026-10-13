@@ -44,6 +44,10 @@
   .ndi-trace-disposition-no-op { background-color: var(--tblr-secondary) !important; color: #fff !important; }
   [data-bs-theme="dark"] .ndi-trace-disposition-no-op,
   [data-bs-theme="dark"] .ndi-trace-status-reuse { background-color: #4b5563 !important; color: #e5e7eb !important; }
+  /* A pressed filter pill inverts the body colours, so it stands out from an unpressed one in both themes. */
+  .btn.ndi-trace-filter[aria-pressed="true"] {
+    background-color: var(--tblr-body-color); border-color: var(--tblr-body-color); color: var(--tblr-body-bg);
+  }
   .ndi-trace-panel { height: 100%; }
   .ndi-trace-panel .card-header { font-size: .75rem; letter-spacing: .06em; text-transform: uppercase; }
   .ndi-trace-claim { color: var(--tblr-secondary); font-size: .8rem; }
@@ -279,18 +283,32 @@
 
 <div class="row g-3">
   <div class="col-md-3">
-    <div class="card">
+    <div class="card" data-trace-list-filter>
       <div class="card-header">Source Traces</div>
+      {% if trace_dispositions %}
+        <div class="card-body py-2 d-flex flex-wrap gap-1" role="group" aria-label="Filter traces by disposition">
+          {% for disposition, count in trace_dispositions %}
+            <button type="button" class="btn btn-sm btn-outline-secondary ndi-trace-filter"
+                    data-trace-filter="{{ disposition }}" aria-pressed="false">
+              <span class="badge ndi-trace-disposition-{{ disposition }}">{{ disposition }}</span>
+              <span data-trace-filter-count>{{ count }}</span>
+            </button>
+          {% endfor %}
+        </div>
+      {% endif %}
       <div class="list-group list-group-flush">
         {% for trace in traces %}
           <a class="list-group-item list-group-item-action{% if trace.identity == selected_trace.identity %} active{% endif %}"
-             href="?trace={{ trace.identity|urlencode }}">
+             href="?trace={{ trace.identity|urlencode }}" data-disposition="{{ trace.disposition }}">
             <span class="badge ndi-trace-disposition-{{ trace.disposition }}">{{ trace.disposition }}</span>
             <div>{{ trace.name }}</div>
           </a>
         {% empty %}
           <div class="list-group-item text-secondary">This preview planned no Source Trace.</div>
         {% endfor %}
+        {% if traces %}
+          <div class="list-group-item text-secondary" data-trace-filter-empty hidden>No trace matches the filter.</div>
+        {% endif %}
       </div>
     </div>
   </div>
@@ -786,5 +804,6 @@
 <script src="{% static 'netbox_data_import/js/trace_picker.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_location_tree.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_topology.js' %}?v={{ plugin_version }}"></script>
+<script src="{% static 'netbox_data_import/js/trace_list_filter.js' %}?v={{ plugin_version }}"></script>
 </div>
 {% endblock %}

@@ -463,6 +463,10 @@ The Location you select on the import page also ranks candidates, after the sour
 removes one. If that Location is deleted, hidden from you, or moved to another Site, the workspace
 shows a notice and keeps the preview.
 
+Above the trace list, one button per disposition, for example **blocked 4**, filters the list. Select
+more than one to show the traces of each. Select none to show all traces. The trace that is open
+always stays in the list. Your browser keeps the filter for every preview.
+
 Each trace has **Sync with dependencies**, which synchronizes that trace and the traces whose
 changes it needs. It is disabled, with its reason, when one of those changes cannot sync.
 **Sync N actionable traces**, under the trace counts, synchronizes every actionable

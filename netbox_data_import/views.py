@@ -3885,6 +3885,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
             {
                 "profile": profile,
                 "traces": traces,
+                "trace_dispositions": workspace.trace_dispositions,
                 "selected_trace": selected,
                 "attention_devices": attention_devices,
                 "manual_devices": manual_devices,
