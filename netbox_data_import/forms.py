@@ -383,6 +383,7 @@ class InferenceBackendForm(NetBoxModelForm):
             "credential_reference",
             "connect_timeout",
             "read_timeout",
+            "max_concurrent_requests",
             "enabled",
             "tags",
         )

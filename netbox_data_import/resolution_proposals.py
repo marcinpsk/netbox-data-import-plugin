@@ -133,7 +133,7 @@ def next_page_offset(*, profile, task_type, field_key, inventory) -> int:
 
 
 def record_proposal_job(proposal_id, job) -> None:
-    """Bind the enqueued Job to its attempt. A blind UPDATE, so a worker already running wins."""
+    """Bind the enqueued Job to its attempt, in the dispatch transaction before the queue push."""
     ResolutionProposal.objects.filter(pk=proposal_id).update(job=job)
 
 

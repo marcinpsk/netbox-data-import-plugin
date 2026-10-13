@@ -451,6 +451,20 @@ class ResolutionProposalJob(JobRunner):
     class Meta:
         name = "Resolution Proposal"
 
+    @classmethod
+    def handle(cls, job, *args, **kwargs):
+        """Run the proposal, then give its request slot to the next waiting proposal, however the run ended."""
+        from .proposal_dispatch import dispatch_proposals
+
+        try:
+            super().handle(job, *args, **kwargs)
+        finally:
+            # After handle the Job is terminal, so the dispatcher no longer counts its slot.
+            try:
+                dispatch_proposals()
+            except (RedisConnectionError, RedisTimeoutError):
+                logger.warning("The proposal queue did not answer; the next card read dispatches the next proposal.")
+
     def run(self, proposal_id):
         """Resolve backend configuration on the worker after claiming the proposal."""
         from .proposal_jobs import run_proposal

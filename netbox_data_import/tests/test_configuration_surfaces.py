@@ -521,6 +521,7 @@ class InferenceBackendAPITest(TestCase):
             "credential_reference": INFERENCE_REFERENCE,
             "connect_timeout": 5,
             "read_timeout": 60,
+            "max_concurrent_requests": 2,
             "enabled": False,
             "tags": [],
         } | overrides
@@ -546,6 +547,20 @@ class InferenceBackendAPITest(TestCase):
         backend.refresh_from_db()
         self.assertEqual((backend.display_name, backend.credential_reference), ("Updated backend", replacement))
         self.assertNotIn("credential_reference", self.client.get(detail_url).json())
+
+    def test_endpoint_carries_the_request_limit_and_refuses_one_below_one(self):
+        response = self.client.post(self.list_url, data=self.backend_data(), content_type="application/json")
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(response.json()["max_concurrent_requests"], 2)
+        for value in (0, True, "many"):
+            with self.subTest(value=value):
+                response = self.client.post(
+                    self.list_url,
+                    data=self.backend_data(backend_key="refused", max_concurrent_requests=value),
+                    content_type="application/json",
+                )
+                self.assertEqual(response.status_code, 400, response.content)
+                self.assertIn("max_concurrent_requests", response.json())
 
     def test_endpoint_rejects_configuration_the_form_rejects(self):
         response = self.client.post(
