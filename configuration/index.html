@@ -394,6 +394,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#ask-ai-concurrent-requests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ask AI concurrent requests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#ask-ai-candidates-per-request" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -602,6 +613,17 @@
     <span class="md-ellipsis">
       
         Inference backend credentials
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ask-ai-concurrent-requests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ask AI concurrent requests
       
     </span>
   </a>
@@ -851,14 +873,41 @@ the value and save the form. Model discovery is optional. If the endpoint does n
 the exact model id manually.</p>
 <p>The foreground test has one overall time limit. The limit is the backend connect timeout plus its read
 timeout. Credential resolution, model discovery, and the completion request share this time.</p>
+<h2 id="ask-ai-concurrent-requests">Ask AI concurrent requests</h2>
+<p><strong>Max concurrent requests</strong> on the AI backend sets how many Resolution Proposals can call the backend
+at the same time. The default is 1. The value must be a whole number of 1 or more. Many local
+inference servers answer one request after another, so more concurrent requests only make each
+request wait longer, and requests then fail with a timeout. Increase the value only for a backend
+that answers requests in parallel.</p>
+<p>The file fallback takes the same value as the optional <code>max_concurrent_requests</code> key. When you omit
+the key, the value is 1. An invalid value stops startup.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">PLUGINS_CONFIG</span> <span class="o">=</span> <span class="p">{</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="s2">"netbox_data_import"</span><span class="p">:</span> <span class="p">{</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>        <span class="s2">"inference_backend"</span><span class="p">:</span> <span class="p">{</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>            <span class="c1"># ...the other backend fields...</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>            <span class="s2">"max_concurrent_requests"</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>        <span class="p">},</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>    <span class="p">},</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="p">}</span>
+</code></pre></div>
+<p>A proposal that cannot get a request slot waits as <strong>Queued</strong>, and its card says that it waits for a
+free AI backend slot. The plugin starts the next waiting proposal, oldest first, when a proposal job
+ends. A waiting card also checks for a free slot each time it refreshes. A slot stays in use while
+its job can still run, also after you cancel its proposal, because the worker can still be inside
+its backend call. A slot is freed only when no worker holds a lock on its job and the RQ queue no
+longer has its task. When an RQ worker is killed, RQ marks its task failed once the worker's heartbeat
+expires, and the plugin then frees the slot and fails the proposal with <code>queue_unavailable</code>.</p>
+<p>Each proposal job gets a time limit from the active backend: three attempts of the connect timeout,
+the read timeout and the Vault connect and read timeouts, plus the longest wait between attempts
+(60 seconds each), plus 30 seconds. A higher read timeout therefore gives the job more time too.</p>
 <h2 id="ask-ai-candidates-per-request">Ask AI candidates per request</h2>
 <p><code>inference_proposal_candidate_limit</code> sets how many candidates one Ask AI request sends to the
 backend. The default is 64. Valid values are 1 to 1024.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">PLUGINS_CONFIG</span> <span class="o">=</span> <span class="p">{</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="s2">"netbox_data_import"</span><span class="p">:</span> <span class="p">{</span>
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>        <span class="s2">"inference_proposal_candidate_limit"</span><span class="p">:</span> <span class="mi">128</span><span class="p">,</span>
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="p">},</span>
-<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">PLUGINS_CONFIG</span> <span class="o">=</span> <span class="p">{</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="s2">"netbox_data_import"</span><span class="p">:</span> <span class="p">{</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>        <span class="s2">"inference_proposal_candidate_limit"</span><span class="p">:</span> <span class="mi">128</span><span class="p">,</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>    <span class="p">},</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="p">}</span>
 </code></pre></div>
 <p>A Device with more eligible ports than this is searched a page at a time. The first request offers
 the first page. The card says which candidates it searched. The Ask AI button offers the next page
@@ -877,8 +926,11 @@ workspace.</p>
 It skips a termination that has an active proposal, no resolved Device, no eligible candidates, or
 source spellings that disagree, and it reports how many it asked about and why it skipped the rest.
 Ask AI and <strong>Ask AI for all</strong> both refuse when no Inference Backend is enabled or configured as a
-fallback. No setting limits how many it asks about: each request is one background job, and the RQ workers
-run them in turn.</p>
+fallback. Each proposal gets its own background job, but only as many jobs run at the same time as
+the backend's <strong>Max concurrent requests</strong> allows. The other proposals wait for a free slot (see
+<a href="#ask-ai-concurrent-requests">Ask AI concurrent requests</a>). If no backend is available when a
+waiting proposal would start, the proposal fails with the reason its job would record, for example
+<code>invalid_configuration</code>.</p>
 <p>Proposal jobs wait in NetBox's <code>low</code> queue. A worker takes jobs from the <code>high</code> and <code>default</code> queues
 first, so an import or a trace sync that you queue after many proposals does not wait for them. A
 <code>manage.py rqworker</code> with no queue names serves all three queues. If you start a worker for named
@@ -936,10 +988,10 @@ Devices and on Racks. Assign the custom field to both object types.</p>
 <p>Add the link under <strong>Customization &gt; Custom Links</strong>. Set <strong>Object types</strong> to <code>DCIM &gt; device</code>
 and <code>DCIM &gt; rack</code>.</p>
 <p><strong>Link text</strong>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="cp">{%</span> <span class="k">if</span> <span class="nv">object.cf.external_id</span> <span class="cp">%}</span><span class="x">Locate asset in the source system</span><span class="cp">{%</span> <span class="k">endif</span> <span class="cp">%}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="cp">{%</span> <span class="k">if</span> <span class="nv">object.cf.external_id</span> <span class="cp">%}</span><span class="x">Locate asset in the source system</span><span class="cp">{%</span> <span class="k">endif</span> <span class="cp">%}</span>
 </code></pre></div>
 <p><strong>Link URL</strong>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="x">https://assets.example.invalid/search?q=</span><span class="cp">{{</span> <span class="nv">object.cf.external_id</span> <span class="o">|</span> <span class="nf">urlencode</span> <span class="cp">}}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="x">https://assets.example.invalid/search?q=</span><span class="cp">{{</span> <span class="nv">object.cf.external_id</span> <span class="o">|</span> <span class="nf">urlencode</span> <span class="cp">}}</span>
 </code></pre></div>
 <p>To find the URL, search for one ID in the source system and replace the search value with
 <code>{{ object.cf.external_id | urlencode }}</code>.</p>
@@ -958,55 +1010,55 @@ and <code>tenancy.contactassignment</code>.</p>
 <p>The API token needs <code>extras.view_customfield</code>, <code>core.view_objecttype</code>, and
 <code>extras.add_customlink</code>. Updating an existing link with <code>PATCH</code> also needs
 <code>extras.change_customlink</code>, because NetBox maps <code>PATCH</code> to the change action.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">NETBOX</span> <span class="o">=</span> <span class="s2">"https://netbox.example.invalid"</span>
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="n">TOKEN</span> <span class="o">=</span> <span class="s2">"0123456789abcdef0123456789abcdef01234567"</span>
-<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="n">CUSTOM_FIELD</span> <span class="o">=</span> <span class="s2">"external_id"</span>
-<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="n">LINK_NAME</span> <span class="o">=</span> <span class="s2">"Locate asset in the source system"</span>
-<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="n">SEARCH_URL</span> <span class="o">=</span> <span class="s2">"https://assets.example.invalid/search?q="</span>
-<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>
-<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="n">session</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">Session</span><span class="p">()</span>
-<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="n">session</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="s2">"Authorization"</span><span class="p">:</span> <span class="sa">f</span><span class="s2">"Token </span><span class="si">{</span><span class="n">TOKEN</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span> <span class="s2">"Accept"</span><span class="p">:</span> <span class="s2">"application/json"</span><span class="p">})</span>
-<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a>
-<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>
-<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="k">def</span><span class="w"> </span><span class="nf">get</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="o">**</span><span class="n">params</span><span class="p">):</span>
-<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="w">    </span><span class="sd">"""Return the result list of one API endpoint."""</span>
-<a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a>    <span class="n">response</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">NETBOX</span><span class="si">}</span><span class="s2">/api/</span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="n">params</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">)</span>
-<a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a>    <span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
-<a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a>    <span class="k">return</span> <span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()[</span><span class="s2">"results"</span><span class="p">]</span>
-<a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a>
-<a id="__codelineno-7-19" name="__codelineno-7-19" href="#__codelineno-7-19"></a>
-<a id="__codelineno-7-20" name="__codelineno-7-20" href="#__codelineno-7-20"></a><span class="n">fields</span> <span class="o">=</span> <span class="n">get</span><span class="p">(</span><span class="s2">"extras/custom-fields/"</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="n">CUSTOM_FIELD</span><span class="p">)</span>
-<a id="__codelineno-7-21" name="__codelineno-7-21" href="#__codelineno-7-21"></a><span class="k">if</span> <span class="ow">not</span> <span class="n">fields</span><span class="p">:</span>
-<a id="__codelineno-7-22" name="__codelineno-7-22" href="#__codelineno-7-22"></a>    <span class="k">raise</span> <span class="ne">SystemExit</span><span class="p">(</span><span class="sa">f</span><span class="s2">"NetBox has no custom field named </span><span class="si">{</span><span class="n">CUSTOM_FIELD</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
-<a id="__codelineno-7-23" name="__codelineno-7-23" href="#__codelineno-7-23"></a><span class="n">covered</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="n">fields</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="s2">"object_types"</span><span class="p">])</span>
-<a id="__codelineno-7-24" name="__codelineno-7-24" href="#__codelineno-7-24"></a>
-<a id="__codelineno-7-25" name="__codelineno-7-25" href="#__codelineno-7-25"></a><span class="n">linkable</span> <span class="o">=</span> <span class="p">{</span>
-<a id="__codelineno-7-26" name="__codelineno-7-26" href="#__codelineno-7-26"></a>    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">entry</span><span class="p">[</span><span class="s1">'app_label'</span><span class="p">]</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">entry</span><span class="p">[</span><span class="s1">'model'</span><span class="p">]</span><span class="si">}</span><span class="s2">"</span>
-<a id="__codelineno-7-27" name="__codelineno-7-27" href="#__codelineno-7-27"></a>    <span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="n">get</span><span class="p">(</span><span class="s2">"core/object-types/"</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
-<a id="__codelineno-7-28" name="__codelineno-7-28" href="#__codelineno-7-28"></a>    <span class="k">if</span> <span class="s2">"custom_links"</span> <span class="ow">in</span> <span class="n">entry</span><span class="p">[</span><span class="s2">"features"</span><span class="p">]</span>
-<a id="__codelineno-7-29" name="__codelineno-7-29" href="#__codelineno-7-29"></a><span class="p">}</span>
-<a id="__codelineno-7-30" name="__codelineno-7-30" href="#__codelineno-7-30"></a><span class="n">targets</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">covered</span> <span class="o">&amp;</span> <span class="n">linkable</span><span class="p">)</span>
-<a id="__codelineno-7-31" name="__codelineno-7-31" href="#__codelineno-7-31"></a><span class="k">for</span> <span class="n">skipped</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">covered</span> <span class="o">-</span> <span class="n">linkable</span><span class="p">):</span>
-<a id="__codelineno-7-32" name="__codelineno-7-32" href="#__codelineno-7-32"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Skipping </span><span class="si">{</span><span class="n">skipped</span><span class="si">}</span><span class="s2">: it supports custom fields but not custom links"</span><span class="p">)</span>
-<a id="__codelineno-7-33" name="__codelineno-7-33" href="#__codelineno-7-33"></a><span class="k">if</span> <span class="ow">not</span> <span class="n">targets</span><span class="p">:</span>
-<a id="__codelineno-7-34" name="__codelineno-7-34" href="#__codelineno-7-34"></a>    <span class="k">raise</span> <span class="ne">SystemExit</span><span class="p">(</span><span class="s2">"No object type that the custom field covers supports custom links"</span><span class="p">)</span>
-<a id="__codelineno-7-35" name="__codelineno-7-35" href="#__codelineno-7-35"></a>
-<a id="__codelineno-7-36" name="__codelineno-7-36" href="#__codelineno-7-36"></a><span class="n">response</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
-<a id="__codelineno-7-37" name="__codelineno-7-37" href="#__codelineno-7-37"></a>    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">NETBOX</span><span class="si">}</span><span class="s2">/api/extras/custom-links/"</span><span class="p">,</span>
-<a id="__codelineno-7-38" name="__codelineno-7-38" href="#__codelineno-7-38"></a>    <span class="n">json</span><span class="o">=</span><span class="p">{</span>
-<a id="__codelineno-7-39" name="__codelineno-7-39" href="#__codelineno-7-39"></a>        <span class="s2">"name"</span><span class="p">:</span> <span class="n">LINK_NAME</span><span class="p">,</span>
-<a id="__codelineno-7-40" name="__codelineno-7-40" href="#__codelineno-7-40"></a>        <span class="s2">"object_types"</span><span class="p">:</span> <span class="n">targets</span><span class="p">,</span>
-<a id="__codelineno-7-41" name="__codelineno-7-41" href="#__codelineno-7-41"></a>        <span class="s2">"enabled"</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
-<a id="__codelineno-7-42" name="__codelineno-7-42" href="#__codelineno-7-42"></a>        <span class="s2">"link_text"</span><span class="p">:</span> <span class="s2">"{</span><span class="si">% i</span><span class="s2">f object.cf."</span> <span class="o">+</span> <span class="n">CUSTOM_FIELD</span> <span class="o">+</span> <span class="s2">" %}"</span> <span class="o">+</span> <span class="n">LINK_NAME</span> <span class="o">+</span> <span class="s2">"{</span><span class="si">% e</span><span class="s2">ndif %}"</span><span class="p">,</span>
-<a id="__codelineno-7-43" name="__codelineno-7-43" href="#__codelineno-7-43"></a>        <span class="s2">"link_url"</span><span class="p">:</span> <span class="n">SEARCH_URL</span> <span class="o">+</span> <span class="s2">"{{ object.cf."</span> <span class="o">+</span> <span class="n">CUSTOM_FIELD</span> <span class="o">+</span> <span class="s2">" | urlencode }}"</span><span class="p">,</span>
-<a id="__codelineno-7-44" name="__codelineno-7-44" href="#__codelineno-7-44"></a>        <span class="s2">"new_window"</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
-<a id="__codelineno-7-45" name="__codelineno-7-45" href="#__codelineno-7-45"></a>    <span class="p">},</span>
-<a id="__codelineno-7-46" name="__codelineno-7-46" href="#__codelineno-7-46"></a>    <span class="n">timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">,</span>
-<a id="__codelineno-7-47" name="__codelineno-7-47" href="#__codelineno-7-47"></a><span class="p">)</span>
-<a id="__codelineno-7-48" name="__codelineno-7-48" href="#__codelineno-7-48"></a><span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
-<a id="__codelineno-7-49" name="__codelineno-7-49" href="#__codelineno-7-49"></a><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Created custom link </span><span class="si">{</span><span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()[</span><span class="s1">'id'</span><span class="p">]</span><span class="si">}</span><span class="s2"> for </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">targets</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">NETBOX</span> <span class="o">=</span> <span class="s2">"https://netbox.example.invalid"</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="n">TOKEN</span> <span class="o">=</span> <span class="s2">"0123456789abcdef0123456789abcdef01234567"</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="n">CUSTOM_FIELD</span> <span class="o">=</span> <span class="s2">"external_id"</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="n">LINK_NAME</span> <span class="o">=</span> <span class="s2">"Locate asset in the source system"</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="n">SEARCH_URL</span> <span class="o">=</span> <span class="s2">"https://assets.example.invalid/search?q="</span>
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="n">session</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">Session</span><span class="p">()</span>
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="n">session</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="s2">"Authorization"</span><span class="p">:</span> <span class="sa">f</span><span class="s2">"Token </span><span class="si">{</span><span class="n">TOKEN</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span> <span class="s2">"Accept"</span><span class="p">:</span> <span class="s2">"application/json"</span><span class="p">})</span>
+<a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>
+<a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a>
+<a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a><span class="k">def</span><span class="w"> </span><span class="nf">get</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="o">**</span><span class="n">params</span><span class="p">):</span>
+<a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a><span class="w">    </span><span class="sd">"""Return the result list of one API endpoint."""</span>
+<a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a>    <span class="n">response</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">NETBOX</span><span class="si">}</span><span class="s2">/api/</span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="n">params</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">)</span>
+<a id="__codelineno-8-16" name="__codelineno-8-16" href="#__codelineno-8-16"></a>    <span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+<a id="__codelineno-8-17" name="__codelineno-8-17" href="#__codelineno-8-17"></a>    <span class="k">return</span> <span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()[</span><span class="s2">"results"</span><span class="p">]</span>
+<a id="__codelineno-8-18" name="__codelineno-8-18" href="#__codelineno-8-18"></a>
+<a id="__codelineno-8-19" name="__codelineno-8-19" href="#__codelineno-8-19"></a>
+<a id="__codelineno-8-20" name="__codelineno-8-20" href="#__codelineno-8-20"></a><span class="n">fields</span> <span class="o">=</span> <span class="n">get</span><span class="p">(</span><span class="s2">"extras/custom-fields/"</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="n">CUSTOM_FIELD</span><span class="p">)</span>
+<a id="__codelineno-8-21" name="__codelineno-8-21" href="#__codelineno-8-21"></a><span class="k">if</span> <span class="ow">not</span> <span class="n">fields</span><span class="p">:</span>
+<a id="__codelineno-8-22" name="__codelineno-8-22" href="#__codelineno-8-22"></a>    <span class="k">raise</span> <span class="ne">SystemExit</span><span class="p">(</span><span class="sa">f</span><span class="s2">"NetBox has no custom field named </span><span class="si">{</span><span class="n">CUSTOM_FIELD</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+<a id="__codelineno-8-23" name="__codelineno-8-23" href="#__codelineno-8-23"></a><span class="n">covered</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="n">fields</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="s2">"object_types"</span><span class="p">])</span>
+<a id="__codelineno-8-24" name="__codelineno-8-24" href="#__codelineno-8-24"></a>
+<a id="__codelineno-8-25" name="__codelineno-8-25" href="#__codelineno-8-25"></a><span class="n">linkable</span> <span class="o">=</span> <span class="p">{</span>
+<a id="__codelineno-8-26" name="__codelineno-8-26" href="#__codelineno-8-26"></a>    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">entry</span><span class="p">[</span><span class="s1">'app_label'</span><span class="p">]</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">entry</span><span class="p">[</span><span class="s1">'model'</span><span class="p">]</span><span class="si">}</span><span class="s2">"</span>
+<a id="__codelineno-8-27" name="__codelineno-8-27" href="#__codelineno-8-27"></a>    <span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="n">get</span><span class="p">(</span><span class="s2">"core/object-types/"</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+<a id="__codelineno-8-28" name="__codelineno-8-28" href="#__codelineno-8-28"></a>    <span class="k">if</span> <span class="s2">"custom_links"</span> <span class="ow">in</span> <span class="n">entry</span><span class="p">[</span><span class="s2">"features"</span><span class="p">]</span>
+<a id="__codelineno-8-29" name="__codelineno-8-29" href="#__codelineno-8-29"></a><span class="p">}</span>
+<a id="__codelineno-8-30" name="__codelineno-8-30" href="#__codelineno-8-30"></a><span class="n">targets</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">covered</span> <span class="o">&amp;</span> <span class="n">linkable</span><span class="p">)</span>
+<a id="__codelineno-8-31" name="__codelineno-8-31" href="#__codelineno-8-31"></a><span class="k">for</span> <span class="n">skipped</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">covered</span> <span class="o">-</span> <span class="n">linkable</span><span class="p">):</span>
+<a id="__codelineno-8-32" name="__codelineno-8-32" href="#__codelineno-8-32"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Skipping </span><span class="si">{</span><span class="n">skipped</span><span class="si">}</span><span class="s2">: it supports custom fields but not custom links"</span><span class="p">)</span>
+<a id="__codelineno-8-33" name="__codelineno-8-33" href="#__codelineno-8-33"></a><span class="k">if</span> <span class="ow">not</span> <span class="n">targets</span><span class="p">:</span>
+<a id="__codelineno-8-34" name="__codelineno-8-34" href="#__codelineno-8-34"></a>    <span class="k">raise</span> <span class="ne">SystemExit</span><span class="p">(</span><span class="s2">"No object type that the custom field covers supports custom links"</span><span class="p">)</span>
+<a id="__codelineno-8-35" name="__codelineno-8-35" href="#__codelineno-8-35"></a>
+<a id="__codelineno-8-36" name="__codelineno-8-36" href="#__codelineno-8-36"></a><span class="n">response</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+<a id="__codelineno-8-37" name="__codelineno-8-37" href="#__codelineno-8-37"></a>    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">NETBOX</span><span class="si">}</span><span class="s2">/api/extras/custom-links/"</span><span class="p">,</span>
+<a id="__codelineno-8-38" name="__codelineno-8-38" href="#__codelineno-8-38"></a>    <span class="n">json</span><span class="o">=</span><span class="p">{</span>
+<a id="__codelineno-8-39" name="__codelineno-8-39" href="#__codelineno-8-39"></a>        <span class="s2">"name"</span><span class="p">:</span> <span class="n">LINK_NAME</span><span class="p">,</span>
+<a id="__codelineno-8-40" name="__codelineno-8-40" href="#__codelineno-8-40"></a>        <span class="s2">"object_types"</span><span class="p">:</span> <span class="n">targets</span><span class="p">,</span>
+<a id="__codelineno-8-41" name="__codelineno-8-41" href="#__codelineno-8-41"></a>        <span class="s2">"enabled"</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+<a id="__codelineno-8-42" name="__codelineno-8-42" href="#__codelineno-8-42"></a>        <span class="s2">"link_text"</span><span class="p">:</span> <span class="s2">"{</span><span class="si">% i</span><span class="s2">f object.cf."</span> <span class="o">+</span> <span class="n">CUSTOM_FIELD</span> <span class="o">+</span> <span class="s2">" %}"</span> <span class="o">+</span> <span class="n">LINK_NAME</span> <span class="o">+</span> <span class="s2">"{</span><span class="si">% e</span><span class="s2">ndif %}"</span><span class="p">,</span>
+<a id="__codelineno-8-43" name="__codelineno-8-43" href="#__codelineno-8-43"></a>        <span class="s2">"link_url"</span><span class="p">:</span> <span class="n">SEARCH_URL</span> <span class="o">+</span> <span class="s2">"{{ object.cf."</span> <span class="o">+</span> <span class="n">CUSTOM_FIELD</span> <span class="o">+</span> <span class="s2">" | urlencode }}"</span><span class="p">,</span>
+<a id="__codelineno-8-44" name="__codelineno-8-44" href="#__codelineno-8-44"></a>        <span class="s2">"new_window"</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+<a id="__codelineno-8-45" name="__codelineno-8-45" href="#__codelineno-8-45"></a>    <span class="p">},</span>
+<a id="__codelineno-8-46" name="__codelineno-8-46" href="#__codelineno-8-46"></a>    <span class="n">timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">,</span>
+<a id="__codelineno-8-47" name="__codelineno-8-47" href="#__codelineno-8-47"></a><span class="p">)</span>
+<a id="__codelineno-8-48" name="__codelineno-8-48" href="#__codelineno-8-48"></a><span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+<a id="__codelineno-8-49" name="__codelineno-8-49" href="#__codelineno-8-49"></a><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Created custom link </span><span class="si">{</span><span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()[</span><span class="s1">'id'</span><span class="p">]</span><span class="si">}</span><span class="s2"> for </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">targets</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
 </code></pre></div>
 <p>The script creates the link. To change an existing link, send <code>PATCH</code> to
 <code>/api/extras/custom-links/{id}/</code> with the same body.</p>
@@ -1016,10 +1068,10 @@ Custom Link can read that record. The plugin keeps no equivalent record for a Ra
 covers Devices only.</p>
 <p>Set <strong>Object types</strong> to <code>DCIM &gt; device</code>.</p>
 <p><strong>Link text</strong>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="cp">{%</span> <span class="k">if</span> <span class="nv">object.data_import_source</span> <span class="k">and</span> <span class="nv">object.data_import_source.source_id</span> <span class="cp">%}</span><span class="x">Locate asset in the source system</span><span class="cp">{%</span> <span class="k">endif</span> <span class="cp">%}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="cp">{%</span> <span class="k">if</span> <span class="nv">object.data_import_source</span> <span class="k">and</span> <span class="nv">object.data_import_source.source_id</span> <span class="cp">%}</span><span class="x">Locate asset in the source system</span><span class="cp">{%</span> <span class="k">endif</span> <span class="cp">%}</span>
 </code></pre></div>
 <p><strong>Link URL</strong>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="x">https://assets.example.invalid/search?q=</span><span class="cp">{{</span> <span class="nv">object.data_import_source.source_id</span> <span class="o">|</span> <span class="nf">urlencode</span> <span class="cp">}}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="x">https://assets.example.invalid/search?q=</span><span class="cp">{{</span> <span class="nv">object.data_import_source.source_id</span> <span class="o">|</span> <span class="nf">urlencode</span> <span class="cp">}}</span>
 </code></pre></div>
 <p>Keep both tests in the link text. A Device that the plugin never imported has no
 <code>data_import_source</code>. A link text that reads <code>object.data_import_source.source_id</code> without the first
@@ -1069,6 +1121,9 @@ Location.</p>
 <p>The Location you select on the import page also ranks candidates, after the source hints, and never
 removes one. If that Location is deleted, hidden from you, or moved to another Site, the workspace
 shows a notice and keeps the preview.</p>
+<p>Above the trace list, one button per disposition, for example <strong>blocked 4</strong>, filters the list. Select
+more than one to show the traces of each. Select none to show all traces. The trace that is open
+always stays in the list. Your browser keeps the filter for every preview.</p>
 <p>Each trace has <strong>Sync with dependencies</strong>, which synchronizes that trace and the traces whose
 changes it needs. It is disabled, with its reason, when one of those changes cannot sync.
 <strong>Sync N actionable traces</strong>, under the trace counts, synchronizes every actionable
@@ -1088,13 +1143,13 @@ different NetBox instance.</p>
 stamps the flat workbook adapter on every existing profile, copies each column into the adapter
 configuration, and drops the columns.</p>
 <p>The exported profile YAML carries the adapter and its configuration:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="nt">profile</span><span class="p">:</span>
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My Profile</span>
-<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">  </span><span class="nt">source_adapter</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">flat_workbook</span>
-<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="w">  </span><span class="nt">adapter_config</span><span class="p">:</span>
-<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="w">    </span><span class="nt">sheet_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Data</span>
-<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="w">    </span><span class="nt">source_id_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Id</span>
-<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="w">    </span><span class="nt">primary_contact_role</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Primary Contact</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="nt">profile</span><span class="p">:</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My Profile</span>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="w">  </span><span class="nt">source_adapter</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">flat_workbook</span>
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="w">  </span><span class="nt">adapter_config</span><span class="p">:</span>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="w">    </span><span class="nt">sheet_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Data</span>
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="w">    </span><span class="nt">source_id_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Id</span>
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="w">    </span><span class="nt">primary_contact_role</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Primary Contact</span>
 </code></pre></div>
 <p>When imported, <code>adapter_config</code> replaces the profile's stored adapter configuration. It is not
 merged. A setting that is absent from the mapping resets to the adapter's declared default. Include
