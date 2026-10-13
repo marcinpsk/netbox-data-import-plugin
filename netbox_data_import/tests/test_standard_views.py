@@ -211,5 +211,6 @@ class InferenceBackendViewTestCase(
             "credential_reference": json.dumps(INFERENCE_REFERENCE),
             "connect_timeout": 5,
             "read_timeout": 60,
+            "max_concurrent_requests": 2,
             "enabled": False,
         }

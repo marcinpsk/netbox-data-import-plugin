@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import cached_property
@@ -24,7 +24,6 @@ from django.template.defaultfilters import pluralize
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
-from netbox.constants import RQ_QUEUE_LOW
 from netbox.views import generic
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -3886,6 +3885,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
             {
                 "profile": profile,
                 "traces": traces,
+                "trace_dispositions": workspace.trace_dispositions,
                 "selected_trace": selected,
                 "attention_devices": attention_devices,
                 "manual_devices": manual_devices,
@@ -4624,26 +4624,18 @@ class _ProposalRequests:
                 fields.setdefault(item["field_key"], item)
         return fields
 
-    def queue(self, field_key: str) -> Callable[[], None]:
-        """Recheck one field against live NetBox, create its attempt row and queue its Job.
-
-        Return the compensation that fails the attempt if the queue push after the commit fails.
-        """
-        from core.choices import JobStatusChoices
-        from core.models import Job, ObjectType
+    def queue(self, field_key: str) -> None:
+        """Recheck one field against live NetBox and create its attempt row, which waits for a request slot."""
+        from core.models import ObjectType
 
         from .cable_target import UNRESOLVED
         from .inference_backend import proposal_candidate_limit
-        from .jobs import ResolutionProposalJob, import_queue_task
-        from .models import ProposalFailureReason
         from .proposal_jobs import PROMPT_VERSION
         from .proposal_response import RESPONSE_SCHEMA_VERSION
         from .resolution_proposals import (
             ActiveProposalExists,
             active_proposal_exists,
-            fail_queued_proposal,
             next_page_offset,
-            record_proposal_job,
             request_proposal,
         )
 
@@ -4677,7 +4669,7 @@ class _ProposalRequests:
             ),
             size=proposal_candidate_limit(),
         )
-        proposal = request_proposal(
+        request_proposal(
             profile=profile,
             task_type=SELECT_TERMINATION_TASK,
             field_key=field_key,
@@ -4689,29 +4681,6 @@ class _ProposalRequests:
             candidate_snapshot=snapshot,
             requested_by=actor,
         )
-        # The low queue lets a trace sync queued later start before minutes of inference.
-        job = ResolutionProposalJob.enqueue(
-            name=ResolutionProposalJob.Meta.name, user=actor, queue_name=RQ_QUEUE_LOW, proposal_id=proposal.pk
-        )
-        record_proposal_job(proposal.pk, job)
-
-        def compensate():
-            # The push runs after commit, so the attempt fails on its own row rather than staying queued.
-            try:
-                pushed = import_queue_task(job) is not None
-            except (RedisConnectionError, RedisTimeoutError):
-                # A queue that cannot answer cannot show the task, so the attempt fails as before.
-                pushed = False
-            # A failed push stops only the later pushes, so a task that reached the queue keeps its attempt.
-            if pushed:
-                return
-            # A worker that took the attempt owns it, so only an attempt still queued fails here.
-            if fail_queued_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE):
-                Job.objects.filter(pk=job.pk, status=JobStatusChoices.STATUS_PENDING).update(
-                    status=JobStatusChoices.STATUS_ERRORED
-                )
-
-        return compensate
 
 
 @dataclass(frozen=True)
@@ -4727,8 +4696,8 @@ class _RequestProposal(PreviewCommand):
     def apply(self, preview):
         """Queue one proposal for the field."""
         _refuse_without_backend()
-        compensate = _ProposalRequests(preview).queue(self.field_key)
-        return CommandOutcome(payload={"field_key": self.field_key}, compensate=compensate)
+        _ProposalRequests(preview).queue(self.field_key)
+        return CommandOutcome(payload={"field_key": self.field_key})
 
 
 @dataclass(frozen=True)
@@ -4756,21 +4725,18 @@ class _RequestAllProposals(PreviewCommand):
             and parse_termination_field_key(item["field_key"])["role"] == TERMINATION_ROLE
         )
         requests = _ProposalRequests(preview)
-        compensations: list[Callable[[], None]] = []
+        queued = 0
         skipped: Counter[str] = Counter()
         for field_key in fields:
             try:
-                compensations.append(requests.queue(field_key))
+                requests.queue(field_key)
             except (InvalidProposalTarget, InvalidProposalCandidate, UnsupportedProposalRole):
                 skipped[TERMINATION_UNRESOLVABLE] += 1
             except (PreviewCommandRefused, ActiveProposalExists, UnusableCandidateSet) as exc:
                 skipped[exc.operator_message] += 1
-
-        def compensate():
-            for each in compensations:
-                each()
-
-        return CommandOutcome(payload={"queued": len(compensations), "skipped": skipped}, compensate=compensate)
+            else:
+                queued += 1
+        return CommandOutcome(payload={"queued": queued, "skipped": skipped})
 
 
 class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
@@ -4779,12 +4745,15 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Create the attempt row, queue a job carrying its id alone, and answer with the field's card."""
+        """Create the attempt row, give it a Job when a request slot is free, and answer with the field's card."""
+        from .proposal_dispatch import dispatch_proposals
+
         field_key = request.POST.get("field_key", "").strip()
         try:
             result = apply_preview_command(
                 request, PreviewClaim.posted(request.POST), _RequestProposal(field_key=field_key)
             )
+            dispatch_proposals()
         except (RedisConnectionError, RedisTimeoutError):
             logger.exception("Failed to enqueue a resolution proposal")
             return JsonResponse({"ok": False, "error": PROPOSAL_QUEUE_UNAVAILABLE}, status=503)
@@ -4798,8 +4767,11 @@ class TraceRequestAllProposalsView(_TraceWorkspaceMixin, PermissionRequiredMixin
 
     def post(self, request):
         """Queue the proposals in one command, then show the workspace with the outcome."""
+        from .proposal_dispatch import dispatch_proposals
+
         try:
             result = apply_preview_command(request, PreviewClaim.posted(request.POST), _RequestAllProposals())
+            dispatch_proposals()
         except (RedisConnectionError, RedisTimeoutError):
             logger.exception("Failed to enqueue resolution proposals")
             return self._refusal(request, PROPOSAL_QUEUE_UNAVAILABLE, 503)
@@ -4822,7 +4794,14 @@ class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
 
     def get(self, request):
         """Answer with the field's card as it stands now, which a pending card polls."""
+        from .proposal_dispatch import dispatch_proposals
+
         snapshot = _claimed_snapshot(request, profile_action="view")
+        # The poll is the backstop for a slot that a killed worker never handed on.
+        try:
+            dispatch_proposals()
+        except (RedisConnectionError, RedisTimeoutError):
+            logger.warning("The proposal queue did not answer; the card shows its proposal as it stands.")
         return _proposal_card(request, snapshot, request.GET.get("field_key", "").strip(), request.GET.get("trace", ""))
 
 

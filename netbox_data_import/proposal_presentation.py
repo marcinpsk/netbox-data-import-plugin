@@ -39,6 +39,8 @@ STATE_STYLES = {
 }
 
 RECENT_PROPOSAL_HISTORY_LIMIT = 10
+WAITING_FOR_SLOT = "Waiting for a free AI backend slot..."
+WAITING_FOR_BACKEND = "Waiting for the backend..."
 REQUEST_PERMISSION_REASON = "You do not have permission to request proposals for this Import Profile."
 
 
@@ -242,6 +244,8 @@ class ProposalPresentation:
     def card(self, field, proposal, payload, inventory):
         """Derive all proposal vocabulary and legal actions in one place."""
         pending = proposal is not None and proposal.status in ProposalStatus.ACTIVE
+        # A queued row without a Job waits for the dispatcher to free a request slot.
+        waiting = pending and proposal.status == ProposalStatus.QUEUED and proposal.job_id is None
         completed = proposal is not None and proposal.status == ProposalStatus.COMPLETED
         state = field["state"]
         # The plan owns whether a field is resolved; acceptance only renames a state it already set.
@@ -289,6 +293,7 @@ class ProposalPresentation:
         return {
             "has_proposal": proposal is not None,
             "pending": pending,
+            "progress": WAITING_FOR_SLOT if waiting else WAITING_FOR_BACKEND,
             "field_state": state,
             "state_style": STATE_STYLES[state],
             "badge": badge,
@@ -328,13 +333,18 @@ class ProposalPresentation:
     def job_status(proposal):
         """Say where the background job stands, which a card waiting on one cannot otherwise show."""
         job = proposal.job
-        state = job.get_status_display() if job is not None else "none recorded"
+        if job is not None:
+            state = job.get_status_display()
+        else:
+            state = "not started yet" if proposal.status == ProposalStatus.QUEUED else "none recorded"
         return f"Background job: {state}, requested {timesince(proposal.created)} ago"
 
     @staticmethod
     def job_note(proposal):
         """Name the two states in which an active attempt is never going to get an answer."""
         job = proposal.job
+        if job is None and proposal.status == ProposalStatus.QUEUED:
+            return ""
         if job is None:
             return "No background job is recorded. Cancel this proposal and ask again."
         if job.status in JobStatusChoices.TERMINAL_STATE_CHOICES:

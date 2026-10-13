@@ -53,7 +53,14 @@ MODEL_MAX_LENGTH = 200
 
 # PositiveIntegerField stores up to this. One second is the smallest timeout that can make a call.
 TIMEOUT_MIN = 1
-TIMEOUT_MAX = 2147483647
+POSITIVE_INTEGER_MAX = 2147483647
+
+#: One request at a time, because a local inference server answers its requests one after another.
+MAX_CONCURRENT_REQUESTS_DEFAULT = 1
+MAX_CONCURRENT_REQUESTS_MIN = 1
+
+# The InferenceBackend row fields the fallback may omit, with the default the row column has too.
+FILE_FALLBACK_DEFAULTS = {"max_concurrent_requests": MAX_CONCURRENT_REQUESTS_DEFAULT}
 
 #: A proposal offers the whole eligible set, so the bound is denser equipment, not the picker's page.
 PROPOSAL_CANDIDATE_LIMIT_DEFAULT = 64
@@ -211,10 +218,24 @@ def _validate_timeout(mapping: Mapping[str, Any], field: str, setting: str = FIL
     """Reject a timeout the matching PositiveIntegerField would not accept."""
     value = mapping.get(field)
     # bool is an int subclass, and True would otherwise read as a one second timeout.
-    if isinstance(value, bool) or not isinstance(value, int) or not TIMEOUT_MIN <= value <= TIMEOUT_MAX:
+    if isinstance(value, bool) or not isinstance(value, int) or not TIMEOUT_MIN <= value <= POSITIVE_INTEGER_MAX:
         raise InvalidInferenceConfiguration(
             f"'{setting}.{field}' must be a whole number of seconds between "
-            f"{TIMEOUT_MIN} and {TIMEOUT_MAX}, got {value!r}."
+            f"{TIMEOUT_MIN} and {POSITIVE_INTEGER_MAX}, got {value!r}."
+        )
+
+
+def _validate_max_concurrent_requests(mapping: Mapping[str, Any]) -> None:
+    """Reject a request limit the matching InferenceBackend column would not accept."""
+    value = mapping["max_concurrent_requests"]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not MAX_CONCURRENT_REQUESTS_MIN <= value <= POSITIVE_INTEGER_MAX
+    ):
+        raise InvalidInferenceConfiguration(
+            f"'{FILE_FALLBACK_SETTING}.max_concurrent_requests' must be a whole number between "
+            f"{MAX_CONCURRENT_REQUESTS_MIN} and {POSITIVE_INTEGER_MAX}, got {value!r}."
         )
 
 
@@ -228,12 +249,13 @@ def _validate_fallback_fields(mapping: Mapping[str, Any]) -> None:
     _validate_text(mapping, "model", MODEL_MAX_LENGTH)
     _validate_timeout(mapping, "connect_timeout")
     _validate_timeout(mapping, "read_timeout")
+    _validate_max_concurrent_requests(mapping)
 
 
-def validate_file_fallback(value: Any, allowlist: Sequence[str]) -> Mapping[str, Any]:
-    """Return the whole-backend fallback, rejecting a field set that is not exactly the row's."""
-    mapping = _require_mapping(value, FILE_FALLBACK_SETTING)
-    unknown = sorted(str(key) for key in set(mapping) - set(FILE_FALLBACK_FIELDS))
+def validate_file_fallback(value: Any, allowlist: Sequence[str]) -> dict[str, Any]:
+    """Return the whole-backend fallback with its defaults, rejecting a field set the row does not have."""
+    mapping = {**FILE_FALLBACK_DEFAULTS, **_require_mapping(value, FILE_FALLBACK_SETTING)}
+    unknown = sorted(str(key) for key in set(mapping) - set(FILE_FALLBACK_FIELDS) - set(FILE_FALLBACK_DEFAULTS))
     if unknown:
         raise InvalidInferenceConfiguration(f"Unknown '{FILE_FALLBACK_SETTING}' key(s): {', '.join(unknown)}.")
     missing = [name for name in FILE_FALLBACK_FIELDS if name not in mapping]
@@ -283,9 +305,12 @@ def validate_plugin_settings(user_config: Mapping[str, Any]) -> None:
 __all__ = (
     "CREDENTIAL_REFERENCE_BACKEND",
     "CREDENTIAL_REFERENCE_FIELDS",
+    "FILE_FALLBACK_DEFAULTS",
     "FILE_FALLBACK_FIELDS",
     "FILE_FALLBACK_KEY",
     "FILE_FALLBACK_SETTING",
+    "MAX_CONCURRENT_REQUESTS_DEFAULT",
+    "MAX_CONCURRENT_REQUESTS_MIN",
     "ORIGIN_ALLOWLIST_SETTING",
     "PROPOSAL_CANDIDATE_LIMIT_DEFAULT",
     "PROPOSAL_CANDIDATE_LIMIT_MAX",

@@ -274,6 +274,7 @@ class SecretContainmentTest(TestCase):
                                 "credential_reference": json.dumps(REFERENCE),
                                 "connect_timeout": self.row.connect_timeout,
                                 "read_timeout": self.row.read_timeout,
+                                "max_concurrent_requests": self.row.max_concurrent_requests,
                                 "enabled": "on",
                             },
                         )

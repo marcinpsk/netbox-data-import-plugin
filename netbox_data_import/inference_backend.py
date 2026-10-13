@@ -95,6 +95,7 @@ class ResolvedInferenceBackend:
     credential_reference: CredentialReference
     connect_timeout: int
     read_timeout: int
+    max_concurrent_requests: int
     source: str
 
     def metadata(self) -> dict[str, str]:
@@ -140,6 +141,7 @@ def _from_row(row, allowlist) -> ResolvedInferenceBackend:
         credential_reference=CredentialReference.from_mapping(row.credential_reference),
         connect_timeout=row.connect_timeout,
         read_timeout=row.read_timeout,
+        max_concurrent_requests=row.max_concurrent_requests,
         source=SOURCE_DATABASE,
     )
 
@@ -158,6 +160,7 @@ def _from_file_fallback(mapping, allowlist) -> ResolvedInferenceBackend:
         credential_reference=CredentialReference.from_mapping(validated["credential_reference"]),
         connect_timeout=validated["connect_timeout"],
         read_timeout=validated["read_timeout"],
+        max_concurrent_requests=validated["max_concurrent_requests"],
         source=SOURCE_FILE_FALLBACK,
     )
 
