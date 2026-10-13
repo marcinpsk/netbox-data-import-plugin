@@ -1118,13 +1118,17 @@ is pending, scheduled, or running, whatever the proposal's status, because the w
 row can still be inside its backend call. The dispatcher holds a PostgreSQL transaction-scoped
 advisory lock, so two dispatchers cannot fill the same slot. It runs after each request commits,
 after each proposal Job ends however it ended, and on each card read, which is the backstop for a
-worker that was killed. No worker waits for a slot. Before it fills slots, the dispatcher frees each
-slot whose Job can no longer run: a Job whose queue task is lost fails its active proposal with
-`queue_unavailable`, and a Job that runs one minute past its time limit fails it with `timeout`. When
+worker that was killed. No worker waits for a slot. A worker holds its Job lock, the same session
+advisory lock that import Jobs use, for the whole delivery. Before it fills slots, the dispatcher
+tries that lock for each slot without waiting. When a worker holds it, the slot stays in use,
+whatever the queue or the clock say. When the lock is free, a running Job has lost its worker, and a
+pending or scheduled Job has lost its run only when its queue task is lost; the dispatcher then marks
+the Job errored and fails its active proposal with `queue_unavailable`, because the job system lost
+the run, not the backend. The dispatcher never reads the backend's timeouts to free a slot. When
 no backend resolves, each waiting row fails with the reason its Job would record. A queue push that
 fails after the dispatch commits fails that attempt with `queue_unavailable`.
 
-Each proposal Job runs under a time limit derived from the active backend: three attempts of the
+Each proposal Job is enqueued with a time limit derived from the active backend: three attempts of the
 backend connect and read timeouts plus the Vault connect and read timeouts, the longest backoff
 before each retry (the 60-second `Retry-After` cap), and a 30-second margin.
 

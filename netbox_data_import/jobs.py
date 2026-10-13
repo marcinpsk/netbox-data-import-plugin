@@ -57,8 +57,8 @@ QUEUE_PUSH_GRACE = timedelta(minutes=1)
 QUEUE_UNREADABLE = "The job queue cannot be read now."
 
 
-def _import_job_lock(job):
-    """Name the session lock that serializes worker delivery with explicit recovery."""
+def _job_lock(job):
+    """Name the lock a worker holds while it delivers a Job, which recovery must get before it releases one."""
     with connection.cursor() as cursor:
         cursor.execute("SELECT hashtextextended(%s, 0)", [f"netbox-data-import-job:{job.job_id}"])
         return cursor.fetchone()[0]
@@ -196,13 +196,13 @@ def _with_queue_place(status: ImportJobStatus, rq_job) -> ImportJobStatus:
     )
 
 
-def _try_import_job_lock(job) -> bool:
+def _try_job_lock(job) -> bool:
     """Take the Job lock until the transaction ends, or return False at once when a worker holds it."""
     if not connection.in_atomic_block:
-        raise RuntimeError("The import Job lock requires the preview command transaction.")
-    # Never wait for a worker while holding its profile. PostgreSQL holds this lock through commit or rollback.
+        raise RuntimeError("The Job lock requires the transaction of the recovery that takes it.")
+    # Never wait for a worker while holding other locks. PostgreSQL holds this lock through commit or rollback.
     with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [_import_job_lock(job)])
+        cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [_job_lock(job)])
         return cursor.fetchone()[0]
 
 
@@ -211,7 +211,7 @@ def recover_abandoned_import_job(job) -> None:
     from core.choices import JobStatusChoices
     from core.models import Job
 
-    if _try_import_job_lock(job):
+    if _try_job_lock(job):
         job.refresh_from_db()
         if import_job_abandoned(job):
             Job.objects.filter(pk=job.pk, status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES).update(
@@ -230,7 +230,7 @@ def cancel_queued_import_job(job, message: str) -> bool:
     from core.choices import JobStatusChoices
     from core.models import Job
 
-    if not _try_import_job_lock(job):
+    if not _try_job_lock(job):
         return False
     job.refresh_from_db()
     waiting = (JobStatusChoices.STATUS_PENDING, JobStatusChoices.STATUS_SCHEDULED)
@@ -265,13 +265,8 @@ def _cancel_queue_task(job) -> None:
         logger.warning("The queue task of cancelled import Job %s stays in its queue.", job.pk)
 
 
-class ImportJobRunner(JobRunner):
-    """Validate and execute one import while publishing row progress to RQ."""
-
-    job_type = "netbox_data_import.import"
-
-    class Meta:
-        name = "Data Import"
+class OwnedJobRunner(JobRunner):
+    """A runner whose worker holds the Job lock for the whole delivery, so recovery cannot release a live Job."""
 
     @classmethod
     def handle(cls, job, *args, **kwargs):
@@ -279,13 +274,22 @@ class ImportJobRunner(JobRunner):
         from core.choices import JobStatusChoices
         from core.models import Job
 
-        with advisory_lock(_import_job_lock(job)):
+        with advisory_lock(_job_lock(job)):
             try:
                 job.refresh_from_db()
             except Job.DoesNotExist:
                 return
             if job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES:
                 super().handle(job, *args, **kwargs)
+
+
+class ImportJobRunner(OwnedJobRunner):
+    """Validate and execute one import while publishing row progress to RQ."""
+
+    job_type = "netbox_data_import.import"
+
+    class Meta:
+        name = "Data Import"
 
     def _save_data(self, **values):
         """Merge values into the native Job data."""
@@ -443,7 +447,7 @@ class SourceDocumentRetentionJob(JobRunner):
         return self.purge()
 
 
-class ResolutionProposalJob(JobRunner):
+class ResolutionProposalJob(OwnedJobRunner):
     """Run inference for one proposal id through the worker service."""
 
     job_type = "netbox_data_import.resolution_proposal"
@@ -459,7 +463,7 @@ class ResolutionProposalJob(JobRunner):
         try:
             super().handle(job, *args, **kwargs)
         finally:
-            # After handle the Job is terminal, so the dispatcher no longer counts its slot.
+            # The Job is terminal and its lock is released here, so the dispatcher no longer counts its slot.
             try:
                 dispatch_proposals()
             except (RedisConnectionError, RedisTimeoutError):

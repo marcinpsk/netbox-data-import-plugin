@@ -15,6 +15,7 @@ from django.db import connection, connections, transaction
 from django.test import SimpleTestCase, TestCase, TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
+from django_pg_utils import advisory_lock
 from django_rq import get_queue
 from netbox.constants import RQ_QUEUE_LOW
 
@@ -42,6 +43,38 @@ def backend_config(**fallback):
 
 def proposal_jobs():
     return Job.objects.filter(name=ResolutionProposalJob.Meta.name)
+
+
+@contextmanager
+def worker_owning(job):
+    """Hold the Job's delivery lock on a second connection, as a worker inside its backend call does."""
+    from netbox_data_import.jobs import _job_lock
+
+    held, release = Event(), Event()
+    errors: list[BaseException] = []
+
+    def worker():
+        try:
+            with advisory_lock(_job_lock(job)):
+                held.set()
+                release.wait(timeout=30)
+        except BaseException as exc:  # noqa: BLE001 - the thread hands every failure to the test
+            errors.append(exc)
+            held.set()
+        finally:
+            connections["default"].close()
+
+    thread = Thread(target=worker, daemon=True)
+    thread.start()
+    if not held.wait(timeout=10):
+        raise AssertionError("The worker did not get its Job lock.")
+    try:
+        yield
+    finally:
+        release.set()
+        thread.join(timeout=10)
+    if thread.is_alive() or errors:
+        raise AssertionError(f"The worker lock holder did not finish cleanly: {errors}")
 
 
 class _DispatchViewMixin(InPlacePreviewMixin):
@@ -141,12 +174,12 @@ class ProposalDispatchTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTo
     def test_a_cancelled_proposal_keeps_its_slot_until_its_running_job_ends(self):
         """The worker of a cancelled row can still be inside its backend call, which still occupies the server."""
         first, second, _third = self.ask_all()
-        Job.objects.get(pk=first.job_id).start()
-        self.assertTrue(claim_proposal(first.pk))
+        job = self.start(first)
         cancelled = self.post("trace_cancel_proposal", proposal_id=first.pk)
         self.assertEqual(cancelled.status_code, 200, cancelled.content[:500])
 
-        self.poll(second.field_key)
+        with worker_owning(job):
+            self.poll(second.field_key)
 
         self.assertIsNone(ResolutionProposal.objects.get(pk=second.pk).job_id)
         with self.answering_backend() as seen:
@@ -168,13 +201,26 @@ class ProposalDispatchTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTo
         self.assertEqual(rows[1].status, ProposalStatus.CANCELLED)
         self.assertEqual([row.job_id is not None for row in rows], [True, False, True])
 
-    def test_a_lost_task_releases_its_slot_at_the_next_poll(self):
-        first, second, _third = self.ask_all()
-        job = Job.objects.get(pk=first.job_id)
+    def start(self, proposal):
+        """Start the proposal's Job and claim the proposal, as a worker does before its backend call."""
+        job = Job.objects.get(pk=proposal.job_id)
         job.start()
-        self.assertTrue(claim_proposal(first.pk))
-        # The worker died, and its task went with it.
+        self.assertTrue(claim_proposal(proposal.pk))
+        return job
+
+    def test_a_worker_that_owns_its_job_keeps_the_slot_when_the_queue_loses_its_task(self):
+        """A Redis restart can drop the task record while the worker is still inside its backend call."""
+        first, second, _third = self.ask_all()
+        job = self.start(first)
         get_queue(RQ_QUEUE_LOW).fetch_job(str(job.job_id)).delete()
+
+        with worker_owning(job):
+            self.poll(second.field_key)
+
+            rows = self.rows()
+            self.assertEqual((rows[0].status, rows[0].failure_reason), (ProposalStatus.RUNNING, ""))
+            self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_RUNNING)
+            self.assertEqual([row.job_id is not None for row in rows], [True, False, False])
 
         self.poll(second.field_key)
 
@@ -185,29 +231,54 @@ class ProposalDispatchTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTo
         self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_ERRORED)
         self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
 
-    def test_a_job_running_past_its_timeout_releases_its_slot_at_the_next_poll(self):
-        from netbox_data_import.inference_backend import resolve_active_backend
-        from netbox_data_import.proposal_dispatch import STALE_SLOT_GRACE
-        from netbox_data_import.proposal_jobs import proposal_job_timeout
+    def test_an_owned_job_keeps_its_slot_however_long_it_runs_and_whatever_the_timeouts_say(self):
+        first, second, _third = self.ask_all(read_timeout=600)
+        job = self.start(first)
+        Job.objects.filter(pk=job.pk).update(started=timezone.now() - timedelta(days=1))
 
+        with worker_owning(job):
+            self.poll(second.field_key, connect_timeout=1, read_timeout=1)
+
+        rows = self.rows()
+        self.assertEqual((rows[0].status, rows[0].failure_reason), (ProposalStatus.RUNNING, ""))
+        self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_RUNNING)
+        self.assertEqual([row.job_id is not None for row in rows], [True, False, False])
+
+    def test_a_running_job_whose_worker_is_gone_releases_its_slot_at_the_next_poll(self):
+        """No worker holds the Job's lock, so nothing can still be inside the backend call."""
         first, second, _third = self.ask_all()
-        job = Job.objects.get(pk=first.job_id)
-        job.start()
-        self.assertTrue(claim_proposal(first.pk))
-        with override_plugins_config(netbox_data_import=backend_config()):
-            timeout = timedelta(seconds=proposal_job_timeout(resolve_active_backend()))
-        Job.objects.filter(pk=job.pk).update(started=timezone.now() - timeout)
-
-        self.poll(second.field_key)
-
-        self.assertIsNone(ResolutionProposal.objects.get(pk=second.pk).job_id)
-        Job.objects.filter(pk=job.pk).update(started=timezone.now() - timeout - STALE_SLOT_GRACE - timedelta(seconds=5))
+        job = self.start(first)
 
         self.poll(second.field_key)
 
         rows = self.rows()
         self.assertEqual(
-            (rows[0].status, rows[0].failure_reason), (ProposalStatus.FAILED, ProposalFailureReason.TIMEOUT)
+            (rows[0].status, rows[0].failure_reason), (ProposalStatus.FAILED, ProposalFailureReason.QUEUE_UNAVAILABLE)
+        )
+        self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_ERRORED)
+        self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
+
+    def test_a_pending_job_releases_its_slot_only_once_its_task_is_lost(self):
+        from netbox_data_import.jobs import QUEUE_PUSH_GRACE
+
+        first, second, _third = self.ask_all()
+        job = Job.objects.get(pk=first.job_id)
+
+        self.poll(second.field_key)
+
+        self.assertIsNone(ResolutionProposal.objects.get(pk=second.pk).job_id)
+        get_queue(RQ_QUEUE_LOW).fetch_job(str(job.job_id)).delete()
+        # A young pending Job may have no task yet, because the push follows the commit.
+        self.poll(second.field_key)
+
+        self.assertIsNone(ResolutionProposal.objects.get(pk=second.pk).job_id)
+        Job.objects.filter(pk=job.pk).update(created=timezone.now() - QUEUE_PUSH_GRACE - timedelta(seconds=5))
+
+        self.poll(second.field_key)
+
+        rows = self.rows()
+        self.assertEqual(
+            (rows[0].status, rows[0].failure_reason), (ProposalStatus.FAILED, ProposalFailureReason.QUEUE_UNAVAILABLE)
         )
         self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_ERRORED)
         self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
@@ -259,6 +330,63 @@ class ProposalDispatchTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTo
             [(row.status, row.failure_reason) for row in rows[1:]],
             [(ProposalStatus.FAILED, ProposalFailureReason.INVALID_CONFIGURATION)] * 2,
         )
+
+
+class OwnedDeliveryTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTopologyMixin, TransactionTestCase):
+    """The real proposal worker holds its Job lock through the run, so a poll cannot release its slot."""
+
+    def setUp(self):
+        self.build_topology()
+        super().setUp()
+
+    def test_a_poll_during_a_real_delivery_leaves_the_running_job_its_slot(self) -> None:
+        first, second, _third = self.ask_all()
+        task = get_queue(RQ_QUEUE_LOW).fetch_job(str(Job.objects.get(pk=first.job_id).job_id))
+        arguments = task.kwargs
+        claimed, release = Event(), Event()
+        errors: list[BaseException] = []
+
+        def pause_after_the_claim(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            # The worker started its Job and claimed the row, and has not called the backend yet.
+            if sql.startswith('UPDATE "netbox_data_import_resolutionproposal" SET "status"') and params[0] == "running":
+                claimed.set()
+                release.wait(20)
+            return result
+
+        def deliver():
+            try:
+                with connection.execute_wrapper(pause_after_the_claim):
+                    ResolutionProposalJob.handle(**arguments)
+            except BaseException as exc:  # noqa: BLE001 - the thread hands every failure to the test
+                errors.append(exc)
+            finally:
+                connection.close()
+
+        with self.answering_backend() as seen:
+            worker = Thread(target=deliver, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(claimed.wait(20), "the worker never claimed its proposal")
+                task.delete()
+                response = self.client.get(
+                    reverse("plugins:netbox_data_import:trace_proposal"),
+                    {**self.claim(), "field_key": second.field_key},
+                    headers=HTMX,
+                )
+                rows_while_running = self.rows()
+            finally:
+                release.set()
+                worker.join(30)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(response.status_code, 200, response.content[:500])
+        self.assertEqual((rows_while_running[0].status, rows_while_running[0].failure_reason), ("running", ""))
+        self.assertEqual([row.job_id is not None for row in rows_while_running], [True, False, False])
+        self.assertEqual(len(seen), 1)
+        rows = self.rows()
+        self.assertEqual(rows[0].status, ProposalStatus.COMPLETED)
+        self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
 
 
 class DispatchRaceTest(IsolatedRQQueueTestMixin, TransactionTestCase):

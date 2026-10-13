@@ -570,23 +570,31 @@ class AskAllQueueFailureTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, Cabl
         from rq.job import Job as RQJob
 
         def a_worker_takes_it_and_the_push_fails(queue, *args, **kwargs):
-            self.assertTrue(claim_proposal(ResolutionProposal.objects.get(field_key=self.first).pk))
+            self.assertTrue(claim_proposal(ResolutionProposal.objects.get(job__job_id=kwargs["job_id"]).pk))
             raise RedisConnectionError
 
+        # Two request slots, so the dispatch pushes the claimed attempt first and never pushes the second.
+        two_slots = {**BACKEND, "inference_backend": {**FALLBACK, "max_concurrent_requests": 2}}
         with (
+            override_plugins_config(netbox_data_import=two_slots),
             patch.object(DjangoRQ, "enqueue_call", autospec=True, side_effect=a_worker_takes_it_and_the_push_fails),
             patch.object(RQJob, "fetch", side_effect=RedisConnectionError),
         ):
-            response = self.post("trace_request_proposal", field_key=self.first)
+            response = self.post("trace_request_all_proposals")
 
-        self.assertEqual(response.status_code, 503, response.content[:300])
-        proposal = ResolutionProposal.objects.select_related("job").get(field_key=self.first)
-        self.assertEqual((proposal.status, proposal.failure_reason), (ProposalStatus.RUNNING, ""))
-        self.assertEqual(proposal.job.status, JobStatusChoices.STATUS_PENDING)
-        entry = proposal.candidate_snapshot["candidates"][0]
+        self.assertEqual(response.status_code, 204, response.content[:300])
+        claimed, unpushed, waiting = ResolutionProposal.objects.select_related("job").order_by("created", "pk")
+        self.assertEqual(
+            (unpushed.status, unpushed.failure_reason, unpushed.job.status),
+            (ProposalStatus.FAILED, ProposalFailureReason.QUEUE_UNAVAILABLE, JobStatusChoices.STATUS_ERRORED),
+        )
+        self.assertEqual((waiting.status, waiting.job_id), (ProposalStatus.QUEUED, None))
+        self.assertEqual((claimed.status, claimed.failure_reason), (ProposalStatus.RUNNING, ""))
+        self.assertEqual(claimed.job.status, JobStatusChoices.STATUS_PENDING)
+        entry = claimed.candidate_snapshot["candidates"][0]
         self.assertTrue(
             complete_proposal(
-                proposal.pk,
+                claimed.pk,
                 outcome=ProposalOutcome.CANDIDATE,
                 explanation="The worker's answer still lands.",
                 selected_candidate_id=entry["candidate_id"],

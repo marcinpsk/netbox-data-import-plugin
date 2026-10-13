@@ -4,11 +4,11 @@
 
 A requested proposal waits as a queued row without a Job. The dispatcher gives the oldest waiting rows
 a Job while slots are free. A slot is in use while a proposal's Job can still run, whatever the
-proposal's status: the worker of a cancelled row can still be inside its backend call.
+proposal's status: the worker of a cancelled row can still be inside its backend call. A worker holds
+its Job lock for the whole delivery, so a slot whose Job lock is taken is never released.
 """
 
 import logging
-from datetime import timedelta
 
 from django.db import connection, transaction
 from django.utils import timezone
@@ -19,17 +19,15 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from .inference_backend import NoActiveInferenceBackend, resolve_active_backend
 from .inference_credentials import CredentialFailure
 from .inference_trust import InvalidInferenceConfiguration
-from .jobs import ResolutionProposalJob, _task_lost, import_queue_task
+from .jobs import ResolutionProposalJob, _task_lost, _try_job_lock, import_queue_task
 from .models import ProposalFailureReason, ProposalStatus, ResolutionProposal
 from .proposal_jobs import CREDENTIAL_FAILURE_REASONS, proposal_job_timeout
 from .resolution_proposals import fail_proposal, fail_queued_proposal, record_proposal_job
 
 logger = logging.getLogger(__name__)
 
-#: How long a running Job may stay past its own timeout before its slot counts as leaked.
-STALE_SLOT_GRACE = timedelta(minutes=1)
 SLOT_TASK_LOST = "The proposal task is no longer queued or running."
-SLOT_TIMED_OUT = "The proposal Job ran past its timeout without ending."
+SLOT_WORKER_GONE = "The proposal Job is running, but no worker holds it."
 _DISPATCH_LOCK = "netbox-data-import-proposal-dispatch"
 
 
@@ -62,10 +60,10 @@ def _fill_free_slots() -> list[tuple[int, object]]:
     waiting = ResolutionProposal.objects.filter(status=ProposalStatus.QUEUED, job__isnull=True).order_by(
         "created", "pk"
     )
+    in_use = _release_leaked_slots()
     try:
         backend = resolve_active_backend()
     except (NoActiveInferenceBackend, InvalidInferenceConfiguration, CredentialFailure) as exc:
-        _release_leaked_slots(None)
         # No Job could call a backend, so each waiting row fails with the reason its Job would record.
         reason = ProposalFailureReason.INVALID_CONFIGURATION
         if isinstance(exc, CredentialFailure):
@@ -74,7 +72,7 @@ def _fill_free_slots() -> list[tuple[int, object]]:
             fail_queued_proposal(proposal_id, reason=reason)
         return []
     job_timeout = proposal_job_timeout(backend)
-    free = max(backend.max_concurrent_requests - _release_leaked_slots(job_timeout), 0)
+    free = max(backend.max_concurrent_requests - in_use, 0)
     dispatched = []
     for proposal in waiting.select_related("requested_by")[:free]:
         # The low queue lets a trace sync queued later start before minutes of inference.
@@ -90,7 +88,7 @@ def _fill_free_slots() -> list[tuple[int, object]]:
     return dispatched
 
 
-def _release_leaked_slots(job_timeout: int | None) -> int:
+def _release_leaked_slots() -> int:
     """Release each slot whose Job can no longer run, and return how many slots stay in use."""
     from core.choices import JobStatusChoices
     from core.models import Job
@@ -99,15 +97,17 @@ def _release_leaked_slots(job_timeout: int | None) -> int:
     holders = ResolutionProposal.objects.filter(job__status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES)
     for proposal in holders.select_related("job"):
         job = proposal.job
-        if _task_lost(job, import_queue_task(job)):
-            reason, message = ProposalFailureReason.QUEUE_UNAVAILABLE, SLOT_TASK_LOST
-        elif (
-            job_timeout is not None
-            and job.status == JobStatusChoices.STATUS_RUNNING
-            and job.started is not None
-            and job.started + timedelta(seconds=job_timeout) + STALE_SLOT_GRACE < timezone.now()
-        ):
-            reason, message = ProposalFailureReason.TIMEOUT, SLOT_TIMED_OUT
+        # A worker holds this lock through its whole delivery, whatever Redis or the clock say.
+        if not _try_job_lock(job):
+            in_use += 1
+            continue
+        job.refresh_from_db()
+        if job.status not in JobStatusChoices.ENQUEUED_STATE_CHOICES:
+            continue
+        if job.status == JobStatusChoices.STATUS_RUNNING:
+            message = SLOT_WORKER_GONE
+        elif _task_lost(job, import_queue_task(job)):
+            message = SLOT_TASK_LOST
         else:
             in_use += 1
             continue
@@ -115,8 +115,8 @@ def _release_leaked_slots(job_timeout: int | None) -> int:
         Job.objects.filter(pk=job.pk, status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES).update(
             status=JobStatusChoices.STATUS_ERRORED, completed=timezone.now(), error=message
         )
-        # A terminal row keeps its status; only an attempt that is still active fails here.
-        fail_proposal(proposal.pk, reason=reason)
+        # The job system lost the run, not the backend; a terminal row keeps its status.
+        fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)
     return in_use
 
 
@@ -140,4 +140,4 @@ def _fail_unpushed(proposal_id: int, job) -> None:
         )
 
 
-__all__ = ("STALE_SLOT_GRACE", "dispatch_proposals")
+__all__ = ("dispatch_proposals",)

@@ -170,8 +170,9 @@ A proposal that cannot get a request slot waits as **Queued**, and its card says
 free AI backend slot. The plugin starts the next waiting proposal, oldest first, when a proposal job
 ends. A waiting card also checks for a free slot each time it refreshes. A slot stays in use while
 its job can still run, also after you cancel its proposal, because the worker can still be inside
-its backend call. When a job can no longer run, because its queue task is gone or it ran past its
-time limit, the plugin frees its slot and fails its proposal with `queue_unavailable` or `timeout`.
+its backend call. A running worker holds a lock on its job, so its slot stays in use for as long as
+the worker runs. When a job can no longer run, because its worker is gone or its queue task is gone
+before a worker took it, the plugin frees its slot and fails its proposal with `queue_unavailable`.
 
 Each proposal job gets a time limit from the active backend: three attempts of the connect timeout,
 the read timeout and the Vault connect and read timeouts, plus the longest wait between attempts
