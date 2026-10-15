@@ -643,7 +643,13 @@
                     {% endif %}
                   </td>
                   <td>{{ policy.cable_type }}</td>
-                  <td>{{ policy.cable_profile }}</td>
+                  <td>
+                    {% if policy.breakout_profile %}
+                      <span class="text-secondary" data-breakout-profile>{{ policy.breakout_profile }}</span>
+                    {% else %}
+                      {{ policy.cable_profile }}
+                    {% endif %}
+                  </td>
                   <td class="text-end">
                     <form method="post" class="d-flex flex-wrap gap-2 justify-content-end"
                           action="{% url 'plugins:netbox_data_import:trace_cable_policy' %}"
@@ -656,9 +662,14 @@
                       <label class="visually-hidden" for="{{ policy.form.cable_type.id_for_label }}">
                         Cable Type for {{ policy.cable_class }}</label>
                       {{ policy.form.cable_type }}
-                      <label class="visually-hidden" for="{{ policy.form.cable_profile.id_for_label }}">
-                        Cable Profile for {{ policy.cable_class }}</label>
-                      {{ policy.form.cable_profile }}
+                      {% if policy.breakout_profile %}
+                        {# The breakout ignores this dimension, so a save keeps the stored value. #}
+                        {{ policy.form.cable_profile.as_hidden }}
+                      {% else %}
+                        <label class="visually-hidden" for="{{ policy.form.cable_profile.id_for_label }}">
+                          Cable Profile for {{ policy.cable_class }}</label>
+                        {{ policy.form.cable_profile }}
+                      {% endif %}
                       <button type="submit" class="btn btn-sm btn-primary" data-cable-policy-save
                               {% if policy.reason %}disabled{% endif %}>Save</button>
                     </form>

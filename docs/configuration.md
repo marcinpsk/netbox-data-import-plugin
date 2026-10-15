@@ -488,7 +488,9 @@ states each lane as its own trace. Select **Choose termination** once for each l
 channel subinterface: the import does not match a lane label to a channel. The traces of one parent
 then share one breakout Cable. Its A side is the parent, and B connector k is the first hop of the
 lane on channel k. The parent's channel count selects the Cable Profile, and the CableClass policies
-of all lanes must give the same Cable Type. **Sync with dependencies** on one lane selects every lane
+of all lanes must give the same Cable Type. The lane's **Cable policy** row shows that profile as
+"Set by the breakout" and offers only the Cable Type. When the same CableClass also states another
+segment of the trace, the row keeps its Cable Profile control, because the profile applies there. **Sync with dependencies** on one lane selects every lane
 of that parent, because one Cable carries them all. The lane's card lists the other lanes, and the
 server refuses a selection that leaves a lane out. The breakout is blocked when its lanes reach ports of different kinds, when a channel
 between two lanes has no trace, when a trace that names the same card is not resolved, or when

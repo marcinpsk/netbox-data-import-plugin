@@ -3488,6 +3488,7 @@ def _cable_policy_forms(profile, trace, viewer) -> list:
                 "cable_class": cable_class,
                 "cable_type": POLICY_HIDDEN if hidden else decision["cable_type"],
                 "cable_profile": POLICY_HIDDEN if hidden else decision["cable_profile"],
+                "breakout_profile": decision["breakout_profile"],
                 "resolved": False if hidden else bool(decision["policy"]),
                 "form": form,
                 "reason": (

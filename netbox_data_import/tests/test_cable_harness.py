@@ -3,6 +3,7 @@
 """Plan and write breakout harnesses from leg traces through the real adapter, engine and database."""
 
 import uuid
+from io import BytesIO
 from unittest import skipUnless
 
 from dcim.models import (
@@ -19,14 +20,16 @@ from dcim.models import (
 from django.db import transaction
 from django.db.models.signals import pre_save
 from django.test import TestCase, TransactionTestCase
+from django.urls import reverse
 
 from netbox_data_import.cable_disclosure import TERMINATION_HIDDEN, present_units
 from netbox_data_import.cable_harness import IntentRefused, harness_intent, ordinary_intent
+from netbox_data_import.cable_policy import cable_profile_label
 from netbox_data_import.cable_target import CableModule
 from netbox_data_import.import_engine import ImportEngine, SelectionError, StalePlan
 from netbox_data_import.models import CableClassMapping, CableImportSource, ImportExecution
 from netbox_data_import.plan import Disposition, PlannedChange, Severity, fingerprint_of
-from netbox_data_import.review_workspace import ReviewWorkspace
+from netbox_data_import.review_workspace import BREAKOUT_PROFILE, ReviewWorkspace
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.tests.helpers import (
     cables_on,
@@ -35,9 +38,11 @@ from netbox_data_import.tests.helpers import (
     trace_endpoint_line,
     trace_segment,
     trace_termination,
+    trace_workbook_bytes,
+    upload_preview,
     user_with_object_permission,
 )
-from netbox_data_import.tests.test_cable_module import CableTopologyMixin, patched_path
+from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path, patched_path
 
 
 def _channel_fields() -> bool:
@@ -1277,6 +1282,33 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
                     "edited in NetBox, because the import never edits a breakout Cable.",
                 )
 
+    def test_a_leg_policy_row_names_the_breakout_profile_unless_the_parent_is_hidden(self):
+        self.resolve_lanes([1, 2])
+        plan = self.plan(direct_leg(1), direct_leg(2))
+        viewer = self.viewer(interfaces={"channels__isnull": True})
+
+        for actor, expected in (
+            (self.actor, f"{BREAKOUT_PROFILE}: {cable_profile_label(BREAKOUT_4)}"),
+            (viewer, BREAKOUT_PROFILE),
+        ):
+            with self.subTest(actor=actor.username):
+                policies = ReviewWorkspace(plan, actor).traces[0].cable_policies
+                self.assertEqual(
+                    [(item["cable_class"], item["breakout_profile"]) for item in policies], [(FIBER, expected)]
+                )
+
+    def test_a_leg_policy_row_names_no_profile_when_the_channel_count_has_none(self):
+        parent = self.make_parent(self.make_device("SW-3"), "1/1", 3)
+        lanes = [lane(number, device="SW-3") for number in range(1, 4)]
+        for number, reference in enumerate(lanes, start=1):
+            self.save_resolution(reference, self.make_child(parent, number))
+
+        plan = self.plan(*(direct_leg(number, start=reference) for number, reference in enumerate(lanes, start=1)))
+
+        self.assertIn("cable.harness_profile_unavailable", self.codes(plan.units[0]))
+        (policy,) = ReviewWorkspace(plan, self.actor).traces[0].cable_policies
+        self.assertEqual(policy["breakout_profile"], BREAKOUT_PROFILE)
+
     def test_a_cached_plan_states_no_channel_facts_to_a_viewer_who_cannot_view_the_parent_device(self):
         """The viewer keeps Interface view and loses only the chassis member that holds the parent."""
         _member, legs = self.build_chassis_harness()
@@ -1370,3 +1402,53 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
         (change,) = {change for unit in plan.units for change in self.harness_changes(unit)}
         fars = [far for _child, far in change.to_dict()["payload"]["harness"]["legs"]]
         self.assertEqual(fars, [["dcim.interface", self.servers[n].pk, self.servers[n].device_id] for n in (1, 2)])
+
+
+def policy_row(page, cable_class):
+    """Return the Cable policy table row of one CableClass on a rendered trace card."""
+    return page.content.decode().split(f'<tr data-cable-class="{cable_class}">', 1)[1].split("</tr>", 1)[0]
+
+
+@CHANNELS
+class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
+    """The breakout, not the CableClass, sets a leg's Cable Profile, so the leg's policy row offers no profile."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_harness_topology()
+
+    def setUp(self):
+        self.resolve_lanes(range(1, 5))
+        self.client.force_login(self.actor)
+
+    def cards(self, *blocks):
+        """Upload the blocks and return each trace card, keyed by the trace's first endpoint."""
+        upload = BytesIO(trace_workbook_bytes(path_blocks=blocks))
+        upload.name = "traces.xlsx"
+        upload_preview(self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload})
+        url = reverse("plugins:netbox_data_import:trace_workspace")
+        traces = self.client.get(url).context["traces"]
+        return {trace.endpoints["from"]: self.client.get(url, {"trace": trace.identity}) for trace in traces}
+
+    def test_a_leg_row_shows_the_breakout_profile_and_offers_only_the_cable_type(self):
+        cards = self.cards(*(panel_leg(number, downstream="Patch") for number in range(1, 5)), direct_path())
+
+        leg = policy_row(cards["SW-1 Slot 0 >> 0/0 (10) P01"], FIBER)
+        self.assertIn(f"{BREAKOUT_PROFILE}: {cable_profile_label(BREAKOUT_4)}", leg)
+        self.assertIn('<select name="cable_type"', leg)
+        self.assertNotIn('<select name="cable_profile"', leg)
+        # A save keeps the stored profile, which an ordinary segment of another trace can still use.
+        self.assertIn('<input type="hidden" name="cable_profile" value="single-1c1p"', leg)
+        downstream = policy_row(cards["SW-1 Slot 0 >> 0/0 (10) P01"], "Patch")
+        self.assertIn('<select name="cable_profile"', downstream)
+        self.assertNotIn(BREAKOUT_PROFILE, downstream)
+        ordinary = cards["DEV-A eth0"]
+        self.assertNotContains(ordinary, BREAKOUT_PROFILE)
+        self.assertIn('<select name="cable_profile"', policy_row(ordinary, "Patch"))
+
+    def test_a_class_that_also_serves_an_ordinary_segment_keeps_its_profile_select(self):
+        cards = self.cards(*(panel_leg(number) for number in range(1, 5)))
+
+        card = cards["SW-1 Slot 0 >> 0/0 (10) P01"]
+        self.assertNotContains(card, BREAKOUT_PROFILE)
+        self.assertIn('<select name="cable_profile"', policy_row(card, FIBER))

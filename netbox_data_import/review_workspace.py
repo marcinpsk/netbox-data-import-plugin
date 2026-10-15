@@ -18,7 +18,7 @@ from .cable_disclosure import (
     POLICY_VISIBLE,
     TERMINATION_HIDDEN,
 )
-from .cable_policy import cable_media_family_label, cable_type_label
+from .cable_policy import cable_media_family_label, cable_profile_label, cable_type_label
 from .cable_target import UNRESOLVED
 from .identity import identity_in, identity_text
 from .import_engine import ImportEngine
@@ -951,6 +951,7 @@ SYNC_SELECTION_INVALID = "The sync request names no valid trace selection."
 SYNC_NOTHING = "That trace has no changes to synchronize."
 SYNC_COMPANIONS = "On the same breakout Cable as this trace"
 SYNC_DEPENDENCY_OWNERS = "Needed for a change this trace depends on"
+BREAKOUT_PROFILE = "Set by the breakout"
 
 
 @dataclass(frozen=True)
@@ -1040,6 +1041,18 @@ class SyncMember:
     is_trace: bool
 
 
+def _breakout_policies(policies, segments, diagnostics) -> list[dict[str, Any]]:
+    """Return each CableClass decision, naming the breakout profile on a class that only the harness leg states."""
+    state = next((item.display for item in diagnostics if item.code == "cable.harness_state"), None)
+    if state is None:
+        return [{**policy, "breakout_profile": ""} for policy in policies]
+    ordinary = {segment["cable_class"] for segment in segments if segment["index"] != state["segment_index"]}
+    # A hidden parent hides the profile its channel count selects, and a blocked harness selects none.
+    known = not _parent_hidden(state) and state["profile"]
+    text = f"{BREAKOUT_PROFILE}: {cable_profile_label(state['profile'])}" if known else BREAKOUT_PROFILE
+    return [{**policy, "breakout_profile": "" if policy["cable_class"] in ordinary else text} for policy in policies]
+
+
 def _termination_model_name(label: str) -> str:
     """Return the NetBox name of the model one resolved termination selected, or nothing while open."""
     if not label:
@@ -1095,6 +1108,7 @@ class TraceWorkspaceUnit:
             {"code": item.code, "message": _diagnostic_message(item), "severity": item.severity}
             for item in unit.diagnostics
         ]
+        segments = [dict(segment) for segment in workspace.get("segments") or ()]
         return cls(
             identity=unit.identity,
             trace_identity=str(workspace.get("identity") or ""),
@@ -1103,8 +1117,8 @@ class TraceWorkspaceUnit:
             row_number=display.get("row_number"),
             sheet=str(display.get("sheet") or ""),
             endpoints=dict(workspace.get("endpoints") or {}),
-            segments=[dict(segment) for segment in workspace.get("segments") or ()],
-            cable_policies=[dict(policy) for policy in workspace["cable_policies"]],
+            segments=segments,
+            cable_policies=_breakout_policies(workspace["cable_policies"], segments, unit.diagnostics),
             logical_cable=workspace.get("logical_cable"),
             deletes_logical_cable=bool(workspace.get("deletes_logical_cable")),
             resolution_started=bool(workspace.get("resolution_started")),
