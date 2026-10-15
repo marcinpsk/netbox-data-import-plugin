@@ -469,7 +469,11 @@ more than one to show the traces of each. Select none to show all traces. The tr
 always stays in the list. Your browser keeps the filter for every preview.
 
 Each trace has **Sync with dependencies**, which synchronizes that trace and the traces whose
-changes it needs. It is disabled, with its reason, when one of those changes cannot sync.
+changes it needs. When the sync includes other traces, the trace card lists each of them by name,
+under the reason: on the same breakout Cable as this trace, or needed for a change this trace
+depends on. Select a name to open that trace. The sync executes only the traces the page listed. If
+that list changed after the page loaded, the sync is refused: reload the page and check the list
+again. The button is disabled, with its reason, when one of those changes cannot sync.
 **Sync N actionable traces**, under the trace counts, synchronizes every actionable
 trace, with the traces their changes need, in one background Job. It leaves blocked, invalid and
 unchanged traces alone. A trace that needs a change from a trace that cannot sync is left out too.
@@ -485,8 +489,8 @@ channel subinterface: the import does not match a lane label to a channel. The t
 then share one breakout Cable. Its A side is the parent, and B connector k is the first hop of the
 lane on channel k. The parent's channel count selects the Cable Profile, and the CableClass policies
 of all lanes must give the same Cable Type. **Sync with dependencies** on one lane selects every lane
-of that parent, because one Cable carries them all, and the server refuses a selection that leaves a
-lane out. The breakout is blocked when its lanes reach ports of different kinds, when a channel
+of that parent, because one Cable carries them all. The lane's card lists the other lanes, and the
+server refuses a selection that leaves a lane out. The breakout is blocked when its lanes reach ports of different kinds, when a channel
 between two lanes has no trace, when a trace that names the same card is not resolved, or when
 another Cable holds the parent or a far end. Channels after the last lane stay unused, with a
 warning. The import never edits or deletes a breakout Cable, so a lane that a later file adds needs

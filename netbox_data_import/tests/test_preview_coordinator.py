@@ -779,7 +779,7 @@ FLAT_COMMANDS = {
     "unlink_device": {"source_id": "D-1"},
 }
 TRACE_COMMANDS = {
-    "trace_sync": {"identity": "trace"},
+    "trace_sync": {"selection": "trace"},
     "trace_sync_all": {},
     "trace_sync_cancel": {"job_id": "1"},
     "trace_cable_policy": {"cable_class": "Patch", "cable_type": "mmf-om4", "cable_profile": "single-1c1p"},
@@ -1115,7 +1115,7 @@ class TraceQueueOrderingTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
             self.client,
             Job._meta.db_table,
             reverse("plugins:netbox_data_import:trace_sync"),
-            {**preview_claim(self.client), "identity": self.identity},
+            {**preview_claim(self.client), "selection": self.identity},
         )
         queued.start()
         try:
@@ -1153,7 +1153,7 @@ class TraceQueueOrderingTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
         )
         sync = (
             reverse("plugins:netbox_data_import:trace_sync"),
-            {**claim, "identity": self.identity},
+            {**claim, "selection": self.identity},
             Job._meta.db_table,
         )
         first_args, rival_args = (sync, resolution) if queue_first else (resolution, sync)

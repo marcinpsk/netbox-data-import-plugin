@@ -392,6 +392,15 @@ closure is actionable and the closure carries each dependency. Otherwise the act
 its reason, and the server refuses it before it queues a Job. Sync of all actionable traces applies
 the same check.
 
+The selected trace's card lists every other unit of the closure by the name the trace list shows,
+under why the closure holds it: a co-selection member, or a unit that carries a change the trace
+depends on (with that unit's own members). A trace name is source evidence, so the list discloses
+nothing the trace list does not. The sync form posts the whole displayed closure, the selected trace
+first. The server computes the closure again from the claimed preview and refuses a posted list
+that differs in any unit or in order with HTTP 409, the same way it refuses a stale Preview Claim.
+It refuses an empty or repeated list, or a unit the preview does not hold, with HTTP 400. Both
+refusals queue no Job.
+
 A unit can name co-selection members (`selected_with`): units that every selection must hold together
 with it, whatever their disposition. The serialized unit and its fingerprint carry the field only when
 it is not empty. One validator in `plan.py` decides a selection: each member of each selected unit, read
@@ -1755,6 +1764,8 @@ The workspace is one page per preview. Layout:
 - **Cable policy** for the selected trace: the policy in force on each stated CableClass, editable
   in place, and the policy in force on each resolved segment with the action that forces one segment
   to its own Cable Type and Cable Profile.
+- **Sync with dependencies** for the selected trace, with the list of every other trace that the
+  sync executes and why (section 4.5). The command executes only the list the page showed.
 
 Termination field states render as badges: `unresolved`, `automatically resolved`, `manually
 resolved`, `proposed`, `accepted`, `stale`, `failed`. The `automatically resolved` state is distinct

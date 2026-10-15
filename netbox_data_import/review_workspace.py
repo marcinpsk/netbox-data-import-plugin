@@ -944,6 +944,12 @@ _SYNC_URL_NAME = "plugins:netbox_data_import:trace_sync"
 _SYNC_ALL_URL_NAME = "plugins:netbox_data_import:trace_sync_all"
 SYNC_ALL_NOTHING = "This preview has no actionable trace to synchronize."
 SYNC_DEPENDENCY_HELD = "This trace depends on a change that cannot synchronize."
+SYNC_SELECTION_CHANGED = (
+    "The traces this sync includes changed since the page loaded. Reload the page and review them again."
+)
+SYNC_SELECTION_INVALID = "The sync request names no valid trace selection."
+SYNC_COMPANIONS = "On the same breakout Cable as this trace"
+SYNC_DEPENDENCY_OWNERS = "Needed for a change this trace depends on"
 
 
 @dataclass(frozen=True)
@@ -1023,6 +1029,16 @@ def with_blocked_sync(trace: TraceWorkspaceUnit, reason: str) -> TraceWorkspaceU
     return replace(trace, actions=actions)
 
 
+@dataclass(frozen=True)
+class SyncMember:
+    """One other unit a trace's sync executes: a companion on its breakout Cable, or one its changes wait on."""
+
+    identity: str
+    name: str
+    companion: bool
+    is_trace: bool
+
+
 def _termination_model_name(label: str) -> str:
     """Return the NetBox name of the model one resolved termination selected, or nothing while open."""
     if not label:
@@ -1053,6 +1069,21 @@ class TraceWorkspaceUnit:
     terminations: list[dict[str, Any]]
     findings: list[dict[str, str]]
     actions: tuple[TraceAction, ...]
+    sync_members: tuple[SyncMember, ...] = ()
+
+    @property
+    def sync_selection(self) -> tuple[str, ...]:
+        """Return what the sync form posts: this trace, then each member in the order the sync selects it."""
+        return (self.identity, *(member.identity for member in self.sync_members))
+
+    @property
+    def sync_groups(self) -> tuple[tuple[str, tuple[SyncMember, ...]], ...]:
+        """Return the members under why the sync needs them, leaving out an empty group."""
+        groups = (
+            (SYNC_COMPANIONS, tuple(member for member in self.sync_members if member.companion)),
+            (SYNC_DEPENDENCY_OWNERS, tuple(member for member in self.sync_members if not member.companion)),
+        )
+        return tuple((label, members) for label, members in groups if members)
 
     @classmethod
     def from_unit(cls, unit: SynchronizationUnit) -> TraceWorkspaceUnit:
@@ -1223,8 +1254,12 @@ class ReviewWorkspace:
             if not _states_a_trace(unit):
                 continue
             trace = TraceWorkspaceUnit.from_unit(unit)
-            if unit.disposition == Disposition.ACTIONABLE and self.cannot_sync(self.sync_selection(unit.identity)):
-                trace = with_blocked_sync(trace, SYNC_DEPENDENCY_HELD)
+            if unit.disposition == Disposition.ACTIONABLE:
+                closure = self._sync_closure(unit.identity)
+                if self.cannot_sync(tuple(closure)):
+                    trace = with_blocked_sync(trace, SYNC_DEPENDENCY_HELD)
+                else:
+                    trace = replace(trace, sync_members=self._sync_members(unit.identity, closure))
             traces.append(trace)
         return tuple(traces)
 
@@ -1245,27 +1280,44 @@ class ReviewWorkspace:
         """Return the unit, its companions, and transitively one owner of each change they wait on and do not carry.
 
         The engine refuses a selection that lacks a dependency or a companion, so a review command that
-        synchronizes one trace has to carry both, visibly.
+        synchronizes one trace has to carry both, visibly: the page lists them and the POST must match.
         """
+        return tuple(self._sync_closure(identity))
+
+    def _sync_members(self, identity: str, closure: Mapping[str, bool]) -> tuple[SyncMember, ...]:
+        """Return every unit of *closure* other than *identity*, by the name the trace list shows."""
+        return tuple(
+            SyncMember(
+                identity=member,
+                name=str(self._presented[member].display.get("name") or ""),
+                companion=companion,
+                is_trace=_states_a_trace(self._presented[member]),
+            )
+            for member, companion in closure.items()
+            if member != identity
+        )
+
+    def _sync_closure(self, identity: str) -> dict[str, bool]:
+        """Return `sync_selection` in order, each unit mapped to whether it joins as a companion of *identity*."""
         selected = self.plan.unit(identity)
         if selected is None or selected.disposition != Disposition.ACTIONABLE:
-            return ()
-        chosen: dict[str, None] = {}
+            return {}
+        chosen: dict[str, bool] = {}
         carried: set[str] = set()
         queue: list[str] = []
 
-        def choose(first: str) -> None:
+        def choose(first: str, companion: bool) -> None:
             pending = [first]
             while pending:
                 unit = pending.pop()
                 if unit in chosen:
                     continue
-                chosen[unit] = None
+                chosen[unit] = companion
                 carried.update(change.identity for change in self._planned_changes(unit))
                 queue.append(unit)
                 pending.extend(reversed(self._presented[unit].selected_with))
 
-        choose(identity)
+        choose(identity, True)
         while queue:
             for change in self._planned_changes(queue.pop()):
                 for dependency in change.dependencies:
@@ -1275,8 +1327,8 @@ class ReviewWorkspace:
                     owners = self._change_owners.get(dependency, ())
                     owner = next((unit for unit in owners if unit in self._executable_units), None)
                     if owner is not None:
-                        choose(owner)
-        return tuple(chosen)
+                        choose(owner, False)
+        return chosen
 
     @cached_property
     def _change_owners(self) -> dict[str, tuple[str, ...]]:

@@ -90,7 +90,7 @@ class _QueuedSyncMixin:
     def queue_sync(self):
         """Synchronize the actionable trace and return its Job, which no worker has started."""
         identity = self.actionable_trace()
-        response = self.post("trace_sync", {"identity": identity})
+        response = self.post("trace_sync", {"selection": identity})
         self.assertEqual(response.status_code, 302, response.content[:500])
         self.identity = identity
         return Job.objects.get(data__job_type=ImportJobRunner.job_type)
@@ -297,12 +297,12 @@ class SyncStatusTest(_QueuedSyncMixin, IsolatedRQQueueTestMixin, CableTopologyMi
     def test_a_refusal_names_the_queued_or_running_state_of_the_sync(self):
         job = self.queue_sync()
 
-        queued = self.post("trace_sync", {"identity": self.identity})
+        queued = self.post("trace_sync", {"selection": self.identity})
         self.assertContains(queued, SYNC_QUEUED, status_code=409)
         self.assertNotContains(queued, SYNC_RUNNING, status_code=409)
 
         Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_RUNNING, started=timezone.now())
-        running = self.post("trace_sync", {"identity": self.identity})
+        running = self.post("trace_sync", {"selection": self.identity})
         self.assertContains(running, SYNC_RUNNING, status_code=409)
 
     def test_the_progress_page_says_a_queued_sync_waits_for_a_worker(self):

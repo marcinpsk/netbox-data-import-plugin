@@ -329,7 +329,7 @@
         {% for action in trace.actions %}
           <form method="post" action="{% url action.url_name %}" class="d-inline">
             {% csrf_token %}
-            <input type="hidden" name="identity" value="{{ trace.identity }}">
+            {% for identity in trace.sync_selection %}<input type="hidden" name="selection" value="{{ identity }}">{% endfor %}
             {% include "netbox_data_import/inc/preview_claim.html" %}
             <button type="submit" class="btn btn-primary" data-trace-action="{{ action.key }}"
                     {% if not action.enabled %}disabled{% endif %}>{{ action.label }}</button>
@@ -339,6 +339,25 @@
       </div>
     </div>
     <div class="card-body">
+      {% if trace.sync_members %}
+        {# The sync form posts exactly these traces, and the server refuses a selection that no longer matches. #}
+        <div class="alert alert-info" data-sync-members>
+          {# A Tabler alert is a flex row, so one block keeps the heading above its lists. #}
+          <div>
+            <strong>Sync with dependencies also synchronizes {{ trace.sync_members|length }} other trace{{ trace.sync_members|length|pluralize }}</strong>
+            {% for group, members in trace.sync_groups %}
+              <div class="ndi-trace-reason mt-2">{{ group }}</div>
+              <ul class="mb-0 ps-3">
+                {% for member in members %}
+                  <li data-sync-member="{% if member.companion %}companion{% else %}dependency{% endif %}">
+                    {% if member.is_trace %}<a href="?trace={{ member.identity|urlencode }}">{{ member.name }}</a>{% else %}{{ member.name }}{% endif %}
+                  </li>
+                {% endfor %}
+              </ul>
+            {% endfor %}
+          </div>
+        </div>
+      {% endif %}
       {% if trace.disposition == "invalid" and trace.findings %}
         <div class="alert alert-danger" role="alert" data-trace-findings>
           <strong>Why this trace is invalid</strong>

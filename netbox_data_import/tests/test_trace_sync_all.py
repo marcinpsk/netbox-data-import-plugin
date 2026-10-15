@@ -257,6 +257,10 @@ class SyncAllSelectionTest(CableTopologyMixin, TestCase):
         workspace = ReviewWorkspace(plan, self.actor)
 
         self.assertTrue(workspace.cannot_sync(workspace.sync_selection("cable:trace:leg1")))
+        # A held sync lists no member: the page would name a selection the server refuses.
+        self.assertEqual(
+            next(trace for trace in workspace.traces if trace.identity == "cable:trace:leg1").sync_members, ()
+        )
         self.assertEqual(workspace.sync_all.units, ("cable:trace:free",))
         self.assertEqual((workspace.sync_all.blocked, workspace.sync_all.held_back), (1, 1))
 
@@ -444,7 +448,7 @@ class HeldTraceSyncTest(_SyncAllMixin, IsolatedRQQueueTestMixin, CableTopologyMi
         for identity in HELD:
             refused = self.client.post(
                 reverse("plugins:netbox_data_import:trace_sync"),
-                {**preview_claim(self.client), "identity": identity},
+                {**preview_claim(self.client), "selection": identity},
                 **JSON,
             )
 
@@ -556,7 +560,7 @@ class SyncAllExecutionTest(_SyncAllMixin, IsolatedRQQueueTestMixin, CableTopolog
         actionable = next(trace for trace in page.context["traces"] if trace.disposition == Disposition.ACTIONABLE)
         queued = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {**preview_claim(self.client), "identity": actionable.identity},
+            {**preview_claim(self.client), "selection": actionable.identity},
         )
         self.assertEqual(queued.status_code, 302)
         held = preview_coordinator(self.client)

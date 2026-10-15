@@ -133,6 +133,8 @@ from .review_workspace import (
     IneligibleLocationSelection,
     SYNC_ALL_NOTHING,
     SYNC_DEPENDENCY_HELD,
+    SYNC_SELECTION_CHANGED,
+    SYNC_SELECTION_INVALID,
     ProfilePolicyMoved,
     ReviewWorkspace,
     UnacceptablePolicyDecision,
@@ -3916,18 +3918,30 @@ def _refuse_drifted_sync(preview) -> None:
         raise PreviewCommandRefused(reason, 409)
 
 
+def _posted_sync_selection(data) -> tuple[str, ...]:
+    """Return the selection a trace sync form posts, its trace first; refuse an empty or repeated one."""
+    selection = tuple(data.getlist("selection"))
+    if not selection or "" in selection or len(set(selection)) != len(selection):
+        raise PreviewCommandRefused(SYNC_SELECTION_INVALID)
+    return selection
+
+
 @dataclass(frozen=True)
 class _TraceSync(QueueImport):
-    """Queue one Source Trace with the units its changes depend on, keeping the preview pending on it."""
+    """Queue the selection one trace's page showed, keeping the preview pending on it."""
 
-    identity: str
+    selection: tuple[str, ...]
     keeps_preview = True
 
     def selection_for(self, preview):
-        """Refuse a trace whose dependency cannot sync, a sync live NetBox has moved under, or nothing to sync."""
-        selection = preview.workspace.sync_selection(self.identity)
+        """Refuse an unknown unit, a held dependency, a selection the page did not show, drift, or nothing to sync."""
+        if any(preview.plan.unit(identity) is None for identity in self.selection):
+            raise PreviewCommandRefused(SYNC_SELECTION_INVALID)
+        selection = preview.workspace.sync_selection(self.selection[0])
         if selection and preview.workspace.cannot_sync(selection):
             raise PreviewCommandRefused(SYNC_DEPENDENCY_HELD)
+        if selection and selection != self.selection:
+            raise StalePreview(SYNC_SELECTION_CHANGED)
         _refuse_drifted_sync(preview)
         if not selection:
             raise PreviewCommandRefused("That trace has no changes to synchronize.")
@@ -3940,14 +3954,14 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Queue the reviewed plan for one trace's own selection."""
-        command = _TraceSync(identity=request.POST.get("identity", "").strip())
+        """Queue the reviewed plan for the selection one trace's page showed."""
+        command = _TraceSync(selection=_posted_sync_selection(request.POST))
         result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
         return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": result.outcome.job_id}))
 
     def refusal_url(self, request):
-        """Return the trace the sync was asked for."""
-        return _trace_workspace_url(request.POST.get("identity", ""))
+        """Return the trace the sync was asked for, which the form posts first."""
+        return _trace_workspace_url(next(iter(request.POST.getlist("selection")), ""))
 
 
 class _TraceSyncAll(QueueImport):
