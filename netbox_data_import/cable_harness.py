@@ -18,6 +18,7 @@ from .plan import canonical_json
 from .target_runtime import PreconditionFailed
 
 INTERFACE = "dcim.interface"
+NOT_CONNECTABLE = "cable.termination_not_connectable"
 # The mirrored Cable fields of a child whose parent holds no profiled Cable.
 _EMPTY_MIRROR = (None, "", None, ())
 
@@ -231,6 +232,20 @@ def _refuse_channel_child(end) -> None:
         )
 
 
+def _refuse_not_connectable(ends) -> None:
+    """Refuse an Interface whose type NetBox refuses to cable, as `CableTermination.clean` does."""
+    from dcim.constants import NONCONNECTABLE_IFACE_TYPES
+
+    for end in ends:
+        if _label(end) == INTERFACE and end.type in NONCONNECTABLE_IFACE_TYPES:
+            raise IntentRefused(
+                NOT_CONNECTABLE,
+                f"NetBox cannot cable {end}, because its Interface type is {end.type}.",
+                {"port": str(end), "interface_type": end.type},
+                port=end,
+            )
+
+
 def _refuse_marked_connected(ends, code: str) -> None:
     """Refuse an end NetBox marks as connected, which `CableTermination.clean` refuses to cable."""
     for end in ends:
@@ -244,9 +259,10 @@ def _refuse_marked_connected(ends, code: str) -> None:
 
 
 def ordinary_intent(first, second, *, profile: str) -> CableIntent:
-    """Return a one-to-one Cable write, refusing a channel child or a marked-connected termination at either end."""
+    """Return a one-to-one Cable write, refusing a channel child or an end NetBox cannot cable at either end."""
     _refuse_channel_child(first)
     _refuse_channel_child(second)
+    _refuse_not_connectable((first, second))
     _refuse_marked_connected((first, second), "cable.termination_occupied")
     return CableIntent(a_terminations=(first,), b_terminations=(second,), profile=profile)
 
@@ -302,6 +318,7 @@ def harness_intent(parent, legs) -> CableIntent:
             "This NetBox instance offers no breakout Cable Profile for the parent's channel count.",
             {"channels": capacity},
         )
+    _refuse_not_connectable((parent, *(far for _child, far in ordered)))
     _refuse_marked_connected((parent, *(far for _child, far in ordered)), "cable.harness_occupied")
     return CableIntent(
         a_terminations=(parent,),

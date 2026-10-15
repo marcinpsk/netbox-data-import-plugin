@@ -341,6 +341,48 @@ class HarnessPlanningTest(HarnessTopologyMixin, TestCase):
         (occupied,) = [item for item in plan.units[0].diagnostics if item.code == "cable.harness_occupied"]
         self.assertEqual(occupied.display["port"], str(self.fronts[3]))
 
+    def test_a_virtual_far_end_blocks_every_leg_and_reopens_its_picker(self):
+        """NetBox refuses a Cable on a virtual Interface (CableTermination.clean)."""
+        self.resolve_lanes(range(1, 5))
+        Interface.objects.filter(pk=self.servers[3].pk).update(type="virtual")
+
+        plan = self.plan(*(direct_leg(number) for number in range(1, 5)))
+
+        self.assert_every_leg(plan, Disposition.BLOCKED, "cable.termination_not_connectable")
+        (refused,) = [item for item in plan.units[0].diagnostics if item.code == "cable.termination_not_connectable"]
+        self.assertEqual(
+            (refused.display["port"], refused.display["interface_type"], refused.display["parent"]),
+            (str(self.servers[3]), "virtual", str(self.parent)),
+        )
+        records = {
+            item["label"]: item["incompatible"]
+            for unit in plan.units
+            for item in unit.display["trace"]["terminations"]
+            if item["label"].startswith("SRV-")
+        }
+        self.assertEqual(records, {"SRV-1 eth0": False, "SRV-2 eth0": False, "SRV-3 eth0": True, "SRV-4 eth0": False})
+        messages = {item["code"]: item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings}
+        self.assertIn("Choose another termination", messages["cable.termination_not_connectable"])
+
+    def test_a_virtual_parent_blocks_every_leg(self):
+        self.resolve_lanes(range(1, 5))
+        Interface.objects.filter(pk=self.parent.pk).update(type="virtual")
+
+        plan = self.plan(*(direct_leg(number) for number in range(1, 5)))
+
+        self.assert_every_leg(plan, Disposition.BLOCKED, "cable.termination_not_connectable")
+        (refused,) = [item for item in plan.units[0].diagnostics if item.code == "cable.termination_not_connectable"]
+        self.assertEqual(refused.display["port"], str(self.parent))
+
+    def test_a_physical_far_end_type_change_keeps_the_harness_actionable(self):
+        self.resolve_lanes(range(1, 5))
+        Interface.objects.filter(pk=self.servers[3].pk).update(type="10gbase-x-sfpp")
+
+        plan = self.plan(*(direct_leg(number) for number in range(1, 5)))
+
+        for unit in plan.units:
+            self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+
     def test_an_unresolved_lane_in_the_cohort_blocks_the_resolved_legs(self):
         self.resolve_lanes([1, 2, 3])
 

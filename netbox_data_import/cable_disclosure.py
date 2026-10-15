@@ -103,6 +103,9 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
             frozenset({"segment_index", "cable_class"}), termination=frozenset({"termination"})
         ),
         "cable.termination_kind_mismatch": _DisplaySchema(_REFERENCE_FIELDS | {"claimed_kind", "selected_object_type"}),
+        "cable.termination_not_connectable": _DisplaySchema(
+            frozenset({"segment_index"}), termination=frozenset({"port", "interface_type", "parent"})
+        ),
         "cable.termination_occupied": _DisplaySchema(
             frozenset({"segment_index", "marked_connected"}),
             cable=frozenset({"cable"}),

@@ -1039,7 +1039,9 @@ ordinary write refuses a channel child at either end. A harness write requires o
 of one model with no channel gap, and a verified profile. Both refuse a termination NetBox marks as
 connected without a Cable, because `CableTermination.clean` refuses to cable it: an ordinary write with
 `cable.termination_occupied`, a harness write with `cable.harness_occupied`, each with
-`marked_connected` in its display. Execution writes
+`marked_connected` in its display. Both refuse an Interface whose type is in NetBox's
+`NONCONNECTABLE_IFACE_TYPES`, as `CableTermination.clean` does, with `cable.termination_not_connectable`.
+The review keeps that end's picker open, so the operator chooses another termination. Execution writes
 `Cable(profile=..., a_terminations=[parent], b_terminations=[far ends by channel])` through
 `full_clean()`, so NetBox writes connector `k` with positions `[1]` on side B and connector 1 with
 positions `1..N` on side A.
@@ -1105,6 +1107,7 @@ view the parent, presentation hides those fields in every harness finding.
 | PortMapping contradicts a Pass-Through Claim | `cable.pass_through_not_mapped` | `invalid` |
 | Several mapped peers for a same-port continuation | `cable.ambiguous_mapped_peer` | `blocked` |
 | A foreign Cable occupies a desired termination, or NetBox marks it connected without a Cable | `cable.termination_occupied` | `blocked` |
+| A desired termination, a harness parent or a harness far end is an Interface whose type NetBox cannot cable (`NONCONNECTABLE_IFACE_TYPES`) | `cable.termination_not_connectable` | `blocked` |
 | A multi-termination Cable touches a desired port | `cable.multi_termination_conflict` | `blocked` |
 | Two different planned Cables claim one free termination, in two Source Traces or in one | `cable.planned_termination_conflict` | `blocked` |
 | A segment whose two ends resolve to one termination | `cable.segment_self_connection` | `blocked` |

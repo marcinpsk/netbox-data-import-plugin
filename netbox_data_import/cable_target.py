@@ -389,6 +389,13 @@ class _TraceAnalysis:
         self.error(code, display, identities)
         self.invalid = True
 
+    def reopen(self, termination_key: tuple[str, int]) -> None:
+        """Keep each end resolved to one termination in attention, so its picker can choose another."""
+        source = disclosure_source(*termination_key)
+        for record in self.terminations.values():
+            if record.get(DISCLOSURE_SOURCE) == source:
+                record["incompatible"] = True
+
 
 def _endpoint_label(reference) -> str:
     """Return the operator-facing name of one Termination Reference."""
@@ -820,7 +827,7 @@ class _CableBatch:
             "source": {"device": reference.device, "cards": reference.cards, "port": reference.port},
             "selectable": not reason,
             "reason": reason,
-            # A segment NetBox cannot cable reopens both its ends, however they were resolved.
+            # An end NetBox cannot cable, alone or with its peer, reopens its picker however it was resolved.
             "incompatible": False,
         }
         if termination is not None:
@@ -1335,6 +1342,8 @@ class _CableBatch:
                         self._harness_display(harness, leg.segment.index, *ports, **fields),
                         identities=(harness.termination.identity, *(port.identity for port in ports)),
                     )
+                    if code == cable_harness.NOT_CONNECTABLE:
+                        leg.analysis.reopen(ports[0].key)
                 self._settle_leg(leg, harness)
 
     def _harness_findings(self, harness: _Harness) -> list[tuple[str, str, tuple, dict]]:
@@ -1708,6 +1717,8 @@ class _CableBatch:
                 {"segment_index": segment.index, **refusal.facts, **termination_sources(port.key)},
                 identities=(port.identity,),
             )
+            if refusal.code == cable_harness.NOT_CONNECTABLE:
+                analysis.reopen(port.key)
 
     def _cable_policy(self, analysis: _TraceAnalysis, segment: _DesiredSegment) -> dict | None:
         """Return the Cable Type and Cable Profile one new segment is written with."""

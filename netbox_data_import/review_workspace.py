@@ -563,6 +563,10 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     "cable.termination_kind_mismatch": (
         "The stated PortClass does not admit the kind of port the saved selection names. Choose the termination again."
     ),
+    "cable.termination_not_connectable": (
+        "NetBox cannot cable this Interface because of its type. "
+        "Choose another termination for this end, or correct the Interface type in NetBox."
+    ),
     "cable.termination_occupied": lambda display: (
         "NetBox marks this termination as connected without a Cable, so it cannot take one. "
         "Clear Mark connected on it in NetBox, or resolve this trace to a free termination."

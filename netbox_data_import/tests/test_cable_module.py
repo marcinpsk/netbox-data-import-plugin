@@ -735,6 +735,33 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         messages = {item["code"]: item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings}
         self.assertIn("as connected without a Cable", messages["cable.termination_occupied"])
 
+    def test_a_lag_far_end_blocks_the_unit_and_reopens_its_picker(self):
+        """NetBox refuses a Cable on a LAG Interface (CableTermination.clean), so the operator chooses again."""
+        Interface.objects.filter(pk=self.eth1.pk).update(type="lag")
+
+        plan = self.plan(patched_path())
+
+        (unit,) = plan.units
+        self.assertEqual(unit.disposition, Disposition.BLOCKED, self.codes(unit))
+        self.assertEqual(unit.changes, ())
+        refused = next(item for item in unit.diagnostics if item.code == "cable.termination_not_connectable")
+        self.assertEqual(
+            (refused.display["segment_index"], refused.display["port"], refused.display["interface_type"]),
+            (2, str(self.eth1), "lag"),
+        )
+        records = {item["label"]: item["incompatible"] for item in unit.display["trace"]["terminations"]}
+        self.assertTrue(records["DEV-B eth1"])
+        self.assertFalse(records["DEV-A eth0"])
+        messages = {item["code"]: item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings}
+        self.assertIn("Choose another termination", messages["cable.termination_not_connectable"])
+
+    def test_a_physical_far_end_of_another_type_stays_actionable(self):
+        Interface.objects.filter(pk=self.eth1.pk).update(type="10gbase-x-sfpp")
+
+        (unit,) = self.plan(patched_path()).units
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+
     def test_an_invisible_occupying_cable_blocks_without_disclosing_its_identity(self):
         """Occupancy stays unscoped, but its Cable details stay inside the actor's view scope."""
         other = self.make_device("DEV-C")
@@ -3054,6 +3081,18 @@ class CablePreconditionRecheckTest(CableTopologyMixin, TestCase):
             CableModule().apply(unit.changes[2], self.context())
 
         self.assertEqual(refused.exception.code, "cable.termination_occupied")
+        self.assertEqual(Cable.objects.count(), 0)
+
+    def test_a_termination_made_virtual_after_planning_refuses_its_creation(self):
+        """The locked write rebuilds the intent, so NetBox's refusal of a virtual Interface is never reached."""
+        unit = self.unit(patched_path())
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+        Interface.objects.filter(pk=self.eth1.pk).update(type="virtual")
+
+        with self.assertRaises(IntentRefused) as refused:
+            CableModule().apply(unit.changes[2], self.context())
+
+        self.assertEqual(refused.exception.code, "cable.termination_not_connectable")
         self.assertEqual(Cable.objects.count(), 0)
 
     def test_a_re_terminated_logical_cable_refuses_its_deletion(self):
