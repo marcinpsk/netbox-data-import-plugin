@@ -108,6 +108,8 @@ class HarnessTopologyMixin(CableTopologyMixin):
         cls.switch = cls.make_device("SW-1")
         cls.parent = cls.make_parent(cls.switch, "1/3", channels)
         cls.children = {number: cls.make_child(cls.parent, number) for number in range(1, channels + 1)}
+        # A plain subinterface under the parent is part of its child set and is no channel.
+        Interface.objects.create(device=cls.switch, name=f"{cls.parent.name}.100", type="virtual", parent=cls.parent)
         panel = cls.make_device("PANEL-H")
         cls.fronts, cls.rears = {}, {}
         for number in range(1, 5):
@@ -312,6 +314,36 @@ class HarnessPlanningTest(HarnessTopologyMixin, TestCase):
         self.assertEqual(
             [unit.selected_with for unit in plan.units[:2]], [(plan.units[1].identity,), (plan.units[0].identity,)]
         )
+
+    def test_a_leg_without_a_cable_type_holds_back_the_legs_that_have_one(self):
+        """An unmapped or stale Cable Type blocks its own leg, and selected_with keeps the others from syncing."""
+        self.resolve_lanes(range(1, 5))
+        CableClassMapping.objects.create(profile=self.profile, cable_class="Unmapped")
+        CableClassMapping.objects.create(
+            profile=self.profile, cable_class="Removed", cable_type_resolved=True, cable_type="mmf-om4"
+        )
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Removed").update(cable_type="removed-type")
+        lanes = [
+            (
+                trace_endpoint_line(lane(number)),
+                trace_endpoint_line(server_port(number)),
+                (trace_segment(lane(number), cable_class, server_port(number)),),
+            )
+            for number, cable_class in ((1, "Unmapped"), (2, "Removed"), (3, FIBER), (4, FIBER))
+        ]
+
+        plan = self.plan(*lanes)
+
+        self.assertIn("cable.cableclass_unmapped", self.codes(plan.units[0]))
+        self.assertIn("cable.policy_stale", self.codes(plan.units[1]))
+        self.assertEqual(
+            [unit.disposition for unit in plan.units], [Disposition.BLOCKED] * 2 + [Disposition.ACTIONABLE] * 2
+        )
+        (change,) = {change for unit in plan.units for change in self.harness_changes(unit)}
+        self.assertEqual(change.payload["cable_type"], "mmf-om4")
+        workspace = ReviewWorkspace(plan, self.actor)
+        self.assertTrue(workspace.cannot_sync(workspace.sync_selection(plan.units[2].identity)))
+        self.assertEqual(workspace.sync_all.units, ())
 
     def test_legs_whose_cable_types_disagree_block_every_leg(self):
         self.resolve_lanes(range(1, 5))

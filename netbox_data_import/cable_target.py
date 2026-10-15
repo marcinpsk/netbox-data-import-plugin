@@ -1216,10 +1216,16 @@ class _CableBatch:
         """Return the harness of one parent, created on first use."""
         if parent_pk not in self._harnesses:
             parent = self._parents[parent_pk]
-            # On a virtual chassis the parent can sit on another member Device.
-            self._device_displays.setdefault(parent.component.device_id, str(parent.component.device))
-            self._harnesses[parent_pk] = _Harness(parent=parent, termination=self._termination(parent.component))
+            self._harnesses[parent_pk] = _Harness(
+                parent=parent, termination=self._channel_termination(parent.component)
+            )
         return self._harnesses[parent_pk]
+
+    def _channel_termination(self, component) -> _Termination:
+        """Return the plan record of a parent or a child, which no trace may have resolved a Device for."""
+        # On a virtual chassis a parent and its children can sit on different member Devices.
+        self._device_displays.setdefault(component.device_id, str(component.device))
+        return self._termination(component)
 
     def _place_trace(self, analysis: _TraceAnalysis) -> None:
         """Record one trace as the leg of its parent's harness, or as a trace that blocks that harness."""
@@ -1233,10 +1239,10 @@ class _CableBatch:
         if not touched:
             return
         legs = [
-            (segment, end)
+            (segment, end, parent)
             for segment in analysis.segments
             for end in segment.terminations
-            if self._channel_parent(end) is not None
+            if (parent := self._channel_parent(end)) is not None
         ]
         if len(legs) > 1:
             # A child at both ends of one segment, or a trace between two harnesses.
@@ -1254,15 +1260,15 @@ class _CableBatch:
             for parent in touched:
                 self._harness(parent).unresolved.append(analysis)
             return
-        ((segment, child),) = legs
-        harness = self._harness(touched[0])
+        ((segment, child, parent),) = legs
+        harness = self._harness(parent)
         far = segment.right if child.key == segment.left.key else segment.left
         analysis.leg = _Leg(analysis=analysis, segment=segment, child=child, far=far)
         analysis.harness = harness
         harness.legs.append(analysis.leg)
 
     def _gather_cohort(self, harness: _Harness) -> None:
-        """Read the source cohorts of one harness as negative evidence (section 6.1).
+        """Read the source cohorts of one harness as negative evidence (section 6.4).
 
         A cohort is the device and cards label of a reference that resolves to a child of the parent.
         Any trace with an unresolved reference in a cohort blocks the harness, so a lane the source
@@ -1282,7 +1288,7 @@ class _CableBatch:
             for key in sorted(key for key in keys if key[:2] in cohorts):
                 termination = resolved.get(key)
                 component = None if termination is None else self._objects.get(termination.key)
-                if termination is None and analysis not in harness.unresolved:
+                if termination is None and analysis.identity not in {other.identity for other in harness.unresolved}:
                     harness.unresolved.append(analysis)
                 elif component is not None and cable_harness.is_plain_interface(component):
                     harness.unchannelized.append((analysis, termination))
@@ -1329,7 +1335,7 @@ class _CableBatch:
                 (
                     "refuse",
                     "cable.harness_channel_state_invalid",
-                    (self._termination(child.component),),
+                    (self._channel_termination(child.component),),
                     {"port": str(child.component), "channel": child.channel, "fault": fault},
                 )
                 for child, fault in faults
