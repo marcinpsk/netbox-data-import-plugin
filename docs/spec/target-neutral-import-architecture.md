@@ -1081,17 +1081,19 @@ Execution rechecks every precondition inside the transaction. Any mismatch rolls
 selected transaction and requires a replan. This makes every topology change after preview a detected
 stale state.
 
-For a harness the execution replan reads the parent of each resolved channel child without a lock.
-It then locks, with normal waits: each parent Interface by primary key, then every Interface whose
+For a harness the execution replan reads the parent of each resolved channel child without a lock. It
+then locks, with normal waits: each parent Interface by primary key, then every Interface whose
 parent is one of them by primary key, whether or not the source states it, then the segment
 terminations, Cables, CableTerminations and PortMapping rows as it does for every trace. A child that
 moved to another parent between that read and its lock has its new parent and children locked too.
 Under those locks the plan rereads the channel count, the full child set with each `channel_id`, and
-the termination snapshot. A difference from the accepted plan changes the unit fingerprint and refuses
-the execution as a stale plan. The child's Device is one of those facts: in a virtual chassis a child
-can move to another member Device and keep its parent and channel. The harness write refuses a child
-whose locked row is no longer on the Device the plan recorded, as an ordinary write refuses a moved
-termination.
+the termination snapshot. A difference from the accepted plan changes the unit fingerprint and
+refuses the execution as a stale plan. The child's Device is one of those facts: in a virtual chassis
+a child can move to another member Device and keep its parent and channel. The harness write refuses
+a child whose locked row is no longer on the Device the plan recorded, as an ordinary write refuses a
+moved termination. A far end that another transaction deletes between its first read and its lock
+refuses the execution as a failed precondition, as an ordinary write refuses a deleted termination. A
+deleted channel child makes its trace no leg, which refuses the execution as a stale plan.
 
 The import serializes its own decision facts against NetBox writes that take row locks. It does not
 serialize two NetBox writers against each other: a state they produce between themselves, such as a

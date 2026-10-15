@@ -1343,6 +1343,7 @@ class _CableBatch:
             if not harness.legs:
                 # Only blocked traces touch this parent, and each already carries its own finding.
                 continue
+            self._refuse_deleted_far_ends(harness)
             harness.legs.sort(
                 key=lambda leg: (cable_harness.channel(self._objects[leg.child.key]), leg.analysis.identity)
             )
@@ -1361,6 +1362,16 @@ class _CableBatch:
                     if code == cable_harness.NOT_CONNECTABLE:
                         leg.analysis.reopen(ports[0].key)
                 self._settle_leg(leg, harness)
+
+    def _refuse_deleted_far_ends(self, harness: _Harness) -> None:
+        """Refuse a harness whose far end the locked reread no longer found, as the segment write refuses one.
+
+        A child row that is gone makes its trace no leg, so only a far end can be missing here.
+        """
+        for leg in harness.legs:
+            if leg.far.key not in self._objects:
+                label, object_id = leg.far.key
+                raise PreconditionFailed(f"{label} {object_id} is gone, so the breakout Cable cannot be created.")
 
     def _harness_findings(self, harness: _Harness) -> list[tuple[str, str, tuple, dict]]:
         """Return each finding of one harness as (severity method, code, ports it names, display fields)."""

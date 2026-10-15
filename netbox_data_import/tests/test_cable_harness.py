@@ -5,6 +5,7 @@
 import uuid
 from io import BytesIO
 from unittest import skipUnless
+from unittest.mock import patch
 
 from dcim.models import (
     Cable,
@@ -17,7 +18,7 @@ from dcim.models import (
     Site,
     VirtualChassis,
 )
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models.signals import pre_save
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
@@ -25,7 +26,7 @@ from django.urls import reverse
 from netbox_data_import.cable_disclosure import TERMINATION_HIDDEN, present_units
 from netbox_data_import.cable_harness import IntentRefused, harness_intent, ordinary_intent
 from netbox_data_import.cable_policy import cable_profile_label
-from netbox_data_import.cable_target import CableModule
+from netbox_data_import.cable_target import CableModule, _CableBatch
 from netbox_data_import.import_engine import ImportEngine, SelectionError, StalePlan
 from netbox_data_import.models import (
     CableClassMapping,
@@ -825,6 +826,59 @@ class HarnessExecutionTest(HarnessTopologyMixin, TransactionTestCase):
         self.assertFalse(cables_on(self.parent).exists())
         self.assertEqual(
             ImportExecution.objects.get(idempotency_key="companion-blocked").failure_detail["reason"], "stale_plan"
+        )
+
+    def execute_after_a_deletion_before_the_lock(self, plan, row_id):
+        """Execute, deleting one Interface on a second connection after the locked replan read it, before its lock."""
+        lock_harness_parents = _CableBatch._lock_harness_parents
+        deleted = []
+
+        def delete_then_lock(batch):
+            if batch.lock_plan_references and not deleted:
+                deleted.append(row_id)
+
+                def delete():
+                    # A raw delete takes no Device row lock, which the replan already holds.
+                    with connection.cursor() as cursor:
+                        cursor.execute("DELETE FROM dcim_interface WHERE id = %s", [row_id])
+
+                with run_on_separate_connection(delete):
+                    pass
+            lock_harness_parents(batch)
+
+        with patch.object(_CableBatch, "_lock_harness_parents", autospec=True, side_effect=delete_then_lock):
+            try:
+                return self.execute(plan, key="deleted-before-lock")
+            finally:
+                self.assertEqual(deleted, [row_id], "the locked replan never ran")
+
+    def test_a_far_end_deleted_before_the_replan_locks_it_refuses_the_harness(self):
+        self.resolve_lanes([1, 2])
+        plan = self.plan(direct_leg(1), direct_leg(2))
+        far = self.servers[2]
+
+        with self.assertRaisesMessage(
+            PreconditionFailed, f"dcim.interface {far.pk} is gone, so the breakout Cable cannot be created."
+        ):
+            self.execute_after_a_deletion_before_the_lock(plan, far.pk)
+
+        self.assertFalse(Cable.objects.exists())
+        self.assertEqual(
+            ImportExecution.objects.get(idempotency_key="deleted-before-lock").failure_detail["reason"],
+            "precondition",
+        )
+
+    def test_a_channel_child_deleted_before_the_replan_locks_it_makes_the_plan_stale(self):
+        """Without its child the trace is no leg, so the replan no longer carries the harness."""
+        self.resolve_lanes([1, 2])
+        plan = self.plan(direct_leg(1), direct_leg(2))
+
+        with self.assertRaises(StalePlan):
+            self.execute_after_a_deletion_before_the_lock(plan, self.children[2].pk)
+
+        self.assertFalse(Cable.objects.exists())
+        self.assertEqual(
+            ImportExecution.objects.get(idempotency_key="deleted-before-lock").failure_detail["reason"], "stale_plan"
         )
 
     def test_the_execution_locks_the_parent_before_any_write(self):
