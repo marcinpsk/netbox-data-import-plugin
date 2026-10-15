@@ -25,6 +25,10 @@ TERMINATION_SOURCE_KINDS = (*sorted(CABLE_END_KINDS), DEVICE_ROW)
 
 # A segment names its two planned ends apart, so one hidden end leaves the other readable.
 SEGMENT_END_SOURCES = MappingProxyType({"left": "left_sources", "right": "right_sources"})
+# The Interface, and its Device, whose fact a finding's wording itself states, such as a leg's channel child.
+WORDING_SOURCES = "wording_sources"
+# What a finding becomes when its viewer cannot see the rows its WORDING_SOURCES name.
+FINDING_HIDDEN = "cable.finding_hidden"
 
 _REFERENCE_FIELDS = frozenset({"device", "cards", "port", "port_class"})
 # These codes replace the source `port` with the NetBox port they resolved.
@@ -38,14 +42,17 @@ class _DisplaySchema(NamedTuple):
     cable: frozenset = frozenset()
     policy: frozenset = frozenset()
     termination: frozenset = frozenset()
+    # The wording alone states a fact of one Interface, so the finding renders only when WORDING_SOURCES are visible.
+    wording: bool = False
 
 
 def _harness_schema(public: frozenset, *, cable: frozenset = frozenset(), termination: frozenset = frozenset()):
     """Return the schema of one harness finding, which always names its leg and its parent Interface.
 
-    A fact derived from the parent's channels is a termination field, so a hidden parent hides it.
+    A fact derived from the parent's channels is a termination field, so a hidden parent hides it. The
+    finding says the trace is a leg, so a hidden channel child hides the whole finding.
     """
-    return _DisplaySchema(public | {"segment_index"}, cable=cable, termination=termination | {"parent"})
+    return _DisplaySchema(public | {"segment_index"}, cable=cable, termination=termination | {"parent"}, wording=True)
 
 
 _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
@@ -55,6 +62,7 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
             frozenset({"segment_index"}), cable=frozenset({"cable", "status", "type", "profile", "label"})
         ),
         "cable.cableclass_unmapped": _DisplaySchema(frozenset({"segment_index", "cable_class"})),
+        FINDING_HIDDEN: _DisplaySchema(frozenset()),
         "cable.harness_channel_gap": _harness_schema(frozenset(), termination=frozenset({"missing"})),
         "cable.harness_channel_state_invalid": _harness_schema(
             frozenset({"channel", "fault"}), termination=frozenset({"port"})
@@ -104,10 +112,12 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
         "cable.segment_self_connection": _DisplaySchema(
             frozenset({"segment_index", "cable_class"}), termination=frozenset({"termination"})
         ),
-        "cable.termination_channelized": _DisplaySchema(frozenset({"segment_index"}), termination=frozenset({"port"})),
+        "cable.termination_channelized": _DisplaySchema(
+            frozenset({"segment_index"}), termination=frozenset({"port"}), wording=True
+        ),
         "cable.termination_kind_mismatch": _DisplaySchema(_REFERENCE_FIELDS | {"claimed_kind", "selected_object_type"}),
         "cable.termination_not_connectable": _DisplaySchema(
-            frozenset({"segment_index"}), termination=frozenset({"port", "interface_type", "parent"})
+            frozenset({"segment_index"}), termination=frozenset({"port", "interface_type", "parent"}), wording=True
         ),
         "cable.termination_occupied": _DisplaySchema(
             frozenset({"segment_index", "marked_connected"}),
@@ -120,7 +130,10 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
 )
 
 CABLE_DIAGNOSTIC_FIELDS = MappingProxyType(
-    {code: frozenset().union(*fields) for code, fields in _DIAGNOSTIC_DISCLOSURE_FIELDS.items()}
+    {
+        code: fields.public | fields.cable | fields.policy | fields.termination
+        for code, fields in _DIAGNOSTIC_DISCLOSURE_FIELDS.items()
+    }
 )
 
 CABLE_DIAGNOSTIC_DISCLOSURES = MappingProxyType(
@@ -149,6 +162,11 @@ def device_source(device_id: int) -> dict:
 def segment_end_sources(port: tuple[str, int], device_id: int) -> list:
     """Return the rows that authorize one planned segment end, which names its Device and its port."""
     return [disclosure_source(*port), device_source(device_id)]
+
+
+def wording_sources(port: tuple[str, int], device_id: int) -> dict:
+    """Return the sources of the Interface whose fact a finding's wording states, and of its Device."""
+    return {WORDING_SOURCES: segment_end_sources(port, device_id)}
 
 
 def termination_sources(*terminations) -> dict:
@@ -200,7 +218,7 @@ def validate_diagnostic_disclosures(code: str, display: dict) -> None:
     fields = _DIAGNOSTIC_DISCLOSURE_FIELDS.get(code)
     if fields is None:
         raise ValueError(f"Diagnostic '{code}' has no registered display schema.")
-    public, cable, policy, termination = fields
+    public, cable, policy, termination, wording = fields
     if code == "cable.media_family_mismatch":
         _validate_media_segments(display)
         return
@@ -213,6 +231,10 @@ def validate_diagnostic_disclosures(code: str, display: dict) -> None:
         metadata.add(TERMINATION_SOURCES)
         if not _well_formed_termination_sources(display.get(TERMINATION_SOURCES)):
             raise ValueError(f"Diagnostic '{code}' names terminations without their sources.")
+    if wording:
+        metadata.add(WORDING_SOURCES)
+        if not _well_formed_termination_sources(display.get(WORDING_SOURCES)):
+            raise ValueError(f"Diagnostic '{code}' states a fact of an Interface without its sources.")
     unknown = set(display) - set(public) - set(cable) - set(policy) - set(termination) - metadata
     if unknown:
         names = ", ".join(sorted(unknown))
@@ -305,7 +327,7 @@ def _identity_key(identity) -> tuple[str, int] | None:
 def _row_sources(value: dict) -> list:
     """Return every row source one display mapping carries."""
     sources = [value.get(DISCLOSURE_SOURCE)]
-    for key in (TERMINATION_SOURCES, *SEGMENT_END_SOURCES.values()):
+    for key in (TERMINATION_SOURCES, WORDING_SOURCES, *SEGMENT_END_SOURCES.values()):
         listed = value.get(key)
         # A frozen plan holds a list as a tuple.
         if isinstance(listed, (list, tuple)):
@@ -412,6 +434,14 @@ def _visible_identities(identities, visible_row_ids: dict[str, set[int]]) -> tup
 
 def _diagnostic(diagnostic, visible_row_ids: dict[str, set[int]]):
     display = diagnostic.to_dict()["display"]
+    identities = _visible_identities(diagnostic.identities, visible_row_ids)
+    schema = _DIAGNOSTIC_DISCLOSURE_FIELDS.get(diagnostic.code)
+    if (
+        schema is not None
+        and schema.wording
+        and not _terminations_are_visible(display[WORDING_SOURCES], visible_row_ids)
+    ):
+        return replace(diagnostic, code=FINDING_HIDDEN, display={}, identities=identities)
     if diagnostic.code == "cable.media_family_mismatch":
         display["segments"] = [_media_segment(segment, visible_row_ids) for segment in display["segments"]]
     elif (
@@ -433,7 +463,7 @@ def _diagnostic(diagnostic, visible_row_ids: dict[str, set[int]]):
     keys = TERMINATION_DIAGNOSTIC_DISCLOSURES.get(diagnostic.code)
     if keys and not _terminations_are_visible(display.get(TERMINATION_SOURCES), visible_row_ids):
         display = _redact_terminations(display, keys)
-    return replace(diagnostic, display=display, identities=_visible_identities(diagnostic.identities, visible_row_ids))
+    return replace(diagnostic, display=display, identities=identities)
 
 
 def _redact_segment_ends(segment: dict, visible_row_ids: dict[str, set[int]]) -> None:
@@ -540,6 +570,7 @@ __all__ = (
     "DEVICE_HIDDEN",
     "DEVICE_ROW",
     "DISCLOSURE_SOURCE",
+    "FINDING_HIDDEN",
     "POLICY_DIAGNOSTIC_DISCLOSURES",
     "POLICY_HIDDEN",
     "POLICY_VISIBLE",
@@ -547,6 +578,7 @@ __all__ = (
     "TERMINATION_DIAGNOSTIC_DISCLOSURES",
     "TERMINATION_HIDDEN",
     "TERMINATION_SOURCES",
+    "WORDING_SOURCES",
     "device_source",
     "disclosed_cable",
     "disclosed_policy",
@@ -558,4 +590,5 @@ __all__ = (
     "segment_end_sources",
     "termination_sources",
     "validate_diagnostic_disclosures",
+    "wording_sources",
 )

@@ -2090,6 +2090,12 @@ class CableDisclosureSchemaTest(SimpleTestCase):
                 "Diagnostic 'cable.planned_termination_conflict' names terminations without their sources.",
             ),
             (
+                "a fact of an Interface without its wording sources",
+                "cable.termination_channelized",
+                {"segment_index": 0, "port": "0/0", "termination_sources": [{"kind": "dcim.interface", "pk": 1}]},
+                "Diagnostic 'cable.termination_channelized' states a fact of an Interface without its sources.",
+            ),
+            (
                 "termination sources on a diagnostic that names no termination",
                 "cable.segment_reused",
                 {"segment_index": 0, "termination_sources": [{"kind": "dcim.interface", "pk": 1}]},
@@ -2192,6 +2198,7 @@ class CableDisclosureSchemaTest(SimpleTestCase):
             _DIAGNOSTIC_DISCLOSURE_FIELDS,
             CABLE_CLASS_MAPPING_ROW,
             CABLE_ROW,
+            WORDING_SOURCES,
             DISCLOSURE_SOURCE,
             POLICY_VISIBLE,
             TERMINATION_SOURCES,
@@ -2204,7 +2211,7 @@ class CableDisclosureSchemaTest(SimpleTestCase):
         mapping = {"kind": CABLE_CLASS_MAPPING_ROW, "pk": 3}
         media_segment = {"retained": True, "visible": True, "cable_type": "cat6", "family": "cat6"}
         diagnostics = []
-        for code, (public, cable, policy, termination) in _DIAGNOSTIC_DISCLOSURE_FIELDS.items():
+        for code, (public, cable, policy, termination, wording) in _DIAGNOSTIC_DISCLOSURE_FIELDS.items():
             display = dict.fromkeys(public, "value")
             if code == "cable.media_family_mismatch":
                 display["segments"] = [
@@ -2218,6 +2225,8 @@ class CableDisclosureSchemaTest(SimpleTestCase):
             if termination:
                 display.update(dict.fromkeys(termination, "eth0"))
                 display[TERMINATION_SOURCES] = [{"kind": "dcim.interface", "pk": 5}]
+            if wording:
+                display[WORDING_SOURCES] = [{"kind": "dcim.interface", "pk": 6}, {"kind": "dcim.device", "pk": 7}]
             diagnostics.append(Diagnostic(code=code, severity=Severity.ERROR, display=display))
         delete = PlannedChange(
             identity="cable:delete:9", target_module="cable", operation="delete", payload={"cable_id": 9}
@@ -2349,7 +2358,7 @@ class CablePolicyDisclosureRegistryTest(CableTopologyMixin, TestCase):
         from pathlib import Path
 
         from netbox_data_import import cable_harness, cable_target
-        from netbox_data_import.cable_disclosure import CABLE_DIAGNOSTIC_FIELDS
+        from netbox_data_import.cable_disclosure import CABLE_DIAGNOSTIC_FIELDS, FINDING_HIDDEN
         from netbox_data_import.cable_policy import policy_choice_errors
 
         produced = {
@@ -2361,7 +2370,8 @@ class CablePolicyDisclosureRegistryTest(CableTopologyMixin, TestCase):
         produced.update(error.code for error in policy_choice_errors("removed-type", "removed-profile").values())
         produced.update(error.code for error in policy_choice_errors("cat6", "trunk-2c1p").values())
 
-        self.assertEqual(set(CABLE_DIAGNOSTIC_FIELDS), produced)
+        # Only presentation writes the finding that replaces a hidden channel fact.
+        self.assertEqual(set(CABLE_DIAGNOSTIC_FIELDS), produced | {FINDING_HIDDEN})
 
 
 class CableMediaFamilyTest(CableTopologyMixin, TestCase):

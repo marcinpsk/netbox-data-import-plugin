@@ -349,7 +349,7 @@
               <div class="ndi-trace-reason mt-2">{{ group }}</div>
               <ul class="mb-0 ps-3">
                 {% for member in members %}
-                  <li data-sync-member="{% if member.companion %}companion{% else %}dependency{% endif %}">
+                  <li data-sync-member="{{ member.kind }}">
                     {% if member.is_trace %}<a href="?trace={{ member.identity|urlencode }}">{{ member.name }}</a>{% else %}{{ member.name }}{% endif %}
                   </li>
                 {% endfor %}

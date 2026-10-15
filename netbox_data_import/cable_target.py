@@ -26,6 +26,7 @@ from .cable_disclosure import (
     DEVICE_ROW,
     DISCLOSURE_SOURCE,
     SEGMENT_END_SOURCES,
+    wording_sources,
     device_source,
     disclosed_cable,
     disclosed_policy,
@@ -616,6 +617,10 @@ def _ranked_keys(rows, wanted: str, order: int):
         )
         .values_list("_ndi_exact", "_ndi_name", "_ndi_order", "_ndi_pk")
     )
+
+
+# Refusals of an ordinary write whose wording states a fact of the refused port.
+_PORT_WORDING_CODES = frozenset({cable_harness.CHANNELIZED, cable_harness.NOT_CONNECTABLE})
 
 
 class _CableBatch:
@@ -1269,7 +1274,7 @@ class _CableBatch:
             harness = self._harness(touched[0])
             analysis.block(
                 "cable.harness_unsupported",
-                self._harness_display(harness, legs[0][0].index, trace=analysis.display["name"]),
+                self._harness_display(harness, legs[0][0].index, child=legs[0][1], trace=analysis.display["name"]),
                 identities=(harness.termination.identity,),
             )
             for parent in touched:
@@ -1324,12 +1329,16 @@ class _CableBatch:
                     harness.unchannelized.append((analysis, termination))
 
     @staticmethod
-    def _harness_display(harness: _Harness, segment_index: int, *ports: _Termination, **fields) -> dict:
+    def _harness_display(
+        harness: _Harness, segment_index: int, *ports: _Termination, child: _Termination, **fields
+    ) -> dict:
         """Return the display every harness finding carries: the leg, the parent, and the ports it names."""
         return {
             "segment_index": segment_index,
             "parent": harness.termination.display,
             **fields,
+            # Every harness finding says that this trace reaches a channel child, so that child authorizes it.
+            **wording_sources(child.key, child.device_id),
             # The parent's Device authorizes its channel facts too: on a virtual chassis it can be hidden alone.
             **termination_sources(
                 harness.termination.key, (DEVICE_ROW, harness.parent.component.device_id), *(port.key for port in ports)
@@ -1356,7 +1365,7 @@ class _CableBatch:
                 for kind, code, ports, fields in findings:
                     getattr(leg.analysis, kind)(
                         code,
-                        self._harness_display(harness, leg.segment.index, *ports, **fields),
+                        self._harness_display(harness, leg.segment.index, *ports, child=leg.child, **fields),
                         identities=(harness.termination.identity, *(port.identity for port in ports)),
                     )
                     if code == cable_harness.NOT_CONNECTABLE:
@@ -1520,6 +1529,7 @@ class _CableBatch:
             self._harness_display(
                 harness,
                 leg.segment.index,
+                child=leg.child,
                 channels=harness.parent.channels,
                 legs=self._leg_channels(harness),
                 profile=evidence["profile"],
@@ -1746,7 +1756,13 @@ class _CableBatch:
             (port,) = [end for end in segment.terminations if self._objects[end.key] is refusal.port]
             analysis.block(
                 refusal.code,
-                {"segment_index": segment.index, **refusal.facts, **termination_sources(port.key)},
+                {
+                    "segment_index": segment.index,
+                    **refusal.facts,
+                    **termination_sources(port.key),
+                    # The wording states a fact of this Interface, which only that Interface authorizes.
+                    **(wording_sources(port.key, port.device_id) if refusal.code in _PORT_WORDING_CODES else {}),
+                },
                 identities=(port.identity,),
             )
             if refusal.code in {cable_harness.NOT_CONNECTABLE, cable_harness.CHANNELIZED}:

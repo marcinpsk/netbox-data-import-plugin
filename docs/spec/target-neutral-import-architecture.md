@@ -1114,13 +1114,25 @@ inside the transaction as the accepted plan's operator.
 A parent Interface, or a parent Device, the actor cannot view is treated like a hidden Cable or
 mapped peer. The leg's `cable.permission_denied` diagnostic names the view permission the actor
 lacks. The leg names its companions whatever Cable the parent holds, and no display field states the
-parent's channels, legs, missing channels or Cable Profile. The leg's segment still states that it is
-a leg, because that is a fact of the visible channel child, so the Review Workspace offers no Cable
-Profile control on it. When the viewer of a cached plan cannot view the channel child or its Device,
-presentation hides that mark with the child. A segment override save still keeps the stored Cable
-Profile, because the server reads the mark from the plan and not from the presentation. Every harness
-finding names the parent Interface and its Device as its sources. When the viewer of a cached plan
-cannot view either of them, presentation hides those fields in every harness finding.
+parent's channels, legs, missing channels or Cable Profile. Every harness finding names the parent
+Interface and its Device as its sources. When the viewer of a cached plan cannot view either of them,
+presentation hides those fields in every harness finding.
+
+That a trace is a leg is a fact of its channel child, and one rule binds it. Every output that states
+it names the leg's channel child Interface and that child's Device as its sources, and presentation
+hides the output when the viewer cannot view either of them. A harness finding carries those sources
+as `wording_sources`, because its wording alone states the fact. A `cable.termination_channelized` or
+`cable.termination_not_connectable` finding of an ordinary segment carries the refused port and its
+Device there, because its wording states a fact of that port. Presentation replaces a finding whose
+`wording_sources` are hidden with `cable.finding_hidden`, which says only that the trace reaches a
+port the viewer cannot view. The segment mark is bound to the segment end that holds the child, so
+the Cable Profile text "Set by the breakout" on the segment and on its CableClass policy row hides
+with that end. The sync list names a companion as on the same breakout Cable only when the viewer
+sees the channel child of both legs, and otherwise lists it as synchronized together with the trace.
+So a viewer who sees the child and not the parent still sees that the trace is a leg, without any
+parent fact. Selection enforcement and the segment override save read the plan, not its presentation,
+so a hidden leg still selects every companion and still keeps a stored Cable Profile that planning
+ignores.
 
 ### 6.7 Planning diagnostics
 

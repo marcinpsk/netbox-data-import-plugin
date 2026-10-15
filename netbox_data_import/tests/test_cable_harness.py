@@ -23,7 +23,7 @@ from django.db.models.signals import pre_save
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
-from netbox_data_import.cable_disclosure import TERMINATION_HIDDEN, present_units
+from netbox_data_import.cable_disclosure import FINDING_HIDDEN, TERMINATION_HIDDEN, present_units
 from netbox_data_import.cable_harness import IntentRefused, harness_intent, ordinary_intent
 from netbox_data_import.cable_policy import cable_profile_label
 from netbox_data_import.cable_target import CableModule, _CableBatch
@@ -36,7 +36,13 @@ from netbox_data_import.models import (
     ImportProfile,
 )
 from netbox_data_import.plan import Disposition, PlannedChange, Severity, fingerprint_of
-from netbox_data_import.review_workspace import BREAKOUT_PROFILE, ReviewWorkspace
+from netbox_data_import.review_workspace import (
+    _DIAGNOSTIC_MESSAGES,
+    BREAKOUT_PROFILE,
+    SYNC_COMPANIONS,
+    SYNC_TOGETHER,
+    ReviewWorkspace,
+)
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.tests.helpers import (
     cables_on,
@@ -1467,6 +1473,9 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
 
 # A trace runs from its lower endpoint, SRV before SW, so the leg from the lane is the last segment.
 DOWNSTREAM, LEG = 0, 1
+# Interface view scopes: the parent alone holds `channels`, and only its children hold `channel_id`.
+PARENT_HIDDEN = {"channels__isnull": True}
+PARENT_AND_CHILDREN_HIDDEN = {"channels__isnull": True, "channel_id__isnull": True}
 
 
 def segment_item(page, index):
@@ -1573,15 +1582,15 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         return segment_key
 
     @staticmethod
-    def hidden_parent_operator():
-        """Return an operator who views the channel children and every far end, but not the parent Interface."""
+    def operator(interfaces):
+        """Return an operator who views and edits the profile's policies, and the Interfaces *interfaces* admits."""
         return user_with_object_permission(
-            "hidden-parent-operator",
+            "trace-operator",
             [
                 (ImportProfile, ("view", "change"), {}),
                 (Site, ("view",), {}),
                 (Device, ("view",), {}),
-                (Interface, ("view",), {"channels__isnull": True}),
+                (Interface, ("view",), interfaces),
                 (FrontPort, ("view",), {}),
                 (RearPort, ("view",), {}),
                 (Cable, ("view", "add", "delete"), {}),
@@ -1594,7 +1603,7 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         """Being a leg is a fact of the visible channel child, so the page keeps it and states no parent fact."""
         blocks = [panel_leg(number, downstream="Patch") for number in range(1, 5)]
         segment_key = self.store_leg_override(blocks)
-        self.client.force_login(self.hidden_parent_operator())
+        self.client.force_login(self.operator(PARENT_HIDDEN))
 
         card = self.cards(*blocks)["SW-1 Slot 0 >> 0/0 (10) P01"]
 
@@ -1610,21 +1619,26 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         row = CableSegmentOverride.objects.get(profile=self.profile, segment_key=segment_key)
         self.assertEqual((row.cable_type, row.cable_profile), ("mmf-om3", "single-1c1p"))
 
-    def test_a_cached_leg_mark_is_hidden_with_its_channel_child_and_still_keeps_the_stored_profile(self):
-        """The viewer loses the child after planning; the page drops the mark, and the save still ignores a profile."""
+    @staticmethod
+    def restrict_interfaces(operator, constraints):
+        """Replace the operator's Interface view scope, as an administrator does after the preview exists."""
         from users.models import ObjectPermission
 
         from netbox_data_import.object_permissions import clear_user_permission_caches
 
-        blocks = [panel_leg(number, downstream="Patch") for number in range(1, 5)]
-        segment_key = self.store_leg_override(blocks)
-        operator = self.hidden_parent_operator()
-        self.client.force_login(operator)
-        trace = self.cards(*blocks)["SW-1 Slot 0 >> 0/0 (10) P01"].context["selected_trace"].identity
-        permission = ObjectPermission.objects.get(name__startswith="hidden-parent-operator Interface ")
-        permission.constraints = {"channels__isnull": True, "channel_id__isnull": True}
+        permission = ObjectPermission.objects.get(name__startswith="trace-operator Interface ")
+        permission.constraints = constraints
         permission.save(update_fields=("constraints",))
         clear_user_permission_caches(operator)
+
+    def test_a_cached_leg_mark_is_hidden_with_its_channel_child_and_still_keeps_the_stored_profile(self):
+        """The viewer loses the child after planning; the page drops the mark, and the save still ignores a profile."""
+        blocks = [panel_leg(number, downstream="Patch") for number in range(1, 5)]
+        segment_key = self.store_leg_override(blocks)
+        operator = self.operator(PARENT_HIDDEN)
+        self.client.force_login(operator)
+        trace = self.cards(*blocks)["SW-1 Slot 0 >> 0/0 (10) P01"].context["selected_trace"].identity
+        self.restrict_interfaces(operator, PARENT_AND_CHILDREN_HIDDEN)
 
         card = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), {"trace": trace})
 
@@ -1633,6 +1647,35 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         self.assertNotContains(card, BREAKOUT_PROFILE)
         self.assertNotContains(card, "data-breakout-profile")
         self.assertEqual(card.context["segment_policy_forms"][LEG]["breakout_leg"], "")
+        response = self.force_type(card, "mmf-om3", cable_profile="__explicit_none__")
+        self.assertEqual(response.status_code, 302, response.content[:300])
+        row = CableSegmentOverride.objects.get(profile=self.profile, segment_key=segment_key)
+        self.assertEqual((row.cable_type, row.cable_profile), ("mmf-om3", "single-1c1p"))
+
+    def test_a_cached_preview_states_no_leg_fact_once_the_parent_and_its_children_are_hidden(self):
+        """Every output that says a trace is a leg names the leg's channel child, so it hides with that child."""
+        blocks = [panel_leg(number, downstream="Patch") for number in range(1, 5)]
+        segment_key = self.store_leg_override(blocks)
+        operator = self.operator({})
+        self.client.force_login(operator)
+        visible = self.cards(*blocks)["SW-1 Slot 0 >> 0/0 (10) P01"]
+        self.assertContains(visible, SYNC_COMPANIONS)
+        self.assertContains(visible, "breaks out as one Cable")
+        self.restrict_interfaces(operator, PARENT_AND_CHILDREN_HIDDEN)
+
+        card = self.client.get(
+            reverse("plugins:netbox_data_import:trace_workspace"), {"trace": visible.context["selected_trace"].identity}
+        )
+
+        self.assertEqual(card.status_code, 200)
+        page = card.content.decode()
+        self.assertNotIn("breakout", page.lower())
+        self.assertNotIn("channel", page.lower())
+        self.assertNotIn('data-sync-member="companion"', page)
+        self.assertEqual(page.count(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN]), 1)
+        self.assertContains(card, SYNC_TOGETHER)
+        self.assertContains(card, 'data-sync-member="together"', count=3)
+        self.assertEqual(page.split('data-trace-action="sync"')[0].count('name="selection"'), 4)
         response = self.force_type(card, "mmf-om3", cable_profile="__explicit_none__")
         self.assertEqual(response.status_code, 302, response.content[:300])
         row = CableSegmentOverride.objects.get(profile=self.profile, segment_key=segment_key)

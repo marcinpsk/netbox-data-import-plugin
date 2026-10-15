@@ -13,6 +13,7 @@ from typing import Any
 
 from .cable_disclosure import (
     CABLE_SEGMENT_OVERRIDE_ROW,
+    FINDING_HIDDEN,
     DISCLOSURE_SOURCE,
     POLICY_HIDDEN,
     POLICY_VISIBLE,
@@ -486,6 +487,7 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     ),
     "cable.attribute_drift": "The existing Cable carries attributes this import would not have written.",
     "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Set the Cable policy for it.",
+    FINDING_HIDDEN: "A port this trace reaches is outside your view, so this preview does not describe it.",
     "cable.harness_channel_gap": lambda display: (
         f"{_missing_channels(display)} between the legs of this breakout have no leg. "
         "NetBox numbers connectors by position, so a later leg would take the wrong connector. "
@@ -951,6 +953,7 @@ SYNC_SELECTION_CHANGED = (
 SYNC_SELECTION_INVALID = "The sync request names no valid trace selection."
 SYNC_NOTHING = "That trace has no changes to synchronize."
 SYNC_COMPANIONS = "On the same breakout Cable as this trace"
+SYNC_TOGETHER = "Synchronized together with this trace"
 SYNC_DEPENDENCY_OWNERS = "Needed for a change this trace depends on"
 BREAKOUT_PROFILE = "Set by the breakout"
 
@@ -1034,11 +1037,12 @@ def with_blocked_sync(trace: TraceWorkspaceUnit, reason: str) -> TraceWorkspaceU
 
 @dataclass(frozen=True)
 class SyncMember:
-    """One other unit a trace's sync executes: a companion on its breakout Cable, or one its changes wait on."""
+    """One other unit a trace's sync executes, and why: a companion, or one its changes wait on."""
 
     identity: str
     name: str
-    companion: bool
+    # "companion" on a breakout the viewer sees, "together" on one they do not, or "dependency".
+    kind: str
     is_trace: bool
 
 
@@ -1106,8 +1110,12 @@ class TraceWorkspaceUnit:
     def sync_groups(self) -> tuple[tuple[str, tuple[SyncMember, ...]], ...]:
         """Return the members under why the sync needs them, leaving out an empty group."""
         groups = (
-            (SYNC_COMPANIONS, tuple(member for member in self.sync_members if member.companion)),
-            (SYNC_DEPENDENCY_OWNERS, tuple(member for member in self.sync_members if not member.companion)),
+            (label, tuple(member for member in self.sync_members if member.kind == kind))
+            for kind, label in (
+                ("companion", SYNC_COMPANIONS),
+                ("together", SYNC_TOGETHER),
+                ("dependency", SYNC_DEPENDENCY_OWNERS),
+            )
         )
         return tuple((label, members) for label, members in groups if members)
 
@@ -1317,12 +1325,23 @@ class ReviewWorkspace:
             SyncMember(
                 identity=member,
                 name=str(self._presented[member].display.get("name") or ""),
-                companion=companion,
+                kind=self._member_kind(identity, member, companion),
                 is_trace=_states_a_trace(self._presented[member]),
             )
             for member, companion in closure.items()
             if member != identity
         )
+
+    def _member_kind(self, identity: str, member: str, companion: bool) -> str:
+        """Name a companion's breakout only when the viewer sees the channel child of both legs."""
+        if not companion:
+            return "dependency"
+        return "companion" if self._shows_leg(identity) and self._shows_leg(member) else "together"
+
+    def _shows_leg(self, identity: str) -> bool:
+        """Return whether presentation kept the leg mark, which hides with the leg's channel child."""
+        trace = self._presented[identity].display.get("trace") or {}
+        return any(segment["breakout_leg"] for segment in trace.get("segments") or ())
 
     def _sync_closure(self, identity: str) -> dict[str, bool]:
         """Return `sync_selection` in order, each unit mapped to whether it joins as a companion of *identity*."""
