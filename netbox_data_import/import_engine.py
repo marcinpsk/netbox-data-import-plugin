@@ -14,6 +14,7 @@ from collections.abc import Callable
 import logging
 from typing import cast
 
+import psycopg
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, transaction
 
@@ -61,6 +62,11 @@ UNMERGEABLE_SELECTION = (
 )
 
 
+CONCURRENT_CHANGE = "NetBox changed these objects during the sync. Sync again to retry."
+# PostgreSQL deadlock (40P01) and lock timeout (55P03): a concurrent writer, not a fault in the import.
+_LOCK_CONFLICTS = (psycopg.errors.DeadlockDetected, psycopg.errors.LockNotAvailable)
+
+
 def operator_failure_message(exc) -> str:
     """Return one execution failure as the text the operator reads.
 
@@ -97,10 +103,9 @@ class SelectionError(PublicRefusal):
 class _ExecutionFailed(Exception):
     """Carry one apply failure out of the transaction, with what rolled back behind it."""
 
-    def __init__(self, *, cause, reason, failed_change, rolled_back, not_attempted):
+    def __init__(self, *, cause, failed_change, rolled_back, not_attempted):
         super().__init__(str(cause))
         self.cause = cause
-        self.reason = reason
         self.failed_change = failed_change
         self.rolled_back = list(rolled_back)
         self.not_attempted = list(not_attempted)
@@ -306,23 +311,36 @@ class ImportEngine:
                         profile, source_document, actor, accepted, completed, validate_replan
                     )
         except _ExecutionFailed as failure:
+            # The savepoint has already unwound, so the audit row can still be written.
+            cause = cls._concurrency_refusal(failure.cause) or failure.cause
             cls._mark_failed(
                 execution,
-                reason=failure.reason,
+                reason=cls._failure_reason(cause),
                 failed_change=failure.failed_change,
                 rolled_back=failure.rolled_back,
                 not_attempted=failure.not_attempted,
             )
-            raise failure.cause from failure
+            raise cause from failure
         except Exception as exc:
             # Every other failure after the reservation, so the row can never stay pending.
+            refusal = cls._concurrency_refusal(exc)
             cls._mark_failed(
                 execution,
-                reason=cls._failure_reason(exc),
+                reason=cls._failure_reason(refusal or exc),
                 not_attempted=cls._selected_change_identities(accepted, selected_identities),
             )
+            if refusal is not None:
+                raise refusal from exc
             raise
         return execution, replanned
+
+    @staticmethod
+    def _concurrency_refusal(exc) -> StalePlan | None:
+        """Return the retryable refusal for a deadlock or lock timeout, or None for every other failure."""
+        if isinstance(exc, DatabaseError) and isinstance(exc.__cause__, _LOCK_CONFLICTS):
+            logger.warning("A concurrent NetBox write stopped the import execution.", exc_info=exc)
+            return StalePlan(CONCURRENT_CHANGE)
+        return None
 
     @classmethod
     def _replan_after_writes(cls, profile, source_document, actor, accepted, completed, validate_replan) -> ImportPlan:
@@ -334,7 +352,6 @@ class ImportEngine:
         except Exception as exc:
             raise _ExecutionFailed(
                 cause=exc,
-                reason=cls._failure_reason(exc),
                 failed_change=None,
                 rolled_back=completed,
                 not_attempted=[],
@@ -390,7 +407,6 @@ class ImportEngine:
             except (PreconditionFailed, ObjectPermissionDenied, ValidationError, DatabaseError) as exc:
                 raise _ExecutionFailed(
                     cause=exc,
-                    reason=cls._failure_reason(exc),
                     failed_change=change.identity,
                     rolled_back=completed,
                     not_attempted=[later.identity for later in changes[index + 1 :]],

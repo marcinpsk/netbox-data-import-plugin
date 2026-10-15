@@ -173,6 +173,7 @@ module = [
     "ipam.*",
     "netbox.*",
     "netbox_branching.*",
+    "psycopg.*",
     "pytest",
     "redis.*",
     "rest_framework.*",

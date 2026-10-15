@@ -4,12 +4,15 @@
 
 from dataclasses import replace
 from io import BytesIO
+from threading import Event
 
 import openpyxl
+import psycopg
+from django.db import connection, transaction
 from django.test import TransactionTestCase
 
 from netbox_data_import.adapters import SourceUnreadable
-from netbox_data_import.import_engine import ImportEngine, SelectionError, StalePlan
+from netbox_data_import.import_engine import CONCURRENT_CHANGE, ImportEngine, SelectionError, StalePlan
 from netbox_data_import.netbox_reader import PlanningTargetUnavailable
 from netbox_data_import.models import (
     DeviceImportSource,
@@ -970,3 +973,107 @@ class CompanionSelectionExecutionTest(ImportEngineTestDataMixin, TransactionTest
 
         self.assertEqual(execution.outcome, ExecutionOutcome.SUCCEEDED)
         self.assertEqual(Device.objects.filter(name__in=["server-1", "server-2"], site=self.site).count(), 2)
+
+
+def _psycopg_cause(exc):
+    """Return the PostgreSQL error at the root of *exc*'s cause chain."""
+    while exc is not None and not isinstance(exc, psycopg.Error):
+        exc = exc.__cause__
+    return exc
+
+
+class ConcurrencyRefusalTest(ImportEngineTestDataMixin, TransactionTestCase):
+    """A deadlock or lock timeout during an execution is a retryable stale plan, not a database failure."""
+
+    _planning_grants = staticmethod(ImportEngineExecutionTest._planning_grants)
+
+    def test_a_lock_timeout_in_the_locked_replan_is_a_retryable_refusal(self):
+        from dcim.models import Device, Rack
+
+        accepted = self._plan()
+        unit = accepted.unit("device:source:D-1")
+        held, release = Event(), Event()
+
+        def hold_the_rack():
+            with transaction.atomic():
+                Rack.objects.select_for_update().get(pk=self.rack.pk)
+                held.set()
+                release.wait(10)
+
+        with run_on_separate_connection(hold_the_rack):
+            try:
+                self.assertTrue(held.wait(10), "the second connection never locked the Rack")
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout TO '200ms'")
+                with self.assertRaisesMessage(StalePlan, CONCURRENT_CHANGE) as raised:
+                    ImportEngine.execute(
+                        self.profile, self.document, accepted.to_dict(), [unit.identity], "replan-lock", self.actor
+                    )
+            finally:
+                release.set()
+                with connection.cursor() as cursor:
+                    cursor.execute("RESET lock_timeout")
+
+        self.assertIsInstance(_psycopg_cause(raised.exception), psycopg.errors.LockNotAvailable)
+        self.assertFalse(Device.objects.filter(name="server-a").exists())
+        execution = ImportExecution.objects.get(idempotency_key="replan-lock")
+        self.assertEqual(execution.outcome, ExecutionOutcome.FAILED)
+        self.assertEqual(execution.failure_detail["reason"], "stale_plan")
+        self.assertEqual(execution.failure_detail["not_attempted"], [unit.changes[0].identity])
+
+    def test_a_deadlock_in_a_write_is_a_retryable_refusal(self):
+        """The execution waits on another writer's uncommitted Device, which then waits on the execution's Rack.
+
+        `bulk_create` skips the Device Type counter update, which the locked replan would wait on first.
+        """
+        from dcim.models import Device, Rack
+
+        accepted = self._plan()
+        unit = accepted.unit("device:source:D-1")
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_backend_pid()")
+            (execution_pid,) = cursor.fetchone()
+        inserted, done = Event(), Event()
+
+        def collide():
+            with transaction.atomic():
+                Device.objects.bulk_create(
+                    [
+                        Device(
+                            name="server-a",
+                            site=self.site,
+                            rack=self.rack,
+                            device_type=self.device_type,
+                            role=self.role,
+                        )
+                    ]
+                )
+                inserted.set()
+                with connection.cursor() as cursor:
+                    for _ in range(500):
+                        cursor.execute("SELECT 1 FROM pg_locks WHERE pid = %s AND NOT granted", [execution_pid])
+                        if cursor.fetchone():
+                            break
+                        done.wait(0.02)
+                    cursor.execute("SET LOCAL lock_timeout TO '5s'")
+                Rack.objects.select_for_update().get(pk=self.rack.pk)
+                done.wait(10)
+                transaction.set_rollback(True)
+
+        with run_on_separate_connection(collide):
+            try:
+                self.assertTrue(inserted.wait(10), "the second connection never inserted its Device")
+                with self.assertRaisesMessage(StalePlan, CONCURRENT_CHANGE) as raised:
+                    ImportEngine.execute(
+                        self.profile, self.document, accepted.to_dict(), [unit.identity], "write-deadlock", self.actor
+                    )
+            finally:
+                done.set()
+
+        self.assertIsInstance(_psycopg_cause(raised.exception), psycopg.errors.DeadlockDetected)
+        self.assertFalse(Device.objects.filter(name="server-a").exists())
+        execution = ImportExecution.objects.get(idempotency_key="write-deadlock")
+        self.assertEqual(execution.outcome, ExecutionOutcome.FAILED)
+        self.assertEqual(execution.failure_detail["reason"], "stale_plan")
+        self.assertEqual(execution.failure_detail["failed_change"], unit.changes[0].identity)
+        self.assertEqual(execution.failure_detail["not_attempted"], [])
