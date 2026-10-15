@@ -242,6 +242,8 @@ def harness_intent(parent, legs) -> CableIntent:
     The B side is ordered by channel, so B connector k carries channel k. A write that would shift a
     leg to another connector, or that NetBox would refuse, is refused here with its diagnostic code.
     """
+    if not legs:
+        raise ValueError("A harness intent needs at least one leg.")
     for end in (parent, *(far for _child, far in legs)):
         _refuse_channel_child(end)
     if any(channel_parent(child) != parent.pk for child, _far in legs):

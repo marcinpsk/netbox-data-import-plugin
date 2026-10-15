@@ -384,6 +384,34 @@ class HarnessPlanningTest(HarnessTopologyMixin, TestCase):
             self.assertEqual(unit.disposition, Disposition.BLOCKED)
             self.assertIn("cable.harness_unsupported", self.codes(unit))
 
+    def test_a_segment_between_two_channel_children_alone_blocks_without_a_harness(self):
+        self.resolve_lanes([1, 2])
+        between = (
+            trace_endpoint_line(lane(1)),
+            trace_endpoint_line(lane(2)),
+            (trace_segment(lane(1), FIBER, lane(2)),),
+        )
+
+        (unit,) = self.plan(between).units
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.harness_unsupported", self.codes(unit))
+        self.assertEqual(unit.changes, ())
+
+    def test_a_lone_lane_without_a_first_hop_blocks_without_a_harness(self):
+        self.resolve_lanes([4])
+        lost = (
+            trace_endpoint_line(lane(4)),
+            trace_endpoint_line(server_port(9)),
+            (trace_segment(lane(4), FIBER, server_port(9)),),
+        )
+
+        (unit,) = self.plan(lost).units
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("trace.device_unresolved", self.codes(unit))
+        self.assertEqual(unit.changes, ())
+
     def test_a_plain_interface_in_the_cohort_warns_and_blocks_nothing(self):
         self.resolve_lanes(range(1, 5))
         Interface.objects.create(device=self.switch, name="P05", type="25gbase-x-sfp28")
@@ -736,6 +764,10 @@ class CableIntentTest(HarnessTopologyMixin, TestCase):
         legs = [(self.children[1], self.fronts[1]), (self.children[2], self.fronts[1])]
 
         self.assertEqual(self.refusal(legs), "cable.harness_leg_conflict")
+
+    def test_a_harness_without_legs_is_a_programming_error(self):
+        with self.assertRaisesMessage(ValueError, "A harness intent needs at least one leg."):
+            harness_intent(self.parent, [])
 
     def test_a_channel_past_the_parent_count_is_invalid_state(self):
         Interface.objects.filter(pk=self.children[4].pk).update(channel_id=9)

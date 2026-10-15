@@ -1307,6 +1307,9 @@ class _CableBatch:
         """Decide each harness once, then give each of its leg units the same findings."""
         for parent_pk in sorted(self._harnesses):
             harness = self._harnesses[parent_pk]
+            if not harness.legs:
+                # Only blocked traces touch this parent, and each already carries its own finding.
+                continue
             harness.legs.sort(
                 key=lambda leg: (cable_harness.channel(self._objects[leg.child.key]), leg.analysis.identity)
             )
