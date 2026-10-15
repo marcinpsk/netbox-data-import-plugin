@@ -87,6 +87,10 @@ _Avoid_: Cable amendment
 The direct NetBox Cable between a Source Trace's two endpoint terminations that stands in for the unmodeled physical path, whatever created it. Patched Path Replacement removes it.
 _Avoid_: LLDP cable
 
+**Breakout Harness**:
+One NetBox breakout Cable from a channelized parent Interface to the first hop of each of its lanes. The source states it only as separate Source Traces, one per lane. Each lane's trace stays its own Synchronization Unit, and the lanes of one harness are always selected together.
+_Avoid_: Breakout trace, fan-out cable
+
 **Termination Reference**:
 The source-side naming of one port within a Source Trace: device, cards, and port labels. Port class and location values corroborate it but do not identify it.
 _Avoid_: Endpoint string

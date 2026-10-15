@@ -478,6 +478,20 @@ its reason, when no trace can sync, when NetBox changed since the last re-read, 
 holds the preview. Both commands keep the workspace: when the Job ends, re-read the preview and
 resolve the traces that remain.
 
+On NetBox 4.7 and later a breakout transceiver is a channelized Interface: the parent Interface
+holds the channel count, and one channel subinterface per lane holds its channel number. The source
+states each lane as its own trace. Select **Choose termination** once for each lane to choose its
+channel subinterface: the import does not match a lane label to a channel. The traces of one parent
+then share one breakout Cable. Its A side is the parent, and B connector k is the first hop of the
+lane on channel k. The parent's channel count selects the Cable Profile, and the CableClass policies
+of all lanes must give the same Cable Type. **Sync with dependencies** on one lane selects every lane
+of that parent, because one Cable carries them all, and the server refuses a selection that leaves a
+lane out. The breakout is blocked when its lanes reach ports of different kinds, when a channel
+between two lanes has no trace, when a trace that names the same card is not resolved, or when
+another Cable holds the parent or a far end. Channels after the last lane stay unused, with a
+warning. The import never edits a breakout Cable, so a lane that a later file adds needs the Cable
+edited in NetBox. NetBox 4.6 has no channels, and trace import there works as before.
+
 The trace workbook layout is not configurable in this release. A later adapter setting can map other
 sheet names and columns to the same Source Trace values. Device choices do not depend on Excel column
 names, so they remain reusable across that change.
