@@ -1227,6 +1227,8 @@ class _CableBatch:
         self._parents.update(cable_harness.read_parents(parents - self._parents.keys(), lock=self.lock_plan_references))
         for analysis in self.analyses:
             self._place_trace(analysis)
+        for analysis in self.analyses:
+            self._block_harness_of_ordinary_parent(analysis)
         for parent_pk in sorted(self._harnesses):
             self._gather_cohort(self._harnesses[parent_pk])
 
@@ -1284,6 +1286,16 @@ class _CableBatch:
         analysis.leg = _Leg(analysis=analysis, segment=segment, child=child, far=far)
         analysis.harness = harness
         harness.legs.append(analysis.leg)
+
+    def _block_harness_of_ordinary_parent(self, analysis: _TraceAnalysis) -> None:
+        """Block the harness of each parent this trace names as an ordinary segment end: the source states two paths on it."""
+        for segment in analysis.segments:
+            if analysis.is_leg(segment):
+                continue
+            for end in segment.terminations:
+                harness = self._harnesses.get(end.object_id) if end.object_type == cable_harness.INTERFACE else None
+                if harness is not None and analysis not in harness.unsupported:
+                    harness.unsupported.append(analysis)
 
     def _gather_cohort(self, harness: _Harness) -> None:
         """Read the source cohorts of one harness as negative evidence (section 6.4).
@@ -1721,7 +1733,7 @@ class _CableBatch:
                 {"segment_index": segment.index, **refusal.facts, **termination_sources(port.key)},
                 identities=(port.identity,),
             )
-            if refusal.code == cable_harness.NOT_CONNECTABLE:
+            if refusal.code in {cable_harness.NOT_CONNECTABLE, cable_harness.CHANNELIZED}:
                 analysis.reopen(port.key)
 
     def _cable_policy(self, analysis: _TraceAnalysis, segment: _DesiredSegment) -> dict | None:
@@ -1862,7 +1874,7 @@ class _CableBatch:
         """Block every actionable trace whose planned Cables compete for one free termination.
 
         A claim is keyed by the Cable it creates, so traces that share one segment or one harness agree.
-        Two different Cables also conflict inside one trace, such as a harness and a segment back to its parent.
+        Two different Cables also conflict inside one trace, such as a harness and a segment back to its far end.
         """
         claims: dict[tuple[str, int], list[tuple[_TraceAnalysis, str, int, _Termination]]] = {}
         for analysis in self._writing():

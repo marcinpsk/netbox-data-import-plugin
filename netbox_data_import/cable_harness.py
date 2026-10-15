@@ -19,6 +19,7 @@ from .target_runtime import PreconditionFailed
 
 INTERFACE = "dcim.interface"
 NOT_CONNECTABLE = "cable.termination_not_connectable"
+CHANNELIZED = "cable.termination_channelized"
 # The mirrored Cable fields of a child whose parent holds no profiled Cable.
 _EMPTY_MIRROR = (None, "", None, ())
 
@@ -61,6 +62,11 @@ def channel_parent(component) -> int | None:
 def channel(component) -> int:
     """Return the channel of one channel child Interface."""
     return component.channel_id
+
+
+def is_channelized(component) -> bool:
+    """Return whether *component* is a channelized Interface, whose channels only a breakout Cable reaches."""
+    return supported() and _label(component) == INTERFACE and bool(component.channels)
 
 
 def is_plain_interface(component) -> bool:
@@ -232,6 +238,18 @@ def _refuse_channel_child(end) -> None:
         )
 
 
+def _refuse_channelized(end) -> None:
+    """Refuse a channelized Interface as a one-position end, because NetBox mirrors no channel through it."""
+    if is_channelized(end):
+        raise IntentRefused(
+            CHANNELIZED,
+            f"{end} is channelized, so an ordinary Cable on it reaches no channel. The import cables it only as a "
+            "breakout from its channel subinterfaces.",
+            {"port": str(end)},
+            port=end,
+        )
+
+
 def _refuse_not_connectable(ends) -> None:
     """Refuse an Interface whose type NetBox refuses to cable, as `CableTermination.clean` does."""
     from dcim.constants import NONCONNECTABLE_IFACE_TYPES
@@ -259,9 +277,10 @@ def _refuse_marked_connected(ends, code: str) -> None:
 
 
 def ordinary_intent(first, second, *, profile: str) -> CableIntent:
-    """Return a one-to-one Cable write, refusing a channel child or an end NetBox cannot cable at either end."""
-    _refuse_channel_child(first)
-    _refuse_channel_child(second)
+    """Return a one-to-one Cable write, refusing a channel child, a channelized parent, or an end NetBox cannot cable."""
+    for end in (first, second):
+        _refuse_channel_child(end)
+        _refuse_channelized(end)
     _refuse_not_connectable((first, second))
     _refuse_marked_connected((first, second), "cable.termination_occupied")
     return CableIntent(a_terminations=(first,), b_terminations=(second,), profile=profile)
@@ -281,6 +300,8 @@ def harness_intent(parent, legs) -> CableIntent:
         raise IntentRefused(
             "cable.harness_unsupported", "A leg ends on its own parent, so the trace runs inside one harness."
         )
+    if any(is_channelized(far) for _child, far in legs):
+        raise IntentRefused("cable.harness_unsupported", "A leg ends on another channelized Interface.")
     if any(channel_parent(child) != parent.pk for child, _far in legs):
         raise IntentRefused("cable.harness_channel_state_invalid", "A leg is no longer a channel of this parent.")
     ordered = sorted(legs, key=lambda leg: leg[0].channel_id)
@@ -373,6 +394,7 @@ __all__ = (
     "channel_parent",
     "harness_intent",
     "harness_payload",
+    "is_channelized",
     "is_plain_interface",
     "locked_harness_intent",
     "ordinary_intent",

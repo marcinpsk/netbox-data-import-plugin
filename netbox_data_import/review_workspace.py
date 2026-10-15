@@ -458,8 +458,8 @@ def _harness_unsupported_message(display) -> str:
     # The constructor refuses a whole harness, so its finding names no single trace.
     subject = f"The trace '{display['trace']}'" if "trace" in display else "A leg of this breakout"
     return (
-        f"{subject} joins two channel subinterfaces, two breakouts, or a channel subinterface and its own parent. "
-        "The import cannot write that as one breakout Cable."
+        f"{subject} joins two channel subinterfaces, two breakouts, or a channel subinterface and its own parent, "
+        "or names the parent as an ordinary port. The import cannot write that as one breakout Cable."
     )
 
 
@@ -560,6 +560,10 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     "cable.same_port_continuation": "A mapped peer port continues the path where the source repeats one port.",
     "cable.segment_reused": "An existing Cable already proves this segment, so the import keeps it.",
     "cable.segment_self_connection": "Both ends of this segment name one termination. Correct the source path.",
+    "cable.termination_channelized": (
+        "This Interface is channelized, so an ordinary Cable on it reaches no channel. "
+        "Choose the channel subinterface of this lane, so the import writes the breakout Cable on this Interface."
+    ),
     "cable.termination_kind_mismatch": (
         "The stated PortClass does not admit the kind of port the saved selection names. Choose the termination again."
     ),

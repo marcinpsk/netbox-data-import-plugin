@@ -94,6 +94,20 @@ def direct_leg(number, start=None):
     )
 
 
+def uplink():
+    """Return the source reference that names the channelized parent itself, under another cards label."""
+    return trace_termination("SW-1", "Uplinks", "0/0", "Port")
+
+
+def uplink_trace():
+    """Return the ordinary trace from the parent itself through panel port 1 to server 1."""
+    return (
+        trace_endpoint_line(uplink()),
+        trace_endpoint_line(server_port(1)),
+        (trace_segment(uplink(), FIBER, panel_front(1)), trace_segment(panel_rear(1), FIBER, server_port(1))),
+    )
+
+
 def termination_snapshot(cable):
     """Return every CableTermination row of one Cable as side, connector, positions, model and object id."""
     return sorted(
@@ -534,6 +548,21 @@ class HarnessPlanningTest(HarnessTopologyMixin, TestCase):
         messages = [item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings]
         self.assertIn("its own parent", " ".join(messages))
 
+    def test_an_ordinary_trace_that_ends_on_a_channelized_parent_blocks_and_reopens_its_picker(self):
+        """NetBox accepts that Cable but mirrors no channel through it, so no channel would reach its far end."""
+        plan = self.plan(uplink_trace())
+
+        (unit,) = plan.units
+        self.assertEqual((unit.disposition, unit.changes), (Disposition.BLOCKED, ()))
+        (refused,) = [item for item in unit.diagnostics if item.code == "cable.termination_channelized"]
+        self.assertEqual(refused.display["port"], str(self.parent))
+        records = {item["label"]: item["incompatible"] for item in unit.display["trace"]["terminations"]}
+        self.assertEqual(
+            records, {"SW-1 Uplinks 0/0": True, "PANEL-H F1": False, "PANEL-H R1": False, "SRV-1 eth0": False}
+        )
+        messages = {item["code"]: item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings}
+        self.assertIn("channel subinterface", messages["cable.termination_channelized"])
+
     def test_a_plain_interface_in_the_cohort_warns_and_blocks_nothing(self):
         self.resolve_lanes(range(1, 5))
         Interface.objects.create(device=self.switch, name="P05", type="25gbase-x-sfp28")
@@ -943,10 +972,20 @@ class CableIntentTest(HarnessTopologyMixin, TestCase):
             harness_intent(self.parent, legs)
         return refused.exception.code
 
-    def test_an_ordinary_write_takes_a_parent_and_refuses_its_child(self):
-        self.assertEqual(ordinary_intent(self.parent, self.fronts[1], profile="").a_terminations, (self.parent,))
-        with self.assertRaises(IntentRefused):
-            ordinary_intent(self.fronts[1], self.children[1], profile="")
+    def test_an_ordinary_write_refuses_a_channelized_parent_and_its_child(self):
+        """NetBox mirrors no channel through an ordinary Cable on the parent, so only a harness cables it."""
+        self.assertEqual(
+            ordinary_intent(self.servers[1], self.fronts[1], profile="").a_terminations, (self.servers[1],)
+        )
+        for first, second, code in (
+            (self.fronts[1], self.parent, "cable.termination_channelized"),
+            (self.parent, self.fronts[1], "cable.termination_channelized"),
+            (self.fronts[1], self.children[1], "cable.harness_unsupported"),
+        ):
+            with self.subTest(first=str(first), second=str(second)):
+                with self.assertRaises(IntentRefused) as refused:
+                    ordinary_intent(first, second, profile="")
+                self.assertEqual(refused.exception.code, code)
 
     def test_legs_given_out_of_order_take_the_connector_of_their_channel(self):
         intent = harness_intent(self.parent, [(self.children[2], self.fronts[2]), (self.children[1], self.fronts[1])])
@@ -961,6 +1000,11 @@ class CableIntentTest(HarnessTopologyMixin, TestCase):
         legs = [(self.children[1], self.fronts[1]), (self.children[2], self.fronts[1])]
 
         self.assertEqual(self.refusal(legs), "cable.harness_leg_conflict")
+
+    def test_a_far_end_that_is_a_channelized_interface_is_unsupported(self):
+        other = self.make_parent(self.switch, "0/1", 4)
+
+        self.assertEqual(self.refusal([(self.children[1], other)]), "cable.harness_unsupported")
 
     def test_a_far_end_that_is_the_parent_is_unsupported(self):
         self.assertEqual(self.refusal([(self.children[1], self.parent)]), "cable.harness_unsupported")
@@ -1013,13 +1057,17 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
 
         plan = self.plan(*(panel_leg(number) for number in range(1, 5)), rival)
 
-        for unit in plan.units:
+        *legs, ordinary = plan.units
+        self.assertEqual(ordinary.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.termination_channelized", self.codes(ordinary))
+        for unit in legs:
             with self.subTest(unit=unit.identity):
-                self.assertEqual(unit.disposition, Disposition.BLOCKED)
-                self.assertIn("cable.planned_termination_conflict", self.codes(unit))
+                self.assertEqual((unit.disposition, unit.changes), (Disposition.BLOCKED, ()))
+                (unsupported,) = [item for item in unit.diagnostics if item.code == "cable.harness_unsupported"]
+                self.assertEqual(unsupported.display["trace"], "SW-1 Uplinks 0/0 to OTHER eth9")
 
-    def test_a_panel_return_to_the_parent_conflicts_with_the_harness_of_its_own_trace(self):
-        """The harness cables the parent to F1, and the segment back from R1 claims the parent as well."""
+    def test_a_panel_return_to_the_parent_is_unsupported_in_its_own_trace(self):
+        """The harness cables the parent to F1, and the segment back from R1 names the parent as an ordinary port."""
         self.resolve_lanes([1])
         uplink = trace_termination("SW-1", "Uplinks", "0/0", "Port")
         loop = (
@@ -1031,12 +1079,30 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
         plan = self.plan(loop)
 
         (unit,) = plan.units
-        self.assertEqual(unit.disposition, Disposition.BLOCKED, self.codes(unit))
-        self.assertEqual(unit.changes, ())
+        self.assertEqual((unit.disposition, unit.changes), (Disposition.BLOCKED, ()))
+        self.assertIn("cable.harness_unsupported", self.codes(unit))
+        messages = {item["code"]: item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings}
+        self.assertIn("names the parent as an ordinary port", messages["cable.harness_unsupported"])
+
+    def test_a_panel_return_to_the_far_end_conflicts_with_the_harness_of_its_own_trace(self):
+        """The harness cables the parent to F1, and the segment back from R1 claims F1 under another source name."""
+        self.resolve_lanes([1])
+        alias = trace_termination("PANEL-H", "", "F1-ALIAS", "Position Front")
+        self.save_resolution(alias, self.fronts[1])
+        loop = (
+            trace_endpoint_line(lane(1)),
+            trace_endpoint_line(alias),
+            (trace_segment(lane(1), FIBER, panel_front(1)), trace_segment(panel_rear(1), FIBER, alias)),
+        )
+
+        plan = self.plan(loop)
+
+        (unit,) = plan.units
+        self.assertEqual((unit.disposition, unit.changes), (Disposition.BLOCKED, ()), self.codes(unit))
         conflicts = [item.display for item in unit.diagnostics if item.code == "cable.planned_termination_conflict"]
         self.assertEqual(
             sorted((item["segment_index"], item["competing_segment"], item["termination"]) for item in conflicts),
-            [(0, 1, str(self.parent)), (1, 0, str(self.parent))],
+            [(0, 1, str(self.fronts[1])), (1, 0, str(self.fronts[1]))],
         )
         messages = {item["code"]: item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings}
         self.assertTrue(
