@@ -490,8 +490,11 @@ then share one breakout Cable. Its A side is the parent, and B connector k is th
 lane on channel k. The parent's channel count selects the Cable Profile, and the CableClass policies
 of all lanes must give the same Cable Type. The lane's **Cable policy** row shows that profile as
 "Set by the breakout" and offers only the Cable Type. When the same CableClass also states another
-segment of the trace, the row keeps its Cable Profile control, because the profile applies there. **Sync with dependencies** on one lane selects every lane
-of that parent, because one Cable carries them all. The lane's card lists the other lanes, and the
+segment of the trace, the row keeps its Cable Profile control, because the profile applies there.
+Under **Proposed physical topology**, the segment that leaves the channel subinterface shows the same
+text, and its override forces only the Cable Type. A Cable Profile that an override of that segment
+already stores stays stored, and the import ignores it. A new override of that segment stores no
+Cable Profile. **Sync with dependencies** on one lane selects every lane of that parent, because one Cable carries them all. The lane's card lists the other lanes, and the
 server refuses a selection that leaves a lane out. The breakout is blocked when its lanes reach ports of different kinds, when a channel
 between two lanes has no trace, when a trace that names the same card is not resolved, or when
 another Cable holds the parent or a far end. Channels after the last lane stay unused, with a

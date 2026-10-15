@@ -228,6 +228,7 @@ def save_cable_segment_override_and_replan(
     cable_class,
     data,
     reviewed_fingerprint,
+    breakout_leg,
 ):
     """Force one planned segment's Cable policy, then request a fresh Import Plan."""
     from .forms import CableSegmentOverrideForm
@@ -243,7 +244,7 @@ def save_cable_segment_override_and_replan(
         instance = stored or CableSegmentOverride(**lookup)
         instance.source_trace_identity = trace_identity
         instance.segment_index = segment_index
-        form = CableSegmentOverrideForm(data, instance=instance)
+        form = CableSegmentOverrideForm(data, instance=instance, breakout_leg=breakout_leg)
         if not form.is_valid():
             raise UnacceptablePolicyDecision(_form_messages(form))
         save_permission_scoped_object(
@@ -1041,16 +1042,31 @@ class SyncMember:
     is_trace: bool
 
 
-def _breakout_policies(policies, segments, diagnostics) -> list[dict[str, Any]]:
-    """Return each CableClass decision, naming the breakout profile on a class that only the harness leg states."""
+def _breakout_segments(segments, diagnostics) -> list[dict[str, Any]]:
+    """Return each segment, naming the breakout profile on the harness leg, which the breakout decides."""
     state = next((item.display for item in diagnostics if item.code == "cable.harness_state"), None)
     if state is None:
-        return [{**policy, "breakout_profile": ""} for policy in policies]
-    ordinary = {segment["cable_class"] for segment in segments if segment["index"] != state["segment_index"]}
+        return [{**segment, "breakout_profile": ""} for segment in segments]
     # A hidden parent hides the profile its channel count selects, and a blocked harness selects none.
     known = not _parent_hidden(state) and state["profile"]
     text = f"{BREAKOUT_PROFILE}: {cable_profile_label(state['profile'])}" if known else BREAKOUT_PROFILE
-    return [{**policy, "breakout_profile": "" if policy["cable_class"] in ordinary else text} for policy in policies]
+    return [
+        {**segment, "breakout_profile": text if segment["index"] == state["segment_index"] else ""}
+        for segment in segments
+    ]
+
+
+def _breakout_policies(policies, segments) -> list[dict[str, Any]]:
+    """Return each CableClass decision, naming the breakout profile on a class that only the harness leg states."""
+    leg = next((segment for segment in segments if segment["breakout_profile"]), None)
+    ordinary = {segment["cable_class"] for segment in segments if segment is not leg}
+    return [
+        {
+            **policy,
+            "breakout_profile": "" if leg is None or policy["cable_class"] in ordinary else leg["breakout_profile"],
+        }
+        for policy in policies
+    ]
 
 
 def _termination_model_name(label: str) -> str:
@@ -1108,7 +1124,7 @@ class TraceWorkspaceUnit:
             {"code": item.code, "message": _diagnostic_message(item), "severity": item.severity}
             for item in unit.diagnostics
         ]
-        segments = [dict(segment) for segment in workspace.get("segments") or ()]
+        segments = _breakout_segments(workspace.get("segments") or (), unit.diagnostics)
         return cls(
             identity=unit.identity,
             trace_identity=str(workspace.get("identity") or ""),
@@ -1118,7 +1134,7 @@ class TraceWorkspaceUnit:
             sheet=str(display.get("sheet") or ""),
             endpoints=dict(workspace.get("endpoints") or {}),
             segments=segments,
-            cable_policies=_breakout_policies(workspace["cable_policies"], segments, unit.diagnostics),
+            cable_policies=_breakout_policies(workspace["cable_policies"], segments),
             logical_cable=workspace.get("logical_cable"),
             deletes_logical_cable=bool(workspace.get("deletes_logical_cable")),
             resolution_started=bool(workspace.get("resolution_started")),

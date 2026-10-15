@@ -27,13 +27,14 @@ from netbox_data_import.cable_harness import IntentRefused, harness_intent, ordi
 from netbox_data_import.cable_policy import cable_profile_label
 from netbox_data_import.cable_target import CableModule
 from netbox_data_import.import_engine import ImportEngine, SelectionError, StalePlan
-from netbox_data_import.models import CableClassMapping, CableImportSource, ImportExecution
+from netbox_data_import.models import CableClassMapping, CableImportSource, CableSegmentOverride, ImportExecution
 from netbox_data_import.plan import Disposition, PlannedChange, Severity, fingerprint_of
 from netbox_data_import.review_workspace import BREAKOUT_PROFILE, ReviewWorkspace
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.tests.helpers import (
     cables_on,
     competing_write_during,
+    preview_claim,
     run_on_separate_connection,
     trace_endpoint_line,
     trace_segment,
@@ -1404,6 +1405,20 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
         self.assertEqual(fars, [["dcim.interface", self.servers[n].pk, self.servers[n].device_id] for n in (1, 2)])
 
 
+# A trace runs from its lower endpoint, SRV before SW, so the leg from the lane is the last segment.
+DOWNSTREAM, LEG = 0, 1
+
+
+def segment_item(page, index):
+    """Return the Proposed physical topology entry of one segment on a rendered trace card."""
+    return page.content.decode().split(f'data-trace-segment="{index}">', 1)[1].split("</li>", 1)[0]
+
+
+def segment_policy(page, index):
+    """Return the policy line one segment entry shows above its override form."""
+    return segment_item(page, index).split("data-segment-policy>", 1)[1].split("</div>", 1)[0]
+
+
 def policy_row(page, cable_class):
     """Return the Cable policy table row of one CableClass on a rendered trace card."""
     return page.content.decode().split(f'<tr data-cable-class="{cable_class}">', 1)[1].split("</tr>", 1)[0]
@@ -1411,7 +1426,7 @@ def policy_row(page, cable_class):
 
 @CHANNELS
 class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
-    """The breakout, not the CableClass, sets a leg's Cable Profile, so the leg's policy row offers no profile."""
+    """The breakout sets a leg's Cable Profile, so neither the leg's policy row nor its override offers one."""
 
     @classmethod
     def setUpTestData(cls):
@@ -1450,5 +1465,67 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         cards = self.cards(*(panel_leg(number) for number in range(1, 5)))
 
         card = cards["SW-1 Slot 0 >> 0/0 (10) P01"]
-        self.assertNotContains(card, BREAKOUT_PROFILE)
+        self.assertNotIn(BREAKOUT_PROFILE, policy_row(card, FIBER))
         self.assertIn('<select name="cable_profile"', policy_row(card, FIBER))
+
+    def test_a_leg_segment_shows_the_breakout_profile_and_offers_only_a_cable_type_override(self):
+        cards = self.cards(*(panel_leg(number, downstream="Patch") for number in range(1, 5)), direct_path())
+
+        card = cards["SW-1 Slot 0 >> 0/0 (10) P01"]
+        self.assertIn(f"{BREAKOUT_PROFILE}: {cable_profile_label(BREAKOUT_4)}", segment_policy(card, LEG))
+        self.assertNotIn("1C1P", segment_policy(card, LEG))
+        self.assertIn('<select name="cable_type"', segment_item(card, LEG))
+        self.assertNotIn('name="cable_profile"', segment_item(card, LEG))
+        self.assertNotIn("Cable Profile for segment", segment_item(card, LEG))
+        self.assertNotIn("cable_profile", card.context["segment_policy_forms"][LEG]["form"].fields)
+        self.assertIn('<select name="cable_profile"', segment_item(card, DOWNSTREAM))
+        self.assertNotIn(BREAKOUT_PROFILE, segment_item(card, DOWNSTREAM))
+        self.assertNotContains(cards["DEV-A eth0"], BREAKOUT_PROFILE)
+
+    def force_type(self, page, cable_type):
+        """Post the leg segment's override form as the card renders it: a Cable Type and no profile."""
+        return self.client.post(
+            reverse("plugins:netbox_data_import:trace_segment_policy"),
+            {
+                **preview_claim(self.client),
+                "trace": page.context["selected_trace"].identity,
+                "segment": str(LEG),
+                "cable_type": cable_type,
+            },
+        )
+
+    def test_a_leg_type_override_keeps_a_stored_profile_and_never_shows_it(self):
+        blocks = [panel_leg(number, downstream="Patch") for number in range(1, 5)]
+        legs = {
+            unit.display["trace"]["endpoints"]["from"]: unit.display["trace"]["segments"][LEG]
+            for unit in self.plan(*blocks).units
+        }
+        first, second = legs["SW-1 Slot 0 >> 0/0 (10) P01"], legs["SW-1 Slot 0 >> 0/0 (10) P02"]
+        CableSegmentOverride.objects.create(
+            profile=self.profile,
+            segment_key=first["segment_key"],
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            source_trace_identity="stored",
+            segment_index=LEG,
+        )
+        (change,) = {change for unit in self.plan(*blocks).units for change in self.harness_changes(unit)}
+        self.assertEqual(change.to_dict()["payload"]["harness"]["profile"], BREAKOUT_4)
+        cards = self.cards(*blocks)
+        stored, fresh = cards["SW-1 Slot 0 >> 0/0 (10) P01"], cards["SW-1 Slot 0 >> 0/0 (10) P02"]
+        self.assertIn("forced", segment_policy(stored, LEG))
+        self.assertIn(BREAKOUT_PROFILE, segment_policy(stored, LEG))
+        self.assertNotIn("1C1P", segment_policy(stored, LEG))
+
+        for page, segment_key in ((stored, first["segment_key"]), (fresh, second["segment_key"])):
+            with self.subTest(segment_key=segment_key):
+                response = self.force_type(page, "mmf-om3")
+
+                self.assertEqual(response.status_code, 302, response.content[:300])
+                row = CableSegmentOverride.objects.get(profile=self.profile, segment_key=segment_key)
+                self.assertEqual(row.cable_type, "mmf-om3")
+        # Planning ignores a leg's profile, so a save keeps a stored one and a new override decides none.
+        self.assertEqual(
+            dict(CableSegmentOverride.objects.values_list("segment_key", "cable_profile")),
+            {first["segment_key"]: "single-1c1p", second["segment_key"]: None},
+        )

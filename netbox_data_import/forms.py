@@ -297,7 +297,7 @@ class CableClassMappingForm(forms.ModelForm):
 
 
 class CableSegmentOverrideForm(forms.ModelForm):
-    """Force both Cable dimensions on one planned segment, which an override always decides."""
+    """Force both Cable dimensions on one planned segment, or only the Cable Type on a breakout leg."""
 
     # One control per segment in a narrow panel, so the small variant keeps a long path readable.
     cable_type = _RuntimeCableChoiceField(widget=forms.Select(attrs={"class": "form-select form-select-sm"}))
@@ -307,7 +307,7 @@ class CableSegmentOverrideForm(forms.ModelForm):
         model = CableSegmentOverride
         fields = ["cable_type", "cable_profile"]
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, breakout_leg=False, **kwargs):
         super().__init__(*args, **kwargs)
         # The empty state is a prompt the required field refuses, not a decision the override stores.
         self.fields["cable_type"].choices = _with_stored_decision(
@@ -315,6 +315,10 @@ class CableSegmentOverrideForm(forms.ModelForm):
             True,
             self.instance.cable_type,
         )
+        if breakout_leg:
+            # The breakout decides a leg's profile, so the override keeps the profile it stores.
+            del self.fields["cable_profile"]
+            return
         self.fields["cable_profile"].choices = _with_stored_decision(
             [("", "Choose a Cable Profile"), *_decision_choices(compatible_cable_profile_choices(), unresolved=False)],
             True,
@@ -322,14 +326,13 @@ class CableSegmentOverrideForm(forms.ModelForm):
         )
 
     def clean(self):
-        """Decode both explicit decisions, which the model then validates against the instance."""
+        """Decode each explicit decision the form offers, which the model then validates against the instance."""
         cleaned = super().clean()
-        _type_resolved, cable_type = _decode_decision(cleaned.get("cable_type"))
-        _profile_resolved, cable_profile = _decode_decision(cleaned.get("cable_profile"))
-        self.instance.cable_type = cable_type
-        self.instance.cable_profile = cable_profile
-        cleaned["cable_type"] = cable_type
-        cleaned["cable_profile"] = cable_profile
+        for name in ("cable_type", "cable_profile"):
+            if name in self.fields:
+                _resolved, value = _decode_decision(cleaned.get(name))
+                setattr(self.instance, name, value)
+                cleaned[name] = value
         return cleaned
 
 

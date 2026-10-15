@@ -449,7 +449,12 @@
                       {% endif %}
                       {% if segment.segment_key %}
                         <div class="text-secondary small" data-segment-policy>
-                          {{ segment.cable_type }} &middot; {{ segment.cable_profile }}
+                          {{ segment.cable_type }} &middot;
+                          {% if segment.breakout_profile %}
+                            <span data-breakout-profile>{{ segment.breakout_profile }}</span>
+                          {% else %}
+                            {{ segment.cable_profile }}
+                          {% endif %}
                           {% if segment.overridden %}
                             <span class="badge ndi-trace-state-manual">forced</span>
                           {% endif %}
@@ -466,9 +471,11 @@
                         <label class="visually-hidden" for="{{ segment.form.cable_type.id_for_label }}">
                           Cable Type for segment {{ segment.position }}</label>
                         {{ segment.form.cable_type }}
-                        <label class="visually-hidden" for="{{ segment.form.cable_profile.id_for_label }}">
-                          Cable Profile for segment {{ segment.position }}</label>
-                        {{ segment.form.cable_profile }}
+                        {% if not segment.breakout_profile %}
+                          <label class="visually-hidden" for="{{ segment.form.cable_profile.id_for_label }}">
+                            Cable Profile for segment {{ segment.position }}</label>
+                          {{ segment.form.cable_profile }}
+                        {% endif %}
                         <button type="submit" class="btn btn-sm btn-primary" data-segment-policy-force
                                 {% if segment.reason %}disabled{% endif %}>Force</button>
                         {% if segment.overridden %}

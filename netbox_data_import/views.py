@@ -3571,6 +3571,7 @@ def _segment_policy_forms(profile, trace, viewer) -> list:
             ),
             initial={} if hidden or moved else cable_policy_form_initial(segment["policy"]),
             auto_id=f"id_%s_segment_{segment['index']}",
+            breakout_leg=bool(segment["breakout_profile"]),
         )
         shared_reason = POLICY_WRITE_REFUSED if hidden else PROFILE_POLICY_MOVED if moved else ""
         force_reason = (
@@ -4445,6 +4446,7 @@ class _SetSegmentPolicy(PreviewCommand):
                     cable_class=segment["cable_class"],
                     data=dict(self.data),
                     reviewed_fingerprint=preview.reviewed_fingerprint,
+                    breakout_leg=bool(segment["breakout_profile"]),
                 )
         except UnacceptablePolicyDecision as exc:
             raise PreviewCommandRefused("; ".join(exc.errors)) from exc
