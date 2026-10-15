@@ -1572,11 +1572,10 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         )
         return segment_key
 
-    def test_a_leg_planned_by_an_operator_who_cannot_view_the_parent_stays_a_leg(self):
-        """Being a leg is a fact of the visible channel child, so the page keeps it and states no parent fact."""
-        blocks = [panel_leg(number, downstream="Patch") for number in range(1, 5)]
-        segment_key = self.store_leg_override(blocks)
-        operator = user_with_object_permission(
+    @staticmethod
+    def hidden_parent_operator():
+        """Return an operator who views the channel children and every far end, but not the parent Interface."""
+        return user_with_object_permission(
             "hidden-parent-operator",
             [
                 (ImportProfile, ("view", "change"), {}),
@@ -1590,7 +1589,12 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
                 (CableSegmentOverride, ("view", "add", "change", "delete"), {}),
             ],
         )
-        self.client.force_login(operator)
+
+    def test_a_leg_planned_by_an_operator_who_cannot_view_the_parent_stays_a_leg(self):
+        """Being a leg is a fact of the visible channel child, so the page keeps it and states no parent fact."""
+        blocks = [panel_leg(number, downstream="Patch") for number in range(1, 5)]
+        segment_key = self.store_leg_override(blocks)
+        self.client.force_login(self.hidden_parent_operator())
 
         card = self.cards(*blocks)["SW-1 Slot 0 >> 0/0 (10) P01"]
 
@@ -1601,6 +1605,34 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         self.assertNotIn('name="cable_profile"', segment_item(card, LEG))
         self.assertIn(BREAKOUT_PROFILE, policy_row(card, FIBER))
         self.assertNotIn('<select name="cable_profile"', policy_row(card, FIBER))
+        response = self.force_type(card, "mmf-om3", cable_profile="__explicit_none__")
+        self.assertEqual(response.status_code, 302, response.content[:300])
+        row = CableSegmentOverride.objects.get(profile=self.profile, segment_key=segment_key)
+        self.assertEqual((row.cable_type, row.cable_profile), ("mmf-om3", "single-1c1p"))
+
+    def test_a_cached_leg_mark_is_hidden_with_its_channel_child_and_still_keeps_the_stored_profile(self):
+        """The viewer loses the child after planning; the page drops the mark, and the save still ignores a profile."""
+        from users.models import ObjectPermission
+
+        from netbox_data_import.object_permissions import clear_user_permission_caches
+
+        blocks = [panel_leg(number, downstream="Patch") for number in range(1, 5)]
+        segment_key = self.store_leg_override(blocks)
+        operator = self.hidden_parent_operator()
+        self.client.force_login(operator)
+        trace = self.cards(*blocks)["SW-1 Slot 0 >> 0/0 (10) P01"].context["selected_trace"].identity
+        permission = ObjectPermission.objects.get(name__startswith="hidden-parent-operator Interface ")
+        permission.constraints = {"channels__isnull": True, "channel_id__isnull": True}
+        permission.save(update_fields=("constraints",))
+        clear_user_permission_caches(operator)
+
+        card = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), {"trace": trace})
+
+        self.assertEqual(card.status_code, 200)
+        self.assertIn(TERMINATION_HIDDEN, segment_item(card, LEG))
+        self.assertNotContains(card, BREAKOUT_PROFILE)
+        self.assertNotContains(card, "data-breakout-profile")
+        self.assertEqual(card.context["segment_policy_forms"][LEG]["breakout_leg"], "")
         response = self.force_type(card, "mmf-om3", cable_profile="__explicit_none__")
         self.assertEqual(response.status_code, 302, response.content[:300])
         row = CableSegmentOverride.objects.get(profile=self.profile, segment_key=segment_key)

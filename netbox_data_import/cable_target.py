@@ -2044,8 +2044,8 @@ class _CableBatch:
                     "status": self._segment_status(analysis, index, conflicted, planned, writes),
                     # An override cannot change a Cable this plan keeps, so the panel says which is which.
                     "retained": index in analysis.proven,
-                    # The visible channel child makes a leg, so a hidden parent keeps this mark.
-                    "breakout_leg": planned is not None and analysis.is_leg(planned),
+                    # The end that holds the channel child, so presentation hides the mark with that end.
+                    "breakout_leg": self._leg_end(analysis, planned),
                     **self._policy_display(planned),
                     **self._end_sources(planned),
                 }
@@ -2078,6 +2078,13 @@ class _CableBatch:
             "policy": (None if row is None else row.decided_policy()) or {},
         }
         return display if row is None else disclosed_policy(row, self._may_view(row), display)
+
+    @staticmethod
+    def _leg_end(analysis: _TraceAnalysis, planned: _DesiredSegment | None) -> str:
+        """Return the segment end that holds the harness leg's channel child, or nothing for an ordinary segment."""
+        if planned is None or not analysis.is_leg(planned):
+            return ""
+        return "left" if planned.left.key == analysis.leg.child.key else "right"
 
     def _policy_display(self, planned: _DesiredSegment | None) -> dict:
         """Return the Cable policy in force for one resolved segment, and whether it is an override."""

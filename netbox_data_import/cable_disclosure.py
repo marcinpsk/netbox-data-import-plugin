@@ -436,6 +436,17 @@ def _diagnostic(diagnostic, visible_row_ids: dict[str, set[int]]):
     return replace(diagnostic, display=display, identities=_visible_identities(diagnostic.identities, visible_row_ids))
 
 
+def _redact_segment_ends(segment: dict, visible_row_ids: dict[str, set[int]]) -> None:
+    """Hide each end of one planned segment whose port or Device the viewer cannot see."""
+    for end, source_key in SEGMENT_END_SOURCES.items():
+        if not _end_is_visible(segment.get(source_key), visible_row_ids):
+            segment.pop(source_key, None)
+            segment[end] = TERMINATION_HIDDEN
+            # Being a leg is a fact of the channel child, so it hides with that end.
+            if segment["breakout_leg"] == end:
+                segment["breakout_leg"] = ""
+
+
 def _unit(unit, visible_row_ids: dict[str, set[int]]):
     display = unit.to_dict()["display"]
     trace = display.get("trace")
@@ -475,12 +486,8 @@ def _unit(unit, visible_row_ids: dict[str, set[int]]):
                 field.update(selected=TERMINATION_HIDDEN, selected_type="")
         for segment in trace.get("segments") or ():
             # Only a planned segment names NetBox ports; an unplanned one repeats the source text.
-            if not segment.get("segment_key"):
-                continue
-            for end, source_key in SEGMENT_END_SOURCES.items():
-                if not _end_is_visible(segment.get(source_key), visible_row_ids):
-                    segment.pop(source_key, None)
-                    segment[end] = TERMINATION_HIDDEN
+            if segment.get("segment_key"):
+                _redact_segment_ends(segment, visible_row_ids)
     diagnostics = tuple(_diagnostic(item, visible_row_ids) for item in unit.diagnostics)
     return replace(unit, diagnostics=diagnostics, display=display)
 

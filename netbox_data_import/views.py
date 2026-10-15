@@ -3619,6 +3619,12 @@ def _segment_override_reason(segment) -> str:
     return ""
 
 
+def _planned_leg(plan, unit_identity: str, index: int) -> bool:
+    """Return whether the plan, before presentation hides a viewer's rows, states the segment as a harness leg."""
+    segments = plan.unit(unit_identity).display["trace"]["segments"]
+    return bool(next(segment for segment in segments if segment["index"] == index)["breakout_leg"])
+
+
 def _workspace_cable_classes(workspace) -> set:
     """Return every CableClass value the reviewed preview's traces actually state."""
     return {
@@ -4446,7 +4452,7 @@ class _SetSegmentPolicy(PreviewCommand):
                     cable_class=segment["cable_class"],
                     data=dict(self.data),
                     reviewed_fingerprint=preview.reviewed_fingerprint,
-                    breakout_leg=bool(segment["breakout_profile"]),
+                    breakout_leg=_planned_leg(preview.plan, trace.identity, segment["index"]),
                 )
         except UnacceptablePolicyDecision as exc:
             raise PreviewCommandRefused("; ".join(exc.errors)) from exc

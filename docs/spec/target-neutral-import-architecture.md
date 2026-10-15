@@ -1116,9 +1116,11 @@ mapped peer. The leg's `cable.permission_denied` diagnostic names the view permi
 lacks. The leg names its companions whatever Cable the parent holds, and no display field states the
 parent's channels, legs, missing channels or Cable Profile. The leg's segment still states that it is
 a leg, because that is a fact of the visible channel child, so the Review Workspace offers no Cable
-Profile control on it. Every harness finding names the parent Interface and its Device as its
-sources. When the viewer of a cached plan cannot view either of them, presentation hides those fields
-in every harness finding.
+Profile control on it. When the viewer of a cached plan cannot view the channel child or its Device,
+presentation hides that mark with the child. A segment override save still keeps the stored Cable
+Profile, because the server reads the mark from the plan and not from the presentation. Every harness
+finding names the parent Interface and its Device as its sources. When the viewer of a cached plan
+cannot view either of them, presentation hides those fields in every harness finding.
 
 ### 6.7 Planning diagnostics
 
