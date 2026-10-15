@@ -1328,26 +1328,19 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
         )
         viewer = self.viewer(interfaces={"channels__isnull": True})
 
+        self.assert_every_harness_finding_hidden(plan, viewer)
+
+    def assert_every_harness_finding_hidden(self, plan, viewer):
+        """Assert that a viewer who cannot see one port of the harness reads no harness finding (section 6.6)."""
         for unit in present_units(plan.units, viewer):
-            displays = {item.code: item.display for item in unit.diagnostics}
-            self.assertEqual(
-                {key: displays["cable.harness_state"][key] for key in ("channels", "legs", "profile")},
-                {"channels": TERMINATION_HIDDEN, "legs": (), "profile": TERMINATION_HIDDEN},
-            )
-            self.assertEqual(displays["cable.harness_partial"]["missing"], ())
+            codes = [item.code for item in unit.diagnostics]
+            self.assertIn(FINDING_HIDDEN, codes)
+            self.assertFalse([code for code in codes if code.startswith("cable.harness_")], codes)
         for trace in ReviewWorkspace(plan, viewer).traces:
             with self.subTest(trace=trace.identity):
-                findings = {item["code"]: item["message"] for item in trace.findings}
-                self.assertEqual(
-                    findings["cable.harness_state"],
-                    "This trace is a leg of a breakout on a parent Interface you cannot view.",
-                )
-                self.assertEqual(
-                    findings["cable.harness_partial"],
-                    "Some channels of this breakout have no leg in this source, so the breakout Cable leaves them "
-                    "unused. A per-module export confirms only the legs it states. A leg added later needs the Cable "
-                    "edited in NetBox, because the import never edits a breakout Cable.",
-                )
+                wording = " ".join(item["message"] for item in trace.findings).lower()
+                self.assertNotIn("breakout", wording)
+                self.assertNotIn("channel", wording)
 
     def test_a_leg_policy_row_names_the_breakout_profile_unless_the_parent_is_hidden(self):
         self.resolve_lanes([1, 2])
@@ -1383,48 +1376,19 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
         self.assertEqual([unit.disposition for unit in plan.units], [Disposition.ACTIONABLE] * 2)
         viewer = self.viewer(devices={"serial": ""})
 
-        for unit in present_units(plan.units, viewer):
-            (state,) = [item.display for item in unit.diagnostics if item.code == "cable.harness_state"]
-            self.assertEqual(
-                {key: state[key] for key in ("parent", "channels", "legs", "profile")},
-                {
-                    "parent": TERMINATION_HIDDEN,
-                    "channels": TERMINATION_HIDDEN,
-                    "legs": (),
-                    "profile": TERMINATION_HIDDEN,
-                },
-            )
-        for trace in ReviewWorkspace(plan, viewer).traces:
-            with self.subTest(trace=trace.identity):
-                findings = {item["code"]: item["message"] for item in trace.findings}
-                self.assertNotIn("of 2", findings["cable.harness_state"])
+        self.assert_every_harness_finding_hidden(plan, viewer)
 
     def test_a_cached_refusal_states_no_channel_count_to_a_viewer_who_cannot_view_the_parent(self):
         parent = self.make_parent(self.make_device("SW-3"), "1/1", 3)
         for number in range(1, 4):
             self.save_resolution(lane(number, device="SW-3"), self.make_child(parent, number))
         viewer = self.viewer(interfaces={"channels__isnull": True})
-        cases = {
-            "cable.harness_channel_gap": (
-                (1, 3),
-                ("missing", ()),
-                "Some channels between the legs of this breakout have no leg.",
-            ),
-            "cable.harness_profile_unavailable": (
-                (1, 2, 3),
-                ("channels", TERMINATION_HIDDEN),
-                "This NetBox instance offers no breakout Cable Profile for the channel count of this breakout's parent.",
-            ),
-        }
-        for code, (numbers, (field, hidden), wording) in cases.items():
+        for code, numbers in (("cable.harness_channel_gap", (1, 3)), ("cable.harness_profile_unavailable", (1, 2, 3))):
             with self.subTest(code=code):
                 plan = self.plan(*(direct_leg(n, start=lane(n, device="SW-3")) for n in numbers))
+                self.assertIn(code, self.codes(plan.units[0]))
 
-                (presented,) = [item for item in present_units(plan.units, viewer)[0].diagnostics if item.code == code]
-                findings = {item["code"]: item["message"] for item in ReviewWorkspace(plan, viewer).traces[0].findings}
-
-                self.assertEqual(presented.display[field], hidden)
-                self.assertTrue(findings[code].startswith(wording), findings[code])
+                self.assert_every_harness_finding_hidden(plan, viewer)
 
     def test_a_hidden_parent_does_not_disclose_that_its_cable_is_the_harness(self):
         """A visible leg reads no companion once its harness exists, so a hidden one must always name them."""
@@ -1671,18 +1635,91 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         self.assertIn(_DIAGNOSTIC_MESSAGES["cable.termination_not_connectable"], self.messages(card))
         return operator, card
 
-    def test_a_refusal_of_a_far_end_hides_with_that_far_end_and_not_with_the_child(self):
-        not_connectable = _DIAGNOSTIC_MESSAGES["cable.termination_not_connectable"]
+    def test_a_harness_refusal_hides_with_any_port_of_the_harness(self):
+        """The refused far end and lane 1's own child are both ports of the harness, so either one hides it."""
         operator, card = self.virtual_far_end_card()
 
-        for hidden, shown in ((self.servers[3], False), (self.children[1], True)):
+        for hidden in (self.servers[3], self.children[1]):
             with self.subTest(hidden=str(hidden)):
                 self.restrict_interfaces(operator, self.all_but(Interface, hidden))
 
                 messages = self.messages(self.reload(card))
 
-                self.assertIs(not_connectable in messages, shown)
+                self.assertNotIn(_DIAGNOSTIC_MESSAGES["cable.termination_not_connectable"], messages)
                 self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], messages)
+
+    def test_a_trace_between_two_channel_children_hides_its_finding_with_either_child(self):
+        """The unsupported trace names child 2 as well as child 1, and its finding reaches the other legs too."""
+        between = (
+            trace_endpoint_line(lane(1)),
+            trace_endpoint_line(lane(2)),
+            (trace_segment(lane(1), FIBER, lane(2)),),
+        )
+        operator = self.operator({})
+        self.client.force_login(operator)
+        cards = self.cards(between, panel_leg(3), panel_leg(4))
+        unsupported, other_leg = cards["SW-1 Slot 0 >> 0/0 (10) P01"], cards["SW-1 Slot 0 >> 0/0 (10) P03"]
+        for page in (unsupported, other_leg):
+            self.assertTrue(any("joins two channel subinterfaces" in message for message in self.messages(page)))
+
+        for page, hidden in ((unsupported, [self.children[2]]), (other_leg, [self.children[1], self.children[2]])):
+            with self.subTest(trace=page.context["selected_trace"].name, hidden=[str(item) for item in hidden]):
+                visible = Interface.objects.exclude(pk__in=[item.pk for item in hidden])
+                self.restrict_interfaces(operator, {"id__in": list(visible.values_list("pk", flat=True))})
+
+                messages = self.messages(self.reload(page))
+
+                self.assertFalse(any("channel" in message.lower() for message in messages), messages)
+                self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], messages)
+
+    def test_one_hidden_far_end_hides_the_harness_on_every_leg(self):
+        """A healthy harness is one disclosure unit: losing one far end hides its findings and its breakout heading."""
+        operator = self.operator({})
+        self.client.force_login(operator)
+        cards = self.cards(*(direct_leg(number) for number in range(1, 5)))
+        for page in cards.values():
+            self.assertContains(page, "breaks out as one Cable")
+            self.assertContains(page, 'data-sync-member="companion"', count=3)
+
+        self.restrict_interfaces(operator, self.all_but(Interface, self.servers[4]))
+
+        for name, page in cards.items():
+            with self.subTest(trace=name):
+                card = self.reload(page)
+                self.assertNotContains(card, "breaks out as one Cable")
+                self.assertNotContains(card, SYNC_COMPANIONS)
+                self.assertContains(card, SYNC_TOGETHER)
+                self.assertContains(card, 'data-sync-member="together"', count=3)
+
+    def test_a_blocking_trace_hides_the_harness_with_its_own_ports(self):
+        """A trace that names the parent as an ordinary port joins the harness, so its far end hides the harness too."""
+        uplink, other = (
+            trace_termination("SW-1", "Uplinks", "0/0", "Port"),
+            trace_termination("OTHER", "", "eth9", "NIC"),
+        )
+        eth9 = Interface.objects.create(device=self.make_device("OTHER"), name="eth9", type="100gbase-x-qsfp28")
+        rival = (trace_endpoint_line(uplink), trace_endpoint_line(other), (trace_segment(uplink, FIBER, other),))
+        operator = self.operator({})
+        self.client.force_login(operator)
+        card = self.cards(*(panel_leg(number) for number in range(1, 5)), rival)["SW-1 Slot 0 >> 0/0 (10) P01"]
+        self.assertTrue(any("names the parent as an ordinary port" in message for message in self.messages(card)))
+
+        self.restrict_interfaces(operator, self.all_but(Interface, eth9))
+
+        messages = self.messages(self.reload(card))
+        self.assertFalse(any("ordinary port" in message for message in messages), messages)
+        self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], messages)
+
+    def test_one_far_end_device_hides_the_harness(self):
+        operator = self.operator({})
+        self.client.force_login(operator)
+        card = self.cards(*(direct_leg(number) for number in range(1, 5)))["SW-1 Slot 0 >> 0/0 (10) P01"]
+
+        self.restrict_interfaces(operator, self.all_but(Device, self.servers[4].device), model=Device)
+
+        card = self.reload(card)
+        self.assertNotContains(card, "breaks out as one Cable")
+        self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], self.messages(card))
 
     def test_a_refusal_of_a_far_end_hides_with_its_device_alone(self):
         operator, card = self.virtual_far_end_card()

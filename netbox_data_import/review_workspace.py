@@ -17,7 +17,6 @@ from .cable_disclosure import (
     DISCLOSURE_SOURCE,
     POLICY_HIDDEN,
     POLICY_VISIBLE,
-    TERMINATION_HIDDEN,
 )
 from .cable_policy import cable_media_family_label, cable_profile_label, cable_type_label
 from .cable_target import UNRESOLVED
@@ -435,15 +434,8 @@ def _channels(numbers) -> str:
     return ", ".join(str(number) for number in numbers)
 
 
-def _parent_hidden(display) -> bool:
-    """Return whether presentation hid the parent of a harness finding, and with it every channel fact."""
-    return display["parent"] == TERMINATION_HIDDEN
-
-
 def _harness_state_message(display) -> str:
     """Return the wording that says which channels of one breakout this plan states."""
-    if _parent_hidden(display):
-        return "This trace is a leg of a breakout on a parent Interface you cannot view."
     return (
         f"{display['parent']} breaks out as one Cable. This source states channel(s) "
         f"{_channels(display['legs'])} of {display['channels']}."
@@ -451,8 +443,8 @@ def _harness_state_message(display) -> str:
 
 
 def _missing_channels(display) -> str:
-    """Return the subject that names the channels a harness finding misses, unless the parent is hidden."""
-    return "Some channels" if _parent_hidden(display) else f"Channel(s) {_channels(display['missing'])}"
+    """Return the subject that names the channels a harness finding misses."""
+    return f"Channel(s) {_channels(display['missing'])}"
 
 
 def _harness_unsupported_message(display) -> str:
@@ -522,9 +514,7 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
         "edited in NetBox, because the import never edits a breakout Cable."
     ),
     "cable.harness_profile_unavailable": lambda display: (
-        "This NetBox instance offers no breakout Cable Profile for the channel count of this breakout's parent."
-        if _parent_hidden(display)
-        else f"This NetBox instance offers no breakout Cable Profile for a parent with {display['channels']} channels."
+        f"This NetBox instance offers no breakout Cable Profile for a parent with {display['channels']} channels."
     ),
     "cable.harness_state": _harness_state_message,
     "cable.harness_type_conflict": (
@@ -1050,8 +1040,8 @@ def _breakout_segments(segments, diagnostics) -> list[dict[str, Any]]:
     """Return each segment, naming the breakout profile on the harness leg, which the breakout decides."""
     state = next((item.display for item in diagnostics if item.code == "cable.harness_state"), None)
     text = BREAKOUT_PROFILE
-    # A hidden parent hides the profile its channel count selects, and a blocked harness selects none.
-    if state is not None and not _parent_hidden(state) and state["profile"]:
+    # A hidden harness hides the profile its channel count selects, and a blocked harness selects none.
+    if state is not None and state["profile"]:
         text = f"{BREAKOUT_PROFILE}: {cable_profile_label(state['profile'])}"
     return [{**segment, "breakout_profile": text if segment["breakout_leg"] else ""} for segment in segments]
 
@@ -1333,15 +1323,14 @@ class ReviewWorkspace:
         )
 
     def _member_kind(self, identity: str, member: str, companion: bool) -> str:
-        """Name a companion's breakout only when the viewer sees the channel child of both legs."""
+        """Name a companion's breakout only when the viewer sees the harness of both legs."""
         if not companion:
             return "dependency"
-        return "companion" if self._shows_leg(identity) and self._shows_leg(member) else "together"
+        return "companion" if self._shows_harness(identity) and self._shows_harness(member) else "together"
 
-    def _shows_leg(self, identity: str) -> bool:
-        """Return whether presentation kept the leg mark, which hides with the leg's channel child."""
-        trace = self._presented[identity].display.get("trace") or {}
-        return any(segment["breakout_leg"] for segment in trace.get("segments") or ())
+    def _shows_harness(self, identity: str) -> bool:
+        """Return whether presentation kept the unit's harness state, which hides with any port of the harness."""
+        return any(item.code == "cable.harness_state" for item in self._presented[identity].diagnostics)
 
     def _sync_closure(self, identity: str) -> dict[str, bool]:
         """Return `sync_selection` in order, each unit mapped to whether it joins as a companion of *identity*."""

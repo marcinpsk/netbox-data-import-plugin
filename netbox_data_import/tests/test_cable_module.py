@@ -2005,12 +2005,6 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
 class CableDisclosureSchemaTest(SimpleTestCase):
     """Reject disclosure data that cannot be presented without leaking row state."""
 
-    def test_a_leg_finding_without_its_channel_child_is_refused(self):
-        from netbox_data_import.cable_disclosure import wording_sources
-
-        with self.assertRaisesMessage(ValueError, "says the trace is a leg without naming the leg's channel child"):
-            wording_sources("cable.harness_state", [])
-
     def test_diagnostic_schemas_reject_invalid_visibility_metadata(self):
         """Cable and policy fields must carry a boolean flag and a matching row source."""
         from netbox_data_import.cable_disclosure import (
@@ -2256,7 +2250,7 @@ class CableDisclosureSchemaTest(SimpleTestCase):
         mapping = {"kind": CABLE_CLASS_MAPPING_ROW, "pk": 3}
         media_segment = {"retained": True, "visible": True, "cable_type": "cat6", "family": "cat6"}
         diagnostics = []
-        for code, (public, cable, policy, termination, wording, _leg) in _DIAGNOSTIC_DISCLOSURE_FIELDS.items():
+        for code, (public, cable, policy, termination, wording) in _DIAGNOSTIC_DISCLOSURE_FIELDS.items():
             display = dict.fromkeys(public, "value")
             if code == "cable.media_family_mismatch":
                 display["segments"] = [

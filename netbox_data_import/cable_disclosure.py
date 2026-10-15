@@ -44,19 +44,14 @@ class _DisplaySchema(NamedTuple):
     termination: frozenset = frozenset()
     # The wording states facts of Interfaces, so the finding renders only when its WORDING_SOURCES are visible.
     wording: bool = False
-    # The wording also says the trace is a breakout leg, which its channel child authorizes.
-    leg: bool = False
 
 
 def _harness_schema(public: frozenset, *, cable: frozenset = frozenset(), termination: frozenset = frozenset()):
     """Return the schema of one harness finding, which always names its leg and its parent Interface.
 
-    A fact derived from the parent's channels is a termination field, so a hidden parent hides it. The
-    finding says the trace is a leg, so a hidden channel child hides the whole finding.
+    Its wording describes the harness as a whole, so every port of the harness authorizes it (section 6.6).
     """
-    return _DisplaySchema(
-        public | {"segment_index"}, cable=cable, termination=termination | {"parent"}, wording=True, leg=True
-    )
+    return _DisplaySchema(public | {"segment_index"}, cable=cable, termination=termination | {"parent"}, wording=True)
 
 
 _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
@@ -148,6 +143,9 @@ POLICY_DIAGNOSTIC_DISCLOSURES = MappingProxyType(
     {code: fields.policy for code, fields in _DIAGNOSTIC_DISCLOSURE_FIELDS.items() if fields.policy}
 )
 
+# Every code whose wording states facts of Interfaces, so its display must carry WORDING_SOURCES.
+WORDING_CODES = frozenset(code for code, fields in _DIAGNOSTIC_DISCLOSURE_FIELDS.items() if fields.wording)
+
 TERMINATION_DIAGNOSTIC_DISCLOSURES = MappingProxyType(
     {code: fields.termination for code, fields in _DIAGNOSTIC_DISCLOSURE_FIELDS.items() if fields.termination}
 )
@@ -168,20 +166,8 @@ def segment_end_sources(port: tuple[str, int], device_id: int) -> list:
     return [disclosure_source(*port), device_source(device_id)]
 
 
-def wording_sources(code: str, subjects, leg: tuple[tuple[str, int], int] | None = None) -> dict:
-    """Return the sources one finding's wording needs, or nothing for a code whose wording states no such fact.
-
-    *subjects* are the ``(port, device_id)`` pairs of every Interface the wording describes. *leg* is the
-    leg's channel child, which the sources include when the wording says the trace is a leg.
-    """
-    schema = _DIAGNOSTIC_DISCLOSURE_FIELDS[code]
-    if not schema.wording:
-        return {}
-    ends = list(subjects)
-    if schema.leg:
-        if leg is None:
-            raise ValueError(f"Diagnostic '{code}' says the trace is a leg without naming the leg's channel child.")
-        ends.append(leg)
+def wording_sources(ends) -> dict:
+    """Return the sources a finding's wording needs: each ``(port, device_id)`` end, the port followed by its Device."""
     return {
         WORDING_SOURCES: [
             source for port, device_id in dict.fromkeys(ends) for source in segment_end_sources(port, device_id)
@@ -238,7 +224,7 @@ def validate_diagnostic_disclosures(code: str, display: dict) -> None:
     fields = _DIAGNOSTIC_DISCLOSURE_FIELDS.get(code)
     if fields is None:
         raise ValueError(f"Diagnostic '{code}' has no registered display schema.")
-    public, cable, policy, termination, wording, _leg = fields
+    public, cable, policy, termination, wording = fields
     if code == "cable.media_family_mismatch":
         _validate_media_segments(display)
         return
@@ -262,11 +248,7 @@ def validate_diagnostic_disclosures(code: str, display: dict) -> None:
 
 
 def _validate_wording_sources(code: str, display: dict) -> None:
-    """Reject wording sources that are not port and Device pairs, or that leave out a port the display names.
-
-    A harness display lists its parent and the parent's Device first among its termination sources: the
-    parent's facts are termination fields that hide on their own, so the parent is no subject of the wording.
-    """
+    """Reject wording sources that are not port and Device pairs, or that leave out a port the display names."""
     listed = display.get(WORDING_SOURCES)
     sources = list(listed) if isinstance(listed, (list, tuple)) else []
     pairs = list(zip(sources[::2], sources[1::2], strict=False))
@@ -282,8 +264,6 @@ def _validate_wording_sources(code: str, display: dict) -> None:
     ):
         raise ValueError(f"Diagnostic '{code}' states a fact of an Interface without its sources.")
     named = list(display.get(TERMINATION_SOURCES) or ())
-    if "parent" in display:
-        named = named[2:]
     ports = {(port["kind"], port["pk"]) for port, _device in pairs}
     if any((source["kind"], source["pk"]) not in ports for source in named if _source_pk(source, DEVICE_ROW) is None):
         raise ValueError(f"Diagnostic '{code}' names a port its wording sources leave out.")
@@ -625,6 +605,7 @@ __all__ = (
     "TERMINATION_DIAGNOSTIC_DISCLOSURES",
     "TERMINATION_HIDDEN",
     "TERMINATION_SOURCES",
+    "WORDING_CODES",
     "WORDING_SOURCES",
     "device_source",
     "disclosed_cable",

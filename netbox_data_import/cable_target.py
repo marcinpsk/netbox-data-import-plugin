@@ -17,6 +17,7 @@ accepted unit stale and rolls the write back.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -24,6 +25,7 @@ from typing import Any
 from . import cable_harness
 from .cable_disclosure import (
     DEVICE_ROW,
+    WORDING_CODES,
     DISCLOSURE_SOURCE,
     SEGMENT_END_SOURCES,
     wording_sources,
@@ -263,6 +265,8 @@ class _Harness:
     intent: cable_harness.CableIntent | None = None
     cable_type: str | None = None
     reused: _ExistingCable | None = None
+    # The sources of every finding about this harness, which `settle_wording` sets once its members are known.
+    wording: dict = field(default_factory=dict)
 
     @property
     def change_identity(self) -> str:
@@ -278,6 +282,22 @@ class _Harness:
     def ends(self) -> list[_Termination]:
         """Return the parent and every far end the harness claims."""
         return [self.termination, *(leg.far for leg in self.legs)]
+
+    def settle_wording(self, resolved: Mapping[str, Mapping[tuple, _Termination]]) -> None:
+        """Bind every finding about this harness to every port it involves, each with its Device.
+
+        A finding on one leg can describe the parent, a sibling child, another leg's far end or a trace
+        that blocks the harness, so the whole harness is one disclosure unit (section 6.6).
+        """
+        ends = [self.termination, *(end for leg in self.legs for end in (leg.child, leg.far))]
+        blockers = (*self.unsupported, *self.unresolved, *(analysis for analysis, _port in self.unchannelized))
+        ends.extend(end for analysis in blockers for end in resolved.get(analysis.identity, {}).values())
+        children = [
+            ((child.component._meta.label_lower, child.component.pk), child.component.device_id)
+            for child in self.parent.children
+            if child.channel is not None
+        ]
+        self.wording = wording_sources([*((end.key, end.device_id) for end in ends), *children])
 
     def companions(self, leg: _Leg) -> tuple[str, ...]:
         """Return the unit identity of every other leg, which must be selected together with *leg*."""
@@ -645,6 +665,7 @@ class _CableBatch:
         self._overrides_by_trace: dict[str, list] = {}
         self._parents: dict[int, cable_harness.Parent] = {}
         self._harnesses: dict[int, _Harness] = {}
+        self._unsupported_traces: list[tuple[_TraceAnalysis, _Harness, int]] = []
         self._stored = self._stored_resolutions()
         active_traces = (analysis.trace for analysis in self.analyses if not analysis.stopped)
         self._device_evidence = collect_trace_device_evidence(active_traces)
@@ -1232,6 +1253,15 @@ class _CableBatch:
             self._block_harness_of_ordinary_parent(analysis)
         for parent_pk in sorted(self._harnesses):
             self._gather_cohort(self._harnesses[parent_pk])
+        for parent_pk in sorted(self._harnesses):
+            self._harnesses[parent_pk].settle_wording(self._resolved)
+        # Its wording names the whole harness, which is known only once every trace is placed.
+        for analysis, harness, segment_index in self._unsupported_traces:
+            analysis.block(
+                "cable.harness_unsupported",
+                self._harness_display(harness, segment_index, trace=analysis.display["name"]),
+                identities=(harness.termination.identity,),
+            )
 
     def _harness(self, parent_pk: int) -> _Harness:
         """Return the harness of one parent, created on first use."""
@@ -1267,18 +1297,7 @@ class _CableBatch:
         ]
         if len(legs) > 1:
             # A child at both ends of one segment, or a trace between two harnesses.
-            harness = self._harness(touched[0])
-            analysis.block(
-                "cable.harness_unsupported",
-                self._harness_display(
-                    harness,
-                    "cable.harness_unsupported",
-                    legs[0][0].index,
-                    child=legs[0][1],
-                    trace=analysis.display["name"],
-                ),
-                identities=(harness.termination.identity,),
-            )
+            self._unsupported_traces.append((analysis, self._harness(touched[0]), legs[0][0].index))
             for parent in touched:
                 self._harness(parent).unsupported.append(analysis)
             return
@@ -1331,15 +1350,13 @@ class _CableBatch:
                     harness.unchannelized.append((analysis, termination))
 
     @staticmethod
-    def _harness_display(
-        harness: _Harness, code: str, segment_index: int, *ports: _Termination, child: _Termination, **fields
-    ) -> dict:
+    def _harness_display(harness: _Harness, segment_index: int, *ports: _Termination, **fields) -> dict:
         """Return the display every finding about a harness carries: the leg, the parent, and the ports it names."""
         return {
             "segment_index": segment_index,
             "parent": harness.termination.display,
             **fields,
-            **wording_sources(code, [(port.key, port.device_id) for port in ports], (child.key, child.device_id)),
+            **harness.wording,
             # The parent's Device authorizes its channel facts too: on a virtual chassis it can be hidden alone.
             **termination_sources(
                 harness.termination.key, (DEVICE_ROW, harness.parent.component.device_id), *(port.key for port in ports)
@@ -1366,7 +1383,7 @@ class _CableBatch:
                 for kind, code, ports, fields in findings:
                     getattr(leg.analysis, kind)(
                         code,
-                        self._harness_display(harness, code, leg.segment.index, *ports, child=leg.child, **fields),
+                        self._harness_display(harness, leg.segment.index, *ports, **fields),
                         identities=(harness.termination.identity, *(port.identity for port in ports)),
                     )
                     if code == cable_harness.NOT_CONNECTABLE:
@@ -1529,9 +1546,7 @@ class _CableBatch:
             "cable.harness_state",
             self._harness_display(
                 harness,
-                "cable.harness_state",
                 leg.segment.index,
-                child=leg.child,
                 channels=harness.parent.channels,
                 legs=self._leg_channels(harness),
                 profile=evidence["profile"],
@@ -1762,8 +1777,8 @@ class _CableBatch:
                     "segment_index": segment.index,
                     **refusal.facts,
                     **termination_sources(port.key),
-                    # An ordinary segment's refusal says nothing of a leg, so only the refused port authorizes it.
-                    **wording_sources(refusal.code, [(port.key, port.device_id)]),
+                    # An ordinary segment's refusal describes the refused port alone, so only that port authorizes it.
+                    **(wording_sources([(port.key, port.device_id)]) if refusal.code in WORDING_CODES else {}),
                 },
                 identities=(port.identity,),
             )
