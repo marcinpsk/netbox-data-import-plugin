@@ -265,7 +265,8 @@ class _Harness:
     intent: cable_harness.CableIntent | None = None
     cable_type: str | None = None
     reused: _ExistingCable | None = None
-    # The sources of every finding about this harness, which `settle_wording` sets once its members are known.
+    # Every port of the harness with its Device, and the sources they give every finding about it.
+    wording_ends: list = field(default_factory=list)
     wording: dict = field(default_factory=dict)
 
     @property
@@ -297,7 +298,8 @@ class _Harness:
             for child in self.parent.children
             if child.channel is not None
         ]
-        self.wording = wording_sources([*((end.key, end.device_id) for end in ends), *children])
+        self.wording_ends = [*((end.key, end.device_id) for end in ends), *children]
+        self.wording = wording_sources(self.wording_ends)
 
     def companions(self, leg: _Leg) -> tuple[str, ...]:
         """Return the unit identity of every other leg, which must be selected together with *leg*."""
@@ -1925,20 +1927,22 @@ class _CableBatch:
         A claim is keyed by the Cable it creates, so traces that share one segment or one harness agree.
         Two different Cables also conflict inside one trace, such as a harness and a segment back to its far end.
         """
-        claims: dict[tuple[str, int], list[tuple[_TraceAnalysis, str, int, _Termination]]] = {}
+        claims: dict[tuple[str, int], list[tuple[_TraceAnalysis, str, int, _Termination, _Harness | None]]] = {}
         for analysis in self._writing():
             for segment in analysis.pending:
                 for termination in segment.terminations:
-                    claims.setdefault(termination.key, []).append((analysis, segment.key, segment.index, termination))
+                    claims.setdefault(termination.key, []).append(
+                        (analysis, segment.key, segment.index, termination, None)
+                    )
             if analysis.harness_pending:
                 harness, index = analysis.harness, analysis.leg.segment.index
                 for termination in harness.ends:
                     claims.setdefault(termination.key, []).append(
-                        (analysis, harness.change_identity, index, termination)
+                        (analysis, harness.change_identity, index, termination, harness)
                     )
         for records in claims.values():
-            for analysis, claim, index, termination in records:
-                for other, other_claim, other_index, _other_termination in records:
+            for analysis, claim, index, termination, harness in records:
+                for other, other_claim, other_index, _other_termination, other_harness in records:
                     if other_claim == claim:
                         continue
                     competitor = (
@@ -1946,6 +1950,8 @@ class _CableBatch:
                         if other is analysis
                         else {"competing_trace": other.display["name"]}
                     )
+                    # A claim that only a harness makes is a fact of that harness, so the conflict hides with it.
+                    harnesses = [item for item in (harness, other_harness) if item is not None]
                     analysis.block(
                         "cable.planned_termination_conflict",
                         {
@@ -1953,6 +1959,11 @@ class _CableBatch:
                             "termination": termination.display,
                             **competitor,
                             **termination_sources(termination.key),
+                            **(
+                                wording_sources([end for item in harnesses for end in item.wording_ends])
+                                if harnesses
+                                else {}
+                            ),
                         },
                         identities=(termination.identity,),
                     )

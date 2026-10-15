@@ -44,6 +44,8 @@ class _DisplaySchema(NamedTuple):
     termination: frozenset = frozenset()
     # The wording states facts of Interfaces, so the finding renders only when its WORDING_SOURCES are visible.
     wording: bool = False
+    # The finding carries WORDING_SOURCES only when a harness gives rise to it, and then follows the same rule.
+    wording_optional: bool = False
 
 
 def _harness_schema(public: frozenset, *, cable: frozenset = frozenset(), termination: frozenset = frozenset()):
@@ -94,7 +96,9 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
         "cable.pass_through_verified": _DisplaySchema(_REFERENCE_FIELDS, termination=frozenset({"entry", "exit"})),
         "cable.permission_denied": _DisplaySchema(_REFERENCE_FIELDS | {"permission"}, cable=frozenset({"cable"})),
         "cable.planned_termination_conflict": _DisplaySchema(
-            frozenset({"segment_index", "competing_trace", "competing_segment"}), termination=frozenset({"termination"})
+            frozenset({"segment_index", "competing_trace", "competing_segment"}),
+            termination=frozenset({"termination"}),
+            wording_optional=True,
         ),
         "cable.policy_stale": _DisplaySchema(frozenset({"segment_index", "cable_class"})),
         "cable.profile_incompatible": _DisplaySchema(frozenset({"segment_index", "cable_class"})),
@@ -224,7 +228,7 @@ def validate_diagnostic_disclosures(code: str, display: dict) -> None:
     fields = _DIAGNOSTIC_DISCLOSURE_FIELDS.get(code)
     if fields is None:
         raise ValueError(f"Diagnostic '{code}' has no registered display schema.")
-    public, cable, policy, termination, wording = fields
+    public, cable, policy, termination, wording, wording_optional = fields
     if code == "cable.media_family_mismatch":
         _validate_media_segments(display)
         return
@@ -237,7 +241,7 @@ def validate_diagnostic_disclosures(code: str, display: dict) -> None:
         metadata.add(TERMINATION_SOURCES)
         if not _well_formed_termination_sources(display.get(TERMINATION_SOURCES)):
             raise ValueError(f"Diagnostic '{code}' names terminations without their sources.")
-    if wording:
+    if wording or (wording_optional and WORDING_SOURCES in display):
         metadata.add(WORDING_SOURCES)
         _validate_wording_sources(code, display)
     unknown = set(display) - set(public) - set(cable) - set(policy) - set(termination) - metadata
@@ -465,7 +469,7 @@ def _diagnostic(diagnostic, visible_row_ids: dict[str, set[int]]):
     schema = _DIAGNOSTIC_DISCLOSURE_FIELDS.get(diagnostic.code)
     if (
         schema is not None
-        and schema.wording
+        and (schema.wording or (schema.wording_optional and WORDING_SOURCES in display))
         and not _terminations_are_visible(display[WORDING_SOURCES], visible_row_ids)
     ):
         return replace(diagnostic, code=FINDING_HIDDEN, display={}, identities=identities)

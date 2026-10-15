@@ -56,7 +56,7 @@ from netbox_data_import.tests.helpers import (
     upload_preview,
     user_with_object_permission,
 )
-from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path, patched_path
+from netbox_data_import.tests.test_cable_module import DEVICE_A, CableTopologyMixin, direct_path, patched_path
 
 
 def _channel_fields() -> bool:
@@ -1709,6 +1709,34 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         messages = self.messages(self.reload(card))
         self.assertFalse(any("ordinary port" in message for message in messages), messages)
         self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], messages)
+
+    def test_a_conflict_that_only_the_harness_claims_hides_with_any_port_of_the_harness(self):
+        """Lane 1's trace never names SRV-2, but its harness claims SRV-2, which an ordinary trace also plans."""
+        alias = trace_termination("SRV-2", "", "eth0-alias", "NIC")
+        self.save_resolution(alias, self.servers[2])
+        operator = self.operator({})
+        self.client.force_login(operator)
+        cards = self.cards(direct_leg(1), direct_leg(2), direct_path(DEVICE_A, alias))
+        leg, ordinary = cards["SW-1 Slot 0 >> 0/0 (10) P01"], cards["DEV-A eth0"]
+        conflict = "Another Source Trace plans a Cable on this termination"
+        for page in (leg, ordinary):
+            self.assertTrue(any(conflict in message for message in self.messages(page)), self.messages(page))
+
+        for model, hidden in (
+            (Interface, self.parent),
+            (Interface, self.children[2]),
+            (Interface, self.servers[2]),
+            (Device, self.servers[2].device),
+        ):
+            with self.subTest(hidden=f"{model.__name__} {hidden}"):
+                self.restrict_interfaces(operator, {}, model=Interface)
+                self.restrict_interfaces(operator, {}, model=Device)
+                self.restrict_interfaces(operator, self.all_but(model, hidden), model=model)
+
+                for page in (leg, ordinary):
+                    messages = self.messages(self.reload(page))
+                    self.assertFalse(any(conflict in message for message in messages), messages)
+                    self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], messages)
 
     def test_one_far_end_device_hides_the_harness(self):
         operator = self.operator({})

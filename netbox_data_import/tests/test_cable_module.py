@@ -2118,6 +2118,18 @@ class CableDisclosureSchemaTest(SimpleTestCase):
                 "Diagnostic 'cable.termination_channelized' names a port its wording sources leave out.",
             ),
             (
+                "a harness conflict whose wording sources leave out its termination",
+                "cable.planned_termination_conflict",
+                {
+                    "segment_index": 0,
+                    "competing_trace": "B",
+                    "termination": "F1",
+                    "termination_sources": [{"kind": "dcim.frontport", "pk": 3}],
+                    "wording_sources": [{"kind": "dcim.interface", "pk": 4}, {"kind": "dcim.device", "pk": 2}],
+                },
+                "Diagnostic 'cable.planned_termination_conflict' names a port its wording sources leave out.",
+            ),
+            (
                 "a harness port its wording sources leave out",
                 "cable.harness_occupied",
                 {
@@ -2250,7 +2262,14 @@ class CableDisclosureSchemaTest(SimpleTestCase):
         mapping = {"kind": CABLE_CLASS_MAPPING_ROW, "pk": 3}
         media_segment = {"retained": True, "visible": True, "cable_type": "cat6", "family": "cat6"}
         diagnostics = []
-        for code, (public, cable, policy, termination, wording) in _DIAGNOSTIC_DISCLOSURE_FIELDS.items():
+        for code, (
+            public,
+            cable,
+            policy,
+            termination,
+            wording,
+            _wording_optional,
+        ) in _DIAGNOSTIC_DISCLOSURE_FIELDS.items():
             display = dict.fromkeys(public, "value")
             if code == "cable.media_family_mismatch":
                 display["segments"] = [
