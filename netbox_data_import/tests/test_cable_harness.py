@@ -957,6 +957,58 @@ class HarnessExecutionTest(HarnessTopologyMixin, TransactionTestCase):
         self.assertEqual(refused.exception.code, "cable.harness_unsupported")
         self.assertFalse(Cable.objects.exists())
 
+    def test_an_ordinary_trace_never_replaces_a_one_leg_breakout(self):
+        """One leg gives the breakout one end per side, so it joins the two endpoints of an ordinary trace."""
+        self.resolve_lanes([1])
+        self.assertEqual(self.execute(self.plan(direct_leg(1))).outcome, "succeeded")
+        harness = cables_on(self.parent).get()
+        before = termination_snapshot(harness)
+
+        plan = self.plan(uplink_trace())
+        (unit,) = plan.units
+        with self.assertRaisesMessage(SelectionError, "was not actionable when selected"):
+            self.execute(plan, [unit.identity])
+
+        self.assertEqual(termination_snapshot(Cable.objects.get(pk=harness.pk)), before)
+        self.assertEqual(Cable.objects.count(), 1)
+        self.assertEqual((unit.disposition, unit.changes), (Disposition.BLOCKED, ()))
+        occupied = sorted(
+            item.display["port"] for item in unit.diagnostics if item.code == "cable.termination_occupied"
+        )
+        self.assertEqual(occupied, sorted([str(self.parent), str(self.servers[1])]))
+
+    def test_a_logical_cable_that_became_a_breakout_refuses_its_deletion(self):
+        """The deletion decides from the locked Cable and its ends, so a stale or forged change cannot remove a breakout."""
+        context = ExecutionContext(actor=self.actor, reader=self.reader(), profile=self.profile)
+        cases = {
+            "breakout profile": lambda cable, end: Cable.objects.filter(pk=cable.pk).update(profile=BREAKOUT_4),
+            "channelized end": lambda cable, end: Interface.objects.filter(pk=end.pk).update(channels=4),
+        }
+        for number, (case, make_breakout) in enumerate(cases.items(), start=1):
+            with self.subTest(case=case):
+                other = trace_termination(f"OTHER-{number}", "", "eth9", "NIC")
+                far = Interface.objects.create(device=self.make_device(f"OTHER-{number}"), name="eth9", type="lc")
+                logical = self.connect(self.servers[number], far)
+                trace = (
+                    trace_endpoint_line(server_port(number)),
+                    trace_endpoint_line(other),
+                    (
+                        trace_segment(server_port(number), FIBER, panel_front(number)),
+                        trace_segment(panel_rear(number), FIBER, other),
+                    ),
+                )
+                (delete, *_creations) = self.plan(trace).units[0].changes
+                self.assertEqual(delete.identity, f"cable:delete:{logical.pk}")
+                make_breakout(logical, self.servers[number])
+
+                with (
+                    self.assertRaisesMessage(PreconditionFailed, "the import never deletes it"),
+                    transaction.atomic(),
+                ):
+                    CableModule().apply(delete, context)
+
+                self.assertTrue(Cable.objects.filter(pk=logical.pk).exists())
+
 
 @CHANNELS
 class CableIntentTest(HarnessTopologyMixin, TestCase):

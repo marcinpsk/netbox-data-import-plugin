@@ -1570,10 +1570,15 @@ class _CableBatch:
                 self._classify_endpoint_evidence(analysis)
 
     def _logical_cable(self, analysis: _TraceAnalysis, proven_ids) -> _ExistingCable | None:
-        """Return the direct endpoint-to-endpoint Cable that proves no desired segment."""
+        """Return the direct endpoint-to-endpoint Cable that proves no desired segment and is no breakout."""
         first, second = analysis.endpoints
         existing = self._occupied.get(first.key)
-        if existing is not None and existing.cable.pk not in proven_ids and existing.connects(first, second):
+        if (
+            existing is not None
+            and existing.cable.pk not in proven_ids
+            and existing.connects(first, second)
+            and not cable_harness.is_breakout(existing.cable, (self._objects[first.key], self._objects[second.key]))
+        ):
             return existing
         return None
 
@@ -2251,6 +2256,9 @@ class CableModule:
         current = _cable_terminations(cable_id)
         if current != [list(item) for item in planned_change.preconditions["terminations"]]:
             raise PreconditionFailed(f"Cable {cable_id} was re-terminated after the plan was made.")
+        ends = [_model_for_label(label).objects.get(pk=object_id) for label, object_id in current]
+        if cable_harness.is_breakout(cable, ends):
+            raise PreconditionFailed(f"Cable {cable_id} is a breakout Cable, and the import never deletes it.")
         if _deleted_cable_review_fingerprint(cable) != planned_change.preconditions["review_fingerprint"]:
             raise PreconditionFailed(f"Cable {cable_id} changed after the plan was made.")
         enforce_saved_object_permission(cable, execution_context.actor, "delete")

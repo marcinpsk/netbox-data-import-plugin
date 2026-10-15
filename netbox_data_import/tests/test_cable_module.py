@@ -445,6 +445,20 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         self.assertEqual(list(review["tags"]), ["Earlier", "Later"])
         self.assertEqual(deletion.payload, {"cable_id": logical.pk})
 
+    def test_a_breakout_cable_between_the_endpoints_is_never_the_logical_cable(self):
+        """A one-leg breakout has one end per side, so only its profile tells it from a direct Cable."""
+        breakout = self.connect(self.eth0, self.eth1, profile="breakout-1c4p-4c1p")
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual((unit.disposition, unit.changes), (Disposition.BLOCKED, ()))
+        occupied = sorted(
+            item.display["port"] for item in unit.diagnostics if item.code == "cable.termination_occupied"
+        )
+        self.assertEqual(occupied, sorted([str(self.eth0), str(self.eth1)]))
+        self.assertIsNone(unit.display["trace"]["logical_cable"])
+        self.assertTrue(Cable.objects.filter(pk=breakout.pk).exists())
+
     def test_a_trace_with_no_direct_cable_is_a_creation_only_replacement(self):
         """With nothing to remove the unit carries creations alone, and they wait on nothing."""
         unit = self.unit(patched_path())

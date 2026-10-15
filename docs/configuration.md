@@ -489,8 +489,8 @@ of that parent, because one Cable carries them all, and the server refuses a sel
 lane out. The breakout is blocked when its lanes reach ports of different kinds, when a channel
 between two lanes has no trace, when a trace that names the same card is not resolved, or when
 another Cable holds the parent or a far end. Channels after the last lane stay unused, with a
-warning. The import never edits a breakout Cable, so a lane that a later file adds needs the Cable
-edited in NetBox. A trace that names the parent itself, rather than a channel
+warning. The import never edits or deletes a breakout Cable, so a lane that a later file adds needs
+the Cable edited in NetBox. A trace that names the parent itself, rather than a channel
 subinterface, is blocked: choose the channel subinterface of its lane. NetBox 4.6 has no channels,
 and trace import there works as before.
 

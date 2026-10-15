@@ -69,6 +69,16 @@ def is_channelized(component) -> bool:
     return supported() and _label(component) == INTERFACE and bool(component.channels)
 
 
+def is_breakout(cable, ends) -> bool:
+    """Return whether an existing Cable is a breakout: its profile fans connectors out, or it ends on a channelized Interface.
+
+    The import never deletes or replaces such a Cable as a Logical Cable (section 6.4).
+    """
+    profile = cable.profile_class
+    fans_out = profile is not None and len(profile.a_connectors) != len(profile.b_connectors)
+    return fans_out or any(is_channelized(end) for end in ends)
+
+
 def is_plain_interface(component) -> bool:
     """Return whether *component* is an Interface that is neither channelized nor a channel child."""
     return _label(component) == INTERFACE and component.channel_id is None and not component.channels
@@ -394,6 +404,7 @@ __all__ = (
     "channel_parent",
     "harness_intent",
     "harness_payload",
+    "is_breakout",
     "is_channelized",
     "is_plain_interface",
     "locked_harness_intent",

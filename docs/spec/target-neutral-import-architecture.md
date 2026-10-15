@@ -935,7 +935,9 @@ Cable.
 
 The Logical Cable is the current direct endpoint-to-endpoint Cable that matches no desired segment,
 regardless of what created it. Its description and tags appear in review. There is no
-provenance-marker gate.
+provenance-marker gate. A breakout Cable is never the Logical Cable: a Cable whose profile has a
+different connector count on each side, or that ends on a channelized Interface. A one-leg breakout
+has one termination per side, so its termination sets alone cannot tell it from a direct Cable.
 
 The precedence rule decides the single-segment trace. When the trace claims exactly one segment
 between the two endpoints, an existing direct Cable matches that desired segment, so it is a proven
@@ -984,7 +986,8 @@ Synchronization Unit: one complete Source Trace
 Deletion scope: the only Cable a Patched Path Replacement ever deletes is the one direct
 endpoint-to-endpoint Logical Cable. Any other cable occupying a desired termination makes the unit
 blocked. The operator clears it in NetBox and replans. The plugin never deletes or edits a third-party
-cable.
+cable. The deletion rereads the locked Cable and its terminations, and refuses a breakout Cable
+(section 6.3), so a stale or forged deletion cannot remove one.
 
 Creation policy for a new segment:
 
