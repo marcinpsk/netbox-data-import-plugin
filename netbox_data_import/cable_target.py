@@ -1847,7 +1847,7 @@ class _CableBatch:
         """Block every actionable trace whose planned Cables compete for one free termination.
 
         A claim is keyed by the Cable it creates, so traces that share one segment or one harness agree.
-        Two different Cables conflict also inside one trace, such as a harness and a segment back to its parent.
+        Two different Cables also conflict inside one trace, such as a harness and a segment back to its parent.
         """
         claims: dict[tuple[str, int], list[tuple[_TraceAnalysis, str, int, _Termination]]] = {}
         for analysis in self._writing():
