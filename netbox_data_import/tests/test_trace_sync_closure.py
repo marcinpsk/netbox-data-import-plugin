@@ -15,7 +15,7 @@ from django_rq import get_queue
 
 from netbox_data_import.jobs import ImportJobRunner
 from netbox_data_import.plan import Disposition, ImportPlan
-from netbox_data_import.review_workspace import SYNC_SELECTION_CHANGED, SYNC_SELECTION_INVALID
+from netbox_data_import.review_workspace import SYNC_NOTHING, SYNC_SELECTION_CHANGED, SYNC_SELECTION_INVALID
 from netbox_data_import.tests.helpers import (
     preview_claim,
     store_plan,
@@ -39,6 +39,12 @@ from netbox_data_import.tests.test_cable_module import (
 JSON = {"HTTP_ACCEPT": "application/json"}
 DEVICE_C = trace_termination("DEV-C", "", "eth0", "Port")
 DEVICE_D = trace_termination("DEV-D", "", "eth1", "NIC")
+
+
+def workspace_url(trace=""):
+    """Return the workspace URL a refusal goes back to: the named trace, or the first trace for none."""
+    url = reverse("plugins:netbox_data_import:trace_workspace")
+    return f"{url}?{urlencode({'trace': trace})}" if trace else url
 
 
 def trunk_sharer():
@@ -150,10 +156,7 @@ class DependencyOwnerClosureTest(_SyncClosureMixin, CableTopologyMixin, TestCase
         response = self.sync([self.sharer.identity])
 
         self.assertContains(response, SYNC_SELECTION_CHANGED, status_code=409)
-        self.assertEqual(
-            response.context["next_url"],
-            f"{reverse('plugins:netbox_data_import:trace_workspace')}?{urlencode({'trace': self.sharer.identity})}",
-        )
+        self.assertEqual(response.context["next_url"], workspace_url(self.sharer.identity))
 
 
 class PlainTraceClosureTest(_SyncClosureMixin, CableTopologyMixin, TestCase):
@@ -215,6 +218,53 @@ class PlainTraceClosureTest(_SyncClosureMixin, CableTopologyMixin, TestCase):
                 response = self.sync(selection, **JSON)
 
                 self.assertEqual((response.status_code, response.json()["error"]), (400, SYNC_SELECTION_INVALID))
+        self.assert_nothing_queued()
+
+    def test_a_malformed_or_unknown_form_selection_returns_to_its_trace_with_the_refusal(self):
+        """A form or HTMX post goes back to the trace it names first, as every other non-stale refusal does."""
+        unknown = "cable:trace:unknown"
+        for selection, trace in (
+            ([], ""),
+            ([""], ""),
+            ([self.plain.identity, self.plain.identity], self.plain.identity),
+            ([unknown], unknown),
+            ([self.plain.identity, unknown], self.plain.identity),
+        ):
+            expected = workspace_url(trace)
+            for headers, status, location in ((), 302, "Location"), ({"HTTP_HX_REQUEST": "true"}, 204, "HX-Redirect"):
+                with self.subTest(selection=selection, htmx=bool(headers)):
+                    response = self.sync(selection, **dict(headers))
+
+                    self.assertEqual((response.status_code, response[location]), (status, expected))
+                    self.assertContains(self.client.get(expected), SYNC_SELECTION_INVALID)
+        self.assert_nothing_queued()
+
+
+class NoChangeTraceSyncTest(_SyncClosureMixin, CableTopologyMixin, TestCase):
+    """A trace that NetBox already holds has no changes, so its sync is refused before a Job exists."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+        cls.connect(cls.eth0, cls.eth1)
+
+    def setUp(self):
+        super().setUp()
+        self.upload(direct_path())
+        (self.trace,) = self.traces().values()
+        self.assertEqual(self.trace.disposition, Disposition.NO_OP)
+
+    def test_a_sync_of_a_trace_without_changes_is_refused(self):
+        for headers in ({}, JSON):
+            with self.subTest(json=bool(headers)):
+                response = self.sync([self.trace.identity], **headers)
+
+                if headers:
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json(), {"ok": False, "error": SYNC_NOTHING})
+                else:
+                    self.assertRedirects(response, workspace_url(self.trace.identity), fetch_redirect_response=False)
+                    self.assertContains(self.client.get(workspace_url(self.trace.identity)), SYNC_NOTHING)
         self.assert_nothing_queued()
 
 

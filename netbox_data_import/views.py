@@ -133,6 +133,7 @@ from .review_workspace import (
     IneligibleLocationSelection,
     SYNC_ALL_NOTHING,
     SYNC_DEPENDENCY_HELD,
+    SYNC_NOTHING,
     SYNC_SELECTION_CHANGED,
     SYNC_SELECTION_INVALID,
     ProfilePolicyMoved,
@@ -3944,7 +3945,7 @@ class _TraceSync(QueueImport):
             raise StalePreview(SYNC_SELECTION_CHANGED)
         _refuse_drifted_sync(preview)
         if not selection:
-            raise PreviewCommandRefused("That trace has no changes to synchronize.")
+            raise PreviewCommandRefused(SYNC_NOTHING)
         return list(selection)
 
 

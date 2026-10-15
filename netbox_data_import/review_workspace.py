@@ -948,6 +948,7 @@ SYNC_SELECTION_CHANGED = (
     "The traces this sync includes changed since the page loaded. Reload the page and review them again."
 )
 SYNC_SELECTION_INVALID = "The sync request names no valid trace selection."
+SYNC_NOTHING = "That trace has no changes to synchronize."
 SYNC_COMPANIONS = "On the same breakout Cable as this trace"
 SYNC_DEPENDENCY_OWNERS = "Needed for a change this trace depends on"
 
