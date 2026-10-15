@@ -12,8 +12,8 @@ when the source states the harness only as separate leg traces.
 ### Source evidence
 
 The source export has no breakout object. One breakout transceiver is a card (cards label such as
-`Slot 1 >> 1/3 (10)`) that holds ports `P01`..`P04`. Each leg is its own trace block, from `P0k` to a
-different peer, with an ordinary one-to-one CableClass (`MM Fiber LC-LC`, one `MM Fiber LC-SC`). Some
+`Slot 0 >> 0/0 (10)`) that holds ports `P01`..`P04`. Each leg is its own trace block, from `P0k` to a
+different peer, with an ordinary one-to-one fiber CableClass (one leg has a second fiber CableClass). Some
 legs continue through patch panels after the first hop. The shared device and cards label is the only
 thing that ties the legs together. Lane `P0k` is NetBox channel `k`: the existing one-to-one Cables in
 the target instance confirm it for three lanes.

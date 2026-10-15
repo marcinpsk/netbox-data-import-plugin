@@ -34,8 +34,8 @@ def _channel_fields() -> bool:
 
 
 CHANNELS = skipUnless(_channel_fields(), "NetBox 4.6 Interface has no channel_id field")
-FIBER = "MM Fiber LC-LC"
-CARDS = "Slot 1 >> 1/3 (10)"
+FIBER = "Lane Fiber"
+CARDS = "Slot 0 >> 0/0 (10)"
 BREAKOUT_4 = "breakout-1c4p-4c1p"
 HARNESS_PREFIX = "cable:create:harness:"
 
@@ -107,7 +107,7 @@ class HarnessTopologyMixin(CableTopologyMixin):
             cable_profile="single-1c1p",
         )
         cls.switch = cls.make_device("SW-1")
-        cls.parent = cls.make_parent(cls.switch, "1/3", channels)
+        cls.parent = cls.make_parent(cls.switch, "0/0", channels)
         cls.children = {number: cls.make_child(cls.parent, number) for number in range(1, channels + 1)}
         # A plain subinterface under the parent is part of its child set and is no channel.
         Interface.objects.create(device=cls.switch, name=f"{cls.parent.name}.100", type="virtual", parent=cls.parent)
@@ -416,7 +416,7 @@ class HarnessPlanningTest(HarnessTopologyMixin, TestCase):
     def test_a_leg_that_ends_on_its_own_parent_is_unsupported(self):
         """The source names the parent port under another cards label, so only the resolved objects meet."""
         self.resolve_lanes([1])
-        uplink = trace_termination("SW-1", "Uplinks", "1/3", "Port")
+        uplink = trace_termination("SW-1", "Uplinks", "0/0", "Port")
         loop = (trace_endpoint_line(lane(1)), trace_endpoint_line(uplink), (trace_segment(lane(1), FIBER, uplink),))
 
         plan = self.plan(loop)
@@ -824,7 +824,7 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
         """The source names the parent port under another cards label, so only the resolved objects collide."""
         self.resolve_lanes(range(1, 5))
         uplink, other = (
-            trace_termination("SW-1", "Uplinks", "1/3", "Port"),
+            trace_termination("SW-1", "Uplinks", "0/0", "Port"),
             trace_termination("OTHER", "", "eth9", "NIC"),
         )
         Interface.objects.create(device=self.make_device("OTHER"), name="eth9", type="100gbase-x-qsfp28")
@@ -854,7 +854,7 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
 
         (occupied,) = [item for item in unit.diagnostics if item.code == "cable.harness_occupied"]
         segment = unit.display["trace"]["segments"][occupied.display["segment_index"]]
-        self.assertEqual((segment["right"], segment["status"]), ("SW-1 1/3:1", "conflict"))
+        self.assertEqual((segment["right"], segment["status"]), ("SW-1 0/0:1", "conflict"))
 
     def viewer(self, *, add_cable=True, interfaces=None):
         """Return an operator who views the topology, with the given Interface scope."""
