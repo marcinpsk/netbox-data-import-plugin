@@ -13,10 +13,11 @@ from typing import Any
 
 from .cable_disclosure import (
     CABLE_SEGMENT_OVERRIDE_ROW,
-    FINDING_HIDDEN,
     DISCLOSURE_SOURCE,
+    FINDING_HIDDEN,
     POLICY_HIDDEN,
     POLICY_VISIBLE,
+    TERMINATION_SOURCES,
 )
 from .cable_policy import cable_media_family_label, cable_profile_label, cable_type_label
 from .cable_target import UNRESOLVED
@@ -1036,14 +1037,62 @@ class SyncMember:
     is_trace: bool
 
 
-def _breakout_segments(segments, diagnostics) -> list[dict[str, Any]]:
-    """Return each segment, naming the breakout profile on the harness leg, which the breakout decides."""
+CONFLICT_SEGMENT = "conflict"
+# Findings that make a segment a conflict; only a finding the viewer may read can say so.
+_CONFLICT_CODES = frozenset(
+    {
+        "cable.termination_occupied",
+        "cable.multi_termination_conflict",
+        "cable.planned_termination_conflict",
+        "cable.resolved_segment_conflict",
+        "cable.harness_occupied",
+    }
+)
+# Findings that keep a resolved termination in attention, so its picker can choose another.
+_REOPEN_CODES = frozenset(
+    {"cable.termination_not_connectable", "cable.termination_channelized", "cable.incompatible_terminations"}
+)
+
+
+def _source_key(source) -> tuple:
+    return (source.get("kind"), source.get("pk"))
+
+
+def _presented_terminations(terminations, diagnostics) -> list[dict[str, Any]]:
+    """Return each termination, in attention only while a finding the viewer may read still puts it there."""
+    sources: set[tuple] = set()
+    field_keys: set[Any] = set()
+    for item in diagnostics:
+        if item.code in _REOPEN_CODES:
+            sources.update(_source_key(source) for source in item.display.get(TERMINATION_SOURCES) or ())
+            field_keys.update(item.display.get(key) for key in ("left_field_key", "right_field_key"))
+    return [
+        {
+            **item,
+            "incompatible": bool(item["incompatible"])
+            and (item["field_key"] in field_keys or _source_key(item.get(DISCLOSURE_SOURCE) or {}) in sources),
+            "selected_model": _termination_model_name(item["selected_type"]),
+        }
+        for item in terminations
+    ]
+
+
+def _presented_segments(segments, diagnostics) -> list[dict[str, Any]]:
+    """Return each segment as a conflict when a readable finding says so, and with the breakout profile of a leg."""
     state = next((item.display for item in diagnostics if item.code == "cable.harness_state"), None)
+    conflicted = {item.display.get("segment_index") for item in diagnostics if item.code in _CONFLICT_CODES}
     text = BREAKOUT_PROFILE
     # A hidden harness hides the profile its channel count selects, and a blocked harness selects none.
     if state is not None and state["profile"]:
         text = f"{BREAKOUT_PROFILE}: {cable_profile_label(state['profile'])}"
-    return [{**segment, "breakout_profile": text if segment["breakout_leg"] else ""} for segment in segments]
+    return [
+        {
+            **segment,
+            "breakout_profile": text if segment["breakout_leg"] else "",
+            "status": CONFLICT_SEGMENT if segment["index"] in conflicted else segment["status"],
+        }
+        for segment in segments
+    ]
 
 
 def _breakout_policies(policies, segments) -> list[dict[str, Any]]:
@@ -1118,7 +1167,7 @@ class TraceWorkspaceUnit:
             {"code": item.code, "message": _diagnostic_message(item), "severity": item.severity}
             for item in unit.diagnostics
         ]
-        segments = _breakout_segments(workspace.get("segments") or (), unit.diagnostics)
+        segments = _presented_segments(workspace.get("segments") or (), unit.diagnostics)
         return cls(
             identity=unit.identity,
             trace_identity=str(workspace.get("identity") or ""),
@@ -1134,10 +1183,7 @@ class TraceWorkspaceUnit:
             resolution_started=bool(workspace.get("resolution_started")),
             topology_known=bool(workspace.get("topology_known")),
             devices=[dict(item) for item in workspace.get("devices") or ()],
-            terminations=[
-                {**item, "selected_model": _termination_model_name(item["selected_type"])}
-                for item in workspace.get("terminations") or ()
-            ],
+            terminations=_presented_terminations(workspace.get("terminations") or (), unit.diagnostics),
             findings=findings,
             actions=cls._actions(unit, findings, str(display.get("detail") or "")),
         )

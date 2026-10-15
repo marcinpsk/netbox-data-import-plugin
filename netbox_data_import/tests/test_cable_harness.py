@@ -1247,10 +1247,11 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
         self.resolve_lanes([1])
         self.connect(self.fronts[1], Interface.objects.create(device=self.make_device("OTHER"), name="eth9", type="lc"))
 
-        (unit,) = self.plan(panel_leg(1)).units
+        plan = self.plan(panel_leg(1))
+        (unit,) = plan.units
 
         (occupied,) = [item for item in unit.diagnostics if item.code == "cable.harness_occupied"]
-        segment = unit.display["trace"]["segments"][occupied.display["segment_index"]]
+        segment = ReviewWorkspace(plan, self.actor).traces[0].segments[occupied.display["segment_index"]]
         self.assertEqual((segment["right"], segment["status"]), ("SW-1 0/0:1", "conflict"))
 
     def viewer(self, *, add_cable=True, interfaces=None, devices=None):
@@ -1737,6 +1738,39 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
                     messages = self.messages(self.reload(page))
                     self.assertFalse(any(conflict in message for message in messages), messages)
                     self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], messages)
+
+    def test_an_occupied_parent_hides_its_conflict_badge_with_the_parent(self):
+        """The badge repeats the hidden cable.harness_occupied finding, so it hides with it."""
+        Interface.objects.filter(pk=self.parent.pk).update(mark_connected=True)
+        operator = self.operator({})
+        self.client.force_login(operator)
+        card = self.cards(*(direct_leg(number) for number in range(1, 5)))["SW-1 Slot 0 >> 0/0 (10) P01"]
+        badge = '<span class="badge ndi-trace-status-conflict">conflict</span>'
+        self.assertIn(badge, segment_item(card, 0))
+
+        for model, hidden in ((Interface, self.parent), (Device, self.parent.device)):
+            with self.subTest(hidden=f"{model.__name__} {hidden}"):
+                self.restrict_interfaces(operator, {}, model=Interface)
+                self.restrict_interfaces(operator, {}, model=Device)
+                self.restrict_interfaces(operator, self.all_but(model, hidden), model=model)
+
+                card = self.reload(card)
+
+                self.assertNotIn(badge, segment_item(card, 0))
+                self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], self.messages(card))
+
+    def test_a_refused_far_end_leaves_attention_when_its_harness_finding_hides(self):
+        """The far end needs attention only because of the harness refusal, so it settles once that refusal hides."""
+        operator = self.operator({})
+        self.client.force_login(operator)
+        Interface.objects.filter(pk=self.servers[3].pk).update(type="virtual")
+        card = self.cards(*(direct_leg(number) for number in range(1, 5)))["SW-1 Slot 0 >> 0/0 (10) P03"]
+        self.assertIn("SRV-3 eth0", [item["label"] for item in card.context["attention_terminations"]])
+
+        self.restrict_interfaces(operator, self.all_but(Interface, self.parent))
+
+        card = self.reload(card)
+        self.assertNotIn("SRV-3 eth0", [item["label"] for item in card.context["attention_terminations"]])
 
     def test_one_far_end_device_hides_the_harness(self):
         operator = self.operator({})

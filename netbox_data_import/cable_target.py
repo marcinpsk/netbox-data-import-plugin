@@ -81,16 +81,6 @@ MANUALLY_RESOLVED = "manually resolved"
 
 CREATE_SEGMENT = "create"
 REUSE_SEGMENT = "reuse existing"
-CONFLICT_SEGMENT = "conflict"
-_CONFLICT_CODES = frozenset(
-    {
-        "cable.termination_occupied",
-        "cable.multi_termination_conflict",
-        "cable.planned_termination_conflict",
-        "cable.resolved_segment_conflict",
-        "cable.harness_occupied",
-    }
-)
 
 # A PortMapping joins a front port to a rear port; no other Cable End Kind passes a path through.
 _PASS_THROUGH_PEERS = {FRONT_PORT_MODEL: REAR_PORT_MODEL, REAR_PORT_MODEL: FRONT_PORT_MODEL}
@@ -2061,11 +2051,6 @@ class _CableBatch:
         summary = analysis.trace.endpoint_summary
         resolved = {segment.index: segment for segment in analysis.segments}
         by_reference = self._resolved.get(analysis.identity, {})
-        conflicted = {
-            diagnostic.display.get("segment_index")
-            for diagnostic in analysis.diagnostics
-            if diagnostic.code in _CONFLICT_CODES
-        }
         segments = []
         stated_segments = list(analysis.trace.segments)
         for index, stated in enumerate(stated_segments):
@@ -2085,7 +2070,8 @@ class _CableBatch:
                     "pass_through": index > 0 and same_device_and_cards(stated_segments[index - 1].right, stated.left),
                     # Planning substituted the entry port only where the source re-used one port.
                     "substituted": self._entered_through_claim(planned, by_reference.get(stated.left.identity_key)),
-                    "status": self._segment_status(analysis, index, conflicted, planned, writes),
+                    # Presentation adds "conflict" from the findings the viewer may read.
+                    "status": self._segment_status(analysis, index, planned, writes),
                     # An override cannot change a Cable this plan keeps, so the panel says which is which.
                     "retained": index in analysis.proven,
                     # The end that holds the channel child, so presentation hides the mark with that end.
@@ -2161,10 +2147,8 @@ class _CableBatch:
         return planned is not None and stated is not None and planned.left.key != stated.key
 
     @staticmethod
-    def _segment_status(analysis: _TraceAnalysis, index: int, conflicted: set, planned, writes: bool) -> str:
+    def _segment_status(analysis: _TraceAnalysis, index: int, planned, writes: bool) -> str:
         """Return the verdict the proposed panel shows for one segment, or none for an unplanned one."""
-        if index in conflicted:
-            return CONFLICT_SEGMENT
         if planned is None:
             return ""
         if index in analysis.proven:
@@ -2412,7 +2396,6 @@ def _cable_terminations(cable_id: int) -> list:
 __all__ = (
     "AUTOMATICALLY_RESOLVED",
     "CABLE_STATUS",
-    "CONFLICT_SEGMENT",
     "CREATE_SEGMENT",
     "ELIGIBLE_TERMINATION_LIMIT",
     "MANUALLY_RESOLVED",

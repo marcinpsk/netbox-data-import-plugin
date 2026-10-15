@@ -3250,9 +3250,11 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
         outsider = Interface.objects.create(device=self.make_device("DEV-C"), name="eth9", type="1000base-t")
         self.connect(self.panel_1_fronts[0], outsider)
 
-        workspace = self.workspace(self.unit(patched_path()))
+        plan = self.plan(patched_path())
 
-        statuses = {segment["index"]: segment["status"] for segment in workspace["segments"]}
+        # Presentation marks the conflict from the findings the viewer may read.
+        (trace,) = ReviewWorkspace(plan, self.actor).traces
+        statuses = {segment["index"]: segment["status"] for segment in trace.segments}
         self.assertEqual(statuses[0], "conflict")
 
     def test_the_logical_cable_a_replacement_deletes_is_named(self):
@@ -3335,9 +3337,9 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
 
         plan = self.plan(aliased, conflicting)
 
-        for unit in plan.units:
-            statuses = [segment["status"] for segment in unit.display["trace"]["segments"]]
-            self.assertEqual(statuses, ["conflict"], unit.identity)
+        for trace in ReviewWorkspace(plan, self.actor).traces:
+            statuses = [segment["status"] for segment in trace.segments]
+            self.assertEqual(statuses, ["conflict"], trace.identity)
 
     def test_a_trace_that_never_reached_classification_does_not_claim_an_absent_cable(self):
         """Planning that stopped before it read the topology reports unknown, not absence."""

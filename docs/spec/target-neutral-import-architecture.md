@@ -1141,8 +1141,11 @@ segment end that holds the channel child, so the Cable Profile text "Set by the 
 segment and on its CableClass policy row hides with that end; it names the profile only while the
 harness state is readable. Selection enforcement and the segment override save read the plan, not its
 presentation, so a hidden leg still selects every companion and still keeps a stored Cable Profile
-that planning ignores. A termination field outside such a finding names only a port, which its
-Interface row authorizes, so it needs no Device source.
+that planning ignores. Presentation derives every output that repeats a finding from the findings the
+viewer may read: a segment shows "conflict" only while a readable finding marks it, and a resolved
+termination stays in attention only while a readable finding refuses it. A hidden finding keeps only
+its severity, and with it the disposition of its unit. A termination field outside such a finding
+names only a port, which its Interface row authorizes, so it needs no Device source.
 
 ### 6.7 Planning diagnostics
 
