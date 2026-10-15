@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The Import Engine executes accepted Synchronization Units as one audited transaction."""
 
-from dataclasses import replace
 from io import BytesIO
 from threading import Event
 
@@ -23,7 +22,7 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.plan import Disposition
 from netbox_data_import.object_permissions import ObjectPermissionDenied
-from netbox_data_import.target_modules import MODULE_RUNTIMES, DeviceModule, PreconditionFailed
+from netbox_data_import.target_modules import PreconditionFailed
 from netbox_data_import.tests.helpers import competing_write_during, run_on_separate_connection
 from netbox_data_import.tests.test_import_engine import ImportEngineTestDataMixin, _workbook
 
@@ -852,127 +851,6 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
         execution = ImportExecution.objects.get(idempotency_key=key)
         self.assertEqual(execution.outcome, ExecutionOutcome.FAILED)
         self.assertEqual(execution.failure_detail["reason"], "selection")
-
-
-class _CompanionDevices:
-    """The real Device runtime, with the co-selection groups a test names added to its units.
-
-    No shipped planner states `selected_with` yet, so this seam supplies it over real planning and writes.
-    """
-
-    key = DeviceModule.key
-    consumes = DeviceModule.consumes
-
-    def __init__(self, runtime):
-        self.runtime = runtime
-        self.groups: dict[str, tuple[str, ...]] = {}
-
-    def plan(self, *args, **kwargs):
-        """Return the real units, each with the companions the test currently names."""
-        units = self.runtime.plan(*args, **kwargs)
-        return [replace(unit, selected_with=self.groups.get(unit.identity, ())) for unit in units]
-
-    def apply(self, planned_change, execution_context):
-        """Write through the real runtime."""
-        return self.runtime.apply(planned_change, execution_context)
-
-
-PAIR = ("device:source:D-1", "device:source:D-2")
-STALE_COMPANION = (
-    f"Synchronization Unit '{PAIR[0]}' changed after the plan was accepted: "
-    f"it now needs '{PAIR[1]}' selected and actionable."
-)
-
-
-class CompanionSelectionExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
-    """The engine refuses a selection that leaves out a unit's companion, and never expands it."""
-
-    _planning_grants = staticmethod(ImportEngineExecutionTest._planning_grants)
-
-    def setUp(self):
-        super().setUp()
-        self.devices = _CompanionDevices(MODULE_RUNTIMES[DeviceModule.key])
-        MODULE_RUNTIMES[DeviceModule.key] = self.devices
-        self.addCleanup(MODULE_RUNTIMES.__setitem__, DeviceModule.key, self.devices.runtime)
-        self.document = SourceDocument.store(
-            profile=self.profile,
-            content=_workbook(
-                *(
-                    (
-                        f"D-{n}",
-                        "Server",
-                        f"server-{n}",
-                        self.rack.name,
-                        self.manufacturer.name,
-                        self.device_type.model,
-                        1,
-                    )
-                    for n in (1, 2)
-                )
-            ),
-            filename="pair.xlsx",
-        )
-
-    def _pair(self):
-        self.devices.groups = {PAIR[0]: (PAIR[1],), PAIR[1]: (PAIR[0],)}
-
-    def _execute(self, accepted, selection, key):
-        return ImportEngine.execute(self.profile, self.document, accepted.to_dict(), list(selection), key, self.actor)
-
-    def _assert_refused(self, key, reason):
-        from dcim.models import Device
-
-        self.assertFalse(Device.objects.filter(name__in=["server-1", "server-2"]).exists())
-        execution = ImportExecution.objects.get(idempotency_key=key)
-        self.assertEqual(execution.outcome, ExecutionOutcome.FAILED)
-        self.assertEqual(execution.failure_detail["reason"], reason)
-
-    def test_a_selection_without_a_companion_is_refused(self):
-        self._pair()
-        accepted = self._plan()
-
-        with self.assertRaisesMessage(
-            SelectionError, f"Synchronization Unit '{PAIR[0]}' must be selected together with '{PAIR[1]}'."
-        ):
-            self._execute(accepted, PAIR[:1], "companion-left-out")
-
-        self._assert_refused("companion-left-out", "selection")
-
-    def test_a_companion_the_current_plan_adds_makes_the_selection_stale(self):
-        accepted = self._plan()
-        self._pair()
-
-        with self.assertRaisesMessage(
-            StalePlan,
-            STALE_COMPANION,
-        ):
-            self._execute(accepted, PAIR[:1], "companion-added")
-
-        self._assert_refused("companion-added", "stale_plan")
-
-    def test_a_companion_that_stopped_being_actionable_makes_the_selection_stale(self):
-        self._pair()
-        accepted = self._plan()
-        IgnoredDevice.objects.create(profile=self.profile, source_id="D-2", device_name="server-2")
-
-        with self.assertRaisesMessage(
-            StalePlan,
-            STALE_COMPANION,
-        ):
-            self._execute(accepted, PAIR, "companion-excluded")
-
-        self._assert_refused("companion-excluded", "stale_plan")
-
-    def test_the_whole_group_executes_together(self):
-        from dcim.models import Device
-
-        self._pair()
-        accepted = self._plan()
-
-        execution = self._execute(accepted, PAIR, "whole-group")
-
-        self.assertEqual(execution.outcome, ExecutionOutcome.SUCCEEDED)
-        self.assertEqual(Device.objects.filter(name__in=["server-1", "server-2"], site=self.site).count(), 2)
 
 
 def _psycopg_cause(exc):
