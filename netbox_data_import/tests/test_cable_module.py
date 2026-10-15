@@ -2005,6 +2005,12 @@ class CableSegmentOverrideTest(CableTopologyMixin, TestCase):
 class CableDisclosureSchemaTest(SimpleTestCase):
     """Reject disclosure data that cannot be presented without leaking row state."""
 
+    def test_a_leg_finding_without_its_channel_child_is_refused(self):
+        from netbox_data_import.cable_disclosure import wording_sources
+
+        with self.assertRaisesMessage(ValueError, "says the trace is a leg without naming the leg's channel child"):
+            wording_sources("cable.harness_state", [])
+
     def test_diagnostic_schemas_reject_invalid_visibility_metadata(self):
         """Cable and policy fields must carry a boolean flag and a matching row source."""
         from netbox_data_import.cable_disclosure import (
@@ -2094,6 +2100,45 @@ class CableDisclosureSchemaTest(SimpleTestCase):
                 "cable.termination_channelized",
                 {"segment_index": 0, "port": "0/0", "termination_sources": [{"kind": "dcim.interface", "pk": 1}]},
                 "Diagnostic 'cable.termination_channelized' states a fact of an Interface without its sources.",
+            ),
+            (
+                "a wording port without its Device",
+                "cable.termination_channelized",
+                {
+                    "segment_index": 0,
+                    "port": "0/0",
+                    "termination_sources": [{"kind": "dcim.interface", "pk": 1}],
+                    "wording_sources": [{"kind": "dcim.interface", "pk": 1}, {"kind": "dcim.interface", "pk": 2}],
+                },
+                "Diagnostic 'cable.termination_channelized' states a fact of an Interface without its sources.",
+            ),
+            (
+                "wording sources that leave out the port the display names",
+                "cable.termination_channelized",
+                {
+                    "segment_index": 0,
+                    "port": "0/0",
+                    "termination_sources": [{"kind": "dcim.interface", "pk": 1}],
+                    "wording_sources": [{"kind": "dcim.interface", "pk": 2}, {"kind": "dcim.device", "pk": 3}],
+                },
+                "Diagnostic 'cable.termination_channelized' names a port its wording sources leave out.",
+            ),
+            (
+                "a harness port its wording sources leave out",
+                "cable.harness_occupied",
+                {
+                    "segment_index": 0,
+                    "parent": "0/0",
+                    "port": "F1",
+                    "marked_connected": True,
+                    "termination_sources": [
+                        {"kind": "dcim.interface", "pk": 1},
+                        {"kind": "dcim.device", "pk": 2},
+                        {"kind": "dcim.frontport", "pk": 3},
+                    ],
+                    "wording_sources": [{"kind": "dcim.interface", "pk": 4}, {"kind": "dcim.device", "pk": 2}],
+                },
+                "Diagnostic 'cable.harness_occupied' names a port its wording sources leave out.",
             ),
             (
                 "termination sources on a diagnostic that names no termination",
@@ -2211,7 +2256,7 @@ class CableDisclosureSchemaTest(SimpleTestCase):
         mapping = {"kind": CABLE_CLASS_MAPPING_ROW, "pk": 3}
         media_segment = {"retained": True, "visible": True, "cable_type": "cat6", "family": "cat6"}
         diagnostics = []
-        for code, (public, cable, policy, termination, wording) in _DIAGNOSTIC_DISCLOSURE_FIELDS.items():
+        for code, (public, cable, policy, termination, wording, _leg) in _DIAGNOSTIC_DISCLOSURE_FIELDS.items():
             display = dict.fromkeys(public, "value")
             if code == "cable.media_family_mismatch":
                 display["segments"] = [
@@ -2226,7 +2271,7 @@ class CableDisclosureSchemaTest(SimpleTestCase):
                 display.update(dict.fromkeys(termination, "eth0"))
                 display[TERMINATION_SOURCES] = [{"kind": "dcim.interface", "pk": 5}]
             if wording:
-                display[WORDING_SOURCES] = [{"kind": "dcim.interface", "pk": 6}, {"kind": "dcim.device", "pk": 7}]
+                display[WORDING_SOURCES] = [{"kind": "dcim.interface", "pk": 5}, {"kind": "dcim.device", "pk": 7}]
             diagnostics.append(Diagnostic(code=code, severity=Severity.ERROR, display=display))
         delete = PlannedChange(
             identity="cable:delete:9", target_module="cable", operation="delete", payload={"cable_id": 9}

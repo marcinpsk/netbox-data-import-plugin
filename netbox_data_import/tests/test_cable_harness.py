@@ -1620,16 +1620,95 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         self.assertEqual((row.cable_type, row.cable_profile), ("mmf-om3", "single-1c1p"))
 
     @staticmethod
-    def restrict_interfaces(operator, constraints):
-        """Replace the operator's Interface view scope, as an administrator does after the preview exists."""
+    def restrict_interfaces(operator, constraints, model=Interface):
+        """Replace the operator's view scope of one model, as an administrator does after the preview exists."""
         from users.models import ObjectPermission
 
         from netbox_data_import.object_permissions import clear_user_permission_caches
 
-        permission = ObjectPermission.objects.get(name__startswith="trace-operator Interface ")
+        permission = ObjectPermission.objects.get(name__startswith=f"trace-operator {model.__name__} ")
         permission.constraints = constraints
         permission.save(update_fields=("constraints",))
         clear_user_permission_caches(operator)
+
+    @staticmethod
+    def all_but(model, hidden):
+        """Return a view scope of every row of *model* except *hidden*."""
+        return {"id__in": list(model.objects.exclude(pk=hidden.pk).values_list("pk", flat=True))}
+
+    def reload(self, page):
+        """Render the trace of *page* again from the cached preview, as the viewer's next request does."""
+        identity = page.context["selected_trace"].identity
+        return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), {"trace": identity})
+
+    @staticmethod
+    def messages(page):
+        """Return the finding wording the selected trace renders."""
+        return [item["message"] for item in page.context["selected_trace"].findings]
+
+    def test_a_finding_about_a_sibling_child_hides_with_that_child(self):
+        """Lane 1's trace reports that child 2 does not mirror the parent; a viewer of child 1 alone sees no such fact."""
+        self.build_existing_harness()
+        Interface.objects.filter(pk=self.children[2].pk).update(cable_positions=[3])
+        operator = self.operator({})
+        self.client.force_login(operator)
+        card = self.cards(*(panel_leg(number) for number in range(1, 5)))["SW-1 Slot 0 >> 0/0 (10) P01"]
+        self.assertTrue(any("does not mirror" in message for message in self.messages(card)))
+
+        self.restrict_interfaces(operator, self.all_but(Interface, self.children[2]))
+        card = self.reload(card)
+
+        self.assertFalse(any("does not mirror" in message for message in self.messages(card)))
+        self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], self.messages(card))
+        self.assertNotContains(card, "does not mirror")
+
+    def virtual_far_end_card(self):
+        """Return lane 1's card in a preview where lane 3 reaches a virtual Interface, which NetBox cannot cable."""
+        Interface.objects.filter(pk=self.servers[3].pk).update(type="virtual")
+        operator = self.operator({})
+        self.client.force_login(operator)
+        card = self.cards(*(direct_leg(number) for number in range(1, 5)))["SW-1 Slot 0 >> 0/0 (10) P01"]
+        self.assertIn(_DIAGNOSTIC_MESSAGES["cable.termination_not_connectable"], self.messages(card))
+        return operator, card
+
+    def test_a_refusal_of_a_far_end_hides_with_that_far_end_and_not_with_the_child(self):
+        not_connectable = _DIAGNOSTIC_MESSAGES["cable.termination_not_connectable"]
+        operator, card = self.virtual_far_end_card()
+
+        for hidden, shown in ((self.servers[3], False), (self.children[1], True)):
+            with self.subTest(hidden=str(hidden)):
+                self.restrict_interfaces(operator, self.all_but(Interface, hidden))
+
+                messages = self.messages(self.reload(card))
+
+                self.assertIs(not_connectable in messages, shown)
+                self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], messages)
+
+    def test_a_refusal_of_a_far_end_hides_with_its_device_alone(self):
+        operator, card = self.virtual_far_end_card()
+
+        self.restrict_interfaces(operator, self.all_but(Device, self.servers[3].device), model=Device)
+
+        messages = self.messages(self.reload(card))
+        self.assertNotIn(_DIAGNOSTIC_MESSAGES["cable.termination_not_connectable"], messages)
+        self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], messages)
+
+    def virtual_downstream_card(self):
+        """Return lane 1's card in a three-lane preview whose ordinary downstream segment reaches a virtual Interface."""
+        Interface.objects.filter(pk=self.servers[1].pk).update(type="virtual")
+        operator = self.operator({})
+        self.client.force_login(operator)
+        return operator, self.cards(*(panel_leg(number) for number in range(1, 4)))["SW-1 Slot 0 >> 0/0 (10) P01"]
+
+    def test_an_ordinary_segment_refusal_stays_when_only_the_channel_child_is_hidden(self):
+        """The downstream refusal says nothing of the breakout, so hiding the leg's child leaves it readable."""
+        operator, card = self.virtual_downstream_card()
+        self.restrict_interfaces(operator, PARENT_AND_CHILDREN_HIDDEN)
+
+        messages = self.messages(self.reload(card))
+
+        self.assertIn(_DIAGNOSTIC_MESSAGES["cable.termination_not_connectable"], messages)
+        self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], messages)
 
     def test_a_cached_leg_mark_is_hidden_with_its_channel_child_and_still_keeps_the_stored_profile(self):
         """The viewer loses the child after planning; the page drops the mark, and the save still ignores a profile."""

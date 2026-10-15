@@ -1118,21 +1118,25 @@ parent's channels, legs, missing channels or Cable Profile. Every harness findin
 Interface and its Device as its sources. When the viewer of a cached plan cannot view either of them,
 presentation hides those fields in every harness finding.
 
-That a trace is a leg is a fact of its channel child, and one rule binds it. Every output that states
-it names the leg's channel child Interface and that child's Device as its sources, and presentation
-hides the output when the viewer cannot view either of them. A harness finding carries those sources
-as `wording_sources`, because its wording alone states the fact. A `cable.termination_channelized` or
-`cable.termination_not_connectable` finding of an ordinary segment carries the refused port and its
-Device there, because its wording states a fact of that port. Presentation replaces a finding whose
-`wording_sources` are hidden with `cable.finding_hidden`, which says only that the trace reaches a
-port the viewer cannot view. The segment mark is bound to the segment end that holds the child, so
-the Cable Profile text "Set by the breakout" on the segment and on its CableClass policy row hides
-with that end. The sync list names a companion as on the same breakout Cable only when the viewer
-sees the channel child of both legs, and otherwise lists it as synchronized together with the trace.
-So a viewer who sees the child and not the parent still sees that the trace is a leg, without any
-parent fact. Selection enforcement and the segment override save read the plan, not its presentation,
-so a hidden leg still selects every companion and still keeps a stored Cable Profile that planning
-ignores.
+That a trace is a leg is a fact of its channel child, and one rule binds every finding whose wording
+states a fact of an Interface: every harness finding, and `cable.termination_channelized` and
+`cable.termination_not_connectable`. Such a finding carries `wording_sources`: every Interface or
+port its wording describes, each with its Device, and also the leg's channel child and its Device
+when the wording says the trace is a leg, which every harness code does. A refusal of an ordinary
+segment of a leg trace says nothing of the leg, so it names only the refused port. The display
+validator refuses a finding whose wording sources are not port and Device pairs, or leave out a port
+the finding names; a harness finding's parent is no subject, because its facts are termination fields
+that hide on their own. Presentation replaces a finding whose wording sources are not all visible
+with `cable.finding_hidden`, which says only that the trace reaches a port the viewer cannot view,
+with the severity of the finding it replaces. The segment mark is bound to the segment end that holds
+the child, so the Cable Profile text "Set by the breakout" on the segment and on its CableClass
+policy row hides with that end. The sync list names a companion as on the same breakout Cable only
+when the viewer sees the channel child of both legs, and otherwise lists it as synchronized together
+with the trace. So a viewer who sees the child and not the parent still sees that the trace is a leg,
+without any parent fact. Selection enforcement and the segment override save read the plan, not its
+presentation, so a hidden leg still selects every companion and still keeps a stored Cable Profile
+that planning ignores. A termination field outside such a finding names only a port, which its
+Interface row authorizes, so it needs no Device source.
 
 ### 6.7 Planning diagnostics
 
