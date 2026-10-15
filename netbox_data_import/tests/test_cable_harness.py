@@ -10,11 +10,12 @@ from django.db import transaction
 from django.db.models.signals import pre_save
 from django.test import TestCase, TransactionTestCase
 
+from netbox_data_import.cable_disclosure import TERMINATION_HIDDEN, present_units
 from netbox_data_import.cable_harness import IntentRefused, harness_intent, ordinary_intent
 from netbox_data_import.cable_target import CableModule
 from netbox_data_import.import_engine import ImportEngine, SelectionError, StalePlan
 from netbox_data_import.models import CableClassMapping, CableImportSource, ImportExecution
-from netbox_data_import.plan import Disposition, PlannedChange, Severity
+from netbox_data_import.plan import Disposition, PlannedChange, Severity, fingerprint_of
 from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.tests.helpers import (
@@ -888,6 +889,93 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
             self.assertEqual(unit.disposition, Disposition.BLOCKED)
             denied = [item.display for item in unit.diagnostics if item.code == "cable.permission_denied"]
             self.assertEqual(denied, [{"permission": "dcim.view_interface"}])
+        for trace in ReviewWorkspace(plan, actor).traces:
+            with self.subTest(trace=trace.identity):
+                self.assertEqual([item["code"] for item in trace.findings], ["cable.permission_denied"])
+                self.assertNotIn("channel", " ".join(item["message"] for item in trace.findings).lower())
+
+    def test_a_hidden_parent_still_moves_the_fingerprint_when_its_channels_change(self):
+        self.resolve_lanes([1, 2])
+        actor = self.viewer(interfaces={"channels__isnull": True})
+        before = self.plan(direct_leg(1), direct_leg(2), actor=actor).units[0]
+        Interface.objects.filter(pk=self.parent.pk).update(channels=8)
+
+        after = self.plan(direct_leg(1), direct_leg(2), actor=actor).units[0]
+
+        self.assertEqual(after.disposition, Disposition.BLOCKED)
+        self.assertNotEqual(fingerprint_of(before.fingerprint_data), fingerprint_of(after.fingerprint_data))
+
+    def test_a_cached_plan_states_no_channel_facts_to_a_viewer_who_cannot_view_the_parent(self):
+        """The planner could view the parent; the viewer lost that right before the preview renders."""
+        self.resolve_lanes([1, 2])
+        plan = self.plan(direct_leg(1), direct_leg(2))
+        self.assertIn(
+            "of 4", " ".join(item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings)
+        )
+        viewer = self.viewer(interfaces={"channels__isnull": True})
+
+        for unit in present_units(plan.units, viewer):
+            displays = {item.code: item.display for item in unit.diagnostics}
+            self.assertEqual(
+                {key: displays["cable.harness_state"][key] for key in ("channels", "legs", "profile")},
+                {"channels": TERMINATION_HIDDEN, "legs": (), "profile": TERMINATION_HIDDEN},
+            )
+            self.assertEqual(displays["cable.harness_partial"]["missing"], ())
+        for trace in ReviewWorkspace(plan, viewer).traces:
+            with self.subTest(trace=trace.identity):
+                findings = {item["code"]: item["message"] for item in trace.findings}
+                self.assertEqual(
+                    findings["cable.harness_state"],
+                    "This trace is a leg of a breakout on a parent Interface you cannot view.",
+                )
+                self.assertEqual(
+                    findings["cable.harness_partial"],
+                    "Some channels of this breakout have no leg in this source, so the breakout Cable leaves them "
+                    "unused. A per-module export confirms only the legs it states. A leg added later needs the Cable "
+                    "edited in NetBox, because the import never edits a breakout Cable.",
+                )
+
+    def test_a_cached_refusal_states_no_channel_count_to_a_viewer_who_cannot_view_the_parent(self):
+        parent = self.make_parent(self.make_device("SW-3"), "1/1", 3)
+        for number in range(1, 4):
+            self.save_resolution(lane(number, device="SW-3"), self.make_child(parent, number))
+        viewer = self.viewer(interfaces={"channels__isnull": True})
+        cases = {
+            "cable.harness_channel_gap": (
+                (1, 3),
+                ("missing", ()),
+                "Some channels between the legs of this breakout have no leg.",
+            ),
+            "cable.harness_profile_unavailable": (
+                (1, 2, 3),
+                ("channels", TERMINATION_HIDDEN),
+                "This NetBox instance offers no breakout Cable Profile for the channel count of this breakout's parent.",
+            ),
+        }
+        for code, (numbers, (field, hidden), wording) in cases.items():
+            with self.subTest(code=code):
+                plan = self.plan(*(direct_leg(n, start=lane(n, device="SW-3")) for n in numbers))
+
+                (presented,) = [item for item in present_units(plan.units, viewer)[0].diagnostics if item.code == code]
+                findings = {item["code"]: item["message"] for item in ReviewWorkspace(plan, viewer).traces[0].findings}
+
+                self.assertEqual(presented.display[field], hidden)
+                self.assertTrue(findings[code].startswith(wording), findings[code])
+
+    def test_a_hidden_parent_does_not_disclose_that_its_cable_is_the_harness(self):
+        """A visible leg reads no companion once its harness exists, so a hidden one must always name them."""
+        self.resolve_lanes(range(1, 5))
+        self.build_existing_harness()
+        actor = self.viewer(interfaces={"channels__isnull": True})
+
+        plan = self.plan(*(panel_leg(number) for number in range(1, 5)), actor=actor)
+
+        identities = {unit.identity for unit in plan.units}
+        for unit in plan.units:
+            with self.subTest(unit=unit.identity):
+                self.assertEqual(unit.disposition, Disposition.BLOCKED)
+                self.assertNotIn("cable.segment_reused", self.codes(unit))
+                self.assertEqual(set(unit.selected_with), identities - {unit.identity})
 
     def test_a_cable_the_operator_cannot_view_is_not_disclosed(self):
         self.resolve_lanes([1, 2])

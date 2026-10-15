@@ -1029,7 +1029,8 @@ parent, and each leg trace stays its own Synchronization Unit:
 - Every leg unit carries a `cable.harness_state` info diagnostic. Its evidence is the parent, its
   channel count, every Interface under it with its `channel_id`, the legs by channel and far end, the
   profile, and whether an existing Cable proves the harness. A change in any of them changes every leg
-  unit's fingerprint, on an actionable or a no-op unit.
+  unit's fingerprint, on an actionable or a no-op unit. A leg whose parent the actor cannot view
+  carries no harness finding: its `cable.permission_denied` diagnostic holds that evidence (section 6.6).
 
 One constructor builds every Cable write, in planning and again in execution from the locked rows. An
 ordinary write refuses a channel child at either end. A harness write requires ordered, distinct B ends
@@ -1078,6 +1079,11 @@ Planning marks the unit blocked with a diagnostic when the operator lacks rights
 Cable, add cables, or view the involved devices and ports. A harness leg also needs the right to add
 cables when its only change is the harness, and the right to view the parent Interface. Execution rechecks the same permissions
 inside the transaction as the accepted plan's operator.
+
+A parent Interface the actor cannot view is treated like a hidden Cable or mapped peer. The leg names
+its companions whatever Cable the parent holds, and no display field states the parent's channels,
+legs, missing channels or Cable Profile. When the viewer of a cached plan cannot view the parent,
+presentation hides those fields in every harness finding.
 
 ### 6.7 Planning diagnostics
 

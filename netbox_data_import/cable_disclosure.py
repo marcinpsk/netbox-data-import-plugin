@@ -39,7 +39,10 @@ class _DisplaySchema(NamedTuple):
 
 
 def _harness_schema(public: frozenset, *, cable: frozenset = frozenset(), termination: frozenset = frozenset()):
-    """Return the schema of one harness finding, which always names its leg and its parent Interface."""
+    """Return the schema of one harness finding, which always names its leg and its parent Interface.
+
+    A fact derived from the parent's channels is a termination field, so a hidden parent hides it.
+    """
     return _DisplaySchema(public | {"segment_index"}, cable=cable, termination=termination | {"parent"})
 
 
@@ -50,7 +53,7 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
             frozenset({"segment_index"}), cable=frozenset({"cable", "status", "type", "profile", "label"})
         ),
         "cable.cableclass_unmapped": _DisplaySchema(frozenset({"segment_index", "cable_class"})),
-        "cable.harness_channel_gap": _harness_schema(frozenset({"missing"})),
+        "cable.harness_channel_gap": _harness_schema(frozenset(), termination=frozenset({"missing"})),
         "cable.harness_channel_state_invalid": _harness_schema(
             frozenset({"channel", "fault"}), termination=frozenset({"port"})
         ),
@@ -61,9 +64,9 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
         "cable.harness_occupied": _harness_schema(
             frozenset(), cable=frozenset({"cable"}), termination=frozenset({"port"})
         ),
-        "cable.harness_partial": _harness_schema(frozenset({"missing"})),
-        "cable.harness_profile_unavailable": _harness_schema(frozenset({"channels"})),
-        "cable.harness_state": _harness_schema(frozenset({"channels", "legs", "profile"})),
+        "cable.harness_partial": _harness_schema(frozenset(), termination=frozenset({"missing"})),
+        "cable.harness_profile_unavailable": _harness_schema(frozenset(), termination=frozenset({"channels"})),
+        "cable.harness_state": _harness_schema(frozenset(), termination=frozenset({"channels", "legs", "profile"})),
         "cable.harness_type_conflict": _harness_schema(frozenset()),
         "cable.harness_unsupported": _harness_schema(frozenset({"trace"})),
         "cable.incompatible_terminations": _DisplaySchema(

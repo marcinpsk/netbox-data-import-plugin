@@ -277,6 +277,10 @@ class _Harness:
         """Return the parent and every far end the harness claims."""
         return [self.termination, *(leg.far for leg in self.legs)]
 
+    def companions(self, leg: _Leg) -> tuple[str, ...]:
+        """Return the unit identity of every other leg, which must be selected together with *leg*."""
+        return tuple(sorted(other.analysis.identity for other in self.legs if other is not leg))
+
 
 @dataclass
 class _TraceAnalysis:
@@ -336,11 +340,17 @@ class _TraceAnalysis:
         removed = self.deleted_logical_cable
         return None if removed is None else _delete_identity(removed.cable.pk)
 
-    def error(self, code: str, display: dict, identities=()) -> None:
+    def error(self, code: str, display: dict, identities=(), evidence=None) -> None:
         """Record one blocking or invalidating finding."""
         validate_diagnostic_display(code, display)
         self.diagnostics.append(
-            Diagnostic(code=code, severity=Severity.ERROR, identities=tuple(identities), display=display)
+            Diagnostic(
+                code=code,
+                severity=Severity.ERROR,
+                identities=tuple(identities),
+                display=display,
+                evidence=evidence or {},
+            )
         )
 
     def note(self, code: str, display: dict, identities=(), evidence=None) -> None:
@@ -369,9 +379,9 @@ class _TraceAnalysis:
             )
         )
 
-    def block(self, code: str, display: dict, identities=()) -> None:
+    def block(self, code: str, display: dict, identities=(), evidence=None) -> None:
         """Record a finding an operator decision or a NetBox correction can resolve."""
-        self.error(code, display, identities)
+        self.error(code, display, identities, evidence)
         self.blocked = True
 
     def refuse(self, code: str, display: dict, identities=()) -> None:
@@ -1317,9 +1327,8 @@ class _CableBatch:
             hidden = not self.reader.terminations(cable_harness.INTERFACE).filter(pk=parent_pk).exists()
             for leg in harness.legs:
                 if hidden:
-                    leg.analysis.block(
-                        "cable.permission_denied", {"permission": _view_permission(cable_harness.INTERFACE)}
-                    )
+                    self._hide_leg(leg, harness)
+                    continue
                 for kind, code, ports, fields in findings:
                     getattr(leg.analysis, kind)(
                         code,
@@ -1413,6 +1422,37 @@ class _CableBatch:
                 findings.append(("block", "cable.harness_occupied", (port,), {"port": port.display, **cable_display}))
         return findings
 
+    def _hide_leg(self, leg: _Leg, harness: _Harness) -> None:
+        """Block one leg whose parent the actor cannot view, and state no fact of that parent.
+
+        As for a hidden Cable or mapped peer, only the evidence holds the parent's facts, so a change
+        to them still moves the unit.
+        """
+        # Reuse is a fact of the parent, so a hidden leg names its companions whatever the parent holds.
+        leg.analysis.selected_with = harness.companions(leg)
+        leg.analysis.block(
+            "cable.permission_denied",
+            {"permission": _view_permission(cable_harness.INTERFACE)},
+            evidence=self._harness_evidence(harness),
+        )
+
+    def _leg_channels(self, harness: _Harness) -> list[int]:
+        """Return the channel of each leg, in leg order."""
+        return [cable_harness.channel(self._objects[leg.child.key]) for leg in harness.legs]
+
+    def _harness_evidence(self, harness: _Harness) -> dict:
+        """Return the harness facts every leg unit fingerprints (section 6.4)."""
+        return {
+            "parent": harness.termination.identity,
+            **harness.parent.evidence(),
+            "legs": [
+                [number, leg.far.identity]
+                for number, leg in zip(self._leg_channels(harness), harness.legs, strict=True)
+            ],
+            "profile": "" if harness.intent is None else harness.intent.profile,
+            "reused": harness.reused is not None,
+        }
+
     def _settle_leg(self, leg: _Leg, harness: _Harness) -> None:
         """Record what the harness means for one leg unit: reuse or companions, then its fingerprinted state."""
         analysis = leg.analysis
@@ -1425,24 +1465,19 @@ class _CableBatch:
                 identities=(*cable_identities, harness.termination.identity, leg.far.identity),
             )
         else:
-            analysis.selected_with = tuple(
-                sorted(other.analysis.identity for other in harness.legs if other is not leg)
-            )
-        channels = [cable_harness.channel(self._objects[other.child.key]) for other in harness.legs]
-        profile = "" if harness.intent is None else harness.intent.profile
+            analysis.selected_with = harness.companions(leg)
+        evidence = self._harness_evidence(harness)
         analysis.note(
             "cable.harness_state",
             self._harness_display(
-                harness, leg.segment.index, channels=harness.parent.channels, legs=channels, profile=profile
+                harness,
+                leg.segment.index,
+                channels=harness.parent.channels,
+                legs=self._leg_channels(harness),
+                profile=evidence["profile"],
             ),
             identities=(harness.termination.identity, leg.child.identity, leg.far.identity),
-            evidence={
-                "parent": harness.termination.identity,
-                **harness.parent.evidence(),
-                "legs": [[number, other.far.identity] for number, other in zip(channels, harness.legs, strict=True)],
-                "profile": profile,
-                "reused": harness.reused is not None,
-            },
+            evidence=evidence,
         )
 
     @staticmethod

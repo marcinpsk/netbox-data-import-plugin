@@ -11,7 +11,13 @@ from functools import cached_property
 from types import MappingProxyType
 from typing import Any
 
-from .cable_disclosure import CABLE_SEGMENT_OVERRIDE_ROW, DISCLOSURE_SOURCE, POLICY_HIDDEN, POLICY_VISIBLE
+from .cable_disclosure import (
+    CABLE_SEGMENT_OVERRIDE_ROW,
+    DISCLOSURE_SOURCE,
+    POLICY_HIDDEN,
+    POLICY_VISIBLE,
+    TERMINATION_HIDDEN,
+)
 from .cable_policy import cable_media_family_label, cable_type_label
 from .cable_target import UNRESOLVED
 from .identity import identity_in, identity_text
@@ -427,12 +433,24 @@ def _channels(numbers) -> str:
     return ", ".join(str(number) for number in numbers)
 
 
+def _parent_hidden(display) -> bool:
+    """Return whether presentation hid the parent of a harness finding, and with it every channel fact."""
+    return display["parent"] == TERMINATION_HIDDEN
+
+
 def _harness_state_message(display) -> str:
     """Return the wording that says which channels of one breakout this plan states."""
+    if _parent_hidden(display):
+        return "This trace is a leg of a breakout on a parent Interface you cannot view."
     return (
         f"{display['parent']} breaks out as one Cable. This source states channel(s) "
         f"{_channels(display['legs'])} of {display['channels']}."
     )
+
+
+def _missing_channels(display) -> str:
+    """Return the subject that names the channels a harness finding misses, unless the parent is hidden."""
+    return "Some channels" if _parent_hidden(display) else f"Channel(s) {_channels(display['missing'])}"
 
 
 def _harness_unsupported_message(display) -> str:
@@ -468,7 +486,7 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     "cable.attribute_drift": "The existing Cable carries attributes this import would not have written.",
     "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Set the Cable policy for it.",
     "cable.harness_channel_gap": lambda display: (
-        f"Channel(s) {_channels(display['missing'])} between the legs of this breakout have no leg. "
+        f"{_missing_channels(display)} between the legs of this breakout have no leg. "
         "NetBox numbers connectors by position, so a later leg would take the wrong connector. "
         "Resolve the missing lane to its channel subinterface, or correct the source."
     ),
@@ -493,12 +511,14 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
         "Correct that Cable in NetBox, then re-read."
     ),
     "cable.harness_partial": lambda display: (
-        f"Channel(s) {_channels(display['missing'])} have no leg in this source, so the breakout Cable leaves "
+        f"{_missing_channels(display)} of this breakout have no leg in this source, so the breakout Cable leaves "
         "them unused. A per-module export confirms only the legs it states. A leg added later needs the Cable "
         "edited in NetBox, because the import never edits a breakout Cable."
     ),
     "cable.harness_profile_unavailable": lambda display: (
-        f"This NetBox instance offers no breakout Cable Profile for a parent with {display['channels']} channels."
+        "This NetBox instance offers no breakout Cable Profile for the channel count of this breakout's parent."
+        if _parent_hidden(display)
+        else f"This NetBox instance offers no breakout Cable Profile for a parent with {display['channels']} channels."
     ),
     "cable.harness_state": _harness_state_message,
     "cable.harness_type_conflict": (
