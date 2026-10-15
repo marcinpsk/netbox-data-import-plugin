@@ -126,9 +126,11 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/netbox/netbox
           TEST_DB_NAME: test_netbox_data_import_ci
           TEST_REDIS_HOST: localhost
+          # Only the coverage row runs every feature, so only it enforces fail_under from pyproject.toml.
+          COV_FAIL_UNDER: ${{ !matrix.coverage && '--cov-fail-under=0' || '' }}
         # `-n auto` comes from the addopts, capped by conftest.py at the workers that get
         # private PostgreSQL and Redis databases.
-        run: pytest --dist loadscope --disable-warnings -o pythonpath=../netbox/netbox
+        run: pytest --dist loadscope --disable-warnings -o pythonpath=../netbox/netbox $COV_FAIL_UNDER
 
       - name: Generate coverage report
         if: matrix.coverage

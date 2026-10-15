@@ -197,6 +197,7 @@ omit = ["*/migrations/*", "*/tests/*"]
 omit = ["*/migrations/*", "*/tests/*", "netbox_data_import/branching.py"]
 # Without `precision`, coverage.py compares the rounded total, so `fail_under = 98` enforced 97.5%.
 precision = 2
+# Only the CI row that runs every feature (NetBox 4.7) enforces it; the other rows pass 0.
 fail_under = 97.5
 show_missing = true
 
