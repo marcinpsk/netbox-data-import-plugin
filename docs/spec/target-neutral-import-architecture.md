@@ -398,8 +398,8 @@ depends on (with that unit's own members). A trace name is source evidence, so t
 nothing the trace list does not. The sync form posts the whole displayed closure, the selected trace
 first. The server computes the closure again from the claimed preview and refuses a posted list
 that differs in any unit or in order with HTTP 409, the same way it refuses a stale Preview Claim.
-It refuses an empty or repeated list, or a unit the preview does not hold, with HTTP 400. Both
-refusals queue no Job.
+It refuses an empty or repeated list, or a unit the preview does not hold: a JSON request receives
+HTTP 400, and a form or HTMX post returns to the page with the refusal. Both refusals queue no Job.
 
 A unit can name co-selection members (`selected_with`): units that every selection must hold together
 with it, whatever their disposition. The serialized unit and its fingerprint carry the field only when
