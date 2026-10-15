@@ -20,6 +20,8 @@ POLICY_HIDDEN = "a policy you cannot view"
 POLICY_VISIBLE = "policy_visible"
 TERMINATION_HIDDEN = "a termination you cannot view"
 TERMINATION_SOURCES = "termination_sources"
+# A termination display may also name a Device, when that Device alone can hide the display's facts.
+TERMINATION_SOURCE_KINDS = (*sorted(CABLE_END_KINDS), DEVICE_ROW)
 
 # A segment names its two planned ends apart, so one hidden end leaves the other readable.
 SEGMENT_END_SOURCES = MappingProxyType({"left": "left_sources", "right": "right_sources"})
@@ -276,18 +278,18 @@ def _source_is_visible(value, row_kinds, visible_row_ids: dict[str, set[int]]) -
 
 
 def _well_formed_termination_sources(sources) -> bool:
-    """Return whether *sources* is a nonempty list of sources that each name a Cable End Kind row."""
+    """Return whether *sources* is a nonempty list of sources that each name a Cable End Kind row or its Device."""
     return (
         isinstance(sources, list)
         and bool(sources)
-        and all(any(_source_pk(source, kind) is not None for kind in CABLE_END_KINDS) for source in sources)
+        and all(any(_source_pk(source, kind) is not None for kind in TERMINATION_SOURCE_KINDS) for source in sources)
     )
 
 
 def _terminations_are_visible(sources, visible_row_ids: dict[str, set[int]]) -> bool:
-    """Return whether every termination one display names is live and visible."""
+    """Return whether every termination, and every Device, one display names is live and visible."""
     return _well_formed_termination_sources(sources) and all(
-        _source_is_visible(source, CABLE_END_KINDS, visible_row_ids) for source in sources
+        _source_is_visible(source, TERMINATION_SOURCE_KINDS, visible_row_ids) for source in sources
     )
 
 

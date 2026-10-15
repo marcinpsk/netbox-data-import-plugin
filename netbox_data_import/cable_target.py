@@ -23,6 +23,7 @@ from typing import Any
 
 from . import cable_harness
 from .cable_disclosure import (
+    DEVICE_ROW,
     DISCLOSURE_SOURCE,
     SEGMENT_END_SOURCES,
     device_source,
@@ -1317,7 +1318,10 @@ class _CableBatch:
             "segment_index": segment_index,
             "parent": harness.termination.display,
             **fields,
-            **termination_sources(harness.termination.key, *(port.key for port in ports)),
+            # The parent's Device authorizes its channel facts too: on a virtual chassis it can be hidden alone.
+            **termination_sources(
+                harness.termination.key, (DEVICE_ROW, harness.parent.component.device_id), *(port.key for port in ports)
+            ),
         }
 
     def _plan_harnesses(self) -> None:

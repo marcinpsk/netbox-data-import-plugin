@@ -1159,6 +1159,29 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
                     "edited in NetBox, because the import never edits a breakout Cable.",
                 )
 
+    def test_a_cached_plan_states_no_channel_facts_to_a_viewer_who_cannot_view_the_parent_device(self):
+        """The viewer keeps Interface view and loses only the chassis member that holds the parent."""
+        _member, legs = self.build_chassis_harness()
+        plan = self.plan(*legs)
+        self.assertEqual([unit.disposition for unit in plan.units], [Disposition.ACTIONABLE] * 2)
+        viewer = self.viewer(devices={"serial": ""})
+
+        for unit in present_units(plan.units, viewer):
+            (state,) = [item.display for item in unit.diagnostics if item.code == "cable.harness_state"]
+            self.assertEqual(
+                {key: state[key] for key in ("parent", "channels", "legs", "profile")},
+                {
+                    "parent": TERMINATION_HIDDEN,
+                    "channels": TERMINATION_HIDDEN,
+                    "legs": (),
+                    "profile": TERMINATION_HIDDEN,
+                },
+            )
+        for trace in ReviewWorkspace(plan, viewer).traces:
+            with self.subTest(trace=trace.identity):
+                findings = {item["code"]: item["message"] for item in trace.findings}
+                self.assertNotIn("of 2", findings["cable.harness_state"])
+
     def test_a_cached_refusal_states_no_channel_count_to_a_viewer_who_cannot_view_the_parent(self):
         parent = self.make_parent(self.make_device("SW-3"), "1/1", 3)
         for number in range(1, 4):

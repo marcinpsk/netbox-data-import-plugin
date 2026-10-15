@@ -1095,8 +1095,9 @@ inside the transaction as the accepted plan's operator.
 A parent Interface, or a parent Device, the actor cannot view is treated like a hidden Cable or
 mapped peer. The leg's `cable.permission_denied` diagnostic names the view permission the actor
 lacks. The leg names its companions whatever Cable the parent holds, and no display field states the
-parent's channels, legs, missing channels or Cable Profile. When the viewer of a cached plan cannot
-view the parent, presentation hides those fields in every harness finding.
+parent's channels, legs, missing channels or Cable Profile. Every harness finding names the parent
+Interface and its Device as its sources. When the viewer of a cached plan cannot view either of them,
+presentation hides those fields in every harness finding.
 
 ### 6.7 Planning diagnostics
 
