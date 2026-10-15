@@ -62,7 +62,7 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
         "cable.harness_member_unresolved": _harness_schema(frozenset({"trace"})),
         "cable.harness_mixed_terminations": _harness_schema(frozenset({"models"})),
         "cable.harness_occupied": _harness_schema(
-            frozenset(), cable=frozenset({"cable"}), termination=frozenset({"port"})
+            frozenset({"marked_connected"}), cable=frozenset({"cable"}), termination=frozenset({"port"})
         ),
         "cable.harness_partial": _harness_schema(frozenset(), termination=frozenset({"missing"})),
         "cable.harness_profile_unavailable": _harness_schema(frozenset(), termination=frozenset({"channels"})),
@@ -104,7 +104,9 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
         ),
         "cable.termination_kind_mismatch": _DisplaySchema(_REFERENCE_FIELDS | {"claimed_kind", "selected_object_type"}),
         "cable.termination_occupied": _DisplaySchema(
-            frozenset({"segment_index"}), cable=frozenset({"cable"}), termination=frozenset({"port"})
+            frozenset({"segment_index", "marked_connected"}),
+            cable=frozenset({"cable"}),
+            termination=frozenset({"port"}),
         ),
         "cable.termination_unresolved": _DisplaySchema(_REFERENCE_FIELDS),
         "cable.unsupported_termination_kind": _DisplaySchema(_REFERENCE_FIELDS | {"selected_object_type"}),

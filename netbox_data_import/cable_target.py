@@ -1366,7 +1366,8 @@ class _CableBatch:
             )
         except cable_harness.IntentRefused as refusal:
             kind = "refuse" if refusal.code == "cable.harness_channel_state_invalid" else "block"
-            findings.append((kind, refusal.code, (), dict(refusal.facts)))
+            ports = () if refusal.port is None else (self._channel_termination(refusal.port),)
+            findings.append((kind, refusal.code, ports, dict(refusal.facts)))
         if self._harness_cable_types(harness):
             findings.append(("block", "cable.harness_type_conflict", (), {}))
         findings.extend(self._harness_occupancy(harness))
@@ -1689,7 +1690,24 @@ class _CableBatch:
                 policy = self._cable_policy(analysis, segment)
                 if policy is not None:
                     analysis.policies[segment.index] = policy
+                    self._check_write(analysis, segment, policy)
             self._check_permissions(analysis)
+
+    def _check_write(self, analysis: _TraceAnalysis, segment: _DesiredSegment, policy: dict) -> None:
+        """Build one segment's Cable write through the one constructor, and block the trace when it refuses."""
+        ends = [self._objects.get(end.key) for end in segment.terminations]
+        # A row gone since resolution is refused by the write itself.
+        if None in ends:
+            return
+        try:
+            cable_harness.ordinary_intent(*ends, profile=policy["cable_profile"] or "")
+        except cable_harness.IntentRefused as refusal:
+            (port,) = [end for end in segment.terminations if self._objects[end.key] is refusal.port]
+            analysis.block(
+                refusal.code,
+                {"segment_index": segment.index, **refusal.facts, **termination_sources(port.key)},
+                identities=(port.identity,),
+            )
 
     def _cable_policy(self, analysis: _TraceAnalysis, segment: _DesiredSegment) -> dict | None:
         """Return the Cable Type and Cable Profile one new segment is written with."""
@@ -2112,10 +2130,6 @@ class _CableBatch:
 
     def _create_change(self, segment: _DesiredSegment, policy: dict) -> PlannedChange:
         """Return the creation of one physical segment, shared by every trace that states it."""
-        ends = [self._objects.get(end.key) for end in segment.terminations]
-        # A row gone since resolution is refused by the write; every other end passes the write's own guard.
-        if None not in ends:
-            cable_harness.ordinary_intent(*ends, profile=policy["cable_profile"] or "")
         return PlannedChange(
             identity=segment.change_identity,
             target_module=CableModule.key,

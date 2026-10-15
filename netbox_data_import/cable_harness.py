@@ -25,10 +25,12 @@ _EMPTY_MIRROR = (None, "", None, ())
 class IntentRefused(PreconditionFailed):
     """A Cable write that NetBox would refuse, or that would put a leg on another channel."""
 
-    def __init__(self, code: str, message: str, facts: dict | None = None):
+    def __init__(self, code: str, message: str, facts: dict | None = None, port: Any = None):
         super().__init__(message)
         self.code = code
         self.facts = facts or {}
+        # The one termination the refusal is about, when it names one.
+        self.port = port
 
 
 @cache
@@ -229,10 +231,23 @@ def _refuse_channel_child(end) -> None:
         )
 
 
+def _refuse_marked_connected(ends, code: str) -> None:
+    """Refuse an end NetBox marks as connected, which `CableTermination.clean` refuses to cable."""
+    for end in ends:
+        if end.mark_connected:
+            raise IntentRefused(
+                code,
+                f"NetBox marks {end} as connected without a Cable, so it cannot take one.",
+                {"port": str(end), "marked_connected": True},
+                port=end,
+            )
+
+
 def ordinary_intent(first, second, *, profile: str) -> CableIntent:
-    """Return a one-to-one Cable write, refusing a channel child at either end."""
+    """Return a one-to-one Cable write, refusing a channel child or a marked-connected termination at either end."""
     _refuse_channel_child(first)
     _refuse_channel_child(second)
+    _refuse_marked_connected((first, second), "cable.termination_occupied")
     return CableIntent(a_terminations=(first,), b_terminations=(second,), profile=profile)
 
 
@@ -287,6 +302,7 @@ def harness_intent(parent, legs) -> CableIntent:
             "This NetBox instance offers no breakout Cable Profile for the parent's channel count.",
             {"channels": capacity},
         )
+    _refuse_marked_connected((parent, *(far for _child, far in ordered)), "cable.harness_occupied")
     return CableIntent(
         a_terminations=(parent,),
         b_terminations=tuple(far for _child, far in ordered),

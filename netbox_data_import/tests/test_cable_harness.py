@@ -318,6 +318,29 @@ class HarnessPlanningTest(HarnessTopologyMixin, TestCase):
 
         self.assert_every_leg(plan, Disposition.BLOCKED, "cable.harness_occupied")
 
+    def test_a_parent_marked_connected_blocks_every_leg(self):
+        """NetBox refuses a Cable on a termination marked as connected, and the harness cables the parent."""
+        self.resolve_lanes(range(1, 5))
+        Interface.objects.filter(pk=self.parent.pk).update(mark_connected=True)
+
+        plan = self.plan(*(panel_leg(number) for number in range(1, 5)))
+
+        self.assert_every_leg(plan, Disposition.BLOCKED, "cable.harness_occupied")
+        (occupied,) = [item for item in plan.units[0].diagnostics if item.code == "cable.harness_occupied"]
+        self.assertEqual((occupied.display["port"], occupied.display["marked_connected"]), (str(self.parent), True))
+        messages = {item["code"]: item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings}
+        self.assertIn("as connected without a Cable", messages["cable.harness_occupied"])
+
+    def test_a_far_end_marked_connected_blocks_every_leg(self):
+        self.resolve_lanes(range(1, 5))
+        FrontPort.objects.filter(pk=self.fronts[3].pk).update(mark_connected=True)
+
+        plan = self.plan(*(panel_leg(number) for number in range(1, 5)))
+
+        self.assert_every_leg(plan, Disposition.BLOCKED, "cable.harness_occupied")
+        (occupied,) = [item for item in plan.units[0].diagnostics if item.code == "cable.harness_occupied"]
+        self.assertEqual(occupied.display["port"], str(self.fronts[3]))
+
     def test_an_unresolved_lane_in_the_cohort_blocks_the_resolved_legs(self):
         self.resolve_lanes([1, 2, 3])
 
@@ -824,6 +847,18 @@ class HarnessExecutionTest(HarnessTopologyMixin, TransactionTestCase):
         ):
             CableModule().apply(change, context)
 
+        self.assertFalse(Cable.objects.exists())
+
+    def test_a_harness_write_refuses_a_parent_marked_connected_after_planning(self):
+        self.resolve_lanes([1])
+        (change,) = self.harness_changes(self.plan(panel_leg(1)).units[0])
+        Interface.objects.filter(pk=self.parent.pk).update(mark_connected=True)
+        context = ExecutionContext(actor=self.actor, reader=self.reader(), profile=self.profile)
+
+        with self.assertRaises(IntentRefused) as refused, transaction.atomic():
+            CableModule().apply(change, context)
+
+        self.assertEqual(refused.exception.code, "cable.harness_occupied")
         self.assertFalse(Cable.objects.exists())
 
     def test_an_ordinary_write_refuses_a_channel_child_before_netbox_does(self):

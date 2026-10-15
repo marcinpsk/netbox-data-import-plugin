@@ -506,8 +506,11 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
         "The legs of this breakout reach ports of more than one kind, and NetBox cables one kind on each side "
         "of a Cable. Make the source state the same first hop for every lane, for example its panel front port."
     ),
-    "cable.harness_occupied": (
-        "Another Cable holds a port this breakout needs, and the import never edits a breakout Cable. "
+    "cable.harness_occupied": lambda display: (
+        "NetBox marks a port this breakout needs as connected without a Cable, so it cannot take one. "
+        "Clear Mark connected on that port in NetBox, then re-read."
+        if display.get("marked_connected")
+        else "Another Cable holds a port this breakout needs, and the import never edits a breakout Cable. "
         "Correct that Cable in NetBox, then re-read."
     ),
     "cable.harness_partial": lambda display: (
@@ -560,8 +563,11 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     "cable.termination_kind_mismatch": (
         "The stated PortClass does not admit the kind of port the saved selection names. Choose the termination again."
     ),
-    "cable.termination_occupied": (
-        "Another Cable already occupies this termination. "
+    "cable.termination_occupied": lambda display: (
+        "NetBox marks this termination as connected without a Cable, so it cannot take one. "
+        "Clear Mark connected on it in NetBox, or resolve this trace to a free termination."
+        if display.get("marked_connected")
+        else "Another Cable already occupies this termination. "
         "Remove that Cable, or resolve this trace to a free termination."
     ),
     "cable.termination_unresolved": (

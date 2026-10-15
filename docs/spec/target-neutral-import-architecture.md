@@ -1036,7 +1036,10 @@ parent, and each leg trace stays its own Synchronization Unit:
 
 One constructor builds every Cable write, in planning and again in execution from the locked rows. An
 ordinary write refuses a channel child at either end. A harness write requires ordered, distinct B ends
-of one model with no channel gap, and a verified profile. Execution writes
+of one model with no channel gap, and a verified profile. Both refuse a termination NetBox marks as
+connected without a Cable, because `CableTermination.clean` refuses to cable it: an ordinary write with
+`cable.termination_occupied`, a harness write with `cable.harness_occupied`, each with
+`marked_connected` in its display. Execution writes
 `Cable(profile=..., a_terminations=[parent], b_terminations=[far ends by channel])` through
 `full_clean()`, so NetBox writes connector `k` with positions `[1]` on side B and connector 1 with
 positions `1..N` on side A.
@@ -1101,7 +1104,7 @@ view the parent, presentation hides those fields in every harness finding.
 | The resolved object is not a Cable End Kind (section 6.1) | `cable.unsupported_termination_kind` | `invalid` |
 | PortMapping contradicts a Pass-Through Claim | `cable.pass_through_not_mapped` | `invalid` |
 | Several mapped peers for a same-port continuation | `cable.ambiguous_mapped_peer` | `blocked` |
-| A foreign Cable occupies a desired termination | `cable.termination_occupied` | `blocked` |
+| A foreign Cable occupies a desired termination, or NetBox marks it connected without a Cable | `cable.termination_occupied` | `blocked` |
 | A multi-termination Cable touches a desired port | `cable.multi_termination_conflict` | `blocked` |
 | Two different planned Cables claim one free termination, in two Source Traces or in one | `cable.planned_termination_conflict` | `blocked` |
 | A segment whose two ends resolve to one termination | `cable.segment_self_connection` | `blocked` |
@@ -1118,7 +1121,7 @@ view the parent, presentation hides those fields in every harness finding.
 | The running instance has no breakout Cable Profile for the parent's channel count | `cable.harness_profile_unavailable` | `blocked` |
 | A trace in a harness cohort is unresolved or invalid, or names a channel child with no physical first hop | `cable.harness_member_unresolved` | `blocked` |
 | The legs of one harness resolve to different Cable Types | `cable.harness_type_conflict` | `blocked` |
-| A Cable that is not exactly the harness holds the parent or a far end | `cable.harness_occupied` | `blocked` |
+| A Cable that is not exactly the harness holds the parent or a far end, or NetBox marks one of them connected without a Cable | `cable.harness_occupied` | `blocked` |
 | A segment with a channel child at both ends, a trace with two legs, or a leg whose far end is its own parent | `cable.harness_unsupported` | `blocked` |
 | A channel child holds its own CableTermination, names a channel above the parent's count, or does not mirror the parent's Cable | `cable.harness_channel_state_invalid` | `invalid` |
 | A dangling natural-key reference in `adapter_config` | `profile.dangling_reference` | `blocked` |

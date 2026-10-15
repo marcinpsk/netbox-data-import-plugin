@@ -42,6 +42,7 @@ from netbox_data_import.cable_policy import (
     cable_type_label,
     decisive_media_family,
 )
+from netbox_data_import.cable_harness import IntentRefused
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT, CableModule, eligible_terminations
 from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import (
@@ -715,6 +716,24 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         self.assertIs(occupied.display["cable_visible"], True)
         self.assertEqual(occupied.display["cable"], str(foreign))
         self.assertTrue(Cable.objects.filter(pk=foreign.pk).exists())
+
+    def test_a_far_end_marked_connected_blocks_the_unit(self):
+        """NetBox refuses a Cable on a termination marked as connected (CableTermination.clean)."""
+        Interface.objects.filter(pk=self.eth1.pk).update(mark_connected=True)
+
+        plan = self.plan(patched_path())
+
+        (unit,) = plan.units
+        self.assertEqual(unit.disposition, Disposition.BLOCKED, self.codes(unit))
+        self.assertEqual(unit.changes, ())
+        occupied = next(item for item in unit.diagnostics if item.code == "cable.termination_occupied")
+        self.assertEqual(
+            (occupied.display["segment_index"], occupied.display["port"], occupied.display["marked_connected"]),
+            (2, str(self.eth1), True),
+        )
+        self.assertNotIn("cable_visible", occupied.display)
+        messages = {item["code"]: item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings}
+        self.assertIn("as connected without a Cable", messages["cable.termination_occupied"])
 
     def test_an_invisible_occupying_cable_blocks_without_disclosing_its_identity(self):
         """Occupancy stays unscoped, but its Cable details stay inside the actor's view scope."""
@@ -3025,6 +3044,17 @@ class CablePreconditionRecheckTest(CableTopologyMixin, TestCase):
             CableModule().apply(unit.changes[0], self.context())
 
         self.assertEqual(CableImportSource.objects.count(), 0)
+
+    def test_a_termination_marked_connected_after_planning_refuses_its_creation(self):
+        """The locked write rebuilds the intent, so NetBox's refusal of a marked-connected end is never reached."""
+        unit = self.unit(patched_path())
+        Interface.objects.filter(pk=self.eth1.pk).update(mark_connected=True)
+
+        with self.assertRaises(IntentRefused) as refused:
+            CableModule().apply(unit.changes[2], self.context())
+
+        self.assertEqual(refused.exception.code, "cable.termination_occupied")
+        self.assertEqual(Cable.objects.count(), 0)
 
     def test_a_re_terminated_logical_cable_refuses_its_deletion(self):
         """The one cable this import removes must still hold the terminations the plan recorded."""
