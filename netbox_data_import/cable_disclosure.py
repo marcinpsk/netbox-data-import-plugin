@@ -85,7 +85,7 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
         "cable.pass_through_verified": _DisplaySchema(_REFERENCE_FIELDS, termination=frozenset({"entry", "exit"})),
         "cable.permission_denied": _DisplaySchema(_REFERENCE_FIELDS | {"permission"}, cable=frozenset({"cable"})),
         "cable.planned_termination_conflict": _DisplaySchema(
-            frozenset({"segment_index", "competing_trace"}), termination=frozenset({"termination"})
+            frozenset({"segment_index", "competing_trace", "competing_segment"}), termination=frozenset({"termination"})
         ),
         "cable.policy_stale": _DisplaySchema(frozenset({"segment_index", "cable_class"})),
         "cable.profile_incompatible": _DisplaySchema(frozenset({"segment_index", "cable_class"})),

@@ -1103,7 +1103,7 @@ view the parent, presentation hides those fields in every harness finding.
 | Several mapped peers for a same-port continuation | `cable.ambiguous_mapped_peer` | `blocked` |
 | A foreign Cable occupies a desired termination | `cable.termination_occupied` | `blocked` |
 | A multi-termination Cable touches a desired port | `cable.multi_termination_conflict` | `blocked` |
-| Source Traces plan different Cables on one free termination | `cable.planned_termination_conflict` | `blocked` |
+| Two different planned Cables claim one free termination, in two Source Traces or in one | `cable.planned_termination_conflict` | `blocked` |
 | A segment whose two ends resolve to one termination | `cable.segment_self_connection` | `blocked` |
 | A stored termination selection whose model the stated PortClass does not admit | `cable.termination_kind_mismatch` | `blocked` |
 | A segment whose two resolved ends NetBox cannot cable together | `cable.incompatible_terminations` | `blocked` |

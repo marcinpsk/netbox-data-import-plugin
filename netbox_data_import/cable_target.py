@@ -1826,9 +1826,10 @@ class _CableBatch:
             )
 
     def _block_planned_termination_conflicts(self) -> None:
-        """Block every actionable trace that competes for one free termination.
+        """Block every actionable trace whose planned Cables compete for one free termination.
 
         A claim is keyed by the Cable it creates, so traces that share one segment or one harness agree.
+        Two different Cables conflict also inside one trace, such as a harness and a segment back to its parent.
         """
         claims: dict[tuple[str, int], list[tuple[_TraceAnalysis, str, int, _Termination]]] = {}
         for analysis in self._writing():
@@ -1843,18 +1844,20 @@ class _CableBatch:
                     )
         for records in claims.values():
             for analysis, claim, index, termination in records:
-                competitors = [
-                    other
-                    for other, other_claim, _other_index, _other_termination in records
-                    if other is not analysis and other_claim != claim
-                ]
-                for competitor in competitors:
+                for other, other_claim, other_index, _other_termination in records:
+                    if other_claim == claim:
+                        continue
+                    competitor = (
+                        {"competing_segment": other_index}
+                        if other is analysis
+                        else {"competing_trace": other.display["name"]}
+                    )
                     analysis.block(
                         "cable.planned_termination_conflict",
                         {
                             "segment_index": index,
                             "termination": termination.display,
-                            "competing_trace": competitor.display["name"],
+                            **competitor,
                             **termination_sources(termination.key),
                         },
                         identities=(termination.identity,),

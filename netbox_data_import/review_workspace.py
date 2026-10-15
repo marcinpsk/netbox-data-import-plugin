@@ -539,8 +539,11 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     ),
     "cable.pass_through_verified": "A PortMapping proves the stated pass-through.",
     "cable.permission_denied": "Permission denied: you cannot make one of the Cable changes this trace needs.",
-    "cable.planned_termination_conflict": (
-        "Another Source Trace plans a Cable on this termination. Resolve this trace to a different termination."
+    "cable.planned_termination_conflict": lambda display: (
+        "Another segment of this trace plans a different Cable on this termination, and a termination holds "
+        "one Cable. Correct the source path."
+        if "competing_segment" in display
+        else "Another Source Trace plans a Cable on this termination. Resolve this trace to a different termination."
     ),
     "cable.policy_stale": "The selected Cable policy value is no longer offered by this NetBox instance.",
     "cable.profile_incompatible": "The selected Cable Profile does not permit one termination on each side.",

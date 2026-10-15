@@ -941,6 +941,32 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
                 self.assertEqual(unit.disposition, Disposition.BLOCKED)
                 self.assertIn("cable.planned_termination_conflict", self.codes(unit))
 
+    def test_a_panel_return_to_the_parent_conflicts_with_the_harness_of_its_own_trace(self):
+        """The harness cables the parent to F1, and the segment back from R1 claims the parent as well."""
+        self.resolve_lanes([1])
+        uplink = trace_termination("SW-1", "Uplinks", "0/0", "Port")
+        loop = (
+            trace_endpoint_line(lane(1)),
+            trace_endpoint_line(uplink),
+            (trace_segment(lane(1), FIBER, panel_front(1)), trace_segment(panel_rear(1), FIBER, uplink)),
+        )
+
+        plan = self.plan(loop)
+
+        (unit,) = plan.units
+        self.assertEqual(unit.disposition, Disposition.BLOCKED, self.codes(unit))
+        self.assertEqual(unit.changes, ())
+        conflicts = [item.display for item in unit.diagnostics if item.code == "cable.planned_termination_conflict"]
+        self.assertEqual(
+            sorted((item["segment_index"], item["competing_segment"], item["termination"]) for item in conflicts),
+            [(0, 1, str(self.parent)), (1, 0, str(self.parent))],
+        )
+        messages = {item["code"]: item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings}
+        self.assertTrue(
+            messages["cable.planned_termination_conflict"].startswith("Another segment of this trace"),
+            messages["cable.planned_termination_conflict"],
+        )
+
     def test_a_leg_never_joins_a_media_run(self):
         """A breakout Cable fans out, so a copper hop behind a fiber lane states no media contradiction."""
         self.resolve_lanes([1])
