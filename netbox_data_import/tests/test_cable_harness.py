@@ -5,7 +5,17 @@
 import uuid
 from unittest import skipUnless
 
-from dcim.models import Cable, CableTermination, Device, FrontPort, Interface, PortMapping, RearPort, Site
+from dcim.models import (
+    Cable,
+    CableTermination,
+    Device,
+    FrontPort,
+    Interface,
+    PortMapping,
+    RearPort,
+    Site,
+    VirtualChassis,
+)
 from django.db import transaction
 from django.db.models.signals import pre_save
 from django.test import TestCase, TransactionTestCase
@@ -146,6 +156,27 @@ class HarnessTopologyMixin(CableTopologyMixin):
         child.full_clean()
         child.save()
         return child
+
+    def build_chassis_harness(self, serial="MEMBER-B"):
+        """Put a two-channel parent on chassis member SW-1-B and its children on SW-1, which NetBox permits."""
+        chassis = VirtualChassis.objects.create(name="VC-1")
+        member = Device.objects.create(
+            name="SW-1-B", site=self.site, device_type=self.device_type, role=self.role, serial=serial
+        )
+        Device.objects.filter(pk=self.switch.pk).update(virtual_chassis=chassis, vc_position=1)
+        Device.objects.filter(pk=member.pk).update(virtual_chassis=chassis, vc_position=2)
+        parent = self.make_parent(Device.objects.get(pk=member.pk), "1/1", 2)
+        switch = Device.objects.get(pk=self.switch.pk)
+        lanes = []
+        for number in (1, 2):
+            child = Interface(
+                device=switch, name=f"1/1:{number}", type="25gbase-x-sfp28", parent=parent, channel_id=number
+            )
+            child.full_clean()
+            child.save()
+            lanes.append(lane(number, cards="Breakout VC", port=f"V{number}"))
+            self.save_resolution(lanes[-1], child)
+        return member, [direct_leg(number, start=reference) for number, reference in enumerate(lanes, start=1)]
 
     def resolve_lanes(self, numbers, **reference):
         """Save the operator's choice of the channel child for each given lane."""
@@ -515,7 +546,7 @@ class HarnessExecutionTest(HarnessTopologyMixin, TransactionTestCase):
     def setUp(self):
         self.build_harness_topology()
 
-    def execute(self, plan, identities=None, key=None):
+    def execute(self, plan, identities=None, key=None, actor=None):
         """Run one selection through the public coordinator seam."""
         return ImportEngine.execute(
             self.profile,
@@ -523,7 +554,7 @@ class HarnessExecutionTest(HarnessTopologyMixin, TransactionTestCase):
             plan.to_dict(),
             identities or [unit.identity for unit in plan.units if unit.disposition == Disposition.ACTIONABLE],
             key or str(uuid.uuid4()),
-            self.actor,
+            actor or self.actor,
         )
 
     def test_a_lane_resolved_to_a_channel_child_cables_the_parent_and_never_the_child(self):
@@ -722,6 +753,29 @@ class HarnessExecutionTest(HarnessTopologyMixin, TransactionTestCase):
 
         self.assertFalse(Cable.objects.exists())
 
+    def test_a_parent_device_hidden_after_acceptance_is_a_stale_plan(self):
+        """The locked replan rechecks the parent's Device, so the harness is never written on a hidden member."""
+        member, legs = self.build_chassis_harness(serial="")
+        actor = user_with_object_permission(
+            "harness-chassis-executor",
+            [
+                (Site, ("view",), {}),
+                (Device, ("view",), {"serial": ""}),
+                (Interface, ("view",), {}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (Cable, ("add",), {}),
+            ],
+        )
+        accepted = self.plan(*legs, actor=actor)
+        self.assertEqual([unit.disposition for unit in accepted.units], [Disposition.ACTIONABLE] * 2)
+        Device.objects.filter(pk=member.pk).update(serial="MEMBER-B")
+
+        with self.assertRaises(StalePlan):
+            self.execute(accepted, actor=actor)
+
+        self.assertFalse(Cable.objects.exists())
+
     def test_an_ordinary_write_refuses_a_channel_child_before_netbox_does(self):
         context = ExecutionContext(actor=self.actor, reader=self.reader(), profile=self.profile)
         child, front = self.children[1], self.fronts[1]
@@ -856,11 +910,11 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
         segment = unit.display["trace"]["segments"][occupied.display["segment_index"]]
         self.assertEqual((segment["right"], segment["status"]), ("SW-1 0/0:1", "conflict"))
 
-    def viewer(self, *, add_cable=True, interfaces=None):
-        """Return an operator who views the topology, with the given Interface scope."""
+    def viewer(self, *, add_cable=True, interfaces=None, devices=None):
+        """Return an operator who views the topology, with the given Interface and Device scopes."""
         grants = [
             (Site, ("view",), {}),
-            (Device, ("view",), {}),
+            (Device, ("view",), devices or {}),
             (Interface, ("view",), interfaces or {}),
             (FrontPort, ("view",), {}),
             (RearPort, ("view",), {}),
@@ -893,6 +947,23 @@ class HarnessReviewTest(HarnessTopologyMixin, TestCase):
             with self.subTest(trace=trace.identity):
                 self.assertEqual([item["code"] for item in trace.findings], ["cable.permission_denied"])
                 self.assertNotIn("channel", " ".join(item["message"] for item in trace.findings).lower())
+
+    def test_a_parent_on_a_chassis_member_the_operator_cannot_view_blocks_every_leg(self):
+        """Spec 6.6: the actor views every involved Device, and the parent's Device is one of them."""
+        _member, legs = self.build_chassis_harness()
+        visible = self.plan(*legs, actor=self.viewer())
+        self.assertEqual([unit.disposition for unit in visible.units], [Disposition.ACTIONABLE] * 2)
+        actor = self.viewer(devices={"serial": ""})
+
+        plan = self.plan(*legs, actor=actor)
+
+        for unit in plan.units:
+            with self.subTest(unit=unit.identity):
+                self.assertEqual(unit.disposition, Disposition.BLOCKED)
+                self.assertEqual(unit.changes, ())
+                denied = [item.display for item in unit.diagnostics if item.code == "cable.permission_denied"]
+                self.assertEqual(denied, [{"permission": "dcim.view_device"}])
+                self.assertNotIn("cable.harness_state", self.codes(unit))
 
     def test_a_hidden_parent_still_moves_the_fingerprint_when_its_channels_change(self):
         self.resolve_lanes([1, 2])

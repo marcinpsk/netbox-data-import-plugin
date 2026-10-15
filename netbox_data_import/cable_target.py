@@ -1324,10 +1324,10 @@ class _CableBatch:
                 key=lambda leg: (cable_harness.channel(self._objects[leg.child.key]), leg.analysis.identity)
             )
             findings = self._harness_findings(harness)
-            hidden = not self.reader.terminations(cable_harness.INTERFACE).filter(pk=parent_pk).exists()
+            missing = self._parent_permission_missing(harness)
             for leg in harness.legs:
-                if hidden:
-                    self._hide_leg(leg, harness)
+                if missing is not None:
+                    self._hide_leg(leg, harness, missing)
                     continue
                 for kind, code, ports, fields in findings:
                     getattr(leg.analysis, kind)(
@@ -1422,8 +1422,18 @@ class _CableBatch:
                 findings.append(("block", "cable.harness_occupied", (port,), {"port": port.display, **cable_display}))
         return findings
 
-    def _hide_leg(self, leg: _Leg, harness: _Harness) -> None:
-        """Block one leg whose parent the actor cannot view, and state no fact of that parent.
+    def _parent_permission_missing(self, harness: _Harness) -> str | None:
+        """Return the view permission the actor lacks on the parent Interface or on its Device (section 6.6)."""
+        parent = harness.parent.component
+        if not self.reader.terminations(cable_harness.INTERFACE).filter(pk=parent.pk).exists():
+            return _view_permission(cable_harness.INTERFACE)
+        # On a virtual chassis the parent can sit on another member Device than its children.
+        if not self.reader.devices().filter(pk=parent.device_id).exists():
+            return _view_permission("dcim.device")
+        return None
+
+    def _hide_leg(self, leg: _Leg, harness: _Harness, permission: str) -> None:
+        """Block one leg whose parent, or its Device, the actor cannot view, and state no fact of that parent.
 
         As for a hidden Cable or mapped peer, only the evidence holds the parent's facts, so a change
         to them still moves the unit.
@@ -1432,7 +1442,7 @@ class _CableBatch:
         leg.analysis.selected_with = harness.companions(leg)
         leg.analysis.block(
             "cable.permission_denied",
-            {"permission": _view_permission(cable_harness.INTERFACE)},
+            {"permission": permission},
             evidence=self._harness_evidence(harness),
         )
 

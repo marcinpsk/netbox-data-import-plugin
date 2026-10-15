@@ -1075,15 +1075,18 @@ of its own users.
 
 ### 6.6 Permissions
 
-Planning marks the unit blocked with a diagnostic when the operator lacks rights to delete the Logical
-Cable, add cables, or view the involved devices and ports. A harness leg also needs the right to add
-cables when its only change is the harness, and the right to view the parent Interface. Execution rechecks the same permissions
+Planning marks the unit blocked with a diagnostic when the operator lacks rights to delete the
+Logical Cable, add cables, or view the involved devices and ports. A harness leg also needs the
+right to add cables when its only change is the harness, and the right to view the parent Interface
+and its Device. On a virtual chassis NetBox lets the parent sit on another member Device than its
+children, so the parent's Device is an involved Device too. Execution rechecks the same permissions
 inside the transaction as the accepted plan's operator.
 
-A parent Interface the actor cannot view is treated like a hidden Cable or mapped peer. The leg names
-its companions whatever Cable the parent holds, and no display field states the parent's channels,
-legs, missing channels or Cable Profile. When the viewer of a cached plan cannot view the parent,
-presentation hides those fields in every harness finding.
+A parent Interface, or a parent Device, the actor cannot view is treated like a hidden Cable or
+mapped peer. The leg's `cable.permission_denied` diagnostic names the view permission the actor
+lacks. The leg names its companions whatever Cable the parent holds, and no display field states the
+parent's channels, legs, missing channels or Cable Profile. When the viewer of a cached plan cannot
+view the parent, presentation hides those fields in every harness finding.
 
 ### 6.7 Planning diagnostics
 
