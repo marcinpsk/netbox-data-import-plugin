@@ -412,6 +412,21 @@ class HarnessPlanningTest(HarnessTopologyMixin, TestCase):
         self.assertIn("trace.device_unresolved", self.codes(unit))
         self.assertEqual(unit.changes, ())
 
+    def test_a_leg_that_ends_on_its_own_parent_is_unsupported(self):
+        """The source names the parent port under another cards label, so only the resolved objects meet."""
+        self.resolve_lanes([1])
+        uplink = trace_termination("SW-1", "Uplinks", "1/3", "Port")
+        loop = (trace_endpoint_line(lane(1)), trace_endpoint_line(uplink), (trace_segment(lane(1), FIBER, uplink),))
+
+        plan = self.plan(loop)
+
+        (unit,) = plan.units
+        self.assertEqual(unit.disposition, Disposition.BLOCKED, self.codes(unit))
+        self.assertIn("cable.harness_unsupported", self.codes(unit))
+        self.assertEqual(unit.changes, ())
+        messages = [item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings]
+        self.assertIn("its own parent", " ".join(messages))
+
     def test_a_plain_interface_in_the_cohort_warns_and_blocks_nothing(self):
         self.resolve_lanes(range(1, 5))
         Interface.objects.create(device=self.switch, name="P05", type="25gbase-x-sfp28")
@@ -764,6 +779,9 @@ class CableIntentTest(HarnessTopologyMixin, TestCase):
         legs = [(self.children[1], self.fronts[1]), (self.children[2], self.fronts[1])]
 
         self.assertEqual(self.refusal(legs), "cable.harness_leg_conflict")
+
+    def test_a_far_end_that_is_the_parent_is_unsupported(self):
+        self.assertEqual(self.refusal([(self.children[1], self.parent)]), "cable.harness_unsupported")
 
     def test_a_harness_without_legs_is_a_programming_error(self):
         with self.assertRaisesMessage(ValueError, "A harness intent needs at least one leg."):

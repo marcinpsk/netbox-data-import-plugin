@@ -246,6 +246,10 @@ def harness_intent(parent, legs) -> CableIntent:
         raise ValueError("A harness intent needs at least one leg.")
     for end in (parent, *(far for _child, far in legs)):
         _refuse_channel_child(end)
+    if any(_label(far) == INTERFACE and far.pk == parent.pk for _child, far in legs):
+        raise IntentRefused(
+            "cable.harness_unsupported", "A leg ends on its own parent, so the trace runs inside one harness."
+        )
     if any(channel_parent(child) != parent.pk for child, _far in legs):
         raise IntentRefused("cable.harness_channel_state_invalid", "A leg is no longer a channel of this parent.")
     ordered = sorted(legs, key=lambda leg: leg[0].channel_id)

@@ -435,6 +435,16 @@ def _harness_state_message(display) -> str:
     )
 
 
+def _harness_unsupported_message(display) -> str:
+    """Return the wording for a trace the import cannot write as one breakout Cable."""
+    # The constructor refuses a whole harness, so its finding names no single trace.
+    subject = f"The trace '{display['trace']}'" if "trace" in display else "A leg of this breakout"
+    return (
+        f"{subject} joins two channel subinterfaces, two breakouts, or a channel subinterface and its own parent. "
+        "The import cannot write that as one breakout Cable."
+    )
+
+
 _CHANNEL_STATE_REPAIRS = {
     "mirror": "does not mirror the Cable of its parent. Save the parent again in NetBox, or run manage.py trace_paths",
     "termination": "holds its own Cable termination, which NetBox does not permit. Remove that Cable in NetBox",
@@ -495,10 +505,7 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
         "The legs of this breakout resolve to different Cable Types. "
         "Make their CableClass policies or segment overrides agree."
     ),
-    "cable.harness_unsupported": lambda display: (
-        f"The trace '{display['trace']}' joins two channel subinterfaces, or two breakouts. "
-        "The import cannot write that as one breakout Cable."
-    ),
+    "cable.harness_unsupported": _harness_unsupported_message,
     "cable.incompatible_terminations": (
         "NetBox cannot cable these two terminations together. Choose another termination for the end that is wrong."
     ),
