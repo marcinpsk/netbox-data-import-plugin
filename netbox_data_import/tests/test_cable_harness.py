@@ -1710,6 +1710,22 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         self.assertIn(_DIAGNOSTIC_MESSAGES["cable.termination_not_connectable"], messages)
         self.assertIn(_DIAGNOSTIC_MESSAGES[FINDING_HIDDEN], messages)
 
+    def test_hidden_findings_keep_the_highest_severity_they_replace(self):
+        """A warning, an info and an error that all become one hidden-finding line keep the error."""
+        operator, card = self.virtual_downstream_card()
+        codes = [item["code"] for item in card.context["selected_trace"].findings]
+        self.assertLess(codes.index("cable.harness_partial"), codes.index("cable.termination_not_connectable"))
+        self.restrict_interfaces(
+            operator, {"channels__isnull": True, "channel_id__isnull": True, "type": "25gbase-x-sfp28"}
+        )
+
+        card = self.reload(card)
+
+        hidden = [item for item in card.context["selected_trace"].findings if item["code"] == FINDING_HIDDEN]
+        self.assertEqual([item["severity"] for item in hidden], [Severity.ERROR])
+        findings = card.content.decode().split("data-trace-findings>", 1)[1].split("</div>", 1)[0]
+        self.assertNotIn("data-finding-severity", findings)
+
     def test_a_cached_leg_mark_is_hidden_with_its_channel_child_and_still_keeps_the_stored_profile(self):
         """The viewer loses the child after planning; the page drops the mark, and the save still ignores a profile."""
         blocks = [panel_leg(number, downstream="Patch") for number in range(1, 5)]

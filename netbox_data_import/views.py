@@ -96,7 +96,7 @@ from .object_permissions import (
     delete_permission_scoped_objects,
     save_permission_scoped_object,
 )
-from .plan import Disposition, ImportPlan, PlanError
+from .plan import Disposition, ImportPlan, PlanError, Severity
 from .preview_coordinator import (
     SYNC_FINISHED,
     SYNC_NOT_THIS_PREVIEW,
@@ -3659,14 +3659,21 @@ def _workspace_location_prefixes(workspace) -> dict[str, str]:
     return location_prefix_spellings(_workspace_location_paths(workspace))
 
 
+_SEVERITY_RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.ERROR: 2}
+
+
 def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Return findings once per message in first-seen order, keeping every lost override."""
-    messages: set[str] = set()
+    """Return findings once per message in first-seen order, each with its most severe copy, and every lost override."""
     unique: list[dict[str, str]] = []
+    placed: dict[str, int] = {}
     for finding in findings:
-        if finding["code"] == "cable.segment_override_lost" or finding["message"] not in messages:
-            messages.add(finding["message"])
+        message = finding["message"]
+        if finding["code"] == "cable.segment_override_lost" or message not in placed:
+            placed.setdefault(message, len(unique))
             unique.append(finding)
+        elif _SEVERITY_RANK[finding["severity"]] > _SEVERITY_RANK[unique[placed[message]]["severity"]]:
+            # One line stands for every copy, so it must not read as less severe than the worst of them.
+            unique[placed[message]] = finding
     return unique
 
 

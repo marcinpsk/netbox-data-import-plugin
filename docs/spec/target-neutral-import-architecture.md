@@ -1128,15 +1128,16 @@ validator refuses a finding whose wording sources are not port and Device pairs,
 the finding names; a harness finding's parent is no subject, because its facts are termination fields
 that hide on their own. Presentation replaces a finding whose wording sources are not all visible
 with `cable.finding_hidden`, which says only that the trace reaches a port the viewer cannot view,
-with the severity of the finding it replaces. The segment mark is bound to the segment end that holds
-the child, so the Cable Profile text "Set by the breakout" on the segment and on its CableClass
-policy row hides with that end. The sync list names a companion as on the same breakout Cable only
-when the viewer sees the channel child of both legs, and otherwise lists it as synchronized together
-with the trace. So a viewer who sees the child and not the parent still sees that the trace is a leg,
-without any parent fact. Selection enforcement and the segment override save read the plan, not its
-presentation, so a hidden leg still selects every companion and still keeps a stored Cable Profile
-that planning ignores. A termination field outside such a finding names only a port, which its
-Interface row authorizes, so it needs no Device source.
+with the severity of the finding it replaces. When several findings render as one line, the line
+takes the most severe of them. The segment mark is bound to the segment end that holds the child, so
+the Cable Profile text "Set by the breakout" on the segment and on its CableClass policy row hides
+with that end. The sync list names a companion as on the same breakout Cable only when the viewer
+sees the channel child of both legs, and otherwise lists it as synchronized together with the trace.
+So a viewer who sees the child and not the parent still sees that the trace is a leg, without any
+parent fact. Selection enforcement and the segment override save read the plan, not its presentation,
+so a hidden leg still selects every companion and still keeps a stored Cable Profile that planning
+ignores. A termination field outside such a finding names only a port, which its Interface row
+authorizes, so it needs no Device source.
 
 ### 6.7 Planning diagnostics
 
