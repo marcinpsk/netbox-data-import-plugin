@@ -1455,8 +1455,9 @@ class _CableBatch:
         return {
             "parent": harness.termination.identity,
             **harness.parent.evidence(),
+            # The child's Device is read from its latest row: in a virtual chassis a child can change member.
             "legs": [
-                [number, leg.far.identity]
+                [number, _object_identity("dcim.device", self._objects[leg.child.key].device_id), leg.far.identity]
                 for number, leg in zip(self._leg_channels(harness), harness.legs, strict=True)
             ],
             "profile": "" if harness.intent is None else harness.intent.profile,

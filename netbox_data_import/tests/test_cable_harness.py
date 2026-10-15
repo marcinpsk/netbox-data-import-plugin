@@ -31,6 +31,7 @@ from netbox_data_import.target_runtime import ExecutionContext, PreconditionFail
 from netbox_data_import.tests.helpers import (
     cables_on,
     competing_write_during,
+    run_on_separate_connection,
     trace_endpoint_line,
     trace_segment,
     trace_termination,
@@ -157,15 +158,20 @@ class HarnessTopologyMixin(CableTopologyMixin):
         child.save()
         return child
 
-    def build_chassis_harness(self, serial="MEMBER-B"):
-        """Put a two-channel parent on chassis member SW-1-B and its children on SW-1, which NetBox permits."""
+    def join_chassis(self, serial="MEMBER-B"):
+        """Make SW-1 the first member of a virtual chassis and return its second member, SW-1-B."""
         chassis = VirtualChassis.objects.create(name="VC-1")
         member = Device.objects.create(
             name="SW-1-B", site=self.site, device_type=self.device_type, role=self.role, serial=serial
         )
         Device.objects.filter(pk=self.switch.pk).update(virtual_chassis=chassis, vc_position=1)
         Device.objects.filter(pk=member.pk).update(virtual_chassis=chassis, vc_position=2)
-        parent = self.make_parent(Device.objects.get(pk=member.pk), "1/1", 2)
+        return Device.objects.get(pk=member.pk)
+
+    def build_chassis_harness(self, serial="MEMBER-B"):
+        """Put a two-channel parent on chassis member SW-1-B and its children on SW-1, which NetBox permits."""
+        member = self.join_chassis(serial)
+        parent = self.make_parent(member, "1/1", 2)
         switch = Device.objects.get(pk=self.switch.pk)
         lanes = []
         for number in (1, 2):
@@ -237,6 +243,10 @@ class HarnessPlanningTest(HarnessTopologyMixin, TestCase):
         self.assertEqual(harness["profile"], BREAKOUT_4)
         self.assertEqual(harness["parent"], ["dcim.interface", self.parent.pk, self.switch.pk])
         self.assertEqual(
+            [child for child, _far in harness["legs"]],
+            [["dcim.interface", self.children[n].pk, self.switch.pk] for n in range(1, 5)],
+        )
+        self.assertEqual(
             [far for _child, far in harness["legs"]],
             [["dcim.frontport", self.fronts[n].pk, self.fronts[n].device_id] for n in range(1, 5)],
         )
@@ -248,7 +258,7 @@ class HarnessPlanningTest(HarnessTopologyMixin, TestCase):
                 self.assertEqual(unit.selected_with, tuple(sorted(set(identities) - {unit.identity})))
                 self.assertEqual(
                     self.state(unit).to_dict()["evidence"]["legs"],
-                    [[n, f"dcim.frontport:{self.fronts[n].pk}"] for n in range(1, 5)],
+                    [[n, f"dcim.device:{self.switch.pk}", f"dcim.frontport:{self.fronts[n].pk}"] for n in range(1, 5)],
                 )
 
     def test_a_single_lane_names_no_companion_and_warns_of_the_unused_channels(self):
@@ -773,6 +783,46 @@ class HarnessExecutionTest(HarnessTopologyMixin, TransactionTestCase):
 
         with self.assertRaises(StalePlan):
             self.execute(accepted, actor=actor)
+
+        self.assertFalse(Cable.objects.exists())
+
+    def test_a_child_moved_to_another_chassis_member_before_its_lock_is_a_stale_plan(self):
+        """The child stays a channel of its parent, but it no longer answers the source's Device reference."""
+        from django.db import connection
+
+        member = self.join_chassis()
+        self.resolve_lanes([1])
+        accepted = self.plan(panel_leg(1))
+        child = self.children[1].pk
+        moved = []
+        table = Interface._meta.db_table
+
+        def move_before_the_first_interface_lock(execute, sql, params, many, context):
+            if moved or f'FROM "{table}"' not in sql or "FOR UPDATE" not in sql.upper():
+                return execute(sql, params, many, context)
+            moved.append(True)
+            with run_on_separate_connection(lambda: Interface.objects.filter(pk=child).update(device=member)):
+                pass
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(move_before_the_first_interface_lock), self.assertRaises(StalePlan):
+            self.execute(accepted)
+
+        self.assertEqual((moved, Interface.objects.get(pk=child).device_id), ([True], member.pk))
+        self.assertFalse(Cable.objects.exists())
+
+    def test_a_harness_write_refuses_a_child_that_moved_to_another_device(self):
+        member = self.join_chassis()
+        self.resolve_lanes([1])
+        (change,) = self.harness_changes(self.plan(panel_leg(1)).units[0])
+        Interface.objects.filter(pk=self.children[1].pk).update(device=member)
+        context = ExecutionContext(actor=self.actor, reader=self.reader(), profile=self.profile)
+
+        with (
+            self.assertRaisesMessage(PreconditionFailed, "moved to another Device after the plan was made."),
+            transaction.atomic(),
+        ):
+            CableModule().apply(change, context)
 
         self.assertFalse(Cable.objects.exists())
 

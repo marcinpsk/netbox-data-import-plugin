@@ -1025,12 +1025,14 @@ parent, and each leg trace stays its own Synchronization Unit:
   is `cable.harness_profile_unavailable`.
 - Every leg unit carries one identical Planned Change, `cable:create:harness:<parent identity>`. Its
   payload records the Cable Profile, the Cable Type, the parent, the ordered far ends with their
-  channel children, and the provenance of every leg, so one execution writes the harness once.
+  channel children and each child's Device, and the provenance of every leg, so one execution writes
+  the harness once.
 - Every leg unit carries a `cable.harness_state` info diagnostic. Its evidence is the parent, its
-  channel count, every Interface under it with its `channel_id`, the legs by channel and far end, the
-  profile, and whether an existing Cable proves the harness. A change in any of them changes every leg
-  unit's fingerprint, on an actionable or a no-op unit. A leg whose parent the actor cannot view
-  carries no harness finding: its `cable.permission_denied` diagnostic holds that evidence (section 6.6).
+  channel count, every Interface under it with its `channel_id`, the legs by channel, child Device and
+  far end, the profile, and whether an existing Cable proves the harness. A change in any of them
+  changes every leg unit's fingerprint, on an actionable or a no-op unit. A leg whose parent the actor
+  cannot view carries no harness finding: its `cable.permission_denied` diagnostic holds that evidence
+  (section 6.6).
 
 One constructor builds every Cable write, in planning and again in execution from the locked rows. An
 ordinary write refuses a channel child at either end. A harness write requires ordered, distinct B ends
@@ -1064,7 +1066,10 @@ terminations, Cables, CableTerminations and PortMapping rows as it does for ever
 moved to another parent between that read and its lock has its new parent and children locked too.
 Under those locks the plan rereads the channel count, the full child set with each `channel_id`, and
 the termination snapshot. A difference from the accepted plan changes the unit fingerprint and refuses
-the execution as a stale plan.
+the execution as a stale plan. The child's Device is one of those facts: in a virtual chassis a child
+can move to another member Device and keep its parent and channel. The harness write refuses a child
+whose locked row is no longer on the Device the plan recorded, as an ordinary write refuses a moved
+termination.
 
 The import serializes its own decision facts against NetBox writes that take row locks. It does not
 serialize two NetBox writers against each other: a state they produce between themselves, such as a

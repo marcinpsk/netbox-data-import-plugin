@@ -301,7 +301,9 @@ def harness_payload(intent: CableIntent) -> dict:
     return {
         "profile": intent.profile,
         "parent": _record(intent.a_terminations[0]),
-        "legs": [[child.pk, _record(far)] for child, far in zip(intent.children, intent.b_terminations, strict=True)],
+        "legs": [
+            [_record(child), _record(far)] for child, far in zip(intent.children, intent.b_terminations, strict=True)
+        ],
     }
 
 
@@ -314,11 +316,14 @@ def locked_harness_intent(recorded, free_termination) -> CableIntent:
 
     parent = free_termination(*recorded["parent"])
     fars = [free_termination(*far) for _child, far in recorded["legs"]]
-    child_ids = [child for child, _far in recorded["legs"]]
+    child_ids = [child_id for (_label, child_id, _device_id), _far in recorded["legs"]]
     children = Interface.objects.filter(pk__in=sorted(child_ids)).order_by("pk").select_for_update(of=("self",))
     by_pk = {child.pk: child for child in children}
     if set(child_ids) - by_pk.keys():
         raise PreconditionFailed("A channel subinterface of this harness is gone, so the harness cannot be created.")
+    for (_label, child_id, device_id), _far in recorded["legs"]:
+        if by_pk[child_id].device_id != device_id:
+            raise PreconditionFailed(f"{by_pk[child_id]} moved to another Device after the plan was made.")
     intent = harness_intent(parent, [(by_pk[child], far) for child, far in zip(child_ids, fars, strict=True)])
     if canonical_json(harness_payload(intent)) != canonical_json(recorded):
         raise PreconditionFailed("The channels of this harness changed after the plan was made.")
