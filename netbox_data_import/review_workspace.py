@@ -1045,15 +1045,11 @@ class SyncMember:
 def _breakout_segments(segments, diagnostics) -> list[dict[str, Any]]:
     """Return each segment, naming the breakout profile on the harness leg, which the breakout decides."""
     state = next((item.display for item in diagnostics if item.code == "cable.harness_state"), None)
-    if state is None:
-        return [{**segment, "breakout_profile": ""} for segment in segments]
+    text = BREAKOUT_PROFILE
     # A hidden parent hides the profile its channel count selects, and a blocked harness selects none.
-    known = not _parent_hidden(state) and state["profile"]
-    text = f"{BREAKOUT_PROFILE}: {cable_profile_label(state['profile'])}" if known else BREAKOUT_PROFILE
-    return [
-        {**segment, "breakout_profile": text if segment["index"] == state["segment_index"] else ""}
-        for segment in segments
-    ]
+    if state is not None and not _parent_hidden(state) and state["profile"]:
+        text = f"{BREAKOUT_PROFILE}: {cable_profile_label(state['profile'])}"
+    return [{**segment, "breakout_profile": text if segment["breakout_leg"] else ""} for segment in segments]
 
 
 def _breakout_policies(policies, segments) -> list[dict[str, Any]]:

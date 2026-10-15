@@ -27,7 +27,13 @@ from netbox_data_import.cable_harness import IntentRefused, harness_intent, ordi
 from netbox_data_import.cable_policy import cable_profile_label
 from netbox_data_import.cable_target import CableModule
 from netbox_data_import.import_engine import ImportEngine, SelectionError, StalePlan
-from netbox_data_import.models import CableClassMapping, CableImportSource, CableSegmentOverride, ImportExecution
+from netbox_data_import.models import (
+    CableClassMapping,
+    CableImportSource,
+    CableSegmentOverride,
+    ImportExecution,
+    ImportProfile,
+)
 from netbox_data_import.plan import Disposition, PlannedChange, Severity, fingerprint_of
 from netbox_data_import.review_workspace import BREAKOUT_PROFILE, ReviewWorkspace
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
@@ -1482,7 +1488,7 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         self.assertNotIn(BREAKOUT_PROFILE, segment_item(card, DOWNSTREAM))
         self.assertNotContains(cards["DEV-A eth0"], BREAKOUT_PROFILE)
 
-    def force_type(self, page, cable_type):
+    def force_type(self, page, cable_type, **extra):
         """Post the leg segment's override form as the card renders it: a Cable Type and no profile."""
         return self.client.post(
             reverse("plugins:netbox_data_import:trace_segment_policy"),
@@ -1491,8 +1497,60 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
                 "trace": page.context["selected_trace"].identity,
                 "segment": str(LEG),
                 "cable_type": cable_type,
+                **extra,
             },
         )
+
+    def store_leg_override(self, blocks, lane_port="P01"):
+        """Store an override with a Cable Profile on one lane's leg segment, and return its segment key."""
+        legs = {
+            unit.display["trace"]["endpoints"]["from"]: unit.display["trace"]["segments"][LEG]
+            for unit in self.plan(*blocks).units
+        }
+        segment_key = legs[f"SW-1 Slot 0 >> 0/0 (10) {lane_port}"]["segment_key"]
+        CableSegmentOverride.objects.create(
+            profile=self.profile,
+            segment_key=segment_key,
+            cable_type="mmf-om4",
+            cable_profile="single-1c1p",
+            source_trace_identity="stored",
+            segment_index=LEG,
+        )
+        return segment_key
+
+    def test_a_leg_planned_by_an_operator_who_cannot_view_the_parent_stays_a_leg(self):
+        """Being a leg is a fact of the visible channel child, so the page keeps it and states no parent fact."""
+        blocks = [panel_leg(number, downstream="Patch") for number in range(1, 5)]
+        segment_key = self.store_leg_override(blocks)
+        operator = user_with_object_permission(
+            "hidden-parent-operator",
+            [
+                (ImportProfile, ("view", "change"), {}),
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {"channels__isnull": True}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (Cable, ("view", "add", "delete"), {}),
+                (CableClassMapping, ("view", "add", "change", "delete"), {}),
+                (CableSegmentOverride, ("view", "add", "change", "delete"), {}),
+            ],
+        )
+        self.client.force_login(operator)
+
+        card = self.cards(*blocks)["SW-1 Slot 0 >> 0/0 (10) P01"]
+
+        self.assertIn("cable.permission_denied", [item["code"] for item in card.context["selected_trace"].findings])
+        self.assertIn(BREAKOUT_PROFILE, segment_policy(card, LEG))
+        self.assertNotIn(f"{BREAKOUT_PROFILE}:", segment_policy(card, LEG))
+        self.assertNotIn("1C1P", segment_policy(card, LEG))
+        self.assertNotIn('name="cable_profile"', segment_item(card, LEG))
+        self.assertIn(BREAKOUT_PROFILE, policy_row(card, FIBER))
+        self.assertNotIn('<select name="cable_profile"', policy_row(card, FIBER))
+        response = self.force_type(card, "mmf-om3", cable_profile="__explicit_none__")
+        self.assertEqual(response.status_code, 302, response.content[:300])
+        row = CableSegmentOverride.objects.get(profile=self.profile, segment_key=segment_key)
+        self.assertEqual((row.cable_type, row.cable_profile), ("mmf-om3", "single-1c1p"))
 
     def test_a_leg_type_override_keeps_a_stored_profile_and_never_shows_it(self):
         blocks = [panel_leg(number, downstream="Patch") for number in range(1, 5)]
