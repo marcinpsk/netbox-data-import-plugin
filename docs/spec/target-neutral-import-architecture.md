@@ -356,7 +356,7 @@ Source Trace content fingerprint, and one algorithm keeps the runtime consistent
 
 A fingerprint includes the schema version, the stable unit and change identities, the target payloads,
 the dependencies, the preconditions, the dispositions, the structured diagnostic codes with their
-evidence, the source fingerprint, the Import Profile configuration, the actor, and the planning
+evidence, a unit's co-selection members (section 4.5) when it has any, the source fingerprint, the Import Profile configuration, the actor, and the planning
 context. Diagnostic evidence is part of it because a finding can rest on live state no identity names,
 such as the medium two Cables carry, which would otherwise move under an accepted plan unnoticed. It excludes
 timestamps, URLs, translated text, display-only wording, and the plan revision.
@@ -383,6 +383,15 @@ operator confirmation. It offers that selection only when the engine accepts it:
 closure is actionable and the closure carries each dependency. Otherwise the action is disabled with
 its reason, and the server refuses it before it queues a Job. Sync of all actionable traces applies
 the same check.
+
+A unit can name co-selection members (`selected_with`): units that every selection must hold together
+with it, whatever their disposition. The serialized unit and its fingerprint carry the field only when
+it is not empty. One validator in `plan.py` decides a selection: each member of each selected unit, read
+from the accepted plan and from the current plan, must be selected and actionable. Execution never adds
+a member. It refuses a member that the accepted plan names and the selection lacks as a selection error,
+and a member that only the current plan names, or that is no longer actionable, as a stale plan. The
+Review Workspace adds every member to the visible closure, and it takes a dependency owner only from the
+largest set of actionable units in which every dependency has an owner and every member is present.
 
 Preview presents an accepted Import Plan. Execution regenerates the current plan from the same source
 and configuration before it writes. Selective execution compares the accepted unit and its explicit

@@ -32,7 +32,15 @@ from .object_permissions import (
     delete_permission_scoped_objects,
     save_permission_scoped_object,
 )
-from .plan import Diagnostic, Disposition, ImportPlan, PlannedChange, Severity, SynchronizationUnit
+from .plan import (
+    Diagnostic,
+    Disposition,
+    ImportPlan,
+    PlannedChange,
+    Severity,
+    SynchronizationUnit,
+    missing_companions,
+)
 from .trace_device_resolution import source_device_key
 from .values import (
     effective_device_name,
@@ -1121,28 +1129,40 @@ class ReviewWorkspace:
         return MappingProxyType(sources)
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:
-        """Return the unit and, transitively, one owner of each change it depends on and does not carry.
+        """Return the unit, its companions, and transitively one owner of each change they wait on and do not carry.
 
-        `merge_changes` refuses a selection whose dependency is absent, so a review command that
-        synchronizes one trace has to carry the units its changes wait on.
+        The engine refuses a selection that lacks a dependency or a companion, so a review command that
+        synchronizes one trace has to carry both, visibly.
         """
         selected = self.plan.unit(identity)
         if selected is None or selected.disposition != Disposition.ACTIONABLE:
             return ()
-        chosen = [identity]
-        carried = {change.identity for change in self._planned_changes(identity)}
-        queue = [identity]
+        chosen: dict[str, None] = {}
+        carried: set[str] = set()
+        queue: list[str] = []
+
+        def choose(first: str) -> None:
+            pending = [first]
+            while pending:
+                unit = pending.pop()
+                if unit in chosen:
+                    continue
+                chosen[unit] = None
+                carried.update(change.identity for change in self._planned_changes(unit))
+                queue.append(unit)
+                pending.extend(reversed(self._presented[unit].selected_with))
+
+        choose(identity)
         while queue:
             for change in self._planned_changes(queue.pop()):
                 for dependency in change.dependencies:
-                    owners = self._change_owners.get(dependency)
-                    if dependency in carried or not owners:
+                    if dependency in carried:
                         continue
-                    # Identical changes are shared (section 4.4): prefer an owner whose own closure can sync.
-                    owner = next((unit for unit in owners if unit in self._executable_units), owners[0])
-                    chosen.append(owner)
-                    carried.update(owned.identity for owned in self._planned_changes(owner))
-                    queue.append(owner)
+                    # Identical changes are shared (section 4.4): take an owner whose own closure can sync.
+                    owners = self._change_owners.get(dependency, ())
+                    owner = next((unit for unit in owners if unit in self._executable_units), None)
+                    if owner is not None:
+                        choose(owner)
         return tuple(chosen)
 
     @cached_property
@@ -1156,33 +1176,34 @@ class ReviewWorkspace:
 
     @cached_property
     def _executable_units(self) -> frozenset[str]:
-        """Return the largest set of actionable units in which some unit carries every dependency.
+        """Return the largest set of actionable units that carries every dependency and holds every companion.
 
         A unit outside it has no selection that `cannot_sync` accepts, so no closure may pick it as an owner.
         """
-        units = {
-            identity
-            for identity, disposition in self._presented_dispositions.items()
-            if disposition == Disposition.ACTIONABLE
-        }
+        units = {identity for identity, unit in self._presented.items() if unit.disposition == Disposition.ACTIONABLE}
         owners_left: dict[str, int] = {}
         dependents: dict[str, list[str]] = {}
+        named_by: dict[str, list[str]] = {}
         for identity in units:
             for change in self._planned_changes(identity):
                 owners_left[change.identity] = owners_left.get(change.identity, 0) + 1
                 for dependency in change.dependencies:
                     dependents.setdefault(dependency, []).append(identity)
+            for member in self._presented[identity].selected_with:
+                named_by.setdefault(member, []).append(identity)
         stuck = [
             identity
             for dependency, waiting in dependents.items()
             if not owners_left.get(dependency)
             for identity in waiting
         ]
+        stuck.extend(identity for member, naming in named_by.items() if member not in units for identity in naming)
         while stuck:
             identity = stuck.pop()
             if identity not in units:
                 continue
             units.remove(identity)
+            stuck.extend(named_by.get(identity, ()))
             for change in self._planned_changes(identity):
                 owners_left[change.identity] -= 1
                 if not owners_left[change.identity]:
@@ -1190,9 +1211,9 @@ class ReviewWorkspace:
         return frozenset(units)
 
     @cached_property
-    def _presented_dispositions(self) -> dict[str, str]:
-        """Return each unit's disposition as the viewer sees it."""
-        return {unit.identity: unit.disposition for unit in self._presentation_units}
+    def _presented(self) -> dict[str, SynchronizationUnit]:
+        """Return each unit as the viewer sees it, by identity."""
+        return {unit.identity: unit for unit in self._presentation_units}
 
     def _planned_changes(self, identity: str) -> tuple[PlannedChange, ...]:
         """Return the changes of one plan unit, read from the plan's own index."""
@@ -1204,12 +1225,13 @@ class ReviewWorkspace:
     def cannot_sync(self, selection: tuple[str, ...]) -> bool:
         """Return whether the engine refuses *selection*.
 
-        It refuses a unit the viewer does not see as actionable, and a dependency that no unit in the
-        selection carries. Sync all, the per-trace action and its POST all ask this one question.
+        It refuses a unit the viewer does not see as actionable, a dependency that no unit in the
+        selection carries, and a companion the selection lacks. Sync all, the per-trace action and its
+        POST all ask this one question.
         """
         carried = {change.identity for identity in selection for change in self._planned_changes(identity)}
-        return not all(
-            self._presented_dispositions.get(identity) == Disposition.ACTIONABLE
+        return bool(missing_companions(self._presented, selection)) or not all(
+            self._presented[identity].disposition == Disposition.ACTIONABLE
             and all(set(change.dependencies) <= carried for change in self._planned_changes(identity))
             for identity in selection
         )

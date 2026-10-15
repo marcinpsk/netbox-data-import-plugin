@@ -21,7 +21,17 @@ from . import adapter_config, adapters, branching, catalog, target_modules
 from .models import FailureReason, ImportExecution, SourceDocument, locked_profile_policy
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied, clear_user_permission_caches
-from .plan import Diagnostic, Disposition, ImportPlan, PlanError, PlanInvalid, Severity, executable_units, merge_changes
+from .plan import (
+    Diagnostic,
+    Disposition,
+    ImportPlan,
+    PlanError,
+    PlanInvalid,
+    Severity,
+    executable_units,
+    merge_changes,
+    missing_companions,
+)
 from .source_resolution import derive_effective_rows
 from .target_runtime import DeletedObject, ExecutionContext, PreconditionFailed
 from .public_refusal import PublicRefusal
@@ -94,6 +104,14 @@ class _ExecutionFailed(Exception):
         self.failed_change = failed_change
         self.rolled_back = list(rolled_back)
         self.not_attempted = list(not_attempted)
+
+
+def _unit_index(plan: ImportPlan) -> dict:
+    return {unit.identity: unit for unit in plan.units}
+
+
+def _quoted(identities) -> str:
+    return ", ".join(f"'{identity}'" for identity in identities)
 
 
 class ImportEngine:
@@ -418,17 +436,30 @@ class ImportEngine:
 
     @staticmethod
     def _selected_units(accepted, current, selected_identities):
-        """Return the current actionable units whose accepted fingerprints still match."""
+        """Return the current actionable units whose accepted fingerprints still match.
+
+        Each plan's `selected_with` must be honoured by the selection as submitted; it is never expanded.
+        """
         if len(set(selected_identities)) != len(selected_identities):
             raise SelectionError("A Synchronization Unit can be selected only once.")
-        selected = []
         for identity in selected_identities:
             accepted_unit = accepted.unit(identity)
-            current_unit = current.unit(identity)
-            if accepted_unit is None or current_unit is None:
+            if accepted_unit is None or current.unit(identity) is None:
                 raise SelectionError(f"The current Import Plan does not carry selected unit '{identity}'.")
             if accepted_unit.disposition != Disposition.ACTIONABLE:
                 raise SelectionError(f"Synchronization Unit '{identity}' was not actionable when selected.")
+        for identity, members in missing_companions(_unit_index(accepted), selected_identities).items():
+            raise SelectionError(
+                f"Synchronization Unit '{identity}' must be selected together with {_quoted(members)}."
+            )
+        for identity, members in missing_companions(_unit_index(current), selected_identities).items():
+            raise StalePlan(
+                f"Synchronization Unit '{identity}' changed after the plan was accepted: "
+                f"it now needs {_quoted(members)} selected and actionable."
+            )
+        selected = []
+        for identity in selected_identities:
+            current_unit = current.unit(identity)
             if current_unit.disposition != Disposition.ACTIONABLE:
                 raise StalePlan(f"Synchronization Unit '{identity}' is no longer actionable.")
             if accepted.unit_fingerprint(identity) != current.unit_fingerprint(identity):
