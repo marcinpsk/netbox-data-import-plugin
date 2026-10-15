@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
+from . import cable_harness
 from .cable_disclosure import (
     DISCLOSURE_SOURCE,
     SEGMENT_END_SOURCES,
@@ -83,6 +84,7 @@ _CONFLICT_CODES = frozenset(
         "cable.multi_termination_conflict",
         "cable.planned_termination_conflict",
         "cable.resolved_segment_conflict",
+        "cable.harness_occupied",
     }
 )
 
@@ -189,6 +191,8 @@ class _ExistingCable:
     cable: Any
     a_side: frozenset
     b_side: frozenset
+    # Side, connector, positions and object of every CableTermination row: what a harness reuse compares.
+    snapshot: frozenset = frozenset()
 
     @property
     def multi_termination(self) -> bool:
@@ -234,6 +238,46 @@ def _deleted_cable_review_fingerprint(cable) -> str:
     return fingerprint_of(_cable_review_snapshot(cable))
 
 
+@dataclass(frozen=True, eq=False)
+class _Leg:
+    """One trace's segment from a channel child to the far end its parent's harness cables."""
+
+    analysis: Any
+    segment: _DesiredSegment
+    child: _Termination
+    far: _Termination
+
+
+@dataclass(eq=False)
+class _Harness:
+    """One channelized parent, the legs the batch states on it, and the traces that block it."""
+
+    parent: cable_harness.Parent
+    termination: _Termination
+    legs: list = field(default_factory=list)
+    unsupported: list = field(default_factory=list)
+    unresolved: list = field(default_factory=list)
+    unchannelized: list = field(default_factory=list)
+    intent: cable_harness.CableIntent | None = None
+    cable_type: str | None = None
+    reused: _ExistingCable | None = None
+
+    @property
+    def change_identity(self) -> str:
+        """Return the Planned Change identity every leg unit carries for this harness."""
+        return f"cable:create:harness:{self.termination.identity}"
+
+    @property
+    def pending(self) -> bool:
+        """Return whether the harness can be written and no existing Cable already is it."""
+        return self.intent is not None and self.reused is None
+
+    @property
+    def ends(self) -> list[_Termination]:
+        """Return the parent and every far end the harness claims."""
+        return [self.termination, *(leg.far for leg in self.legs)]
+
+
 @dataclass
 class _TraceAnalysis:
     """What one Source Trace contributes, built in planning order."""
@@ -257,16 +301,29 @@ class _TraceAnalysis:
     retains_logical_cable: bool = False
     blocked: bool = False
     invalid: bool = False
+    # The one segment that leaves a channel child, which the harness of its parent writes.
+    leg: Any = None
+    harness: Any = None
+    selected_with: tuple = ()
 
     @property
     def stopped(self) -> bool:
         """Return whether a finding makes further planning for this trace meaningless."""
         return self.blocked or self.invalid
 
+    def is_leg(self, segment: _DesiredSegment) -> bool:
+        """Return whether *segment* is this trace's harness leg rather than an ordinary segment."""
+        return self.leg is not None and segment.index == self.leg.segment.index
+
     @property
     def pending(self) -> list:
-        """Return the desired segments no existing Cable already proves."""
-        return [segment for segment in self.segments if segment.index not in self.proven]
+        """Return the ordinary desired segments no existing Cable already proves."""
+        return [segment for segment in self.segments if segment.index not in self.proven and not self.is_leg(segment)]
+
+    @property
+    def harness_pending(self) -> bool:
+        """Return whether this trace's harness still has to be created."""
+        return self.harness is not None and self.harness.pending
 
     @property
     def deleted_logical_cable(self):
@@ -286,11 +343,17 @@ class _TraceAnalysis:
             Diagnostic(code=code, severity=Severity.ERROR, identities=tuple(identities), display=display)
         )
 
-    def note(self, code: str, display: dict, identities=()) -> None:
+    def note(self, code: str, display: dict, identities=(), evidence=None) -> None:
         """Record one review note whose identities keep the unit honest about live state."""
         validate_diagnostic_display(code, display)
         self.diagnostics.append(
-            Diagnostic(code=code, severity=Severity.INFO, identities=tuple(identities), display=display)
+            Diagnostic(
+                code=code,
+                severity=Severity.INFO,
+                identities=tuple(identities),
+                display=display,
+                evidence=evidence or {},
+            )
         )
 
     def warn(self, code: str, display: dict, identities=(), evidence=None) -> None:
@@ -561,6 +624,8 @@ class _CableBatch:
         self._mapping_rows: dict[str, Any] | None = None
         self._overrides: dict[str, Any] = {}
         self._overrides_by_trace: dict[str, list] = {}
+        self._parents: dict[int, cable_harness.Parent] = {}
+        self._harnesses: dict[int, _Harness] = {}
         self._stored = self._stored_resolutions()
         active_traces = (analysis.trace for analysis in self.analyses if not analysis.stopped)
         self._device_evidence = collect_trace_device_evidence(active_traces)
@@ -580,9 +645,12 @@ class _CableBatch:
         self._load_mappings()
         self._build_segments()
         self._load_overrides()
+        self._lock_harness_parents()
         self._lock_segment_terminations()
+        self._find_legs()
         self._load_existing_cables()
         self._classify()
+        self._plan_harnesses()
         self._decide()
         self._assess_media()
         self._block_planned_termination_conflicts()
@@ -1038,6 +1106,7 @@ class _CableBatch:
         wanted = {
             termination.key for analysis in self.analyses for termination in self._analysis_terminations(analysis)
         }
+        wanted.update(harness.termination.key for harness in self._harnesses.values())
         # Occupancy is unscoped: a Cable the actor cannot view still holds the termination.
         cable_ids = {
             component.cable_id for key, component in self._objects.items() if key in wanted and component.cable_id
@@ -1052,9 +1121,13 @@ class _CableBatch:
         # Each Cable lock precedes its CableTermination locks, as it does during deletion.
         locked = list(cables)
         sides: dict[int, dict[str, set]] = {}
+        snapshots: dict[int, set] = {}
         for row in terminations:
             label = row.termination_type.model_class()._meta.label_lower
             sides.setdefault(row.cable_id, {"A": set(), "B": set()})[row.cable_end].add((label, row.termination_id))
+            snapshots.setdefault(row.cable_id, set()).add(
+                (row.cable_end, row.connector, tuple(row.positions or ()), label, row.termination_id)
+            )
         if self.lock_plan_references:
             from core.models import ObjectType
             from django.db import connection
@@ -1078,7 +1151,12 @@ class _CableBatch:
                     cursor.fetchall()
         for cable in locked:
             ends = sides.get(cable.pk, {"A": set(), "B": set()})
-            existing = _ExistingCable(cable=cable, a_side=frozenset(ends["A"]), b_side=frozenset(ends["B"]))
+            existing = _ExistingCable(
+                cable=cable,
+                a_side=frozenset(ends["A"]),
+                b_side=frozenset(ends["B"]),
+                snapshot=frozenset(snapshots.get(cable.pk, ())),
+            )
             self._existing[cable.pk] = existing
             for key in existing.a_side | existing.b_side:
                 self._occupied[key] = existing
@@ -1101,6 +1179,262 @@ class _CableBatch:
             )
             for component in components:
                 self._objects[(label, component.pk)] = component
+
+    def _channel_parent(self, termination: _Termination) -> int | None:
+        """Return the parent of one resolved termination that is a channel child, from its latest row."""
+        component = self._objects.get(termination.key)
+        return None if component is None else cable_harness.channel_parent(component)
+
+    def _child_parents(self) -> set[int]:
+        """Return the parent of every resolved termination that is a channel child."""
+        return {
+            parent
+            for resolved in self._resolved.values()
+            for termination in resolved.values()
+            if (parent := self._channel_parent(termination)) is not None
+        }
+
+    def _lock_harness_parents(self) -> None:
+        """Lock each parent of a resolved channel child, then every Interface under it, before the segment locks."""
+        if self.lock_plan_references:
+            self._parents = cable_harness.read_parents(self._child_parents(), lock=True)
+
+    def _find_legs(self) -> None:
+        """Give each trace that reaches a channel child to its parent's harness, as a leg or as a blocker.
+
+        A child can move to another parent between the first read and its lock, so that parent is read,
+        and locked, here.
+        """
+        parents = self._child_parents()
+        self._parents.update(cable_harness.read_parents(parents - self._parents.keys(), lock=self.lock_plan_references))
+        for analysis in self.analyses:
+            self._place_trace(analysis)
+        for parent_pk in sorted(self._harnesses):
+            self._gather_cohort(self._harnesses[parent_pk])
+
+    def _harness(self, parent_pk: int) -> _Harness:
+        """Return the harness of one parent, created on first use."""
+        if parent_pk not in self._harnesses:
+            parent = self._parents[parent_pk]
+            # On a virtual chassis the parent can sit on another member Device.
+            self._device_displays.setdefault(parent.component.device_id, str(parent.component.device))
+            self._harnesses[parent_pk] = _Harness(parent=parent, termination=self._termination(parent.component))
+        return self._harnesses[parent_pk]
+
+    def _place_trace(self, analysis: _TraceAnalysis) -> None:
+        """Record one trace as the leg of its parent's harness, or as a trace that blocks that harness."""
+        touched = sorted(
+            {
+                parent
+                for termination in self._resolved.get(analysis.identity, {}).values()
+                if (parent := self._channel_parent(termination)) is not None
+            }
+        )
+        if not touched:
+            return
+        legs = [
+            (segment, end)
+            for segment in analysis.segments
+            for end in segment.terminations
+            if self._channel_parent(end) is not None
+        ]
+        if len(legs) > 1:
+            # A child at both ends of one segment, or a trace between two harnesses.
+            harness = self._harness(touched[0])
+            analysis.block(
+                "cable.harness_unsupported",
+                self._harness_display(harness, legs[0][0].index, trace=analysis.display["name"]),
+                identities=(harness.termination.identity,),
+            )
+            for parent in touched:
+                self._harness(parent).unsupported.append(analysis)
+            return
+        if not legs:
+            # The trace names a channel child but no physical first hop from it.
+            for parent in touched:
+                self._harness(parent).unresolved.append(analysis)
+            return
+        ((segment, child),) = legs
+        harness = self._harness(touched[0])
+        far = segment.right if child.key == segment.left.key else segment.left
+        analysis.leg = _Leg(analysis=analysis, segment=segment, child=child, far=far)
+        analysis.harness = harness
+        harness.legs.append(analysis.leg)
+
+    def _gather_cohort(self, harness: _Harness) -> None:
+        """Read the source cohorts of one harness as negative evidence (section 6.1).
+
+        A cohort is the device and cards label of a reference that resolves to a child of the parent.
+        Any trace with an unresolved reference in a cohort blocks the harness, so a lane the source
+        states but the plan cannot resolve never leaves a shorter harness behind.
+        """
+        members = [leg.analysis for leg in harness.legs] + harness.unsupported + harness.unresolved
+        cohorts = {
+            reference.identity_key[:2]
+            for analysis in members
+            for reference in self._references(analysis.trace)
+            if (termination := self._resolved.get(analysis.identity, {}).get(reference.identity_key)) is not None
+            and self._channel_parent(termination) == harness.parent.pk
+        }
+        for analysis in self.analyses:
+            resolved = self._resolved.get(analysis.identity, {})
+            keys = {reference.identity_key for reference in self._references(analysis.trace)}
+            for key in sorted(key for key in keys if key[:2] in cohorts):
+                termination = resolved.get(key)
+                component = None if termination is None else self._objects.get(termination.key)
+                if termination is None and analysis not in harness.unresolved:
+                    harness.unresolved.append(analysis)
+                elif component is not None and cable_harness.is_plain_interface(component):
+                    harness.unchannelized.append((analysis, termination))
+
+    @staticmethod
+    def _harness_display(harness: _Harness, segment_index: int, *ports: _Termination, **fields) -> dict:
+        """Return the display every harness finding carries: the leg, the parent, and the ports it names."""
+        return {
+            "segment_index": segment_index,
+            "parent": harness.termination.display,
+            **fields,
+            **termination_sources(harness.termination.key, *(port.key for port in ports)),
+        }
+
+    def _plan_harnesses(self) -> None:
+        """Decide each harness once, then give each of its leg units the same findings."""
+        for parent_pk in sorted(self._harnesses):
+            harness = self._harnesses[parent_pk]
+            harness.legs.sort(
+                key=lambda leg: (cable_harness.channel(self._objects[leg.child.key]), leg.analysis.identity)
+            )
+            findings = self._harness_findings(harness)
+            hidden = not self.reader.terminations(cable_harness.INTERFACE).filter(pk=parent_pk).exists()
+            for leg in harness.legs:
+                if hidden:
+                    leg.analysis.block(
+                        "cable.permission_denied", {"permission": _view_permission(cable_harness.INTERFACE)}
+                    )
+                for kind, code, ports, fields in findings:
+                    getattr(leg.analysis, kind)(
+                        code,
+                        self._harness_display(harness, leg.segment.index, *ports, **fields),
+                        identities=(harness.termination.identity, *(port.identity for port in ports)),
+                    )
+                self._settle_leg(leg, harness)
+
+    def _harness_findings(self, harness: _Harness) -> list[tuple[str, str, tuple, dict]]:
+        """Return each finding of one harness as (severity method, code, ports it names, display fields)."""
+        parent = harness.parent
+        on_parent = self._existing.get(parent.component.cable_id)
+        faults = parent.faults("" if on_parent is None else on_parent.cable.profile)
+        if faults:
+            return [
+                (
+                    "refuse",
+                    "cable.harness_channel_state_invalid",
+                    (self._termination(child.component),),
+                    {"port": str(child.component), "channel": child.channel, "fault": fault},
+                )
+                for child, fault in faults
+            ]
+        findings: list[tuple[str, str, tuple, dict]] = [
+            ("block", "cable.harness_unsupported", (), {"trace": analysis.display["name"]})
+            for analysis in harness.unsupported
+        ]
+        findings.extend(
+            ("block", "cable.harness_member_unresolved", (), {"trace": analysis.display["name"]})
+            for analysis in harness.unresolved
+        )
+        try:
+            harness.intent = cable_harness.harness_intent(
+                parent.component, [(self._objects[leg.child.key], self._objects[leg.far.key]) for leg in harness.legs]
+            )
+        except cable_harness.IntentRefused as refusal:
+            kind = "refuse" if refusal.code == "cable.harness_channel_state_invalid" else "block"
+            findings.append((kind, refusal.code, (), dict(refusal.facts)))
+        if self._harness_cable_types(harness):
+            findings.append(("block", "cable.harness_type_conflict", (), {}))
+        findings.extend(self._harness_occupancy(harness))
+        findings.extend(
+            (
+                "warn",
+                "cable.harness_member_unchannelized",
+                (port,),
+                {"trace": analysis.display["name"], "port": port.display},
+            )
+            for analysis, port in harness.unchannelized
+        )
+        if harness.intent is not None and harness.intent.trailing:
+            findings.append(("warn", "cable.harness_partial", (), {"missing": list(harness.intent.trailing)}))
+        return findings
+
+    def _harness_cable_types(self, harness: _Harness) -> bool:
+        """Settle the one Cable Type every leg's policy agrees on, and return whether the legs disagree.
+
+        Only the Cable Type dimension applies to a leg: the channel topology decides the profile.
+        """
+        from .cable_policy import policy_choice_errors
+
+        types = set()
+        for leg in harness.legs:
+            row = self._policy_row(leg.segment)
+            display = {"segment_index": leg.segment.index, "cable_class": leg.segment.cable_class}
+            if row is None or not row.cable_type_resolved:
+                leg.analysis.block("cable.cableclass_unmapped", display)
+            elif policy_choice_errors(row.cable_type, None):
+                leg.analysis.block("cable.policy_stale", display)
+            else:
+                types.add(row.cable_type)
+        if len(types) == 1:
+            harness.cable_type = next(iter(types))
+        return len(types) > 1
+
+    def _harness_occupancy(self, harness: _Harness) -> list[tuple[str, str, tuple, dict]]:
+        """Reuse the Cable on the parent when its termination snapshot is the harness, else block each held end."""
+        on_parent = self._occupied.get(harness.termination.key)
+        if (
+            harness.intent is not None
+            and on_parent is not None
+            and harness.intent.proved_by(on_parent.cable.profile, on_parent.snapshot)
+        ):
+            harness.reused = on_parent
+            return []
+        findings = []
+        for port in harness.ends:
+            occupying = self._occupied.get(port.key)
+            if occupying is not None:
+                cable_display, _identities = self._cable_diagnostic_disclosure(occupying.cable)
+                findings.append(("block", "cable.harness_occupied", (port,), {"port": port.display, **cable_display}))
+        return findings
+
+    def _settle_leg(self, leg: _Leg, harness: _Harness) -> None:
+        """Record what the harness means for one leg unit: reuse or companions, then its fingerprinted state."""
+        analysis = leg.analysis
+        if harness.reused is not None:
+            analysis.proven[leg.segment.index] = harness.reused
+            cable_display, cable_identities = self._cable_diagnostic_disclosure(harness.reused.cable)
+            analysis.note(
+                "cable.segment_reused",
+                {"segment_index": leg.segment.index, **cable_display},
+                identities=(*cable_identities, harness.termination.identity, leg.far.identity),
+            )
+        else:
+            analysis.selected_with = tuple(
+                sorted(other.analysis.identity for other in harness.legs if other is not leg)
+            )
+        channels = [cable_harness.channel(self._objects[other.child.key]) for other in harness.legs]
+        profile = "" if harness.intent is None else harness.intent.profile
+        analysis.note(
+            "cable.harness_state",
+            self._harness_display(
+                harness, leg.segment.index, channels=harness.parent.channels, legs=channels, profile=profile
+            ),
+            identities=(harness.termination.identity, leg.child.identity, leg.far.identity),
+            evidence={
+                "parent": harness.termination.identity,
+                **harness.parent.evidence(),
+                "legs": [[number, other.far.identity] for number, other in zip(channels, harness.legs, strict=True)],
+                "profile": profile,
+                "reused": harness.reused is not None,
+            },
+        )
 
     @staticmethod
     def _analysis_terminations(analysis: _TraceAnalysis) -> list[_Termination]:
@@ -1140,7 +1474,7 @@ class _CableBatch:
         for analysis in pending:
             # Only these analyses look at the live topology, so only they may report what is there.
             analysis.topology_read = True
-            for segment in analysis.segments:
+            for segment in analysis.pending:
                 candidate = self._occupied.get(segment.left.key)
                 proven = candidate if candidate is not None and candidate.satisfies(segment) else None
                 if proven is not None:
@@ -1360,7 +1694,8 @@ class _CableBatch:
             "family": decisive_media_family(cable_type),
             "retained": proven is not None,
             "visible": visible,
-            "splits": cable_profile_splits_a_span(cable_profile),
+            # A breakout Cable fans out, so a leg ends the run whatever its policy states.
+            "splits": analysis.is_leg(segment) or cable_profile_splits_a_span(cable_profile),
             "disclosure_source": source,
             "origin": origin,
         }
@@ -1423,7 +1758,7 @@ class _CableBatch:
         """Block the trace when the actor may not make every Cable write it asks for."""
         if self.actor is None:
             return
-        if analysis.pending and not self.actor.has_perm("dcim.add_cable"):
+        if (analysis.pending or analysis.harness_pending) and not self.actor.has_perm("dcim.add_cable"):
             analysis.block("cable.permission_denied", {"permission": "dcim.add_cable"})
             return
         logical = analysis.deleted_logical_cable
@@ -1436,24 +1771,33 @@ class _CableBatch:
             )
 
     def _block_planned_termination_conflicts(self) -> None:
-        """Block every actionable trace that competes for one free termination."""
-        claims: dict[tuple[str, int], list[tuple[_TraceAnalysis, _DesiredSegment, _Termination]]] = {}
+        """Block every actionable trace that competes for one free termination.
+
+        A claim is keyed by the Cable it creates, so traces that share one segment or one harness agree.
+        """
+        claims: dict[tuple[str, int], list[tuple[_TraceAnalysis, str, int, _Termination]]] = {}
         for analysis in self._writing():
             for segment in analysis.pending:
                 for termination in segment.terminations:
-                    claims.setdefault(termination.key, []).append((analysis, segment, termination))
+                    claims.setdefault(termination.key, []).append((analysis, segment.key, segment.index, termination))
+            if analysis.harness_pending:
+                harness, index = analysis.harness, analysis.leg.segment.index
+                for termination in harness.ends:
+                    claims.setdefault(termination.key, []).append(
+                        (analysis, harness.change_identity, index, termination)
+                    )
         for records in claims.values():
-            for analysis, segment, termination in records:
+            for analysis, claim, index, termination in records:
                 competitors = [
                     other
-                    for other, other_segment, _other_termination in records
-                    if other is not analysis and other_segment.key != segment.key
+                    for other, other_claim, _other_index, _other_termination in records
+                    if other is not analysis and other_claim != claim
                 ]
                 for competitor in competitors:
                     analysis.block(
                         "cable.planned_termination_conflict",
                         {
-                            "segment_index": segment.index,
+                            "segment_index": index,
                             "termination": termination.display,
                             "competing_trace": competitor.display["name"],
                             **termination_sources(termination.key),
@@ -1546,6 +1890,7 @@ class _CableBatch:
                 "detail": self._detail(analysis, disposition),
                 "trace": self._workspace(analysis, bool(changes)),
             },
+            selected_with=analysis.selected_with,
         )
 
     def _workspace(self, analysis: _TraceAnalysis, writes: bool) -> dict:
@@ -1685,7 +2030,12 @@ class _CableBatch:
         changes = []
         if analysis.deleted_logical_cable is not None:
             changes.append(self._delete_change(analysis.deleted_logical_cable))
-        changes.extend(self._create_change(segment, analysis.policies[segment.index]) for segment in analysis.pending)
+        for segment in analysis.segments:
+            if analysis.is_leg(segment):
+                if analysis.harness_pending:
+                    changes.append(self._harness_change(analysis.harness))
+            elif segment.index not in analysis.proven:
+                changes.append(self._create_change(segment, analysis.policies[segment.index]))
         return tuple(changes)
 
     def _delete_change(self, logical: _ExistingCable) -> PlannedChange:
@@ -1704,6 +2054,10 @@ class _CableBatch:
 
     def _create_change(self, segment: _DesiredSegment, policy: dict) -> PlannedChange:
         """Return the creation of one physical segment, shared by every trace that states it."""
+        ends = [self._objects.get(end.key) for end in segment.terminations]
+        # A row gone since resolution is refused by the write; every other end passes the write's own guard.
+        if None not in ends:
+            cable_harness.ordinary_intent(*ends, profile=policy["cable_profile"] or "")
         return PlannedChange(
             identity=segment.change_identity,
             target_module=CableModule.key,
@@ -1718,6 +2072,27 @@ class _CableBatch:
             preconditions={"terminations": segment.as_json()},
         )
 
+    def _harness_change(self, harness: _Harness) -> PlannedChange:
+        """Return the one creation every leg unit of a harness carries, identical in each unit."""
+        if harness.intent is None:
+            raise RuntimeError("A harness that cannot be written has no Planned Change.")
+        sources = sorted(
+            (_source_record(leg.analysis.trace, leg.segment.index) for leg in harness.legs),
+            key=lambda record: (record["trace_identity"], record["segment_index"]),
+        )
+        return PlannedChange(
+            identity=harness.change_identity,
+            target_module=CableModule.key,
+            operation="create",
+            payload={
+                "harness": cable_harness.harness_payload(harness.intent),
+                "cable_type": harness.cable_type,
+                "status": CABLE_STATUS,
+                "sources": sources,
+            },
+            preconditions={"terminations": sorted(end.as_json() for end in harness.ends)},
+        )
+
     @staticmethod
     def _detail(analysis: _TraceAnalysis, disposition: str) -> str:
         """Return the operator wording one unit shows before the trace workspace exists."""
@@ -1725,7 +2100,7 @@ class _CableBatch:
             return "The stated path already exists."
         if disposition != Disposition.ACTIONABLE:
             return ""
-        count = len(analysis.pending)
+        count = len(analysis.pending) + analysis.harness_pending
         if analysis.deleted_logical_cable is not None:
             return f"Would replace the logical cable with {count} physical segment(s)."
         return f"Would create {count} physical segment(s)."
@@ -1789,20 +2164,24 @@ class CableModule:
 
     @staticmethod
     def _create(planned_change: PlannedChange, execution_context) -> Any:
-        """Create one physical Cable segment and the provenance rows its Source Traces earn."""
+        """Create one physical Cable segment or one harness, and the provenance rows its Source Traces earn.
+
+        The write is built from locked live rows through the same constructor planning used.
+        """
         from dcim.models import Cable
 
         payload = planned_change.payload
-        ends = [
-            CableModule._free_termination(label, object_id, device_id)
-            for label, object_id, device_id in payload["terminations"]
-        ]
+        if "harness" in payload:
+            intent = cable_harness.locked_harness_intent(payload["harness"], CableModule._free_termination)
+        else:
+            first, second = (CableModule._free_termination(*end) for end in payload["terminations"])
+            intent = cable_harness.ordinary_intent(first, second, profile=payload["cable_profile"] or "")
         cable = Cable(
             type=payload["cable_type"],
-            profile=payload["cable_profile"] or "",
+            profile=intent.profile,
             status=payload["status"],
-            a_terminations=[ends[0]],
-            b_terminations=[ends[1]],
+            a_terminations=list(intent.a_terminations),
+            b_terminations=list(intent.b_terminations),
         )
         cable.full_clean()
         cable.save()

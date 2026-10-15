@@ -13,7 +13,7 @@ PACKAGE = pathlib.Path(__file__).resolve().parents[1]
 PACKAGE_NAME = PACKAGE.name
 CALLERS = ("views.py", "jobs.py", "preview_coordinator.py")
 INTERPRETERS = ("flat_workbook.py", "trace_workbook.py")
-TARGET_MODULES = ("target_modules.py", "cable_target.py")
+TARGET_MODULES = ("target_modules.py", "cable_target.py", "cable_harness.py")
 FORBIDDEN_TARGET_MODULE_IMPORTS = frozenset({"flat_workbook", "trace_workbook", "views"})
 FORBIDDEN_INTERPRETER_IMPORTS = frozenset(
     {

@@ -423,6 +423,33 @@ def _media_family_message(display) -> str:
     return f"Verified pass-throughs join these segments, and {'; '.join(statements)}. {remedy}"
 
 
+def _channels(numbers) -> str:
+    return ", ".join(str(number) for number in numbers)
+
+
+def _harness_state_message(display) -> str:
+    """Return the wording that says which channels of one breakout this plan states."""
+    return (
+        f"{display['parent']} breaks out as one Cable. This source states channel(s) "
+        f"{_channels(display['legs'])} of {display['channels']}."
+    )
+
+
+_CHANNEL_STATE_REPAIRS = {
+    "mirror": "does not mirror the Cable of its parent. Save the parent again in NetBox, or run manage.py trace_paths",
+    "termination": "holds its own Cable termination, which NetBox does not permit. Remove that Cable in NetBox",
+    "channel": "names a channel its parent does not have. Correct the channel in NetBox",
+}
+
+
+def _channel_state_message(display) -> str:
+    """Return the wording for one channel subinterface whose NetBox state contradicts its parent."""
+    repair = _CHANNEL_STATE_REPAIRS.get(display.get("fault", ""))
+    if repair is None:
+        return "A leg of this breakout is no longer a channel of its parent. Re-read the preview."
+    return f"Channel subinterface {display['port']} {repair}, then re-read."
+
+
 # Operator wording per code: a sentence, or a function of the presented display.
 _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     "cable.ambiguous_mapped_peer": (
@@ -430,6 +457,48 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     ),
     "cable.attribute_drift": "The existing Cable carries attributes this import would not have written.",
     "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Set the Cable policy for it.",
+    "cable.harness_channel_gap": lambda display: (
+        f"Channel(s) {_channels(display['missing'])} between the legs of this breakout have no leg. "
+        "NetBox numbers connectors by position, so a later leg would take the wrong connector. "
+        "Resolve the missing lane to its channel subinterface, or correct the source."
+    ),
+    "cable.harness_channel_state_invalid": _channel_state_message,
+    "cable.harness_leg_conflict": (
+        "Two legs of this breakout claim one channel or one far end. Resolve each lane to its own channel subinterface."
+    ),
+    "cable.harness_member_unchannelized": lambda display: (
+        f"The trace '{display['trace']}' names this breakout's card and reaches {display['port']}, which is not a "
+        "channel subinterface. If it is a lane of this breakout, channelize it in NetBox, then re-read."
+    ),
+    "cable.harness_member_unresolved": lambda display: (
+        f"The trace '{display['trace']}' names this breakout's card but is not resolved. "
+        "Resolve it, so the breakout Cable is written with every lane."
+    ),
+    "cable.harness_mixed_terminations": (
+        "The legs of this breakout reach ports of more than one kind, and NetBox cables one kind on each side "
+        "of a Cable. Make the source state the same first hop for every lane, for example its panel front port."
+    ),
+    "cable.harness_occupied": (
+        "Another Cable holds a port this breakout needs, and the import never edits a breakout Cable. "
+        "Correct that Cable in NetBox, then re-read."
+    ),
+    "cable.harness_partial": lambda display: (
+        f"Channel(s) {_channels(display['missing'])} have no leg in this source, so the breakout Cable leaves "
+        "them unused. A per-module export confirms only the legs it states. A leg added later needs the Cable "
+        "edited in NetBox, because the import never edits a breakout Cable."
+    ),
+    "cable.harness_profile_unavailable": lambda display: (
+        f"This NetBox instance offers no breakout Cable Profile for a parent with {display['channels']} channels."
+    ),
+    "cable.harness_state": _harness_state_message,
+    "cable.harness_type_conflict": (
+        "The legs of this breakout resolve to different Cable Types. "
+        "Make their CableClass policies or segment overrides agree."
+    ),
+    "cable.harness_unsupported": lambda display: (
+        f"The trace '{display['trace']}' joins two channel subinterfaces, or two breakouts. "
+        "The import cannot write that as one breakout Cable."
+    ),
     "cable.incompatible_terminations": (
         "NetBox cannot cable these two terminations together. Choose another termination for the end that is wrong."
     ),

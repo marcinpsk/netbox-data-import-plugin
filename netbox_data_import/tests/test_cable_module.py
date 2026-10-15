@@ -2288,14 +2288,14 @@ class CablePolicyDisclosureRegistryTest(CableTopologyMixin, TestCase):
         import ast
         from pathlib import Path
 
-        from netbox_data_import import cable_target
+        from netbox_data_import import cable_harness, cable_target
         from netbox_data_import.cable_disclosure import CABLE_DIAGNOSTIC_FIELDS
         from netbox_data_import.cable_policy import policy_choice_errors
 
-        source = Path(cable_target.__file__).read_text(encoding="utf-8")
         produced = {
             node.value
-            for node in ast.walk(ast.parse(source))
+            for module in (cable_target, cable_harness)
+            for node in ast.walk(ast.parse(Path(module.__file__).read_text(encoding="utf-8")))
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("cable.")
         }
         produced.update(error.code for error in policy_choice_errors("removed-type", "removed-profile").values())
