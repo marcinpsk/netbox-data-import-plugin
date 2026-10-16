@@ -39,10 +39,14 @@ DRIFT = "NetBox has changed. Re-read the preview before synchronizing."
 JSON = {"HTTP_ACCEPT": "application/json"}
 
 
-def _trace_unit(identity, *changes, disposition=Disposition.ACTIONABLE):
+def _trace_unit(identity, *changes, disposition=Disposition.ACTIONABLE, selected_with=()):
     """Return one trace unit as the workspace reads it, carrying the given changes."""
     return SynchronizationUnit(
-        identity=identity, disposition=disposition, changes=changes, display={"trace": {"cable_policies": []}}
+        identity=identity,
+        disposition=disposition,
+        changes=changes,
+        display={"trace": {"cable_policies": []}},
+        selected_with=selected_with,
     )
 
 
@@ -175,28 +179,126 @@ class SyncAllSelectionTest(CableTopologyMixin, TestCase):
         self.assertEqual(workspace.sync_all.traces, ("cable:trace:second", "cable:trace:waits"))
         self.assertEqual(workspace.sync_all.held_back, 1)
 
+    def test_a_shared_dependency_skips_an_owner_whose_companion_cannot_sync(self):
+        """The first owner needs a blocked companion, so the closure takes the other owner of the change."""
+        plan = ImportPlan(
+            units=(
+                _trace_unit("cable:trace:first", _change("cable:delete:7"), selected_with=("cable:trace:held",)),
+                _trace_unit(
+                    "cable:trace:held",
+                    _change("cable:create:h"),
+                    disposition=Disposition.BLOCKED,
+                    selected_with=("cable:trace:first",),
+                ),
+                _trace_unit("cable:trace:second", _change("cable:delete:7")),
+                _trace_unit("cable:trace:waits", _change("cable:create:w", "cable:delete:7")),
+            )
+        )
+        workspace = ReviewWorkspace(plan, self.actor)
+
+        self.assertEqual(workspace.sync_selection("cable:trace:waits"), ("cable:trace:waits", "cable:trace:second"))
+        actions = {trace.identity: trace.actions for trace in workspace.traces}
+        (sync,) = actions["cable:trace:waits"]
+        self.assertEqual((sync.enabled, sync.reason), (True, ""))
+        (first,) = actions["cable:trace:first"]
+        self.assertEqual((first.enabled, first.reason), (False, SYNC_DEPENDENCY_HELD))
+        self.assertEqual(workspace.sync_all.traces, ("cable:trace:second", "cable:trace:waits"))
+        self.assertEqual(workspace.sync_all.held_back, 1)
+
+    def test_an_owner_leaves_when_its_companion_loses_a_dependency(self):
+        """Pruning one unit prunes every unit that names it, so the closure takes the other owner."""
+        plan = ImportPlan(
+            units=(
+                _trace_unit("cable:trace:first", _change("cable:delete:7"), selected_with=("cable:trace:partner",)),
+                _trace_unit("cable:trace:partner", _change("cable:create:p", "cable:delete:404")),
+                _trace_unit("cable:trace:second", _change("cable:delete:7")),
+                _trace_unit("cable:trace:waits", _change("cable:create:w", "cable:delete:7")),
+            )
+        )
+        workspace = ReviewWorkspace(plan, self.actor)
+
+        self.assertEqual(workspace.sync_selection("cable:trace:waits"), ("cable:trace:waits", "cable:trace:second"))
+        self.assertEqual(workspace.sync_all.traces, ("cable:trace:second", "cable:trace:waits"))
+        self.assertEqual(workspace.sync_all.held_back, 2)
+
+    def test_a_group_selection_shows_every_companion(self):
+        """Selection never expands silently, so a trace's own sync names every unit of its group."""
+        group = ("cable:trace:leg1", "cable:trace:leg2", "cable:trace:leg3")
+        legs = tuple(
+            _trace_unit(
+                identity,
+                _change("cable:create:harness"),
+                selected_with=tuple(other for other in group if other != identity),
+            )
+            for identity in group
+        )
+        plan = ImportPlan(units=(*legs, _trace_unit("cable:trace:free", _change("cable:create:f"))))
+        workspace = ReviewWorkspace(plan, self.actor)
+
+        self.assertEqual(workspace.sync_selection("cable:trace:leg2"), ("cable:trace:leg2", *(group[0], group[2])))
+        self.assertTrue(workspace.cannot_sync(("cable:trace:leg2",)))
+        self.assertFalse(workspace.cannot_sync(workspace.sync_selection("cable:trace:leg2")))
+        self.assertEqual(workspace.sync_all.units, (*group, "cable:trace:free"))
+        self.assertEqual(workspace.sync_all.held_back, 0)
+
+    def test_a_group_with_a_companion_that_cannot_sync_is_held_back(self):
+        plan = ImportPlan(
+            units=(
+                _trace_unit("cable:trace:leg1", _change("cable:create:harness"), selected_with=("cable:trace:leg2",)),
+                _trace_unit(
+                    "cable:trace:leg2",
+                    _change("cable:create:harness"),
+                    disposition=Disposition.BLOCKED,
+                    selected_with=("cable:trace:leg1",),
+                ),
+                _trace_unit("cable:trace:free", _change("cable:create:f")),
+            )
+        )
+        workspace = ReviewWorkspace(plan, self.actor)
+
+        self.assertTrue(workspace.cannot_sync(workspace.sync_selection("cable:trace:leg1")))
+        # A held sync lists no member: the page would name a selection the server refuses.
+        self.assertEqual(
+            next(trace for trace in workspace.traces if trace.identity == "cable:trace:leg1").sync_members, ()
+        )
+        self.assertEqual(workspace.sync_all.units, ("cable:trace:free",))
+        self.assertEqual((workspace.sync_all.blocked, workspace.sync_all.held_back), (1, 1))
+
     def test_a_selection_syncs_whenever_some_selection_with_the_unit_can_sync(self):
         """Compare each closure with every subset of small random plans, so no owner choice hides a valid one."""
-        rng = Random(220)
+        self._assert_every_closure_is_complete(Random(220), grouped=False, rounds=300)
+
+    def test_a_group_selection_syncs_whenever_some_selection_with_the_unit_can_sync(self):
+        """The same comparison with random co-selection groups, in more rounds: a group-blocked owner is rare."""
+        self._assert_every_closure_is_complete(Random(221), grouped=True, rounds=1500)
+
+    def _assert_every_closure_is_complete(self, rng, *, grouped, rounds):
         dispositions = (Disposition.ACTIONABLE,) * 3 + (Disposition.BLOCKED,)
-        for _ in range(300):
+        for _ in range(rounds):
             pool = [f"cable:create:{n}" for n in range(5)]
             dependencies = {
                 change: tuple(rng.sample([*pool[:n], "cable:delete:404"], rng.randint(0, min(2, n + 1))))
                 for n, change in enumerate(pool)
             }
+            identities = [f"cable:trace:{n}" for n in range(5)]
+            companions = {
+                identity: tuple(rng.sample([other for other in identities if other != identity], rng.randint(0, 2)))
+                if grouped
+                else ()
+                for identity in identities
+            }
             plan = ImportPlan(
                 units=tuple(
                     _trace_unit(
-                        f"cable:trace:{n}",
+                        identity,
                         *(_change(c, *dependencies[c]) for c in rng.sample(pool, rng.randint(1, 2))),
                         disposition=rng.choice(dispositions),
+                        selected_with=companions[identity],
                     )
-                    for n in range(5)
+                    for identity in identities
                 )
             )
             workspace = ReviewWorkspace(plan, self.actor)
-            identities = [unit.identity for unit in plan.units]
             for unit in plan.units:
                 if unit.disposition != Disposition.ACTIONABLE:
                     continue
@@ -346,7 +448,7 @@ class HeldTraceSyncTest(_SyncAllMixin, IsolatedRQQueueTestMixin, CableTopologyMi
         for identity in HELD:
             refused = self.client.post(
                 reverse("plugins:netbox_data_import:trace_sync"),
-                {**preview_claim(self.client), "identity": identity},
+                {**preview_claim(self.client), "selection": identity},
                 **JSON,
             )
 
@@ -458,7 +560,7 @@ class SyncAllExecutionTest(_SyncAllMixin, IsolatedRQQueueTestMixin, CableTopolog
         actionable = next(trace for trace in page.context["traces"] if trace.disposition == Disposition.ACTIONABLE)
         queued = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {**preview_claim(self.client), "identity": actionable.identity},
+            {**preview_claim(self.client), "selection": actionable.identity},
         )
         self.assertEqual(queued.status_code, 302)
         held = preview_coordinator(self.client)

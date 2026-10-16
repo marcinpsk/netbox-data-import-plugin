@@ -550,7 +550,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
                     self.assertIn(f'name="next" value="{reread_next}"', form)
                     continue
                 # The sync command already names the trace it synchronizes.
-                field = "identity" if action.endswith("/sync/") else "trace"
+                field = "selection" if action.endswith("/sync/") else "trace"
                 self.assertIn(f'name="{field}" value="{identity}"', form)
 
     def test_a_workspace_command_swaps_the_page_content_in_place(self):
@@ -711,7 +711,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": wanted.identity, **preview_claim(self.client)},
+            {"selection": wanted.identity, **preview_claim(self.client)},
             follow=True,
         )
 
@@ -727,7 +727,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
 
         refused = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **preview_claim(self.client)},
+            {"selection": chosen.identity, **preview_claim(self.client)},
             follow=True,
         )
 
@@ -766,7 +766,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **claim},
+            {"selection": chosen.identity, **claim},
             follow=True,
         )
 
@@ -835,7 +835,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
         with self.captureOnCommitCallbacks(execute=True):
             self.client.post(
                 reverse("plugins:netbox_data_import:trace_sync"),
-                {"identity": chosen.identity, **preview_claim(self.client)},
+                {"selection": chosen.identity, **preview_claim(self.client)},
             )
         return Job.objects.get(data__job_type="netbox_data_import.import")
 
@@ -862,7 +862,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
         refused = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
             {
-                "identity": workspace.context["traces"][0].identity,
+                "selection": workspace.context["traces"][0].identity,
                 **preview_claim(self.client),
             },
             follow=True,
@@ -911,7 +911,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
 
         refused = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": workspace.context["traces"][0].identity, **claim},
+            {"selection": workspace.context["traces"][0].identity, **claim},
         )
 
         self.assertContains(refused, SYNC_QUEUED, status_code=409)
@@ -943,7 +943,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
 
         refused = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **_older_claim(self.client)},
+            {"selection": chosen.identity, **_older_claim(self.client)},
         )
 
         self.assertContains(refused, STALE_PREVIEW, status_code=409)
@@ -1022,7 +1022,7 @@ class TraceWorkspacePageTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestC
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **claim},
+            {"selection": chosen.identity, **claim},
             follow=True,
         )
 
@@ -1137,7 +1137,7 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         with self.captureOnCommitCallbacks(execute=True):
             self.client.post(
                 reverse("plugins:netbox_data_import:trace_sync"),
-                {"identity": self.first_trace(), **preview_claim(self.client)},
+                {"selection": self.first_trace(), **preview_claim(self.client)},
             )
         return Job.objects.get(data__job_type="netbox_data_import.import")
 
@@ -1190,7 +1190,7 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         claim = preview_claim(self.client)
         commands = {
             "preview_reread": {"next": reverse("plugins:netbox_data_import:trace_workspace")},
-            "trace_sync": {"identity": identity},
+            "trace_sync": {"selection": identity},
             "trace_cable_policy": {
                 "trace": identity,
                 "cable_class": "Patch",
@@ -1220,13 +1220,13 @@ class RetainedTraceSyncTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
 
         refused = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": self.first_trace(), **preview_claim(self.client)},
+            {"selection": self.first_trace(), **preview_claim(self.client)},
         )
         self.assertContains(refused, SYNC_FINISHED, status_code=409)
         self.assertEqual(_reread(self.client).status_code, 302)
         queued = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": self.first_trace(), **preview_claim(self.client)},
+            {"selection": self.first_trace(), **preview_claim(self.client)},
         )
 
         self.assertEqual(queued.status_code, 302)
@@ -1488,7 +1488,7 @@ class RetainedSyncEnqueueSerializationTest(IsolatedRQQueueTestMixin, CableTopolo
             self.assertTrue(holding.wait(10), "the competing connection never took the profile row")
             response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_sync"),
-                {"identity": chosen.identity, **claim},
+                {"selection": chosen.identity, **claim},
             )
         finally:
             holder.join(20)
@@ -1532,7 +1532,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         chosen = self._upload_and_choose()
         self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **preview_claim(self.client)},
+            {"selection": chosen.identity, **preview_claim(self.client)},
         )
         job = Job.objects.get(data__job_type="netbox_data_import.import")
         rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
@@ -1565,7 +1565,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         chosen = self._upload_and_choose()
         self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **preview_claim(self.client)},
+            {"selection": chosen.identity, **preview_claim(self.client)},
         )
         job = Job.objects.get(data__job_type="netbox_data_import.import")
         rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
@@ -1592,7 +1592,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         chosen = self._upload_and_choose()
         self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **preview_claim(self.client)},
+            {"selection": chosen.identity, **preview_claim(self.client)},
         )
         job = Job.objects.get(data__job_type="netbox_data_import.import")
         rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
@@ -1641,7 +1641,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         chosen = self._upload_and_choose()
         self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **preview_claim(self.client)},
+            {"selection": chosen.identity, **preview_claim(self.client)},
         )
         job = Job.objects.get(data__job_type="netbox_data_import.import")
         rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
@@ -1697,7 +1697,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         chosen = self._upload_and_choose()
         self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **preview_claim(self.client)},
+            {"selection": chosen.identity, **preview_claim(self.client)},
         )
         job = Job.objects.get(data__job_type="netbox_data_import.import")
         rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
@@ -1722,7 +1722,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         chosen = self._upload_and_choose()
         self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **preview_claim(self.client)},
+            {"selection": chosen.identity, **preview_claim(self.client)},
         )
         job = Job.objects.get(data__job_type="netbox_data_import.import")
         rq_job = get_queue(job.queue_name).fetch_job(str(job.job_id))
@@ -1781,7 +1781,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
             with self.assertRaises(RedisConnectionError):
                 self.client.post(
                     reverse("plugins:netbox_data_import:trace_sync"),
-                    {"identity": chosen.identity, **preview_claim(self.client)},
+                    {"selection": chosen.identity, **preview_claim(self.client)},
                 )
 
         stranded = Job.objects.get(data__job_type="netbox_data_import.import")
@@ -1793,7 +1793,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         self.assertEqual(after.preview_token, before.preview_token)
         retried = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **preview_claim(self.client)},
+            {"selection": chosen.identity, **preview_claim(self.client)},
         )
         self.assertEqual(retried.status_code, 302, retried.content[:300])
         self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 2)
@@ -2313,7 +2313,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         syncable = next(trace for trace in workspace.context["traces"] if trace.disposition == "actionable")
         self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": syncable.identity, **preview_claim(self.client)},
+            {"selection": syncable.identity, **preview_claim(self.client)},
         )
         self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
 
@@ -2535,7 +2535,7 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
         chosen = workspace.context["traces"][0]
         queued = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **preview_claim(self.client)},
+            {"selection": chosen.identity, **preview_claim(self.client)},
         )
         job = Job.objects.get(data__job_type="netbox_data_import.import")
         self.assertRedirects(
@@ -2589,7 +2589,7 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, **preview_claim(self.client)},
+            {"selection": chosen.identity, **preview_claim(self.client)},
         )
 
         job = Job.objects.get(data__job_type="netbox_data_import.import")
@@ -2631,7 +2631,7 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
             chosen = next(trace for trace in workspace.context["traces"] if trace.endpoints["from"] == endpoint)
             response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_sync"),
-                {"identity": chosen.identity, **preview_claim(self.client)},
+                {"selection": chosen.identity, **preview_claim(self.client)},
             )
             queued = Job.objects.filter(data__job_type="netbox_data_import.import").order_by("pk")
             self.assertEqual(queued.count(), step, f"step {step}: the sync queued no new job")
@@ -2692,7 +2692,7 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
         self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
             {
-                "identity": traces["DEV-G eth0"].identity,
+                "selection": traces["DEV-G eth0"].identity,
                 **preview_claim(self.client),
             },
         )
@@ -2735,7 +2735,7 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
             chosen = workspace.context["traces"][0]
             response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_sync"),
-                {"identity": chosen.identity, **preview_claim(self.client)},
+                {"selection": chosen.identity, **preview_claim(self.client)},
             )
             queued = Job.objects.filter(data__job_type="netbox_data_import.import").order_by("pk")
             self.assertEqual(queued.count(), step, f"step {step}: the sync queued no new job")
@@ -3040,7 +3040,7 @@ class TraceWorkspaceCableDisclosureTest(CableTopologyMixin, TransactionTestCase)
         response = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
             {
-                "identity": trace.identity,
+                "selection": trace.identity,
                 **preview_claim(self.client),
             },
         )
@@ -3325,7 +3325,7 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
         queued = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
             {
-                "identity": actionable.identity,
+                "selection": actionable.identity,
                 **preview_claim(self.client),
             },
         )
@@ -3360,7 +3360,7 @@ class TraceWorkspaceTerminationDisclosureTest(CableTopologyMixin, TransactionTes
 
         queued = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": actionable, **preview_claim(self.client)},
+            {"selection": actionable, **preview_claim(self.client)},
             follow=True,
         )
 
@@ -4243,7 +4243,7 @@ class TraceWorkspaceSegmentOverrideTest(CableTopologyMixin, TransactionTestCase)
 
         queued = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": trace.identity, **preview_claim(self.client)},
+            {"selection": trace.identity, **preview_claim(self.client)},
         )
 
         self.assertEqual(queued.status_code, 302)
@@ -4416,7 +4416,8 @@ class TraceWorkspaceSegmentOverrideTest(CableTopologyMixin, TransactionTestCase)
 
         trace = self.open_workspace(patched_path()).context["selected_trace"]
         self.client.post(
-            reverse("plugins:netbox_data_import:trace_sync"), {"identity": trace.identity, **preview_claim(self.client)}
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {"selection": trace.identity, **preview_claim(self.client)},
         )
         self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
         stale = {**stored_plan(self.client), "schema_version": 1}

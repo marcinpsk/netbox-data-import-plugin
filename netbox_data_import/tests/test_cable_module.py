@@ -42,6 +42,7 @@ from netbox_data_import.cable_policy import (
     cable_type_label,
     decisive_media_family,
 )
+from netbox_data_import.cable_harness import IntentRefused
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT, CableModule, eligible_terminations
 from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import (
@@ -444,6 +445,20 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         self.assertEqual(list(review["tags"]), ["Earlier", "Later"])
         self.assertEqual(deletion.payload, {"cable_id": logical.pk})
 
+    def test_a_breakout_cable_between_the_endpoints_is_never_the_logical_cable(self):
+        """A one-leg breakout has one end per side, so only its profile tells it from a direct Cable."""
+        breakout = self.connect(self.eth0, self.eth1, profile="breakout-1c4p-4c1p")
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual((unit.disposition, unit.changes), (Disposition.BLOCKED, ()))
+        occupied = sorted(
+            item.display["port"] for item in unit.diagnostics if item.code == "cable.termination_occupied"
+        )
+        self.assertEqual(occupied, sorted([str(self.eth0), str(self.eth1)]))
+        self.assertIsNone(unit.display["trace"]["logical_cable"])
+        self.assertTrue(Cable.objects.filter(pk=breakout.pk).exists())
+
     def test_a_trace_with_no_direct_cable_is_a_creation_only_replacement(self):
         """With nothing to remove the unit carries creations alone, and they wait on nothing."""
         unit = self.unit(patched_path())
@@ -715,6 +730,51 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         self.assertIs(occupied.display["cable_visible"], True)
         self.assertEqual(occupied.display["cable"], str(foreign))
         self.assertTrue(Cable.objects.filter(pk=foreign.pk).exists())
+
+    def test_a_far_end_marked_connected_blocks_the_unit(self):
+        """NetBox refuses a Cable on a termination marked as connected (CableTermination.clean)."""
+        Interface.objects.filter(pk=self.eth1.pk).update(mark_connected=True)
+
+        plan = self.plan(patched_path())
+
+        (unit,) = plan.units
+        self.assertEqual(unit.disposition, Disposition.BLOCKED, self.codes(unit))
+        self.assertEqual(unit.changes, ())
+        occupied = next(item for item in unit.diagnostics if item.code == "cable.termination_occupied")
+        self.assertEqual(
+            (occupied.display["segment_index"], occupied.display["port"], occupied.display["marked_connected"]),
+            (2, str(self.eth1), True),
+        )
+        self.assertNotIn("cable_visible", occupied.display)
+        messages = {item["code"]: item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings}
+        self.assertIn("as connected without a Cable", messages["cable.termination_occupied"])
+
+    def test_a_lag_far_end_blocks_the_unit_and_reopens_its_picker(self):
+        """NetBox refuses a Cable on a LAG Interface (CableTermination.clean), so the operator chooses again."""
+        Interface.objects.filter(pk=self.eth1.pk).update(type="lag")
+
+        plan = self.plan(patched_path())
+
+        (unit,) = plan.units
+        self.assertEqual(unit.disposition, Disposition.BLOCKED, self.codes(unit))
+        self.assertEqual(unit.changes, ())
+        refused = next(item for item in unit.diagnostics if item.code == "cable.termination_not_connectable")
+        self.assertEqual(
+            (refused.display["segment_index"], refused.display["port"], refused.display["interface_type"]),
+            (2, str(self.eth1), "lag"),
+        )
+        records = {item["label"]: item["incompatible"] for item in unit.display["trace"]["terminations"]}
+        self.assertTrue(records["DEV-B eth1"])
+        self.assertFalse(records["DEV-A eth0"])
+        messages = {item["code"]: item["message"] for item in ReviewWorkspace(plan, self.actor).traces[0].findings}
+        self.assertIn("Choose another termination", messages["cable.termination_not_connectable"])
+
+    def test_a_physical_far_end_of_another_type_stays_actionable(self):
+        Interface.objects.filter(pk=self.eth1.pk).update(type="10gbase-x-sfpp")
+
+        (unit,) = self.plan(patched_path()).units
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
 
     def test_an_invisible_occupying_cable_blocks_without_disclosing_its_identity(self):
         """Occupancy stays unscoped, but its Cable details stay inside the actor's view scope."""
@@ -2030,6 +2090,63 @@ class CableDisclosureSchemaTest(SimpleTestCase):
                 "Diagnostic 'cable.planned_termination_conflict' names terminations without their sources.",
             ),
             (
+                "a fact of an Interface without its wording sources",
+                "cable.termination_channelized",
+                {"segment_index": 0, "port": "0/0", "termination_sources": [{"kind": "dcim.interface", "pk": 1}]},
+                "Diagnostic 'cable.termination_channelized' states a fact of an Interface without its sources.",
+            ),
+            (
+                "a wording port without its Device",
+                "cable.termination_channelized",
+                {
+                    "segment_index": 0,
+                    "port": "0/0",
+                    "termination_sources": [{"kind": "dcim.interface", "pk": 1}],
+                    "wording_sources": [{"kind": "dcim.interface", "pk": 1}, {"kind": "dcim.interface", "pk": 2}],
+                },
+                "Diagnostic 'cable.termination_channelized' states a fact of an Interface without its sources.",
+            ),
+            (
+                "wording sources that leave out the port the display names",
+                "cable.termination_channelized",
+                {
+                    "segment_index": 0,
+                    "port": "0/0",
+                    "termination_sources": [{"kind": "dcim.interface", "pk": 1}],
+                    "wording_sources": [{"kind": "dcim.interface", "pk": 2}, {"kind": "dcim.device", "pk": 3}],
+                },
+                "Diagnostic 'cable.termination_channelized' names a port its wording sources leave out.",
+            ),
+            (
+                "a harness conflict whose wording sources leave out its termination",
+                "cable.planned_termination_conflict",
+                {
+                    "segment_index": 0,
+                    "competing_trace": "B",
+                    "termination": "F1",
+                    "termination_sources": [{"kind": "dcim.frontport", "pk": 3}],
+                    "wording_sources": [{"kind": "dcim.interface", "pk": 4}, {"kind": "dcim.device", "pk": 2}],
+                },
+                "Diagnostic 'cable.planned_termination_conflict' names a port its wording sources leave out.",
+            ),
+            (
+                "a harness port its wording sources leave out",
+                "cable.harness_occupied",
+                {
+                    "segment_index": 0,
+                    "parent": "0/0",
+                    "port": "F1",
+                    "marked_connected": True,
+                    "termination_sources": [
+                        {"kind": "dcim.interface", "pk": 1},
+                        {"kind": "dcim.device", "pk": 2},
+                        {"kind": "dcim.frontport", "pk": 3},
+                    ],
+                    "wording_sources": [{"kind": "dcim.interface", "pk": 4}, {"kind": "dcim.device", "pk": 2}],
+                },
+                "Diagnostic 'cable.harness_occupied' names a port its wording sources leave out.",
+            ),
+            (
                 "termination sources on a diagnostic that names no termination",
                 "cable.segment_reused",
                 {"segment_index": 0, "termination_sources": [{"kind": "dcim.interface", "pk": 1}]},
@@ -2132,6 +2249,7 @@ class CableDisclosureSchemaTest(SimpleTestCase):
             _DIAGNOSTIC_DISCLOSURE_FIELDS,
             CABLE_CLASS_MAPPING_ROW,
             CABLE_ROW,
+            WORDING_SOURCES,
             DISCLOSURE_SOURCE,
             POLICY_VISIBLE,
             TERMINATION_SOURCES,
@@ -2144,7 +2262,14 @@ class CableDisclosureSchemaTest(SimpleTestCase):
         mapping = {"kind": CABLE_CLASS_MAPPING_ROW, "pk": 3}
         media_segment = {"retained": True, "visible": True, "cable_type": "cat6", "family": "cat6"}
         diagnostics = []
-        for code, (public, cable, policy, termination) in _DIAGNOSTIC_DISCLOSURE_FIELDS.items():
+        for code, (
+            public,
+            cable,
+            policy,
+            termination,
+            wording,
+            _wording_optional,
+        ) in _DIAGNOSTIC_DISCLOSURE_FIELDS.items():
             display = dict.fromkeys(public, "value")
             if code == "cable.media_family_mismatch":
                 display["segments"] = [
@@ -2158,6 +2283,8 @@ class CableDisclosureSchemaTest(SimpleTestCase):
             if termination:
                 display.update(dict.fromkeys(termination, "eth0"))
                 display[TERMINATION_SOURCES] = [{"kind": "dcim.interface", "pk": 5}]
+            if wording:
+                display[WORDING_SOURCES] = [{"kind": "dcim.interface", "pk": 5}, {"kind": "dcim.device", "pk": 7}]
             diagnostics.append(Diagnostic(code=code, severity=Severity.ERROR, display=display))
         delete = PlannedChange(
             identity="cable:delete:9", target_module="cable", operation="delete", payload={"cable_id": 9}
@@ -2288,20 +2415,21 @@ class CablePolicyDisclosureRegistryTest(CableTopologyMixin, TestCase):
         import ast
         from pathlib import Path
 
-        from netbox_data_import import cable_target
-        from netbox_data_import.cable_disclosure import CABLE_DIAGNOSTIC_FIELDS
+        from netbox_data_import import cable_harness, cable_target
+        from netbox_data_import.cable_disclosure import CABLE_DIAGNOSTIC_FIELDS, FINDING_HIDDEN
         from netbox_data_import.cable_policy import policy_choice_errors
 
-        source = Path(cable_target.__file__).read_text(encoding="utf-8")
         produced = {
             node.value
-            for node in ast.walk(ast.parse(source))
+            for module in (cable_target, cable_harness)
+            for node in ast.walk(ast.parse(Path(module.__file__).read_text(encoding="utf-8")))
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("cable.")
         }
         produced.update(error.code for error in policy_choice_errors("removed-type", "removed-profile").values())
         produced.update(error.code for error in policy_choice_errors("cat6", "trunk-2c1p").values())
 
-        self.assertEqual(set(CABLE_DIAGNOSTIC_FIELDS), produced)
+        # Only presentation writes the finding that replaces a hidden channel fact.
+        self.assertEqual(set(CABLE_DIAGNOSTIC_FIELDS), produced | {FINDING_HIDDEN})
 
 
 class CableMediaFamilyTest(CableTopologyMixin, TestCase):
@@ -3026,6 +3154,29 @@ class CablePreconditionRecheckTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(CableImportSource.objects.count(), 0)
 
+    def test_a_termination_marked_connected_after_planning_refuses_its_creation(self):
+        """The locked write rebuilds the intent, so NetBox's refusal of a marked-connected end is never reached."""
+        unit = self.unit(patched_path())
+        Interface.objects.filter(pk=self.eth1.pk).update(mark_connected=True)
+
+        with self.assertRaises(IntentRefused) as refused:
+            CableModule().apply(unit.changes[2], self.context())
+
+        self.assertEqual(refused.exception.code, "cable.termination_occupied")
+        self.assertEqual(Cable.objects.count(), 0)
+
+    def test_a_termination_made_virtual_after_planning_refuses_its_creation(self):
+        """The locked write rebuilds the intent, so NetBox's refusal of a virtual Interface is never reached."""
+        unit = self.unit(patched_path())
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, self.codes(unit))
+        Interface.objects.filter(pk=self.eth1.pk).update(type="virtual")
+
+        with self.assertRaises(IntentRefused) as refused:
+            CableModule().apply(unit.changes[2], self.context())
+
+        self.assertEqual(refused.exception.code, "cable.termination_not_connectable")
+        self.assertEqual(Cable.objects.count(), 0)
+
     def test_a_re_terminated_logical_cable_refuses_its_deletion(self):
         """The one cable this import removes must still hold the terminations the plan recorded."""
         logical = self.connect(self.eth0, self.eth1)
@@ -3099,9 +3250,11 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
         outsider = Interface.objects.create(device=self.make_device("DEV-C"), name="eth9", type="1000base-t")
         self.connect(self.panel_1_fronts[0], outsider)
 
-        workspace = self.workspace(self.unit(patched_path()))
+        plan = self.plan(patched_path())
 
-        statuses = {segment["index"]: segment["status"] for segment in workspace["segments"]}
+        # Presentation marks the conflict from the findings the viewer may read.
+        (trace,) = ReviewWorkspace(plan, self.actor).traces
+        statuses = {segment["index"]: segment["status"] for segment in trace.segments}
         self.assertEqual(statuses[0], "conflict")
 
     def test_the_logical_cable_a_replacement_deletes_is_named(self):
@@ -3184,9 +3337,9 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
 
         plan = self.plan(aliased, conflicting)
 
-        for unit in plan.units:
-            statuses = [segment["status"] for segment in unit.display["trace"]["segments"]]
-            self.assertEqual(statuses, ["conflict"], unit.identity)
+        for trace in ReviewWorkspace(plan, self.actor).traces:
+            statuses = [segment["status"] for segment in trace.segments]
+            self.assertEqual(statuses, ["conflict"], trace.identity)
 
     def test_a_trace_that_never_reached_classification_does_not_claim_an_absent_cable(self):
         """Planning that stopped before it read the topology reports unknown, not absence."""

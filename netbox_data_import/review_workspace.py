@@ -11,9 +11,16 @@ from functools import cached_property
 from types import MappingProxyType
 from typing import Any
 
-from .cable_disclosure import CABLE_SEGMENT_OVERRIDE_ROW, DISCLOSURE_SOURCE, POLICY_HIDDEN, POLICY_VISIBLE
-from .cable_policy import cable_media_family_label, cable_type_label
-from .cable_target import UNRESOLVED
+from .cable_disclosure import (
+    CABLE_SEGMENT_OVERRIDE_ROW,
+    DISCLOSURE_SOURCE,
+    FINDING_HIDDEN,
+    POLICY_HIDDEN,
+    POLICY_VISIBLE,
+    TERMINATION_SOURCES,
+)
+from .cable_policy import cable_media_family_label, cable_profile_label, cable_type_label
+from .cable_target import REUSE_SEGMENT, UNRESOLVED
 from .identity import identity_in, identity_text
 from .import_engine import ImportEngine
 from .models import (
@@ -32,7 +39,15 @@ from .object_permissions import (
     delete_permission_scoped_objects,
     save_permission_scoped_object,
 )
-from .plan import Diagnostic, Disposition, ImportPlan, PlannedChange, Severity, SynchronizationUnit
+from .plan import (
+    Diagnostic,
+    Disposition,
+    ImportPlan,
+    PlannedChange,
+    Severity,
+    SynchronizationUnit,
+    missing_companions,
+)
 from .trace_device_resolution import source_device_key
 from .values import (
     effective_device_name,
@@ -214,6 +229,7 @@ def save_cable_segment_override_and_replan(
     cable_class,
     data,
     reviewed_fingerprint,
+    breakout_leg,
 ):
     """Force one planned segment's Cable policy, then request a fresh Import Plan."""
     from .forms import CableSegmentOverrideForm
@@ -229,7 +245,7 @@ def save_cable_segment_override_and_replan(
         instance = stored or CableSegmentOverride(**lookup)
         instance.source_trace_identity = trace_identity
         instance.segment_index = segment_index
-        form = CableSegmentOverrideForm(data, instance=instance)
+        form = CableSegmentOverrideForm(data, instance=instance, breakout_leg=breakout_leg)
         if not form.is_valid():
             raise UnacceptablePolicyDecision(_form_messages(form))
         save_permission_scoped_object(
@@ -415,6 +431,48 @@ def _media_family_message(display) -> str:
     return f"Verified pass-throughs join these segments, and {'; '.join(statements)}. {remedy}"
 
 
+def _channels(numbers) -> str:
+    return ", ".join(str(number) for number in numbers)
+
+
+def _harness_state_message(display) -> str:
+    """Return the wording that says which channels of one breakout this plan states."""
+    return (
+        f"{display['parent']} breaks out as one Cable. This source states channel(s) "
+        f"{_channels(display['legs'])} of {display['channels']}."
+    )
+
+
+def _missing_channels(display) -> str:
+    """Return the subject that names the channels a harness finding misses."""
+    return f"Channel(s) {_channels(display['missing'])}"
+
+
+def _harness_unsupported_message(display) -> str:
+    """Return the wording for a trace the import cannot write as one breakout Cable."""
+    # The constructor refuses a whole harness, so its finding names no single trace.
+    subject = f"The trace '{display['trace']}'" if "trace" in display else "A leg of this breakout"
+    return (
+        f"{subject} joins two channel subinterfaces, two breakouts, or a channel subinterface and its own parent, "
+        "or names the parent as an ordinary port. The import cannot write that as one breakout Cable."
+    )
+
+
+_CHANNEL_STATE_REPAIRS = {
+    "mirror": "does not mirror the Cable of its parent. Save the parent again in NetBox, or run manage.py trace_paths",
+    "termination": "holds its own Cable termination, which NetBox does not permit. Remove that Cable in NetBox",
+    "channel": "names a channel its parent does not have. Correct the channel in NetBox",
+}
+
+
+def _channel_state_message(display) -> str:
+    """Return the wording for one channel subinterface whose NetBox state contradicts its parent."""
+    repair = _CHANNEL_STATE_REPAIRS.get(display.get("fault", ""))
+    if repair is None:
+        return "A leg of this breakout is no longer a channel of its parent. Re-read the preview."
+    return f"Channel subinterface {display['port']} {repair}, then re-read."
+
+
 # Operator wording per code: a sentence, or a function of the presented display.
 _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     "cable.ambiguous_mapped_peer": (
@@ -422,6 +480,49 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     ),
     "cable.attribute_drift": "The existing Cable carries attributes this import would not have written.",
     "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Set the Cable policy for it.",
+    FINDING_HIDDEN: "A port this trace reaches is outside your view, so this preview does not describe it.",
+    "cable.harness_channel_gap": lambda display: (
+        f"{_missing_channels(display)} between the legs of this breakout have no leg. "
+        "NetBox numbers connectors by position, so a later leg would take the wrong connector. "
+        "Resolve the missing lane to its channel subinterface, or correct the source."
+    ),
+    "cable.harness_channel_state_invalid": _channel_state_message,
+    "cable.harness_leg_conflict": (
+        "Two legs of this breakout claim one channel or one far end. Resolve each lane to its own channel subinterface."
+    ),
+    "cable.harness_member_unchannelized": lambda display: (
+        f"The trace '{display['trace']}' names this breakout's card and reaches {display['port']}, which is not a "
+        "channel subinterface. If it is a lane of this breakout, channelize it in NetBox, then re-read."
+    ),
+    "cable.harness_member_unresolved": lambda display: (
+        f"The trace '{display['trace']}' names this breakout's card but is not resolved. "
+        "Resolve it, so the breakout Cable is written with every lane."
+    ),
+    "cable.harness_mixed_terminations": (
+        "The legs of this breakout reach ports of more than one kind, and NetBox cables one kind on each side "
+        "of a Cable. Make the source state the same first hop for every lane, for example its panel front port."
+    ),
+    "cable.harness_occupied": lambda display: (
+        "NetBox marks a port this breakout needs as connected without a Cable, so it cannot take one. "
+        "Clear Mark connected on that port in NetBox, then re-read."
+        if display.get("marked_connected")
+        else "Another Cable holds a port this breakout needs, and the import never edits a breakout Cable. "
+        "Correct that Cable in NetBox, then re-read."
+    ),
+    "cable.harness_partial": lambda display: (
+        f"{_missing_channels(display)} of this breakout have no leg in this source, so the breakout Cable leaves "
+        "them unused. A per-module export confirms only the legs it states. A leg added later needs the Cable "
+        "edited in NetBox, because the import never edits a breakout Cable."
+    ),
+    "cable.harness_profile_unavailable": lambda display: (
+        f"This NetBox instance offers no breakout Cable Profile for a parent with {display['channels']} channels."
+    ),
+    "cable.harness_state": _harness_state_message,
+    "cable.harness_type_conflict": (
+        "The legs of this breakout resolve to different Cable Types. "
+        "Make their CableClass policies or segment overrides agree."
+    ),
+    "cable.harness_unsupported": _harness_unsupported_message,
     "cable.incompatible_terminations": (
         "NetBox cannot cable these two terminations together. Choose another termination for the end that is wrong."
     ),
@@ -435,8 +536,11 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     ),
     "cable.pass_through_verified": "A PortMapping proves the stated pass-through.",
     "cable.permission_denied": "Permission denied: you cannot make one of the Cable changes this trace needs.",
-    "cable.planned_termination_conflict": (
-        "Another Source Trace plans a Cable on this termination. Resolve this trace to a different termination."
+    "cable.planned_termination_conflict": lambda display: (
+        "Another segment of this trace plans a different Cable on this termination, and a termination holds "
+        "one Cable. Correct the source path."
+        if "competing_segment" in display
+        else "Another Source Trace plans a Cable on this termination. Resolve this trace to a different termination."
     ),
     "cable.policy_stale": "The selected Cable policy value is no longer offered by this NetBox instance.",
     "cable.profile_incompatible": "The selected Cable Profile does not permit one termination on each side.",
@@ -450,11 +554,22 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
     "cable.same_port_continuation": "A mapped peer port continues the path where the source repeats one port.",
     "cable.segment_reused": "An existing Cable already proves this segment, so the import keeps it.",
     "cable.segment_self_connection": "Both ends of this segment name one termination. Correct the source path.",
+    "cable.termination_channelized": (
+        "This Interface is channelized, so an ordinary Cable on it reaches no channel. "
+        "Choose the channel subinterface of this lane, so the import writes the breakout Cable on this Interface."
+    ),
     "cable.termination_kind_mismatch": (
         "The stated PortClass does not admit the kind of port the saved selection names. Choose the termination again."
     ),
-    "cable.termination_occupied": (
-        "Another Cable already occupies this termination. "
+    "cable.termination_not_connectable": (
+        "NetBox cannot cable this Interface because of its type. "
+        "Choose another termination for this end, or correct the Interface type in NetBox."
+    ),
+    "cable.termination_occupied": lambda display: (
+        "NetBox marks this termination as connected without a Cable, so it cannot take one. "
+        "Clear Mark connected on it in NetBox, or resolve this trace to a free termination."
+        if display.get("marked_connected")
+        else "Another Cable already occupies this termination. "
         "Remove that Cable, or resolve this trace to a free termination."
     ),
     "cable.termination_unresolved": (
@@ -823,6 +938,15 @@ _SYNC_URL_NAME = "plugins:netbox_data_import:trace_sync"
 _SYNC_ALL_URL_NAME = "plugins:netbox_data_import:trace_sync_all"
 SYNC_ALL_NOTHING = "This preview has no actionable trace to synchronize."
 SYNC_DEPENDENCY_HELD = "This trace depends on a change that cannot synchronize."
+SYNC_SELECTION_CHANGED = (
+    "The traces this sync includes changed since the page loaded. Reload the page and review them again."
+)
+SYNC_SELECTION_INVALID = "The sync request names no valid trace selection."
+SYNC_NOTHING = "That trace has no changes to synchronize."
+SYNC_COMPANIONS = "On the same breakout Cable as this trace"
+SYNC_TOGETHER = "Synchronized together with this trace"
+SYNC_DEPENDENCY_OWNERS = "Needed for a change this trace depends on"
+BREAKOUT_PROFILE = "Set by the breakout"
 
 
 @dataclass(frozen=True)
@@ -902,6 +1026,93 @@ def with_blocked_sync(trace: TraceWorkspaceUnit, reason: str) -> TraceWorkspaceU
     return replace(trace, actions=actions)
 
 
+@dataclass(frozen=True)
+class SyncMember:
+    """One other unit a trace's sync executes, and why: a companion, or one its changes wait on."""
+
+    identity: str
+    name: str
+    # "companion" on a breakout the viewer sees, "together" on one they do not, or "dependency".
+    kind: str
+    is_trace: bool
+
+
+CONFLICT_SEGMENT = "conflict"
+# Findings that make a segment a conflict; only a finding the viewer may read can say so.
+_CONFLICT_CODES = frozenset(
+    {
+        "cable.termination_occupied",
+        "cable.multi_termination_conflict",
+        "cable.planned_termination_conflict",
+        "cable.resolved_segment_conflict",
+        "cable.harness_occupied",
+    }
+)
+# Findings that keep a resolved termination in attention, so its picker can choose another.
+_REOPEN_CODES = frozenset(
+    {"cable.termination_not_connectable", "cable.termination_channelized", "cable.incompatible_terminations"}
+)
+
+
+def _source_key(source) -> tuple:
+    return (source.get("kind"), source.get("pk"))
+
+
+def _presented_terminations(terminations, diagnostics) -> list[dict[str, Any]]:
+    """Return each termination, in attention only while a finding the viewer may read still puts it there."""
+    sources: set[tuple] = set()
+    field_keys: set[Any] = set()
+    for item in diagnostics:
+        if item.code in _REOPEN_CODES:
+            sources.update(_source_key(source) for source in item.display.get(TERMINATION_SOURCES) or ())
+            field_keys.update(item.display.get(key) for key in ("left_field_key", "right_field_key"))
+    return [
+        {
+            **item,
+            "incompatible": bool(item["incompatible"])
+            and (item["field_key"] in field_keys or _source_key(item.get(DISCLOSURE_SOURCE) or {}) in sources),
+            "selected_model": _termination_model_name(item["selected_type"]),
+        }
+        for item in terminations
+    ]
+
+
+def _presented_segments(segments, diagnostics) -> list[dict[str, Any]]:
+    """Return each segment as a conflict when a readable finding says so, and with the breakout profile of a leg."""
+    state = next((item.display for item in diagnostics if item.code == "cable.harness_state"), None)
+    conflicted = {item.display.get("segment_index") for item in diagnostics if item.code in _CONFLICT_CODES}
+    # Each kept Cable carries its own reuse note, so a segment reads as kept only while that note is readable.
+    reused = {item.display.get("segment_index") for item in diagnostics if item.code == "cable.segment_reused"}
+    text = BREAKOUT_PROFILE
+    # A hidden harness hides the profile its channel count selects, and a blocked harness selects none.
+    if state is not None and state["profile"]:
+        text = f"{BREAKOUT_PROFILE}: {cable_profile_label(state['profile'])}"
+    return [
+        {
+            **segment,
+            "breakout_profile": text if segment["breakout_leg"] else "",
+            "status": CONFLICT_SEGMENT
+            if segment["index"] in conflicted
+            else ("" if segment["status"] == REUSE_SEGMENT and segment["index"] not in reused else segment["status"]),
+            "retained": segment["retained"] and segment["index"] in reused,
+        }
+        for segment in segments
+    ]
+
+
+def _breakout_policies(policies, segments) -> list[dict[str, Any]]:
+    """Return each CableClass decision, naming the breakout profile on a class that only the harness leg states."""
+    leg = next((segment for segment in segments if segment["breakout_profile"]), None)
+    ordinary = {segment["cable_class"] for segment in segments if segment is not leg}
+    return [
+        {
+            **policy,
+            "breakout_profile": "" if leg is None or policy["cable_class"] in ordinary else leg["breakout_profile"],
+        }
+        for policy in policies
+    ]
+
+
 def _termination_model_name(label: str) -> str:
     """Return the NetBox name of the model one resolved termination selected, or nothing while open."""
     if not label:
@@ -932,6 +1143,25 @@ class TraceWorkspaceUnit:
     terminations: list[dict[str, Any]]
     findings: list[dict[str, str]]
     actions: tuple[TraceAction, ...]
+    sync_members: tuple[SyncMember, ...] = ()
+
+    @property
+    def sync_selection(self) -> tuple[str, ...]:
+        """Return what the sync form posts: this trace, then each member in the order the sync selects it."""
+        return (self.identity, *(member.identity for member in self.sync_members))
+
+    @property
+    def sync_groups(self) -> tuple[tuple[str, tuple[SyncMember, ...]], ...]:
+        """Return the members under why the sync needs them, leaving out an empty group."""
+        groups = (
+            (label, tuple(member for member in self.sync_members if member.kind == kind))
+            for kind, label in (
+                ("companion", SYNC_COMPANIONS),
+                ("together", SYNC_TOGETHER),
+                ("dependency", SYNC_DEPENDENCY_OWNERS),
+            )
+        )
+        return tuple((label, members) for label, members in groups if members)
 
     @classmethod
     def from_unit(cls, unit: SynchronizationUnit) -> TraceWorkspaceUnit:
@@ -942,6 +1172,14 @@ class TraceWorkspaceUnit:
             {"code": item.code, "message": _diagnostic_message(item), "severity": item.severity}
             for item in unit.diagnostics
         ]
+        segments = _presented_segments(workspace.get("segments") or (), unit.diagnostics)
+        detail = str(display.get("detail") or "")
+        # "The path exists" repeats the reuse notes, so it stands only while each of them is readable.
+        if any(
+            stored["status"] == REUSE_SEGMENT and presented["status"] != REUSE_SEGMENT
+            for stored, presented in zip(workspace.get("segments") or (), segments, strict=True)
+        ):
+            detail = SYNC_NOTHING
         return cls(
             identity=unit.identity,
             trace_identity=str(workspace.get("identity") or ""),
@@ -950,19 +1188,16 @@ class TraceWorkspaceUnit:
             row_number=display.get("row_number"),
             sheet=str(display.get("sheet") or ""),
             endpoints=dict(workspace.get("endpoints") or {}),
-            segments=[dict(segment) for segment in workspace.get("segments") or ()],
-            cable_policies=[dict(policy) for policy in workspace["cable_policies"]],
+            segments=segments,
+            cable_policies=_breakout_policies(workspace["cable_policies"], segments),
             logical_cable=workspace.get("logical_cable"),
             deletes_logical_cable=bool(workspace.get("deletes_logical_cable")),
             resolution_started=bool(workspace.get("resolution_started")),
             topology_known=bool(workspace.get("topology_known")),
             devices=[dict(item) for item in workspace.get("devices") or ()],
-            terminations=[
-                {**item, "selected_model": _termination_model_name(item["selected_type"])}
-                for item in workspace.get("terminations") or ()
-            ],
+            terminations=_presented_terminations(workspace.get("terminations") or (), unit.diagnostics),
             findings=findings,
-            actions=cls._actions(unit, findings, str(display.get("detail") or "")),
+            actions=cls._actions(unit, findings, detail),
         )
 
     @staticmethod
@@ -1102,8 +1337,12 @@ class ReviewWorkspace:
             if not _states_a_trace(unit):
                 continue
             trace = TraceWorkspaceUnit.from_unit(unit)
-            if unit.disposition == Disposition.ACTIONABLE and self.cannot_sync(self.sync_selection(unit.identity)):
-                trace = with_blocked_sync(trace, SYNC_DEPENDENCY_HELD)
+            if unit.disposition == Disposition.ACTIONABLE:
+                closure = self._sync_closure(unit.identity)
+                if self.cannot_sync(tuple(closure)):
+                    trace = with_blocked_sync(trace, SYNC_DEPENDENCY_HELD)
+                else:
+                    trace = replace(trace, sync_members=self._sync_members(unit.identity, closure))
             traces.append(trace)
         return tuple(traces)
 
@@ -1121,29 +1360,68 @@ class ReviewWorkspace:
         return MappingProxyType(sources)
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:
-        """Return the unit and, transitively, one owner of each change it depends on and does not carry.
+        """Return the unit, its companions, and transitively one owner of each change they wait on and do not carry.
 
-        `merge_changes` refuses a selection whose dependency is absent, so a review command that
-        synchronizes one trace has to carry the units its changes wait on.
+        The engine refuses a selection that lacks a dependency or a companion, so a review command that
+        synchronizes one trace has to carry both, visibly: the page lists them and the POST must match.
         """
+        return tuple(self._sync_closure(identity))
+
+    def _sync_members(self, identity: str, closure: Mapping[str, bool]) -> tuple[SyncMember, ...]:
+        """Return every unit of *closure* other than *identity*, by the name the trace list shows."""
+        return tuple(
+            SyncMember(
+                identity=member,
+                name=str(self._presented[member].display.get("name") or ""),
+                kind=self._member_kind(identity, member, companion),
+                is_trace=_states_a_trace(self._presented[member]),
+            )
+            for member, companion in closure.items()
+            if member != identity
+        )
+
+    def _member_kind(self, identity: str, member: str, companion: bool) -> str:
+        """Name a companion's breakout only when the viewer sees the harness of both legs."""
+        if not companion:
+            return "dependency"
+        return "companion" if self._shows_harness(identity) and self._shows_harness(member) else "together"
+
+    def _shows_harness(self, identity: str) -> bool:
+        """Return whether presentation kept the unit's harness state, which hides with any port of the harness."""
+        return any(item.code == "cable.harness_state" for item in self._presented[identity].diagnostics)
+
+    def _sync_closure(self, identity: str) -> dict[str, bool]:
+        """Return `sync_selection` in order, each unit mapped to whether it joins as a companion of *identity*."""
         selected = self.plan.unit(identity)
         if selected is None or selected.disposition != Disposition.ACTIONABLE:
-            return ()
-        chosen = [identity]
-        carried = {change.identity for change in self._planned_changes(identity)}
-        queue = [identity]
+            return {}
+        chosen: dict[str, bool] = {}
+        carried: set[str] = set()
+        queue: list[str] = []
+
+        def choose(first: str, companion: bool) -> None:
+            pending = [first]
+            while pending:
+                unit = pending.pop()
+                if unit in chosen:
+                    continue
+                chosen[unit] = companion
+                carried.update(change.identity for change in self._planned_changes(unit))
+                queue.append(unit)
+                pending.extend(reversed(self._presented[unit].selected_with))
+
+        choose(identity, True)
         while queue:
             for change in self._planned_changes(queue.pop()):
                 for dependency in change.dependencies:
-                    owners = self._change_owners.get(dependency)
-                    if dependency in carried or not owners:
+                    if dependency in carried:
                         continue
-                    # Identical changes are shared (section 4.4): prefer an owner whose own closure can sync.
-                    owner = next((unit for unit in owners if unit in self._executable_units), owners[0])
-                    chosen.append(owner)
-                    carried.update(owned.identity for owned in self._planned_changes(owner))
-                    queue.append(owner)
-        return tuple(chosen)
+                    # Identical changes are shared (section 4.4): take an owner whose own closure can sync.
+                    owners = self._change_owners.get(dependency, ())
+                    owner = next((unit for unit in owners if unit in self._executable_units), None)
+                    if owner is not None:
+                        choose(owner, False)
+        return chosen
 
     @cached_property
     def _change_owners(self) -> dict[str, tuple[str, ...]]:
@@ -1156,33 +1434,34 @@ class ReviewWorkspace:
 
     @cached_property
     def _executable_units(self) -> frozenset[str]:
-        """Return the largest set of actionable units in which some unit carries every dependency.
+        """Return the largest set of actionable units that carries every dependency and holds every companion.
 
         A unit outside it has no selection that `cannot_sync` accepts, so no closure may pick it as an owner.
         """
-        units = {
-            identity
-            for identity, disposition in self._presented_dispositions.items()
-            if disposition == Disposition.ACTIONABLE
-        }
+        units = {identity for identity, unit in self._presented.items() if unit.disposition == Disposition.ACTIONABLE}
         owners_left: dict[str, int] = {}
         dependents: dict[str, list[str]] = {}
+        named_by: dict[str, list[str]] = {}
         for identity in units:
             for change in self._planned_changes(identity):
                 owners_left[change.identity] = owners_left.get(change.identity, 0) + 1
                 for dependency in change.dependencies:
                     dependents.setdefault(dependency, []).append(identity)
+            for member in self._presented[identity].selected_with:
+                named_by.setdefault(member, []).append(identity)
         stuck = [
             identity
             for dependency, waiting in dependents.items()
             if not owners_left.get(dependency)
             for identity in waiting
         ]
+        stuck.extend(identity for member, naming in named_by.items() if member not in units for identity in naming)
         while stuck:
             identity = stuck.pop()
             if identity not in units:
                 continue
             units.remove(identity)
+            stuck.extend(named_by.get(identity, ()))
             for change in self._planned_changes(identity):
                 owners_left[change.identity] -= 1
                 if not owners_left[change.identity]:
@@ -1190,9 +1469,9 @@ class ReviewWorkspace:
         return frozenset(units)
 
     @cached_property
-    def _presented_dispositions(self) -> dict[str, str]:
-        """Return each unit's disposition as the viewer sees it."""
-        return {unit.identity: unit.disposition for unit in self._presentation_units}
+    def _presented(self) -> dict[str, SynchronizationUnit]:
+        """Return each unit as the viewer sees it, by identity."""
+        return {unit.identity: unit for unit in self._presentation_units}
 
     def _planned_changes(self, identity: str) -> tuple[PlannedChange, ...]:
         """Return the changes of one plan unit, read from the plan's own index."""
@@ -1204,12 +1483,13 @@ class ReviewWorkspace:
     def cannot_sync(self, selection: tuple[str, ...]) -> bool:
         """Return whether the engine refuses *selection*.
 
-        It refuses a unit the viewer does not see as actionable, and a dependency that no unit in the
-        selection carries. Sync all, the per-trace action and its POST all ask this one question.
+        It refuses a unit the viewer does not see as actionable, a dependency that no unit in the
+        selection carries, and a companion the selection lacks. Sync all, the per-trace action and its
+        POST all ask this one question.
         """
         carried = {change.identity for identity in selection for change in self._planned_changes(identity)}
-        return not all(
-            self._presented_dispositions.get(identity) == Disposition.ACTIONABLE
+        return bool(missing_companions(self._presented, selection)) or not all(
+            self._presented[identity].disposition == Disposition.ACTIONABLE
             and all(set(change.dependencies) <= carried for change in self._planned_changes(identity))
             for identity in selection
         )

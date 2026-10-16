@@ -19,6 +19,7 @@ from netbox_data_import.plan import (
     SynchronizationUnit,
     executable_units,
     merge_changes,
+    missing_companions,
 )
 
 
@@ -709,3 +710,82 @@ class CatalogAndDiagnosticLookupTest(SimpleTestCase):
         from netbox_data_import.catalog import target_module
 
         self.assertIsNone(target_module("no-such-module"))
+
+
+def _group(*identities, disposition=Disposition.ACTIONABLE):
+    """Return one unit per identity, each naming every other one as a companion."""
+    return tuple(
+        replace(
+            _unit(identity=identity, disposition=disposition, changes=(_change(identity=f"change:{identity}"),)),
+            selected_with=tuple(other for other in identities if other != identity),
+        )
+        for identity in identities
+    )
+
+
+def _index(*units):
+    return {unit.identity: unit for unit in units}
+
+
+class CoSelectionTest(SimpleTestCase):
+    """A unit's `selected_with` names the units that every selection must hold together with it."""
+
+    def test_a_unit_without_companions_serializes_and_fingerprints_as_before(self):
+        """Acceptance condition 5 of the breakout design: an ordinary unit keeps its bytes."""
+        unit = _unit()
+
+        self.assertEqual(list(unit.to_dict()), ["identity", "disposition", "changes", "diagnostics", "display"])
+        self.assertEqual(list(unit.fingerprint_data), ["identity", "disposition", "changes", "diagnostics"])
+        self.assertEqual(SynchronizationUnit.from_dict(unit.to_dict()).selected_with, ())
+
+    def test_companions_round_trip_with_the_fingerprint(self):
+        plan = _plan(units=_group("unit:1", "unit:2"))
+
+        restored = ImportPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+
+        self.assertEqual(restored, plan)
+        self.assertEqual(restored.unit("unit:1").selected_with, ("unit:2",))
+        self.assertEqual(restored.unit_fingerprint("unit:1"), plan.unit_fingerprint("unit:1"))
+
+    def test_a_membership_change_changes_the_unit_fingerprint(self):
+        pair = _plan(units=(*_group("unit:1", "unit:2"), _unit(identity="unit:3")))
+        trio = _plan(units=_group("unit:1", "unit:2", "unit:3"))
+        alone = _plan(units=(_unit(identity="unit:1"), _unit(identity="unit:2"), _unit(identity="unit:3")))
+
+        fingerprints = {plan.unit_fingerprint("unit:1") for plan in (pair, trio, alone)}
+
+        self.assertEqual(len(fingerprints), 3)
+
+    def test_companions_must_be_identity_strings(self):
+        for value in ("unit:2", ("unit:2", 3)):
+            with self.subTest(value=value), self.assertRaises(PlanInvalid):
+                replace(_unit(), selected_with=value)
+
+    def test_a_companion_the_plan_does_not_carry_is_refused(self):
+        with self.assertRaisesMessage(PlanInvalid, "unit:404"):
+            _plan(units=(replace(_unit(), selected_with=("unit:404",)),))
+
+    def test_a_selection_holding_every_actionable_companion_is_complete(self):
+        units = _index(*_group("unit:1", "unit:2", "unit:3"))
+
+        self.assertEqual(missing_companions(units, ("unit:1", "unit:2", "unit:3")), {})
+
+    def test_each_selected_unit_names_the_companions_its_selection_lacks(self):
+        units = _index(*_group("unit:1", "unit:2", "unit:3"))
+
+        self.assertEqual(
+            missing_companions(units, ("unit:2", "unit:3")),
+            {"unit:2": ("unit:1",), "unit:3": ("unit:1",)},
+        )
+
+    def test_a_selected_companion_that_is_not_actionable_is_missing(self):
+        one, two = _group("unit:1", "unit:2")
+        units = _index(one, replace(two, disposition=Disposition.BLOCKED))
+
+        self.assertEqual(missing_companions(units, ("unit:1", "unit:2")), {"unit:1": ("unit:2",)})
+
+    def test_only_the_selected_units_state_companions(self):
+        """The relation is read from each selected unit, so a companion's own unselected group does not apply."""
+        units = _index(_unit(identity="unit:1"), replace(_unit(identity="unit:2"), selected_with=("unit:1",)))
+
+        self.assertEqual(missing_companions(units, ("unit:1",)), {})

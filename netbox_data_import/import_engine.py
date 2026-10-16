@@ -14,6 +14,7 @@ from collections.abc import Callable
 import logging
 from typing import cast
 
+import psycopg
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, transaction
 
@@ -21,7 +22,17 @@ from . import adapter_config, adapters, branching, catalog, target_modules
 from .models import FailureReason, ImportExecution, SourceDocument, locked_profile_policy
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied, clear_user_permission_caches
-from .plan import Diagnostic, Disposition, ImportPlan, PlanError, PlanInvalid, Severity, executable_units, merge_changes
+from .plan import (
+    Diagnostic,
+    Disposition,
+    ImportPlan,
+    PlanError,
+    PlanInvalid,
+    Severity,
+    executable_units,
+    merge_changes,
+    missing_companions,
+)
 from .source_resolution import derive_effective_rows
 from .target_runtime import DeletedObject, ExecutionContext, PreconditionFailed
 from .public_refusal import PublicRefusal
@@ -49,6 +60,11 @@ UNMERGEABLE_SELECTION = (
     "The selected rows cannot run on their own: they need changes from rows that are not selected, "
     "or their changes conflict. Select those rows too, or sync the whole import. The server log names the changes."
 )
+
+
+CONCURRENT_CHANGE = "NetBox changed these objects during the sync. Sync again to retry."
+# PostgreSQL deadlock (40P01) and lock timeout (55P03): a concurrent writer, not a fault in the import.
+_LOCK_CONFLICTS = (psycopg.errors.DeadlockDetected, psycopg.errors.LockNotAvailable)
 
 
 def operator_failure_message(exc) -> str:
@@ -87,13 +103,20 @@ class SelectionError(PublicRefusal):
 class _ExecutionFailed(Exception):
     """Carry one apply failure out of the transaction, with what rolled back behind it."""
 
-    def __init__(self, *, cause, reason, failed_change, rolled_back, not_attempted):
+    def __init__(self, *, cause, failed_change, rolled_back, not_attempted):
         super().__init__(str(cause))
         self.cause = cause
-        self.reason = reason
         self.failed_change = failed_change
         self.rolled_back = list(rolled_back)
         self.not_attempted = list(not_attempted)
+
+
+def _unit_index(plan: ImportPlan) -> dict:
+    return {unit.identity: unit for unit in plan.units}
+
+
+def _quoted(identities) -> str:
+    return ", ".join(f"'{identity}'" for identity in identities)
 
 
 class ImportEngine:
@@ -248,17 +271,24 @@ class ImportEngine:
         selected_identities = tuple(selection)
         if not selected_identities:
             raise SelectionError("An execution needs at least one Synchronization Unit.")
-        execution, created = ImportExecution.reserve(
-            profile=profile,
-            source_document=source_document,
-            actor=actor,
-            idempotency_key=idempotency_key,
-            plan_schema_version=accepted.schema_version,
-            accepted_plan_fingerprint=accepted.fingerprint,
-            selected_units=list(selected_identities),
-            input_filename=source_document.filename,
-            committed_by_caller=replan,
-        )
+        try:
+            execution, created = ImportExecution.reserve(
+                profile=profile,
+                source_document=source_document,
+                actor=actor,
+                idempotency_key=idempotency_key,
+                plan_schema_version=accepted.schema_version,
+                accepted_plan_fingerprint=accepted.fingerprint,
+                selected_units=list(selected_identities),
+                input_filename=source_document.filename,
+                committed_by_caller=replan,
+            )
+        except DatabaseError as exc:
+            # The insert checks its profile key, which another execution's policy lock can hold.
+            refusal = cls._concurrency_refusal(exc)
+            if refusal is not None:
+                raise refusal from exc
+            raise
         if not created:
             return execution, None
 
@@ -288,23 +318,36 @@ class ImportEngine:
                         profile, source_document, actor, accepted, completed, validate_replan
                     )
         except _ExecutionFailed as failure:
+            # The savepoint has already unwound, so the audit row can still be written.
+            cause = cls._concurrency_refusal(failure.cause) or failure.cause
             cls._mark_failed(
                 execution,
-                reason=failure.reason,
+                reason=cls._failure_reason(cause),
                 failed_change=failure.failed_change,
                 rolled_back=failure.rolled_back,
                 not_attempted=failure.not_attempted,
             )
-            raise failure.cause from failure
+            raise cause from failure
         except Exception as exc:
             # Every other failure after the reservation, so the row can never stay pending.
+            refusal = cls._concurrency_refusal(exc)
             cls._mark_failed(
                 execution,
-                reason=cls._failure_reason(exc),
+                reason=cls._failure_reason(refusal or exc),
                 not_attempted=cls._selected_change_identities(accepted, selected_identities),
             )
+            if refusal is not None:
+                raise refusal from exc
             raise
         return execution, replanned
+
+    @staticmethod
+    def _concurrency_refusal(exc) -> StalePlan | None:
+        """Return the retryable refusal for a deadlock or lock timeout, or None for every other failure."""
+        if isinstance(exc, DatabaseError) and isinstance(exc.__cause__, _LOCK_CONFLICTS):
+            logger.warning("A concurrent NetBox write stopped the import execution.", exc_info=exc)
+            return StalePlan(CONCURRENT_CHANGE)
+        return None
 
     @classmethod
     def _replan_after_writes(cls, profile, source_document, actor, accepted, completed, validate_replan) -> ImportPlan:
@@ -316,7 +359,6 @@ class ImportEngine:
         except Exception as exc:
             raise _ExecutionFailed(
                 cause=exc,
-                reason=cls._failure_reason(exc),
                 failed_change=None,
                 rolled_back=completed,
                 not_attempted=[],
@@ -372,7 +414,6 @@ class ImportEngine:
             except (PreconditionFailed, ObjectPermissionDenied, ValidationError, DatabaseError) as exc:
                 raise _ExecutionFailed(
                     cause=exc,
-                    reason=cls._failure_reason(exc),
                     failed_change=change.identity,
                     rolled_back=completed,
                     not_attempted=[later.identity for later in changes[index + 1 :]],
@@ -418,17 +459,30 @@ class ImportEngine:
 
     @staticmethod
     def _selected_units(accepted, current, selected_identities):
-        """Return the current actionable units whose accepted fingerprints still match."""
+        """Return the current actionable units whose accepted fingerprints still match.
+
+        Each plan's `selected_with` must be honoured by the selection as submitted; it is never expanded.
+        """
         if len(set(selected_identities)) != len(selected_identities):
             raise SelectionError("A Synchronization Unit can be selected only once.")
-        selected = []
         for identity in selected_identities:
             accepted_unit = accepted.unit(identity)
-            current_unit = current.unit(identity)
-            if accepted_unit is None or current_unit is None:
+            if accepted_unit is None or current.unit(identity) is None:
                 raise SelectionError(f"The current Import Plan does not carry selected unit '{identity}'.")
             if accepted_unit.disposition != Disposition.ACTIONABLE:
                 raise SelectionError(f"Synchronization Unit '{identity}' was not actionable when selected.")
+        for identity, members in missing_companions(_unit_index(accepted), selected_identities).items():
+            raise SelectionError(
+                f"Synchronization Unit '{identity}' must be selected together with {_quoted(members)}."
+            )
+        for identity, members in missing_companions(_unit_index(current), selected_identities).items():
+            raise StalePlan(
+                f"Synchronization Unit '{identity}' changed after the plan was accepted: "
+                f"it now needs {_quoted(members)} selected and actionable."
+            )
+        selected = []
+        for identity in selected_identities:
+            current_unit = current.unit(identity)
             if current_unit.disposition != Disposition.ACTIONABLE:
                 raise StalePlan(f"Synchronization Unit '{identity}' is no longer actionable.")
             if accepted.unit_fingerprint(identity) != current.unit_fingerprint(identity):

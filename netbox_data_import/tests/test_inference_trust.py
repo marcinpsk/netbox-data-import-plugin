@@ -364,7 +364,9 @@ class ResolvedAddressTest(SimpleTestCase):
         worker = inference_trust.DNS_WORKER_COMMAND[-1]
         child_probe = (
             "import os,pathlib,runpy,socket,sys,time; "
-            "pathlib.Path(sys.argv[2]).write_text(str(os.getpid())); "
+            # Rename the written file into place, so the test never reads it empty.
+            "pending=pathlib.Path(sys.argv[2]+'.tmp'); pending.write_text(str(os.getpid())); "
+            "os.replace(pending,sys.argv[2]); "
             "socket.getaddrinfo=lambda *args,**kwargs: time.sleep(4); "
             "runpy.run_path(sys.argv[1],run_name='__main__')"
         )
