@@ -271,17 +271,24 @@ class ImportEngine:
         selected_identities = tuple(selection)
         if not selected_identities:
             raise SelectionError("An execution needs at least one Synchronization Unit.")
-        execution, created = ImportExecution.reserve(
-            profile=profile,
-            source_document=source_document,
-            actor=actor,
-            idempotency_key=idempotency_key,
-            plan_schema_version=accepted.schema_version,
-            accepted_plan_fingerprint=accepted.fingerprint,
-            selected_units=list(selected_identities),
-            input_filename=source_document.filename,
-            committed_by_caller=replan,
-        )
+        try:
+            execution, created = ImportExecution.reserve(
+                profile=profile,
+                source_document=source_document,
+                actor=actor,
+                idempotency_key=idempotency_key,
+                plan_schema_version=accepted.schema_version,
+                accepted_plan_fingerprint=accepted.fingerprint,
+                selected_units=list(selected_identities),
+                input_filename=source_document.filename,
+                committed_by_caller=replan,
+            )
+        except DatabaseError as exc:
+            # The insert checks its profile key, which another execution's policy lock can hold.
+            refusal = cls._concurrency_refusal(exc)
+            if refusal is not None:
+                raise refusal from exc
+            raise
         if not created:
             return execution, None
 

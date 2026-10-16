@@ -19,6 +19,7 @@ from netbox_data_import.models import (
     IgnoredDevice,
     ImportExecution,
     SourceDocument,
+    locked_profile_policy,
 )
 from netbox_data_import.plan import Disposition
 from netbox_data_import.object_permissions import ObjectPermissionDenied
@@ -898,6 +899,37 @@ class ConcurrencyRefusalTest(ImportEngineTestDataMixin, TransactionTestCase):
         self.assertEqual(execution.outcome, ExecutionOutcome.FAILED)
         self.assertEqual(execution.failure_detail["reason"], "stale_plan")
         self.assertEqual(execution.failure_detail["not_attempted"], [unit.changes[0].identity])
+
+    def test_a_lock_timeout_in_the_reservation_is_a_retryable_refusal(self):
+        """The reservation insert waits on the profile row that another execution's policy lock holds."""
+        from dcim.models import Device
+
+        accepted = self._plan()
+        unit = accepted.unit("device:source:D-1")
+        held, release = Event(), Event()
+
+        def hold_the_profile():
+            with locked_profile_policy(self.profile.pk):
+                held.set()
+                release.wait(10)
+
+        with run_on_separate_connection(hold_the_profile):
+            try:
+                self.assertTrue(held.wait(10), "the second connection never locked the Import Profile")
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout TO '200ms'")
+                with self.assertRaisesMessage(StalePlan, CONCURRENT_CHANGE) as raised:
+                    ImportEngine.execute(
+                        self.profile, self.document, accepted.to_dict(), [unit.identity], "reserve-lock", self.actor
+                    )
+            finally:
+                release.set()
+                with connection.cursor() as cursor:
+                    cursor.execute("RESET lock_timeout")
+
+        self.assertIsInstance(_psycopg_cause(raised.exception), psycopg.errors.LockNotAvailable)
+        self.assertFalse(Device.objects.filter(name="server-a").exists())
+        self.assertFalse(ImportExecution.objects.filter(idempotency_key="reserve-lock").exists())
 
     def test_a_deadlock_in_a_write_is_a_retryable_refusal(self):
         """The execution waits on another writer's uncommitted Device, which then waits on the execution's Rack.
