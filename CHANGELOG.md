@@ -2,6 +2,42 @@
 
 <!-- version list -->
 
+## v2.15.0 (2026-10-16)
+
+### Bug Fixes
+
+- **engine**: Refuse a lock conflict in the execution reservation as a stale plan
+  ([`c5499bf`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c5499bf4be180b68b279a28e7c16b3a861f1acde))
+
+### Chores
+
+- **deps**: Bump the github-actions group with 3 updates
+  ([`64324a9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/64324a938883ead6520e85a059521ad4ea861e0a))
+
+- **deps-dev**: Bump cryptography from 50.0.1 to 50.0.2
+  ([`b0cfaf6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b0cfaf694fad3cbd9692f89387904e1e627f8435))
+
+- **deps-dev**: Bump htmx.org from 2.0.10 to 2.0.11
+  ([`df5c465`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/df5c46552302cd1de2ef1b51c7c52743142ad614))
+
+- **deps-dev**: Bump jsdom from 30.1.1 to 30.1.2
+  ([`cb4b00a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/cb4b00a0f2b5a97fdf1979584efb60434ecad581))
+
+- **deps-dev**: Bump mypy from 2.3.1 to 2.4.0
+  ([`651790f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/651790f77dcca36efc3d06cc8d4be76b0a5c3bf9))
+
+- **deps-dev**: Bump ruff from 0.16.9 to 0.16.10
+  ([`312c934`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/312c934da539cf5e8e2c655289651a76548c5769))
+
+- **deps-dev**: Bump vitest from 5.0.2 to 5.0.3
+  ([`ea320ec`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ea320ecbe02d9b6f4626d6f9aff815dbf2e115fb))
+
+### Testing
+
+- **inference**: Rename the DNS worker pid file into place before the test reads it
+  ([`6c20772`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6c20772ddc3fccaae068c4d73ba29246a6790119))
+
+
 ## v2.14.0 (2026-10-13)
 
 ### Bug Fixes
