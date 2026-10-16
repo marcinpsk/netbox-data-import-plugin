@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Plan and write breakout harnesses from leg traces through the real adapter, engine and database."""
 
+import re
 import uuid
+from html.parser import HTMLParser
 from io import BytesIO
 from unittest import skipUnless
 from unittest.mock import patch
@@ -1488,6 +1490,38 @@ PARENT_HIDDEN = {"channels__isnull": True}
 PARENT_AND_CHILDREN_HIDDEN = {"channels__isnull": True, "channel_id__isnull": True}
 
 
+# Words that only a harness fact puts on a trace card, checked after the viewer loses part of the harness.
+HARNESS_PHRASES = ("breakout", "channel", "reuse", "already exists", "already proves", "kept")
+# The bare leg mark states only that the visible channel child is a leg (section 6.6); its profile label does not.
+BARE_LEG_MARK = re.compile(rf"{re.escape(BREAKOUT_PROFILE.lower())}(?!:)")
+
+
+class _VisibleText(HTMLParser):
+    """Collect the text a browser shows, leaving out scripts and styles."""
+
+    def __init__(self):
+        super().__init__()
+        self.parts: list[str] = []
+        self._hidden = 0
+
+    def handle_starttag(self, tag, attrs):
+        self._hidden += tag in ("script", "style")
+
+    def handle_endtag(self, tag):
+        self._hidden -= tag in ("script", "style") and self._hidden > 0
+
+    def handle_data(self, data):
+        if not self._hidden:
+            self.parts.append(data)
+
+
+def visible_text(page) -> str:
+    """Return the shown text of one rendered page, lowercased and with whitespace collapsed."""
+    parser = _VisibleText()
+    parser.feed(page.content.decode())
+    return " ".join(" ".join(parser.parts).split()).lower()
+
+
 def segment_item(page, index):
     """Return the Proposed physical topology entry of one segment on a rendered trace card."""
     return page.content.decode().split(f'data-trace-segment="{index}">', 1)[1].split("</li>", 1)[0]
@@ -1647,9 +1681,26 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         return {"id__in": list(model.objects.exclude(pk=hidden.pk).values_list("pk", flat=True))}
 
     def reload(self, page):
-        """Render the trace of *page* again from the cached preview, as the viewer's next request does."""
+        """Render the trace of *page* again from the cached preview, after the viewer lost part of the harness.
+
+        Every trace card of the preview must then show none of the harness phrases.
+        """
+        self.assert_cards_state_no_harness_fact()
         identity = page.context["selected_trace"].identity
         return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), {"trace": identity})
+
+    def assert_cards_state_no_harness_fact(self):
+        """Render every lane trace card of the cached preview and assert its shown text holds no harness phrase.
+
+        Only lanes are checked: another trace can state an ordinary fact of a port the viewer still sees.
+        """
+        url = reverse("plugins:netbox_data_import:trace_workspace")
+        lanes = [trace for trace in self.client.get(url).context["traces"] if trace.name.startswith(f"SW-1 {CARDS} ")]
+        self.assertTrue(lanes)
+        for trace in lanes:
+            text = BARE_LEG_MARK.sub("", visible_text(self.client.get(url, {"trace": trace.identity})))
+            found = [phrase for phrase in HARNESS_PHRASES if phrase in text]
+            self.assertEqual(found, [], f"{trace.name}: {found}")
 
     @staticmethod
     def messages(page):
@@ -1849,12 +1900,18 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
 
     def test_a_fully_reused_path_states_no_reuse_in_its_sync_reason_once_the_harness_hides(self):
         """Every Cable of each trace exists, so the traces have no changes, and only a readable reuse says why."""
-        self.build_existing_harness()
-        for number in range(1, 5):
-            self.connect(self.rears[number], self.servers[number], type="mmf-om4")
+        harness = Cable(
+            profile=BREAKOUT_4,
+            type="mmf-om4",
+            status="connected",
+            a_terminations=[self.parent],
+            b_terminations=[self.servers[number] for number in range(1, 5)],
+        )
+        harness.full_clean()
+        harness.save()
         operator = self.operator({})
         self.client.force_login(operator)
-        card = self.cards(*(panel_leg(number) for number in range(1, 5)))["SW-1 Slot 0 >> 0/0 (10) P01"]
+        card = self.cards(*(direct_leg(number) for number in range(1, 5)))["SW-1 Slot 0 >> 0/0 (10) P01"]
         self.assertEqual(card.context["selected_trace"].disposition, Disposition.NO_OP)
         (sync,) = card.context["selected_trace"].actions
         self.assertEqual(sync.reason, "The stated path already exists.")
@@ -1933,7 +1990,7 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         trace = self.cards(*blocks)["SW-1 Slot 0 >> 0/0 (10) P01"].context["selected_trace"].identity
         self.restrict_interfaces(operator, PARENT_AND_CHILDREN_HIDDEN)
 
-        card = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), {"trace": trace})
+        card = self.reload(self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), {"trace": trace}))
 
         self.assertEqual(card.status_code, 200)
         self.assertIn(TERMINATION_HIDDEN, segment_item(card, LEG))
@@ -1956,9 +2013,7 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
         self.assertContains(visible, "breaks out as one Cable")
         self.restrict_interfaces(operator, PARENT_AND_CHILDREN_HIDDEN)
 
-        card = self.client.get(
-            reverse("plugins:netbox_data_import:trace_workspace"), {"trace": visible.context["selected_trace"].identity}
-        )
+        card = self.reload(visible)
 
         self.assertEqual(card.status_code, 200)
         page = card.content.decode()
