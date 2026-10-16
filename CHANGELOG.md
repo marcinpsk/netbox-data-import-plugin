@@ -2,6 +2,38 @@
 
 <!-- version list -->
 
+## v2.14.0 (2026-10-13)
+
+### Bug Fixes
+
+- **proposals**: Keep a slot while RQ still runs its task
+  ([`a88d006`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a88d006dfe8b0bf9cd5c1f5f77e72efc8352b98f))
+
+- **proposals**: Limit concurrent Inference Backend requests
+  ([`be0e8f2`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/be0e8f217c5d9e5d510a5be48a63bda84f2ff95c))
+
+- **proposals**: Release a request slot only when no worker owns its Job
+  ([`2f3e094`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2f3e094fa7bde7c65356bb1d6c9200dab3e5250f))
+
+### Features
+
+- **workspace**: Filter the Source Trace list by disposition
+  ([`dc8eaaf`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/dc8eaaf08c7cb7d21e7b86821007bfb1eee7bc18))
+
+### Performance Improvements
+
+- **proposals**: Share one poll dispatch per interval across all pending cards
+  ([`b7b0028`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b7b00288f2e8385d1e044f1550131f722721c429))
+
+
+## v2.13.0 (2026-10-10)
+
+### Testing
+
+- **branching**: Accept the upstream cable revert failure in the dry run
+  ([`0a322f0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0a322f09b412af3196f48df0412c6d3e6c00dd71))
+
+
 ## v2.12.0 (2026-10-09)
 
 ### Bug Fixes
