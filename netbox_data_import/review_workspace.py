@@ -20,7 +20,7 @@ from .cable_disclosure import (
     TERMINATION_SOURCES,
 )
 from .cable_policy import cable_media_family_label, cable_profile_label, cable_type_label
-from .cable_target import UNRESOLVED
+from .cable_target import REUSE_SEGMENT, UNRESOLVED
 from .identity import identity_in, identity_text
 from .import_engine import ImportEngine
 from .models import (
@@ -1081,6 +1081,8 @@ def _presented_segments(segments, diagnostics) -> list[dict[str, Any]]:
     """Return each segment as a conflict when a readable finding says so, and with the breakout profile of a leg."""
     state = next((item.display for item in diagnostics if item.code == "cable.harness_state"), None)
     conflicted = {item.display.get("segment_index") for item in diagnostics if item.code in _CONFLICT_CODES}
+    # Each kept Cable carries its own reuse note, so a segment reads as kept only while that note is readable.
+    reused = {item.display.get("segment_index") for item in diagnostics if item.code == "cable.segment_reused"}
     text = BREAKOUT_PROFILE
     # A hidden harness hides the profile its channel count selects, and a blocked harness selects none.
     if state is not None and state["profile"]:
@@ -1089,7 +1091,10 @@ def _presented_segments(segments, diagnostics) -> list[dict[str, Any]]:
         {
             **segment,
             "breakout_profile": text if segment["breakout_leg"] else "",
-            "status": CONFLICT_SEGMENT if segment["index"] in conflicted else segment["status"],
+            "status": CONFLICT_SEGMENT
+            if segment["index"] in conflicted
+            else ("" if segment["status"] == REUSE_SEGMENT and segment["index"] not in reused else segment["status"]),
+            "retained": segment["retained"] and segment["index"] in reused,
         }
         for segment in segments
     ]

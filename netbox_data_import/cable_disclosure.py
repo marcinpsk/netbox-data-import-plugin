@@ -111,7 +111,9 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
         "cable.segment_override_lost": _DisplaySchema(
             frozenset({"segment_index"}), policy=frozenset({"cable_type", "cable_profile"})
         ),
-        "cable.segment_reused": _DisplaySchema(frozenset({"segment_index"}), cable=frozenset({"cable"})),
+        "cable.segment_reused": _DisplaySchema(
+            frozenset({"segment_index"}), cable=frozenset({"cable"}), wording_optional=True
+        ),
         "cable.segment_self_connection": _DisplaySchema(
             frozenset({"segment_index", "cable_class"}), termination=frozenset({"termination"})
         ),

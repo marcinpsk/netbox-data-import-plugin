@@ -1528,7 +1528,8 @@ class _CableBatch:
             cable_display, cable_identities = self._cable_diagnostic_disclosure(harness.reused.cable)
             analysis.note(
                 "cable.segment_reused",
-                {"segment_index": leg.segment.index, **cable_display},
+                # The Cable proves this segment only as the harness, so the reuse is a fact of the harness.
+                {"segment_index": leg.segment.index, **cable_display, **harness.wording},
                 identities=(*cable_identities, harness.termination.identity, leg.far.identity),
             )
         else:

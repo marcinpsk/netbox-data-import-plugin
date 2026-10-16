@@ -3510,6 +3510,9 @@ RETAINED_SEGMENT_REASON = (
     "Correct that Cable in NetBox, then re-read."
 )
 SEGMENT_FORCE_PERMISSION_REFUSED = "You do not have permission to force this segment policy."
+SEGMENT_OUT_OF_VIEW = (
+    "A port this segment reaches is outside your view, so this preview cannot change its Cable policy."
+)
 SEGMENT_CLEAR_PERMISSION_REFUSED = "You do not have permission to clear this segment policy."
 
 
@@ -3619,10 +3622,10 @@ def _segment_override_reason(segment) -> str:
     return ""
 
 
-def _planned_leg(plan, unit_identity: str, index: int) -> bool:
-    """Return whether the plan, before presentation hides a viewer's rows, states the segment as a harness leg."""
+def _planned_segment(plan, unit_identity: str, index: int):
+    """Return one segment as the plan states it, before presentation hides a viewer's rows; a write reads this."""
     segments = plan.unit(unit_identity).display["trace"]["segments"]
-    return bool(next(segment for segment in segments if segment["index"] == index)["breakout_leg"])
+    return next(segment for segment in segments if segment["index"] == index)
 
 
 def _workspace_cable_classes(workspace) -> set:
@@ -4434,9 +4437,11 @@ class _SetSegmentPolicy(PreviewCommand):
         # A review command answers a question this preview asked, never one the caller invented.
         if segment is None or not segment["segment_key"]:
             raise PreviewCommandRefused("This preview resolved no segment there.")
+        planned = _planned_segment(preview.plan, trace.identity, segment["index"])
         # An override cannot decide a Cable the plan keeps, but the operator can still remove it.
-        if segment["retained"] and not self.clearing:
-            raise PreviewCommandRefused(RETAINED_SEGMENT_REASON)
+        if planned["retained"] and not self.clearing:
+            # A viewer who cannot read that the Cable is kept learns only that the segment is out of reach.
+            raise PreviewCommandRefused(RETAINED_SEGMENT_REASON if segment["retained"] else SEGMENT_OUT_OF_VIEW)
         try:
             if self.clearing:
                 plan = clear_cable_segment_override_and_replan(
@@ -4459,7 +4464,7 @@ class _SetSegmentPolicy(PreviewCommand):
                     cable_class=segment["cable_class"],
                     data=dict(self.data),
                     reviewed_fingerprint=preview.reviewed_fingerprint,
-                    breakout_leg=_planned_leg(preview.plan, trace.identity, segment["index"]),
+                    breakout_leg=bool(planned["breakout_leg"]),
                 )
         except UnacceptablePolicyDecision as exc:
             raise PreviewCommandRefused("; ".join(exc.errors)) from exc

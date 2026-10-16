@@ -44,6 +44,7 @@ from netbox_data_import.review_workspace import (
     ReviewWorkspace,
 )
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
+from netbox_data_import.views import RETAINED_SEGMENT_REASON, SEGMENT_OUT_OF_VIEW
 from netbox_data_import.tests.helpers import (
     cables_on,
     competing_write_during,
@@ -1771,6 +1772,36 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
 
         card = self.reload(card)
         self.assertNotIn("SRV-3 eth0", [item["label"] for item in card.context["attention_terminations"]])
+
+    def test_a_reused_harness_states_no_reuse_once_one_port_of_it_hides(self):
+        """The leg's reuse is a fact of the harness, so its note, badge, count and retained lock hide with any port."""
+        self.build_existing_harness()
+        operator = self.operator({})
+        self.client.force_login(operator)
+        card = self.cards(*(panel_leg(number) for number in range(1, 5)))["SW-1 Slot 0 >> 0/0 (10) P01"]
+        reused = _DIAGNOSTIC_MESSAGES["cable.segment_reused"]
+        badge = '<span class="badge ndi-trace-status-reuse">reuse existing</span>'
+        self.assertIn(reused, self.messages(card))
+        self.assertIn(badge, segment_item(card, LEG))
+        self.assertIn("1 reuse existing", card.context["topology_summary"])
+
+        for model, hidden in ((Interface, self.parent), (Device, self.parent.device), (Interface, self.children[2])):
+            with self.subTest(hidden=f"{model.__name__} {hidden}"):
+                self.restrict_interfaces(operator, {}, model=Interface)
+                self.restrict_interfaces(operator, {}, model=Device)
+                self.restrict_interfaces(operator, self.all_but(model, hidden), model=model)
+
+                card = self.reload(card)
+
+                self.assertNotIn(reused, self.messages(card))
+                self.assertNotIn(badge, segment_item(card, LEG))
+                self.assertNotIn("reuse", card.context["topology_summary"])
+                self.assertNotIn(RETAINED_SEGMENT_REASON, segment_item(card, LEG))
+                # The plan still keeps the Cable, so a save is refused without saying why.
+                refused = self.client.get(self.force_type(card, "mmf-om3")["Location"])
+                self.assertContains(refused, SEGMENT_OUT_OF_VIEW)
+                self.assertNotContains(refused, RETAINED_SEGMENT_REASON)
+                self.assertFalse(CableSegmentOverride.objects.exists())
 
     def test_one_far_end_device_hides_the_harness(self):
         operator = self.operator({})
