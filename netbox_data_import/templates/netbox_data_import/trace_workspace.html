@@ -329,7 +329,7 @@
         {% for action in trace.actions %}
           <form method="post" action="{% url action.url_name %}" class="d-inline">
             {% csrf_token %}
-            <input type="hidden" name="identity" value="{{ trace.identity }}">
+            {% for identity in trace.sync_selection %}<input type="hidden" name="selection" value="{{ identity }}">{% endfor %}
             {% include "netbox_data_import/inc/preview_claim.html" %}
             <button type="submit" class="btn btn-primary" data-trace-action="{{ action.key }}"
                     {% if not action.enabled %}disabled{% endif %}>{{ action.label }}</button>
@@ -339,6 +339,25 @@
       </div>
     </div>
     <div class="card-body">
+      {% if trace.sync_members %}
+        {# The sync form posts exactly these traces, and the server refuses a selection that no longer matches. #}
+        <div class="alert alert-info" data-sync-members>
+          {# A Tabler alert is a flex row, so one block keeps the heading above its lists. #}
+          <div>
+            <strong>Sync with dependencies also synchronizes {{ trace.sync_members|length }} other trace{{ trace.sync_members|length|pluralize }}</strong>
+            {% for group, members in trace.sync_groups %}
+              <div class="ndi-trace-reason mt-2">{{ group }}</div>
+              <ul class="mb-0 ps-3">
+                {% for member in members %}
+                  <li data-sync-member="{{ member.kind }}">
+                    {% if member.is_trace %}<a href="?trace={{ member.identity|urlencode }}">{{ member.name }}</a>{% else %}{{ member.name }}{% endif %}
+                  </li>
+                {% endfor %}
+              </ul>
+            {% endfor %}
+          </div>
+        </div>
+      {% endif %}
       {% if trace.disposition == "invalid" and trace.findings %}
         <div class="alert alert-danger" role="alert" data-trace-findings>
           <strong>Why this trace is invalid</strong>
@@ -430,7 +449,12 @@
                       {% endif %}
                       {% if segment.segment_key %}
                         <div class="text-secondary small" data-segment-policy>
-                          {{ segment.cable_type }} &middot; {{ segment.cable_profile }}
+                          {{ segment.cable_type }} &middot;
+                          {% if segment.breakout_profile %}
+                            <span data-breakout-profile>{{ segment.breakout_profile }}</span>
+                          {% else %}
+                            {{ segment.cable_profile }}
+                          {% endif %}
                           {% if segment.overridden %}
                             <span class="badge ndi-trace-state-manual">forced</span>
                           {% endif %}
@@ -447,9 +471,11 @@
                         <label class="visually-hidden" for="{{ segment.form.cable_type.id_for_label }}">
                           Cable Type for segment {{ segment.position }}</label>
                         {{ segment.form.cable_type }}
-                        <label class="visually-hidden" for="{{ segment.form.cable_profile.id_for_label }}">
-                          Cable Profile for segment {{ segment.position }}</label>
-                        {{ segment.form.cable_profile }}
+                        {% if not segment.breakout_profile %}
+                          <label class="visually-hidden" for="{{ segment.form.cable_profile.id_for_label }}">
+                            Cable Profile for segment {{ segment.position }}</label>
+                          {{ segment.form.cable_profile }}
+                        {% endif %}
                         <button type="submit" class="btn btn-sm btn-primary" data-segment-policy-force
                                 {% if segment.reason %}disabled{% endif %}>Force</button>
                         {% if segment.overridden %}
@@ -624,7 +650,13 @@
                     {% endif %}
                   </td>
                   <td>{{ policy.cable_type }}</td>
-                  <td>{{ policy.cable_profile }}</td>
+                  <td>
+                    {% if policy.breakout_profile %}
+                      <span class="text-secondary" data-breakout-profile>{{ policy.breakout_profile }}</span>
+                    {% else %}
+                      {{ policy.cable_profile }}
+                    {% endif %}
+                  </td>
                   <td class="text-end">
                     <form method="post" class="d-flex flex-wrap gap-2 justify-content-end"
                           action="{% url 'plugins:netbox_data_import:trace_cable_policy' %}"
@@ -637,9 +669,14 @@
                       <label class="visually-hidden" for="{{ policy.form.cable_type.id_for_label }}">
                         Cable Type for {{ policy.cable_class }}</label>
                       {{ policy.form.cable_type }}
-                      <label class="visually-hidden" for="{{ policy.form.cable_profile.id_for_label }}">
-                        Cable Profile for {{ policy.cable_class }}</label>
-                      {{ policy.form.cable_profile }}
+                      {% if policy.breakout_profile %}
+                        {# The breakout ignores this dimension, so a save keeps the stored value. #}
+                        {{ policy.form.cable_profile.as_hidden }}
+                      {% else %}
+                        <label class="visually-hidden" for="{{ policy.form.cable_profile.id_for_label }}">
+                          Cable Profile for {{ policy.cable_class }}</label>
+                        {{ policy.form.cable_profile }}
+                      {% endif %}
                       <button type="submit" class="btn btn-sm btn-primary" data-cable-policy-save
                               {% if policy.reason %}disabled{% endif %}>Save</button>
                     </form>

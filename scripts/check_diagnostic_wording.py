@@ -15,7 +15,7 @@ import re
 import sys
 
 PACKAGE = pathlib.Path(__file__).resolve().parents[1] / "netbox_data_import"
-EMITTING_MODULES = ("cable_target.py", "target_modules.py")
+EMITTING_MODULES = ("cable_harness.py", "cable_target.py", "target_modules.py")
 CODE = re.compile(r"(cable|device|profile|rack|trace)\.[a-z_]+")
 TABLE = "_DIAGNOSTIC_MESSAGES"
 

@@ -96,7 +96,7 @@ from .object_permissions import (
     delete_permission_scoped_objects,
     save_permission_scoped_object,
 )
-from .plan import Disposition, ImportPlan, PlanError
+from .plan import Disposition, ImportPlan, PlanError, Severity
 from .preview_coordinator import (
     SYNC_FINISHED,
     SYNC_NOT_THIS_PREVIEW,
@@ -133,6 +133,9 @@ from .review_workspace import (
     IneligibleLocationSelection,
     SYNC_ALL_NOTHING,
     SYNC_DEPENDENCY_HELD,
+    SYNC_NOTHING,
+    SYNC_SELECTION_CHANGED,
+    SYNC_SELECTION_INVALID,
     ProfilePolicyMoved,
     ReviewWorkspace,
     UnacceptablePolicyDecision,
@@ -3485,6 +3488,7 @@ def _cable_policy_forms(profile, trace, viewer) -> list:
                 "cable_class": cable_class,
                 "cable_type": POLICY_HIDDEN if hidden else decision["cable_type"],
                 "cable_profile": POLICY_HIDDEN if hidden else decision["cable_profile"],
+                "breakout_profile": decision["breakout_profile"],
                 "resolved": False if hidden else bool(decision["policy"]),
                 "form": form,
                 "reason": (
@@ -3506,6 +3510,9 @@ RETAINED_SEGMENT_REASON = (
     "Correct that Cable in NetBox, then re-read."
 )
 SEGMENT_FORCE_PERMISSION_REFUSED = "You do not have permission to force this segment policy."
+SEGMENT_OUT_OF_VIEW = (
+    "A port this segment reaches is outside your view, so this preview cannot change its Cable policy."
+)
 SEGMENT_CLEAR_PERMISSION_REFUSED = "You do not have permission to clear this segment policy."
 
 
@@ -3567,6 +3574,7 @@ def _segment_policy_forms(profile, trace, viewer) -> list:
             ),
             initial={} if hidden or moved else cable_policy_form_initial(segment["policy"]),
             auto_id=f"id_%s_segment_{segment['index']}",
+            breakout_leg=bool(segment["breakout_profile"]),
         )
         shared_reason = POLICY_WRITE_REFUSED if hidden else PROFILE_POLICY_MOVED if moved else ""
         force_reason = (
@@ -3614,6 +3622,12 @@ def _segment_override_reason(segment) -> str:
     return ""
 
 
+def _planned_segment(plan, unit_identity: str, index: int):
+    """Return one segment as the plan states it, before presentation hides a viewer's rows; a write reads this."""
+    segments = plan.unit(unit_identity).display["trace"]["segments"]
+    return next(segment for segment in segments if segment["index"] == index)
+
+
 def _workspace_cable_classes(workspace) -> set:
     """Return every CableClass value the reviewed preview's traces actually state."""
     return {
@@ -3648,14 +3662,21 @@ def _workspace_location_prefixes(workspace) -> dict[str, str]:
     return location_prefix_spellings(_workspace_location_paths(workspace))
 
 
+_SEVERITY_RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.ERROR: 2}
+
+
 def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Return findings once per message in first-seen order, keeping every lost override."""
-    messages: set[str] = set()
+    """Return findings once per message in first-seen order, each with its most severe copy, and every lost override."""
     unique: list[dict[str, str]] = []
+    placed: dict[str, int] = {}
     for finding in findings:
-        if finding["code"] == "cable.segment_override_lost" or finding["message"] not in messages:
-            messages.add(finding["message"])
+        message = finding["message"]
+        if finding["code"] == "cable.segment_override_lost" or message not in placed:
+            placed.setdefault(message, len(unique))
             unique.append(finding)
+        elif _SEVERITY_RANK[finding["severity"]] > _SEVERITY_RANK[unique[placed[message]]["severity"]]:
+            # One line stands for every copy, so it must not read as less severe than the worst of them.
+            unique[placed[message]] = finding
     return unique
 
 
@@ -3916,21 +3937,33 @@ def _refuse_drifted_sync(preview) -> None:
         raise PreviewCommandRefused(reason, 409)
 
 
+def _posted_sync_selection(data) -> tuple[str, ...]:
+    """Return the selection a trace sync form posts, its trace first; refuse an empty or repeated one."""
+    selection = tuple(data.getlist("selection"))
+    if not selection or "" in selection or len(set(selection)) != len(selection):
+        raise PreviewCommandRefused(SYNC_SELECTION_INVALID)
+    return selection
+
+
 @dataclass(frozen=True)
 class _TraceSync(QueueImport):
-    """Queue one Source Trace with the units its changes depend on, keeping the preview pending on it."""
+    """Queue the selection one trace's page showed, keeping the preview pending on it."""
 
-    identity: str
+    selection: tuple[str, ...]
     keeps_preview = True
 
     def selection_for(self, preview):
-        """Refuse a trace whose dependency cannot sync, a sync live NetBox has moved under, or nothing to sync."""
-        selection = preview.workspace.sync_selection(self.identity)
+        """Refuse an unknown unit, a held dependency, a selection the page did not show, drift, or nothing to sync."""
+        if any(preview.plan.unit(identity) is None for identity in self.selection):
+            raise PreviewCommandRefused(SYNC_SELECTION_INVALID)
+        selection = preview.workspace.sync_selection(self.selection[0])
         if selection and preview.workspace.cannot_sync(selection):
             raise PreviewCommandRefused(SYNC_DEPENDENCY_HELD)
+        if selection and selection != self.selection:
+            raise StalePreview(SYNC_SELECTION_CHANGED)
         _refuse_drifted_sync(preview)
         if not selection:
-            raise PreviewCommandRefused("That trace has no changes to synchronize.")
+            raise PreviewCommandRefused(SYNC_NOTHING)
         return list(selection)
 
 
@@ -3940,14 +3973,14 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Queue the reviewed plan for one trace's own selection."""
-        command = _TraceSync(identity=request.POST.get("identity", "").strip())
+        """Queue the reviewed plan for the selection one trace's page showed."""
+        command = _TraceSync(selection=_posted_sync_selection(request.POST))
         result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
         return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": result.outcome.job_id}))
 
     def refusal_url(self, request):
-        """Return the trace the sync was asked for."""
-        return _trace_workspace_url(request.POST.get("identity", ""))
+        """Return the trace the sync was asked for, which the form posts first."""
+        return _trace_workspace_url(next(iter(request.POST.getlist("selection")), ""))
 
 
 class _TraceSyncAll(QueueImport):
@@ -4404,9 +4437,11 @@ class _SetSegmentPolicy(PreviewCommand):
         # A review command answers a question this preview asked, never one the caller invented.
         if segment is None or not segment["segment_key"]:
             raise PreviewCommandRefused("This preview resolved no segment there.")
+        planned = _planned_segment(preview.plan, trace.identity, segment["index"])
         # An override cannot decide a Cable the plan keeps, but the operator can still remove it.
-        if segment["retained"] and not self.clearing:
-            raise PreviewCommandRefused(RETAINED_SEGMENT_REASON)
+        if planned["retained"] and not self.clearing:
+            # A viewer who cannot read that the Cable is kept learns only that the segment is out of reach.
+            raise PreviewCommandRefused(RETAINED_SEGMENT_REASON if segment["retained"] else SEGMENT_OUT_OF_VIEW)
         try:
             if self.clearing:
                 plan = clear_cable_segment_override_and_replan(
@@ -4429,6 +4464,7 @@ class _SetSegmentPolicy(PreviewCommand):
                     cable_class=segment["cable_class"],
                     data=dict(self.data),
                     reviewed_fingerprint=preview.reviewed_fingerprint,
+                    breakout_leg=bool(planned["breakout_leg"]),
                 )
         except UnacceptablePolicyDecision as exc:
             raise PreviewCommandRefused("; ".join(exc.errors)) from exc

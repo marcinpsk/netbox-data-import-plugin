@@ -17,11 +17,11 @@ import json
 import logging
 import re
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +331,8 @@ class SynchronizationUnit:
     changes: tuple[PlannedChange, ...] = ()
     diagnostics: tuple[Diagnostic, ...] = ()
     display: Mapping[str, Any] = field(default_factory=dict)
+    # The units every selection must hold together with this one (section 4.5).
+    selected_with: tuple[str, ...] = ()
 
     def __post_init__(self):
         """Validate the disposition and detach the display data."""
@@ -343,10 +345,15 @@ class SynchronizationUnit:
             self, "diagnostics", _elements(self.diagnostics, Diagnostic, "Synchronization Unit diagnostics")
         )
         object.__setattr__(self, "display", _plan_mapping(self.display, "Synchronization Unit display"))
+        object.__setattr__(self, "selected_with", _identities(self.selected_with, "Synchronization Unit selected_with"))
 
     def __hash__(self):
         """Hash over the serialized form, which mirrors the generated equality."""
         return hash(canonical_json(self.to_dict()))
+
+    def _companions(self) -> dict:
+        """Return `selected_with` as a serialized field, or nothing, so a unit without one keeps its bytes."""
+        return {"selected_with": list(self.selected_with)} if self.selected_with else {}
 
     @property
     def fingerprint_data(self):
@@ -356,6 +363,7 @@ class SynchronizationUnit:
             "disposition": self.disposition,
             "changes": [change.fingerprint_data for change in self.changes],
             "diagnostics": [diagnostic.fingerprint_data for diagnostic in self.diagnostics],
+            **self._companions(),
         }
 
     def to_dict(self) -> dict:
@@ -366,6 +374,7 @@ class SynchronizationUnit:
             "changes": [change.to_dict() for change in self.changes],
             "diagnostics": [diagnostic.to_dict() for diagnostic in self.diagnostics],
             "display": _thaw_json(self.display),
+            **self._companions(),
         }
 
     @classmethod
@@ -377,6 +386,7 @@ class SynchronizationUnit:
             changes=tuple(PlannedChange.from_dict(item) for item in data.get("changes", ())),
             diagnostics=tuple(Diagnostic.from_dict(item) for item in data.get("diagnostics", ())),
             display=data.get("display", {}),
+            selected_with=tuple(data.get("selected_with", ())),
         )
 
 
@@ -412,6 +422,11 @@ class ImportPlan:
         duplicates = sorted(identity for identity, count in counts.items() if count > 1)
         if duplicates:
             raise PlanInvalid(f"Synchronization Unit identities must be unique: {', '.join(duplicates)}.")
+        unknown = sorted({member for unit in self.units for member in unit.selected_with} - counts.keys())
+        if unknown:
+            raise PlanInvalid(
+                f"A selected_with member names no Synchronization Unit of the plan: {', '.join(unknown)}."
+            )
 
     def __hash__(self):
         """Hash over the serialized form, which mirrors the generated equality."""
@@ -506,6 +521,27 @@ def executable_units(units) -> tuple[SynchronizationUnit, ...]:
     return tuple(unit for unit in units if unit.disposition == Disposition.ACTIONABLE)
 
 
+def missing_companions(
+    units: Mapping[str, SynchronizationUnit], selection: Sequence[str]
+) -> dict[str, tuple[str, ...]]:
+    """Return, for each selected unit, the `selected_with` members the selection lacks or that are not actionable.
+
+    *units* maps each identity to its unit. An empty result means the selection honours co-selection.
+    It never adds a unit: a review command shows the operator every unit it selects (section 4.5).
+    """
+    chosen = frozenset(selection)
+    missing = {}
+    for identity in selection:
+        absent = tuple(
+            member
+            for member in units[identity].selected_with
+            if member not in chosen or units[member].disposition != Disposition.ACTIONABLE
+        )
+        if absent:
+            missing[identity] = absent
+    return missing
+
+
 def merge_changes(units, *, reconciled=()) -> tuple[PlannedChange, ...]:
     """Merge the changes of *units* into one deterministic acyclic execution order.
 
@@ -586,6 +622,7 @@ __all__ = (
     "fingerprint_of",
     "is_current_schema_version",
     "merge_changes",
+    "missing_companions",
     "register_diagnostic_display",
     "validate_diagnostic_display",
 )
