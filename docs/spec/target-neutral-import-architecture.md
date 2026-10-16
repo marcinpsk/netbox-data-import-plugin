@@ -1093,7 +1093,10 @@ a child can move to another member Device and keep its parent and channel. The h
 a child whose locked row is no longer on the Device the plan recorded, as an ordinary write refuses a
 moved termination. A far end that another transaction deletes between its first read and its lock
 refuses the execution as a failed precondition, as an ordinary write refuses a deleted termination. A
-deleted channel child makes its trace no leg, which refuses the execution as a stale plan.
+deleted channel child makes its trace no leg, which refuses the execution as a stale plan. A preview
+plans without locks, so another transaction can delete a parent and its channel children between
+resolution and the harness read. The preview then treats each such child as a row gone since
+resolution: it forms no leg, and execution refuses the plan as stale.
 
 The import serializes its own decision facts against NetBox writes that take row locks. It does not
 serialize two NetBox writers against each other: a state they produce between themselves, such as a

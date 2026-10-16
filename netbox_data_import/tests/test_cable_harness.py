@@ -36,8 +36,9 @@ from netbox_data_import.models import (
     CableSegmentOverride,
     ImportExecution,
     ImportProfile,
+    SourceDocument,
 )
-from netbox_data_import.plan import Disposition, PlannedChange, Severity, fingerprint_of
+from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, Severity, fingerprint_of
 from netbox_data_import.review_workspace import (
     _DIAGNOSTIC_MESSAGES,
     BREAKOUT_PROFILE,
@@ -53,6 +54,7 @@ from netbox_data_import.tests.helpers import (
     competing_write_during,
     preview_claim,
     run_on_separate_connection,
+    stored_plan,
     trace_endpoint_line,
     trace_segment,
     trace_termination,
@@ -904,6 +906,67 @@ class HarnessExecutionTest(HarnessTopologyMixin, TransactionTestCase):
                 return self.execute(plan, key="deleted-before-lock")
             finally:
                 self.assertEqual(deleted, [row_id], "the locked replan never ran")
+
+    def preview_after_a_deletion_before_the_harness(self, *statements):
+        """Upload two lanes, running *statements* on a second connection after resolution, before the harness reads.
+
+        Return the plan the preview stores; the upload and the workspace must answer without an error.
+        """
+        self.resolve_lanes([1, 2])
+        self.client.force_login(self.actor)
+        find_legs, deleted = _CableBatch._find_legs, []
+
+        def delete_then_find(batch):
+            if not batch.lock_plan_references and not deleted:
+                deleted.append(True)
+
+                def delete():
+                    with connection.cursor() as cursor:
+                        for statement, row_id in statements:
+                            cursor.execute(statement, [row_id])
+
+                with run_on_separate_connection(delete):
+                    pass
+            find_legs(batch)
+
+        upload = BytesIO(trace_workbook_bytes(path_blocks=(direct_leg(1), direct_leg(2))))
+        upload.name = "traces.xlsx"
+        with patch.object(_CableBatch, "_find_legs", autospec=True, side_effect=delete_then_find):
+            response = upload_preview(
+                self.client, {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload}, follow=True
+            )
+
+        self.assertEqual(deleted, [True], "preview planning never reached the harness")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get(reverse("plugins:netbox_data_import:trace_workspace")).status_code, 200)
+        return ImportPlan.from_dict(stored_plan(self.client))
+
+    def test_a_parent_deleted_while_a_preview_plans_leaves_the_preview_readable(self):
+        """Preview planning takes no lock, so a parent and its children can go between resolution and the harness."""
+        plan = self.preview_after_a_deletion_before_the_harness(
+            ("DELETE FROM dcim_interface WHERE parent_id = %s", self.parent.pk),
+            ("DELETE FROM dcim_interface WHERE id = %s", self.parent.pk),
+        )
+
+        # The children are rows gone since resolution: no harness forms, and execution refuses them.
+        codes = {item.code for unit in plan.units for item in unit.diagnostics}
+        self.assertFalse([code for code in codes if code.startswith("cable.harness_")], codes)
+        self.document = SourceDocument.objects.filter(profile=self.profile).latest("pk")
+        with self.assertRaises(StalePlan):
+            self.execute(plan)
+        self.assertFalse(Cable.objects.exists())
+
+    def assert_preview_keeps_the_harness_after_deleting(self, row):
+        """The preview still plans the harness on the rows it read; execution rereads them and refuses the plan."""
+        plan = self.preview_after_a_deletion_before_the_harness(("DELETE FROM dcim_interface WHERE id = %s", row.pk))
+
+        self.assertEqual(len({change for unit in plan.units for change in self.harness_changes(unit)}), 1)
+
+    def test_a_child_deleted_while_a_preview_plans_leaves_the_preview_readable(self):
+        self.assert_preview_keeps_the_harness_after_deleting(self.children[2])
+
+    def test_a_far_end_deleted_while_a_preview_plans_leaves_the_preview_readable(self):
+        self.assert_preview_keeps_the_harness_after_deleting(self.servers[2])
 
     def test_a_far_end_deleted_before_the_replan_locks_it_refuses_the_harness(self):
         self.resolve_lanes([1, 2])

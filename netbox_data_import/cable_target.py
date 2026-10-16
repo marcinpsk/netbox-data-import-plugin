@@ -1239,6 +1239,7 @@ class _CableBatch:
         """
         parents = self._child_parents()
         self._parents.update(cable_harness.read_parents(parents - self._parents.keys(), lock=self.lock_plan_references))
+        self._forget_orphaned_children()
         for analysis in self.analyses:
             self._place_trace(analysis)
         for analysis in self.analyses:
@@ -1254,6 +1255,17 @@ class _CableBatch:
                 self._harness_display(harness, segment_index, trace=analysis.display["name"]),
                 identities=(harness.termination.identity,),
             )
+
+    def _forget_orphaned_children(self) -> None:
+        """Forget each resolved channel child whose parent row is gone, as any row gone since resolution.
+
+        An unlocked preview reads a parent after its children, so another transaction can delete both
+        in between. The child is then no leg, its write skips the row, and execution refuses the plan.
+        """
+        for key, component in list(self._objects.items()):
+            parent = cable_harness.channel_parent(component)
+            if parent is not None and parent not in self._parents:
+                del self._objects[key]
 
     def _harness(self, parent_pk: int) -> _Harness:
         """Return the harness of one parent, created on first use."""
