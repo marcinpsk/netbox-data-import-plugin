@@ -2000,8 +2000,15 @@ Profile: Cable Profile is a fixed NetBox choice, not a creatable object.</p>
 <p><strong>Cable Profile cardinality.</strong> A Patched Path Replacement creates Cables with one termination per
 side, so the Cable Profile dimension accepts only a Cable Profile whose connector topology is
 compatible with one termination per side: the single and duplex family as reported by the running
-NetBox instance. The mapping form offers only compatible choices. Trunk, breakout, and shuffle
-profiles are out of scope for segment creation in this delivery (section 15).</p>
+NetBox instance. The mapping form offers only compatible choices. Trunk and shuffle profiles are out
+of scope for segment creation in this delivery (section 15).</p>
+<p><strong>Harness legs.</strong> The cardinality rule does not apply to a breakout harness leg (section 6.4). The
+channel topology decides a harness's Cable Profile, so the profile dimension of a leg's override or
+CableClass mapping does not apply and may stay unresolved. Each leg's override, else its CableClass
+mapping, decides its Cable Type, and every leg of one harness must resolve to the same Cable Type.
+Explicitly none is a value, so none against a concrete type is a disagreement
+(<code>cable.harness_type_conflict</code>). An unresolved or stale Cable Type blocks the leg with
+<code>cable.cableclass_unmapped</code> or <code>cable.policy_stale</code>, as it blocks an ordinary segment.</p>
 <p>Two block conditions are distinct and carry distinct diagnostic codes (section 6.7):</p>
 <table>
 <thead>
@@ -2109,7 +2116,7 @@ canonical serialization (spec default for the algorithm; ADR 0002 already fixes 
 Source Trace content fingerprint, and one algorithm keeps the runtime consistent).</p>
 <p>A fingerprint includes the schema version, the stable unit and change identities, the target payloads,
 the dependencies, the preconditions, the dispositions, the structured diagnostic codes with their
-evidence, the source fingerprint, the Import Profile configuration, the actor, and the planning
+evidence, a unit's co-selection members (section 4.5) when it has any, the source fingerprint, the Import Profile configuration, the actor, and the planning
 context. Diagnostic evidence is part of it because a finding can rest on live state no identity names,
 such as the medium two Cables carry, which would otherwise move under an accepted plan unnoticed. It excludes
 timestamps, URLs, translated text, display-only wording, and the plan revision.</p>
@@ -2130,6 +2137,25 @@ operator confirmation. It offers that selection only when the engine accepts it:
 closure is actionable and the closure carries each dependency. Otherwise the action is disabled with
 its reason, and the server refuses it before it queues a Job. Sync of all actionable traces applies
 the same check.</p>
+<p>The selected trace's card lists every other unit of the closure by the name the trace list shows,
+under why the closure holds it: a co-selection member, or a unit that carries a change the trace
+depends on (with that unit's own members). A trace name is source evidence, so the list discloses
+nothing the trace list does not. The sync form posts the whole displayed closure, the selected trace
+first. The server computes the closure again from the claimed preview and refuses a posted list
+that differs in any unit or in order with HTTP 409, the same way it refuses a stale Preview Claim.
+It refuses an empty or repeated list, or a unit the preview does not hold: a JSON request receives
+HTTP 400, and a form or HTMX post returns to the page with the refusal. Both refusals queue no Job.</p>
+<p>A unit can name co-selection members (<code>selected_with</code>): units that every selection must hold together
+with it, whatever their disposition. The serialized unit and its fingerprint carry the field only when
+it is not empty. One validator in <code>plan.py</code> decides a selection: each member of each selected unit, read
+from the accepted plan and from the current plan, must be selected and actionable. Execution never adds
+a member. It refuses a member that the accepted plan names and the selection lacks as a selection error,
+and a member that only the current plan names, or that is no longer actionable, as a stale plan. The
+Review Workspace adds every member to the visible closure, and it takes a dependency owner only from the
+largest set of actionable units in which every dependency has an owner and every member is present.
+The Cable Target Module names members for a breakout harness (section 6.4): while the harness change is
+pending, every leg unit names every other leg unit of that harness. Once an existing Cable proves the
+harness, no leg names a member, so a no-op leg never has to enter another leg's execution.</p>
 <p>Preview presents an accepted Import Plan. Execution regenerates the current plan from the same source
 and configuration before it writes. Selective execution compares the accepted unit and its explicit
 dependency closure with the equivalent current units. A change in an unrelated unit does not block a
@@ -2652,6 +2678,12 @@ records (<code>docs/design/trace-cable-policy.md</code>, accepted limitation 1).
 <p>A termination resolved by the exact-name rule shows the <code>automatically resolved</code> badge state. A
 termination resolved by an operator or by an accepted proposal shows <code>manually resolved</code> or
 <code>accepted</code>.</p>
+<p>A Termination Reference can resolve to a channel subinterface: an Interface with a <code>channel_id</code>, which
+NetBox 4.7 introduced. NetBox refuses a CableTermination on one, so the segment that leaves it is a
+harness leg (section 6.4) and never an ordinary segment. The operator's termination choice decides
+which channel a source lane is; matching never derives a channel from a lane label. On a NetBox
+without channel fields (4.6) no reference resolves to a channel subinterface, and planning reads no
+channel attribute.</p>
 <h3 id="62-portmapping-verification-and-same-port-continuation">6.2 PortMapping verification and same-port continuation</h3>
 <p>Pass-through verification uses the NetBox PortMapping model. A mapping row must link the resolved
 FrontPort and the resolved RearPort. A contradicted claim makes the unit invalid with a diagnostic
@@ -2682,10 +2714,26 @@ planner classifies every existing Cable against the desired segment set before i
 Cable.</p>
 <p>The Logical Cable is the current direct endpoint-to-endpoint Cable that matches no desired segment,
 regardless of what created it. Its description and tags appear in review. There is no
-provenance-marker gate.</p>
+provenance-marker gate. A breakout Cable is never the Logical Cable: a Cable whose profile has a
+different connector count on each side, or that ends on a channelized Interface. A one-leg breakout
+has one termination per side, so its termination sets alone cannot tell it from a direct Cable.</p>
 <p>The precedence rule decides the single-segment trace. When the trace claims exactly one segment
 between the two endpoints, an existing direct Cable matches that desired segment, so it is a proven
 physical segment and the unit is a no-op. Nothing is deleted and nothing is recreated.</p>
+<p><strong>Harness reuse.</strong> An existing Cable proves a breakout harness only through its termination snapshot:
+the side, connector, positions and object of every CableTermination row. It proves the harness when
+its Cable Profile is the harness profile, the parent is alone on side A at connector 1 with positions
+<code>1..N</code> (<code>N</code> is the parent's channel count), and B connector <code>k</code> holds exactly the far end of leg <code>k</code>
+with positions <code>[1]</code>, for every stated leg, with no other row. Every leg then reads
+<code>cable.segment_reused</code>. Any other Cable on the parent or on a far end blocks every leg with
+<code>cable.harness_occupied</code>, and the import never edits or deletes it.</p>
+<p><strong>Channel state.</strong> For every parent the plan reads, each channel child must mirror the parent as
+NetBox's propagation rule states it: with a profiled Cable on the parent, the child has the same Cable
+and Cable end, the parent's connector, and positions <code>[channel_id]</code>; otherwise all four are empty. A
+child with its own CableTermination, a <code>channel_id</code> above the parent's channel count, or a mirror
+that differs makes every leg unit of that parent invalid with <code>cable.harness_channel_state_invalid</code>.
+The remedy is to save the parent again in NetBox, or to run <code>manage.py trace_paths</code>. A reused harness
+with a stale mirror is therefore never a no-op.</p>
 <p>The unit is a no-op exactly when every desired segment is satisfied by a proven existing Cable and no
 Logical Cable remains to delete. Any partial state is actionable and reuses the proven segments. When
 no direct Cable exists between the endpoints, the unit is still actionable as a creation-only
@@ -2707,7 +2755,8 @@ separate commit boundary.</p>
 <p>Deletion scope: the only Cable a Patched Path Replacement ever deletes is the one direct
 endpoint-to-endpoint Logical Cable. Any other cable occupying a desired termination makes the unit
 blocked. The operator clears it in NetBox and replans. The plugin never deletes or edits a third-party
-cable.</p>
+cable. The deletion rereads the locked Cable and its terminations, and refuses a breakout Cable
+(section 6.3), so a stale or forged deletion cannot remove one.</p>
 <p>Creation policy for a new segment:</p>
 <table>
 <thead>
@@ -2745,6 +2794,56 @@ cable.</p>
 </table>
 <p>An unmapped CableClass blocks the unit. Provenance lives only in the plugin's per-Cable provenance
 table, so nothing duplicates or drifts.</p>
+<p><strong>Breakout harnesses.</strong> A breakout transceiver is a channelized parent Interface, and the source
+states each of its lanes as a separate Source Trace. The import writes one NetBox breakout Cable per
+parent, and each leg trace stays its own Synchronization Unit:</p>
+<ul>
+<li>A leg is the segment whose end resolves to a channel child. The harness is the child's parent.
+  A segment with a channel child at both ends, or a trace with two legs, is
+  <code>cable.harness_unsupported</code>, and it blocks every harness it touches. A leg whose far end is its own
+  parent or another channelized Interface is <code>cable.harness_unsupported</code> too, and it blocks every leg
+  of that harness. A trace that names a harness parent as an ordinary segment end blocks every leg of
+  that harness with <code>cable.harness_unsupported</code>.</li>
+<li>The cohort of a harness is the source device and cards label of each lane that resolves to one of
+  its children. It is one-way negative evidence: any trace with an unresolved or invalid reference in a
+  cohort, and any trace that resolves to a child of the parent without a physical first hop, blocks
+  the harness with <code>cable.harness_member_unresolved</code>. Two parents may share a cohort, and two cohorts
+  may resolve to one parent. A cohort reference that resolves to a plain Interface reads
+  <code>cable.harness_member_unchannelized</code> as a warning.</li>
+<li>Leg <code>k</code> is the child with <code>channel_id = k</code>. The B side is the far ends in channel order, so B
+  connector <code>k</code> carries channel <code>k</code>. A channel missing between legs (<code>cable.harness_channel_gap</code>), two
+  legs on one channel or one far end on two legs (<code>cable.harness_leg_conflict</code>), and far ends of more
+  than one model (<code>cable.harness_mixed_terminations</code>) block every leg. Channels missing after the last
+  leg are left unused with a <code>cable.harness_partial</code> warning, because a later leg needs the Cable edited
+  in NetBox.</li>
+<li>The Cable Profile is the one profile class of the running instance with one A connector of <code>N</code>
+  positions and <code>N</code> one-position B connectors, position <code>k</code> routed to B connector <code>k</code>. No such class
+  is <code>cable.harness_profile_unavailable</code>.</li>
+<li>Every leg unit carries one identical Planned Change, <code>cable:create:harness:&lt;parent identity&gt;</code>. Its
+  payload records the Cable Profile, the Cable Type, the parent, the ordered far ends with their
+  channel children and each child's Device, and the provenance of every leg, so one execution writes
+  the harness once.</li>
+<li>Every leg unit carries a <code>cable.harness_state</code> info diagnostic. Its evidence is the parent, its
+  channel count, every Interface under it with its <code>channel_id</code>, the legs by channel, child Device and
+  far end, the profile, and whether an existing Cable proves the harness. A change in any of them
+  changes every leg unit's fingerprint, on an actionable or a no-op unit. A leg whose parent the actor
+  cannot view carries no harness finding: its <code>cable.permission_denied</code> diagnostic holds that evidence
+  (section 6.6).</li>
+</ul>
+<p>One constructor builds every Cable write, in planning and again in execution from the locked rows. An
+ordinary write refuses a channel child at either end. It refuses a channelized Interface at either
+end with <code>cable.termination_channelized</code>, and the review keeps that end's picker open: NetBox accepts
+such a Cable, but <code>Interface.propagate_channel_cables</code> mirrors no channel through it, so no channel
+reaches its far end. A harness write requires ordered, distinct B ends of one model with no channel
+gap, and a verified profile. Both refuse a termination NetBox marks as
+connected without a Cable, because <code>CableTermination.clean</code> refuses to cable it: an ordinary write with
+<code>cable.termination_occupied</code>, a harness write with <code>cable.harness_occupied</code>, each with
+<code>marked_connected</code> in its display. Both refuse an Interface whose type is in NetBox's
+<code>NONCONNECTABLE_IFACE_TYPES</code>, as <code>CableTermination.clean</code> does, with <code>cable.termination_not_connectable</code>.
+The review keeps that end's picker open, so the operator chooses another termination. Execution writes
+<code>Cable(profile=..., a_terminations=[parent], b_terminations=[far ends by channel])</code> through
+<code>full_clean()</code>, so NetBox writes connector <code>k</code> with positions <code>[1]</code> on side B and connector 1 with
+positions <code>1..N</code> on side A.</p>
 <p>CablePath is never created or mutated. The plugin writes Cables and reads PortMapping rows. NetBox
 derives the paths.</p>
 <h3 id="65-preconditions-and-rollback">6.5 Preconditions and rollback</h3>
@@ -2760,10 +2859,76 @@ derives the paths.</p>
 <p>Execution rechecks every precondition inside the transaction. Any mismatch rolls back the complete
 selected transaction and requires a replan. This makes every topology change after preview a detected
 stale state.</p>
+<p>For a harness the execution replan reads the parent of each resolved channel child without a lock. It
+then locks, with normal waits: each parent Interface by primary key, then every Interface whose
+parent is one of them by primary key, whether or not the source states it, then the segment
+terminations, Cables, CableTerminations and PortMapping rows as it does for every trace. A child that
+moved to another parent between that read and its lock has its new parent and children locked too.
+Under those locks the plan rereads the channel count, the full child set with each <code>channel_id</code>, and
+the termination snapshot. A difference from the accepted plan changes the unit fingerprint and
+refuses the execution as a stale plan. The child's Device is one of those facts: in a virtual chassis
+a child can move to another member Device and keep its parent and channel. The harness write refuses
+a child whose locked row is no longer on the Device the plan recorded, as an ordinary write refuses a
+moved termination. A far end that another transaction deletes between its first read and its lock
+refuses the execution as a failed precondition, as an ordinary write refuses a deleted termination. A
+deleted channel child makes its trace no leg, which refuses the execution as a stale plan. A preview
+plans without locks, so another transaction can delete a parent and its channel children between
+resolution and the harness read. The preview then treats each such child as a row gone since
+resolution: it forms no leg, and execution refuses the plan as stale.</p>
+<p>The import serializes its own decision facts against NetBox writes that take row locks. It does not
+serialize two NetBox writers against each other: a state they produce between themselves, such as a
+direct CableTermination on a channel child, is detected at the next replan. A child moved or added into
+a parent while the import cables it keeps an empty mirror until the next replan reports it, because
+PostgreSQL checks the foreign key of that move only at its commit. NetBox has the same race between two
+of its own users.</p>
 <h3 id="66-permissions">6.6 Permissions</h3>
-<p>Planning marks the unit blocked with a diagnostic when the operator lacks rights to delete the Logical
-Cable, add cables, or view the involved devices and ports. Execution rechecks the same permissions
+<p>Planning marks the unit blocked with a diagnostic when the operator lacks rights to delete the
+Logical Cable, add cables, or view the involved devices and ports. A harness leg also needs the
+right to add cables when its only change is the harness, and the right to view the parent Interface
+and its Device. On a virtual chassis NetBox lets the parent sit on another member Device than its
+children, so the parent's Device is an involved Device too. Execution rechecks the same permissions
 inside the transaction as the accepted plan's operator.</p>
+<p>A parent Interface, or a parent Device, the actor cannot view is treated like a hidden Cable or
+mapped peer. The leg's <code>cable.permission_denied</code> diagnostic names the view permission the actor
+lacks. The leg names its companions whatever Cable the parent holds, and no display field states the
+parent's channels, legs, missing channels or Cable Profile.</p>
+<p>One rule binds every finding whose wording states a fact of an Interface: every harness finding, and
+<code>cable.termination_channelized</code> and <code>cable.termination_not_connectable</code>. Such a finding carries
+<code>wording_sources</code>, each port followed by its Device, and presentation replaces it with
+<code>cable.finding_hidden</code> when the viewer cannot view any one of them. That finding says only that the
+trace reaches a port the viewer cannot view, and it keeps the severity of the finding it replaces.
+When several findings render as one line, the line takes the most severe of them. A harness is one
+disclosure unit, all or nothing: a finding on one leg can describe the parent, a sibling child,
+another leg's far end or a trace that blocks the harness, so the wording sources of every finding
+about one harness are the whole harness. They are the parent, every channel child of the parent,
+every leg's far end, and every resolved port of each trace that blocks the harness or names its card
+without a leg, each with its Device. The planner computes that set once per harness, and every
+finding about the harness, on every leg and on each blocking trace, carries it. A viewer who cannot
+view one port of a harness therefore reads none of its findings. A
+<code>cable.planned_termination_conflict</code> that a harness claim takes part in exists only through that
+harness, so it carries the wording sources of each harness involved, on every trace that receives it,
+the ordinary competitor included. A conflict between ordinary claims carries none. Likewise, the
+<code>cable.segment_reused</code> note of a leg whose existing Cable already is the harness carries the harness
+set, and the note of an ordinary reused segment carries none. A refusal of an ordinary segment
+describes its refused port alone, so it names only that port and its Device, also on a leg trace. The
+display validator refuses wording sources that are not port and Device pairs, or that leave out a
+port the finding lists among its termination sources. The sync list names a companion as on the same
+breakout Cable only when the viewer reads the harness state of both legs, and otherwise lists it as
+synchronized together with the trace. The segment mark is bound to the segment end that holds the
+channel child, so the Cable Profile text "Set by the breakout" on the segment and on its CableClass
+policy row hides with that end; it names the profile only while the harness state is readable. The
+override save refuses a segment the plan keeps; when the viewer cannot read that it is kept, the
+refusal says only that the segment is out of view. Selection enforcement and the segment override
+save read the plan, not its presentation, so a hidden leg still selects every companion and still
+keeps a stored Cable Profile that planning ignores. Presentation derives every output that repeats a
+finding from the findings the viewer may read: a segment shows "conflict" only while a readable
+finding marks it, shows "reuse existing" and counts as kept only while its readable
+<code>cable.segment_reused</code> note says so, a trace with no changes explains that its path already exists
+only while each of those notes is readable, and otherwise says only that it has no changes to
+synchronize, and a resolved termination stays in attention only while a readable finding refuses it.
+A hidden finding keeps only its severity, and with it the disposition of its unit. A termination
+field outside such a finding names only a port, which its Interface row authorizes, so it needs no
+Device source.</p>
 <h3 id="67-planning-diagnostics">6.7 Planning diagnostics</h3>
 <table>
 <thead>
@@ -2795,8 +2960,18 @@ inside the transaction as the accepted plan's operator.</p>
 <td><code>blocked</code></td>
 </tr>
 <tr>
-<td>A foreign Cable occupies a desired termination</td>
+<td>A foreign Cable occupies a desired termination, or NetBox marks it connected without a Cable</td>
 <td><code>cable.termination_occupied</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A desired termination, a harness parent or a harness far end is an Interface whose type NetBox cannot cable (<code>NONCONNECTABLE_IFACE_TYPES</code>)</td>
+<td><code>cable.termination_not_connectable</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>An ordinary segment ends on a channelized Interface</td>
+<td><code>cable.termination_channelized</code></td>
 <td><code>blocked</code></td>
 </tr>
 <tr>
@@ -2805,7 +2980,7 @@ inside the transaction as the accepted plan's operator.</p>
 <td><code>blocked</code></td>
 </tr>
 <tr>
-<td>Source Traces plan different Cables on one free termination</td>
+<td>Two different planned Cables claim one free termination, in two Source Traces or in one</td>
 <td><code>cable.planned_termination_conflict</code></td>
 <td><code>blocked</code></td>
 </tr>
@@ -2850,6 +3025,51 @@ inside the transaction as the accepted plan's operator.</p>
 <td><code>blocked</code></td>
 </tr>
 <tr>
+<td>The far ends of one harness are of more than one model</td>
+<td><code>cable.harness_mixed_terminations</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A channel between two legs of one harness has no leg</td>
+<td><code>cable.harness_channel_gap</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>Two legs of one harness claim one channel, or one far end serves two legs</td>
+<td><code>cable.harness_leg_conflict</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>The running instance has no breakout Cable Profile for the parent's channel count</td>
+<td><code>cable.harness_profile_unavailable</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A trace in a harness cohort is unresolved or invalid, or names a channel child with no physical first hop</td>
+<td><code>cable.harness_member_unresolved</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>The legs of one harness resolve to different Cable Types</td>
+<td><code>cable.harness_type_conflict</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A Cable that is not exactly the harness holds the parent or a far end, or NetBox marks one of them connected without a Cable</td>
+<td><code>cable.harness_occupied</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A segment with a channel child at both ends, a trace with two legs, a leg whose far end is its own parent or another channelized Interface, or a trace that names the harness parent as an ordinary segment end</td>
+<td><code>cable.harness_unsupported</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A channel child holds its own CableTermination, names a channel above the parent's count, or does not mirror the parent's Cable</td>
+<td><code>cable.harness_channel_state_invalid</code></td>
+<td><code>invalid</code></td>
+</tr>
+<tr>
 <td>A dangling natural-key reference in <code>adapter_config</code></td>
 <td><code>profile.dangling_reference</code></td>
 <td><code>blocked</code></td>
@@ -2883,6 +3103,21 @@ inside the transaction as the accepted plan's operator.</p>
 <td>One run of verified pass-throughs states two known media families</td>
 <td><code>cable.media_family_mismatch</code></td>
 <td><code>warning</code> diagnostic, disposition unchanged</td>
+</tr>
+<tr>
+<td>A harness leaves channels after its last leg unused</td>
+<td><code>cable.harness_partial</code></td>
+<td><code>warning</code> diagnostic, disposition unchanged</td>
+</tr>
+<tr>
+<td>A cohort reference resolves to an Interface that is not a channel child</td>
+<td><code>cable.harness_member_unchannelized</code></td>
+<td><code>warning</code> diagnostic, disposition unchanged</td>
+</tr>
+<tr>
+<td>The channel facts and legs of one harness, on each of its leg units</td>
+<td><code>cable.harness_state</code></td>
+<td><code>info</code> diagnostic, disposition unchanged</td>
 </tr>
 </tbody>
 </table>
@@ -3625,6 +3860,8 @@ option.</p>
 <li><strong>Cable policy</strong> for the selected trace: the policy in force on each stated CableClass, editable
   in place, and the policy in force on each resolved segment with the action that forces one segment
   to its own Cable Type and Cable Profile.</li>
+<li><strong>Sync with dependencies</strong> for the selected trace, with the list of every other trace that the
+  sync executes and why (section 4.5). The command executes only the list the page showed.</li>
 </ul>
 <p>Termination field states render as badges: <code>unresolved</code>, <code>automatically resolved</code>, <code>manually
 resolved</code>, <code>proposed</code>, <code>accepted</code>, <code>stale</code>, <code>failed</code>. The <code>automatically resolved</code> state is distinct
@@ -4168,6 +4405,11 @@ transaction.</p>
 <td>Non-transient, typed reason <code>branch_active</code></td>
 <td>Set the row to <code>failed</code> before any other read, so the operator can ask again on main</td>
 </tr>
+<tr>
+<td>An import execution meets a PostgreSQL deadlock (<code>40P01</code>) or lock timeout (<code>55P03</code>), for example while a breakout harness holds its parent and children (section 6.5) and a NetBox write takes them in the other order</td>
+<td>Transient, typed reason <code>stale_plan</code></td>
+<td>Roll back the whole selection, keep the failed audit row, and tell the operator that NetBox changed these objects during the sync and that a new sync can retry it. Every other database error stays a <code>database</code> failure</td>
+</tr>
 </tbody>
 </table>
 <p>The transient HTTP statuses are the four this table names. Every other status at or above 400 is
@@ -4592,9 +4834,13 @@ Confirm that no dual code path, commented-out code, or untracked "remove later" 
 <p>Out of scope for this architecture:</p>
 <ul>
 <li>Multi-fiber and multi-lane modeling beyond NetBox's existing supported Cable Profiles.</li>
-<li>Trunk, breakout, and shuffle Cable Profiles for segment creation. A created segment has one
-  termination per side, so the CableClass mapping offers only the single and duplex family
-  (section 3.6).</li>
+<li>Trunk and shuffle Cable Profiles for segment creation. An ordinary segment has one termination per
+  side, so the CableClass mapping offers only the single and duplex family (section 3.6). A breakout
+  Cable is created only as a harness from channelized lanes (section 6.4).</li>
+<li>Matching a source lane label to its channel subinterface, and extending or replacing an existing
+  breakout Cable when a later source states more legs.</li>
+<li>Freedom from deadlock between the Cable Target Module's execution locks and NetBox's implicit
+  CablePath writes. A deadlock ends in a retryable refusal (section 13.3).</li>
 <li>Whole-preview batch inference processing.</li>
 <li>Contact-field assistance through the Resolution Proposal lifecycle.</li>
 <li>Creating missing Devices or ports.</li>

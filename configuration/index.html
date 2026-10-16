@@ -1125,7 +1125,11 @@ shows a notice and keeps the preview.</p>
 more than one to show the traces of each. Select none to show all traces. The trace that is open
 always stays in the list. Your browser keeps the filter for every preview.</p>
 <p>Each trace has <strong>Sync with dependencies</strong>, which synchronizes that trace and the traces whose
-changes it needs. It is disabled, with its reason, when one of those changes cannot sync.
+changes it needs. When the sync includes other traces, the trace card lists each of them by name,
+under the reason: on the same breakout Cable as this trace, or needed for a change this trace
+depends on. Select a name to open that trace. The sync executes only the traces the page listed. If
+that list changed after the page loaded, the sync is refused: reload the page and check the list
+again. The button is disabled, with its reason, when one of those changes cannot sync.
 <strong>Sync N actionable traces</strong>, under the trace counts, synchronizes every actionable
 trace, with the traces their changes need, in one background Job. It leaves blocked, invalid and
 unchanged traces alone. A trace that needs a change from a trace that cannot sync is left out too.
@@ -1133,6 +1137,26 @@ The line under the button says how many traces stay unsynced, and why. The butto
 its reason, when no trace can sync, when NetBox changed since the last re-read, or while a trace sync
 holds the preview. Both commands keep the workspace: when the Job ends, re-read the preview and
 resolve the traces that remain.</p>
+<p>On NetBox 4.7 and later a breakout transceiver is a channelized Interface: the parent Interface
+holds the channel count, and one channel subinterface per lane holds its channel number. The source
+states each lane as its own trace. Select <strong>Choose termination</strong> once for each lane to choose its
+channel subinterface: the import does not match a lane label to a channel. The traces of one parent
+then share one breakout Cable. Its A side is the parent, and B connector k is the first hop of the
+lane on channel k. The parent's channel count selects the Cable Profile, and the CableClass policies
+of all lanes must give the same Cable Type. The lane's <strong>Cable policy</strong> row shows that profile as
+"Set by the breakout" and offers only the Cable Type. When the same CableClass also states another
+segment of the trace, the row keeps its Cable Profile control, because the profile applies there.
+Under <strong>Proposed physical topology</strong>, the segment that leaves the channel subinterface shows the same
+text, and its override forces only the Cable Type. A Cable Profile that an override of that segment
+already stores stays stored, and the import ignores it. A new override of that segment stores no
+Cable Profile. <strong>Sync with dependencies</strong> on one lane selects every lane of that parent, because one Cable carries them all. The lane's card lists the other lanes, and the
+server refuses a selection that leaves a lane out. The breakout is blocked when its lanes reach ports of different kinds, when a channel
+between two lanes has no trace, when a trace that names the same card is not resolved, or when
+another Cable holds the parent or a far end. Channels after the last lane stay unused, with a
+warning. The import never edits or deletes a breakout Cable, so a lane that a later file adds needs
+the Cable edited in NetBox. A trace that names the parent itself, rather than a channel
+subinterface, is blocked: choose the channel subinterface of its lane. NetBox 4.6 has no channels,
+and trace import there works as before.</p>
 <p>The trace workbook layout is not configurable in this release. A later adapter setting can map other
 sheet names and columns to the same Source Trace values. Device choices do not depend on Excel column
 names, so they remain reusable across that change.</p>
