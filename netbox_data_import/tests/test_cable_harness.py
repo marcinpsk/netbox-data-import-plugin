@@ -23,7 +23,7 @@ from django.db.models.signals import pre_save
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
-from netbox_data_import.cable_disclosure import FINDING_HIDDEN, TERMINATION_HIDDEN, present_units
+from netbox_data_import.cable_disclosure import FINDING_HIDDEN, TERMINATION_HIDDEN, WORDING_SOURCES, present_units
 from netbox_data_import.cable_harness import IntentRefused, harness_intent, ordinary_intent
 from netbox_data_import.cable_policy import cable_profile_label
 from netbox_data_import.cable_target import CableModule, _CableBatch
@@ -136,8 +136,51 @@ def termination_snapshot(cable):
     )
 
 
+# Leg-segment findings that state no harness fact: CableClass policy, and the hidden-parent permission refusal.
+NO_HARNESS_WORDING = frozenset({"cable.permission_denied", "cable.cableclass_unmapped", "cable.policy_stale"})
+
+
+def wording_keys(display) -> set:
+    """Return the rows one display's wording sources name."""
+    return {(source["kind"], source["pk"]) for source in display.get(WORDING_SOURCES) or ()}
+
+
+def assert_harness_disclosure(test, plan) -> None:
+    """Assert that every finding about a harness carries the whole harness as its wording sources (section 6.6).
+
+    The harness set is the one its `cable.harness_state` carries. A finding is about the harness when its code is a
+    harness code, or when a leg unit holds it on the leg's own segment.
+    """
+    harnesses, legs = {}, {}
+    for unit in plan.units:
+        for item in unit.diagnostics:
+            if item.code == "cable.harness_state":
+                harnesses[item.identities[0]] = wording_keys(item.display)
+                legs[unit.identity] = (item.display["segment_index"], item.identities[0])
+    for unit in plan.units:
+        leg = legs.get(unit.identity)
+        for item in unit.diagnostics:
+            if item.code in NO_HARNESS_WORDING:
+                continue
+            if item.code.startswith("cable.harness_"):
+                parent = item.identities[0]
+            elif leg is not None and item.display.get("segment_index") == leg[0]:
+                parent = leg[1]
+            else:
+                continue
+            # A harness the planner settled no leg of carries no set to compare with.
+            if parent in harnesses:
+                test.assertLessEqual(harnesses[parent], wording_keys(item.display), f"{unit.identity}: {item.code}")
+
+
 class HarnessTopologyMixin(CableTopologyMixin):
     """Add one channelized switch port, a four-port panel and four servers to the cable topology."""
+
+    def plan(self, *blocks, actor=None):
+        """Plan through the public seam, and check the harness disclosure invariant on every plan a test builds."""
+        plan = super().plan(*blocks, actor=actor)
+        assert_harness_disclosure(self, plan)
+        return plan
 
     @classmethod
     def build_harness_topology(cls, channels=4):
