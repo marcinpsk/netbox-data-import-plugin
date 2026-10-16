@@ -1147,10 +1147,12 @@ save read the plan, not its presentation, so a hidden leg still selects every co
 keeps a stored Cable Profile that planning ignores. Presentation derives every output that repeats a
 finding from the findings the viewer may read: a segment shows "conflict" only while a readable
 finding marks it, shows "reuse existing" and counts as kept only while its readable
-`cable.segment_reused` note says so, and a resolved termination stays in attention only while a
-readable finding refuses it. A hidden finding keeps only its severity, and with it the disposition of
-its unit. A termination field outside such a finding names only a port, which its Interface row
-authorizes, so it needs no Device source.
+`cable.segment_reused` note says so, a trace with no changes explains that its path already exists
+only while each of those notes is readable, and otherwise says only that it has no changes to
+synchronize, and a resolved termination stays in attention only while a readable finding refuses it.
+A hidden finding keeps only its severity, and with it the disposition of its unit. A termination
+field outside such a finding names only a port, which its Interface row authorizes, so it needs no
+Device source.
 
 ### 6.7 Planning diagnostics
 

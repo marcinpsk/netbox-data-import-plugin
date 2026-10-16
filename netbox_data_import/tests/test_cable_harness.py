@@ -40,6 +40,7 @@ from netbox_data_import.review_workspace import (
     _DIAGNOSTIC_MESSAGES,
     BREAKOUT_PROFILE,
     SYNC_COMPANIONS,
+    SYNC_NOTHING,
     SYNC_TOGETHER,
     ReviewWorkspace,
 )
@@ -1845,6 +1846,30 @@ class HarnessPolicyRowTest(HarnessTopologyMixin, TestCase):
                 self.assertContains(refused, SEGMENT_OUT_OF_VIEW)
                 self.assertNotContains(refused, RETAINED_SEGMENT_REASON)
                 self.assertFalse(CableSegmentOverride.objects.exists())
+
+    def test_a_fully_reused_path_states_no_reuse_in_its_sync_reason_once_the_harness_hides(self):
+        """Every Cable of each trace exists, so the traces have no changes, and only a readable reuse says why."""
+        self.build_existing_harness()
+        for number in range(1, 5):
+            self.connect(self.rears[number], self.servers[number], type="mmf-om4")
+        operator = self.operator({})
+        self.client.force_login(operator)
+        card = self.cards(*(panel_leg(number) for number in range(1, 5)))["SW-1 Slot 0 >> 0/0 (10) P01"]
+        self.assertEqual(card.context["selected_trace"].disposition, Disposition.NO_OP)
+        (sync,) = card.context["selected_trace"].actions
+        self.assertEqual(sync.reason, "The stated path already exists.")
+
+        for model, hidden in ((Interface, self.parent), (Device, self.parent.device), (Interface, self.children[2])):
+            with self.subTest(hidden=f"{model.__name__} {hidden}"):
+                self.restrict_interfaces(operator, {}, model=Interface)
+                self.restrict_interfaces(operator, {}, model=Device)
+                self.restrict_interfaces(operator, self.all_but(model, hidden), model=model)
+
+                card = self.reload(card)
+
+                (sync,) = card.context["selected_trace"].actions
+                self.assertEqual(sync.reason, SYNC_NOTHING)
+                self.assertNotContains(card, "already exists")
 
     def test_one_far_end_device_hides_the_harness(self):
         operator = self.operator({})

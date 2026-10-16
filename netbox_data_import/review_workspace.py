@@ -1173,6 +1173,13 @@ class TraceWorkspaceUnit:
             for item in unit.diagnostics
         ]
         segments = _presented_segments(workspace.get("segments") or (), unit.diagnostics)
+        detail = str(display.get("detail") or "")
+        # "The path exists" repeats the reuse notes, so it stands only while each of them is readable.
+        if any(
+            stored["status"] == REUSE_SEGMENT and presented["status"] != REUSE_SEGMENT
+            for stored, presented in zip(workspace.get("segments") or (), segments, strict=True)
+        ):
+            detail = SYNC_NOTHING
         return cls(
             identity=unit.identity,
             trace_identity=str(workspace.get("identity") or ""),
@@ -1190,7 +1197,7 @@ class TraceWorkspaceUnit:
             devices=[dict(item) for item in workspace.get("devices") or ()],
             terminations=_presented_terminations(workspace.get("terminations") or (), unit.diagnostics),
             findings=findings,
-            actions=cls._actions(unit, findings, str(display.get("detail") or "")),
+            actions=cls._actions(unit, findings, detail),
         )
 
     @staticmethod
