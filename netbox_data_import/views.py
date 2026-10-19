@@ -4540,12 +4540,11 @@ def _replanned_trace(workspace, identity: str, plan) -> str:
     trace = next((item for item in workspace.traces if item.identity == identity), None)
     if trace is None:
         return ""
+    position = {"sheet": trace.sheet, "row_number": trace.row_number}
     for unit in plan.units:
         display = unit.display
-        if display.get("trace") is not None and (display.get("sheet"), display.get("row_number")) == (
-            trace.sheet,
-            trace.row_number,
-        ):
+        # Duplicate collapse keeps every occurrence, and the reviewed one need not be the first.
+        if display.get("trace") is not None and position in display["occurrences"]:
             return unit.identity
     return ""
 

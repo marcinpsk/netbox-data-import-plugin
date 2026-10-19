@@ -705,6 +705,7 @@ class _CableBatch:
             "trace_identity": trace.identity,
             "from_text": provenance.from_text,
             "to_text": provenance.to_text,
+            "occurrences": [{"sheet": item.sheet, "row_number": item.row_start} for item in trace.provenance],
             "segment_count": len(trace.segments),
         }
         analysis = _TraceAnalysis(trace=trace, identity=f"cable:trace:{trace.identity}", display=display)

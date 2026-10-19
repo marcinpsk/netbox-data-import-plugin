@@ -244,6 +244,22 @@ class TraceWorkspacePortClassTest(_PortClassWorkspaceMixin, CableTopologyMixin, 
         sync = next(action for action in self.wireless_trace(page).actions if action.key == "sync")
         self.assertTrue(sync.enabled, sync.reason)
 
+    def test_a_mapping_that_collapses_two_occurrences_reopens_the_collapsed_trace(self):
+        """Collapse lists the earlier fixed occurrence first, because its source text ranks before the label."""
+        wlan = "WLAN Port"
+        self.upload(
+            ELSEWHERE,
+            direct_path(trace_termination("DEV-A", "", "eth0", "NIC"), DEVICE_B),
+            direct_path(trace_termination("DEV-A", "", "eth0", wlan), DEVICE_B),
+        )
+        reviewed = next(trace for trace in self.workspace().context["traces"] if trace.port_classes)
+
+        mapped = self.map_port_class("preview", label=wlan, trace=reviewed.identity)
+
+        (collapsed,) = [trace for trace in mapped.context["traces"] if "DEV-A" in trace.trace_identity]
+        self.assertLess(collapsed.row_number, reviewed.row_number)
+        self.assertEqual(mapped.context["selected_trace"].identity, collapsed.identity)
+
 
 class TraceWorkspacePortClassDisclosureTest(_PortClassWorkspaceMixin, CableTopologyMixin, TransactionTestCase):
     """A profile PortClass mapping the viewer cannot view shows no target in the workspace."""
