@@ -3585,6 +3585,8 @@ def _port_class_rows(profile, workspace, planning_context, viewer) -> list:
             unknown_fields={"port_class"},
         )
         hidden = row is not None and row.pk not in visible_ids
+        # A preview mapping is this preview's own decision, so only a profile mapping can be hidden.
+        redacted = hidden and source == PORT_CLASS_FOR_PROFILE
         save_reason = (
             POLICY_WRITE_REFUSED if hidden else "" if assessment.allowed else PORT_CLASS_SAVE_PERMISSION_REFUSED
         )
@@ -3600,13 +3602,13 @@ def _port_class_rows(profile, workspace, planning_context, viewer) -> list:
         rows.append(
             {
                 "label": label,
-                "port_class": port_class,
+                "port_class": POLICY_HIDDEN if redacted else port_class,
                 "source": source,
                 "trace_count": counts[label],
                 "save_reason": save_reason,
                 "clear_reason": clear_reason,
                 "form": PortClassMappingForm(
-                    initial={"port_class": port_class},
+                    initial={} if redacted else {"port_class": port_class},
                     auto_id=f"id_%s_port_class_{index}",
                 ),
             }

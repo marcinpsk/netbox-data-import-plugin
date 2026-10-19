@@ -5,11 +5,14 @@
 from html.parser import HTMLParser
 from io import BytesIO
 
+from dcim.models import Cable, Device, FrontPort, Interface, RearPort, Site
 from django.core.exceptions import ValidationError
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
-from netbox_data_import.models import ImportProfile, PortClassMapping
+from netbox_data_import.cable_disclosure import POLICY_HIDDEN
+from netbox_data_import.models import CableClassMapping, CableSegmentOverride, ImportProfile, PortClassMapping
+from netbox_data_import.object_permissions import POLICY_WRITE_REFUSED
 from netbox_data_import.plan import Disposition
 from netbox_data_import.tests.helpers import (
     preview_claim,
@@ -17,6 +20,7 @@ from netbox_data_import.tests.helpers import (
     trace_termination,
     trace_workbook_bytes,
     upload_preview,
+    user_with_object_permission,
 )
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.tests.test_cable_module import DEVICE_B, CableTopologyMixin, direct_path
@@ -239,6 +243,58 @@ class TraceWorkspacePortClassTest(_PortClassWorkspaceMixin, CableTopologyMixin, 
         self.assertEqual(page.context["summary"]["preview_state"], "current")
         sync = next(action for action in self.wireless_trace(page).actions if action.key == "sync")
         self.assertTrue(sync.enabled, sync.reason)
+
+
+class TraceWorkspacePortClassDisclosureTest(_PortClassWorkspaceMixin, CableTopologyMixin, TransactionTestCase):
+    """A profile PortClass mapping the viewer cannot view shows no target in the workspace."""
+
+    def setUp(self):
+        self.build_topology()
+        self.viewer = user_with_object_permission(
+            "port-class-viewer",
+            [
+                (ImportProfile, ("view", "change"), {}),
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (Cable, ("view", "add", "delete"), {}),
+                (CableClassMapping, ("view", "add", "change", "delete"), {}),
+                (CableSegmentOverride, ("view", "add", "change", "delete"), {}),
+                (PortClassMapping, ("add", "change", "delete"), {}),
+                (PortClassMapping, ("view",), {"source_label": "Undefined"}),
+            ],
+        )
+        self.client.force_login(self.viewer)
+
+    @staticmethod
+    def label_row(page):
+        """Return the rendered workspace row of the wireless label."""
+        html = page.content.decode()
+        start = html.index(f'data-port-class-label="{LABEL}"')
+        return html[start : html.index("</tr>", start)]
+
+    def test_a_hidden_profile_mapping_shows_no_target_and_preselects_nothing(self):
+        PortClassMapping.objects.create(profile=self.profile, source_label=LABEL, port_class="Position Front")
+
+        page = self.upload()
+
+        (row,) = page.context["port_class_rows"]
+        self.assertEqual((row["port_class"], row["source"]), (POLICY_HIDDEN, "profile"))
+        self.assertFalse(row["form"].initial.get("port_class"))
+        self.assertEqual((row["save_reason"], row["clear_reason"]), (POLICY_WRITE_REFUSED, POLICY_WRITE_REFUSED))
+        html = self.label_row(page)
+        state = html[html.index("data-port-class-state>") : html.index("</td>", html.index("data-port-class-state>"))]
+        self.assertIn(POLICY_HIDDEN, state)
+        self.assertNotIn("Position Front", state)
+        self.assertNotRegex(html, r'<option value="[^"]+"\s*selected')
+
+        mapped = self.map_port_class("preview")
+
+        (row,) = mapped.context["port_class_rows"]
+        self.assertEqual((row["port_class"], row["source"]), ("NIC", "preview"))
+        self.assertEqual(row["form"].initial.get("port_class"), "NIC")
 
 
 class TracePortClassWorkerTest(
