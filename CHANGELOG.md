@@ -2,6 +2,44 @@
 
 <!-- version list -->
 
+## v2.16.0 (2026-10-19)
+
+### Bug Fixes
+
+- **trace**: Keep the workspace selects out of a clipping scroll box
+  ([`cbccabb`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/cbccabb8497f3d96435df996b8bd99b27716bdba))
+
+- **trace**: Name both ends of a broken Segment Evidence path
+  ([`a73b896`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a73b8967c934945a5b6c2f4bdd74e42e026b4b43))
+
+- **trace**: Redact a hidden profile PortClass mapping in the workspace
+  ([`6084d36`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6084d36446c6d398557e94990118c6f220e60461))
+
+- **trace**: Refuse a PortClass label with whitespace at either end
+  ([`3fd1df8`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/3fd1df8c655c577a484a1c13cc5f2f712105c812))
+
+- **trace**: Reopen a trace that a PortClass mapping collapsed
+  ([`483975e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/483975ea94af20df10a3ee0298f01ace96f27323))
+
+### Documentation
+
+- Describe PortClass Mapping and the preview-scoped PortClass map
+  ([`9188bae`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9188baec52948734abaf5fc4cdbbe3c5cd871f47))
+
+### Features
+
+- **trace**: Map a PortClass label on the profile or for one preview
+  ([`e7d0f52`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e7d0f52604b027ba7019c158c1b083caf300c7c3))
+
+- **trace**: Map a PortClass label outside the fixed vocabulary in the adapter
+  ([`ca940ea`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ca940ead39b5889ff82459924868fd2ba6765791))
+
+### Testing
+
+- **trace**: Keep a first preview PortClass label when a second is mapped
+  ([`a95b2da`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a95b2da38a584266fe8dad25ae5c737f501a7dcc))
+
+
 ## v2.15.0 (2026-10-16)
 
 ### Bug Fixes
