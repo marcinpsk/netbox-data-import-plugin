@@ -1116,6 +1116,19 @@ a node to map the prefix that ends at that segment. The Import Profile stores th
 later trace file reuses it for a path or prefix with the same name identity, as defined above. The
 separator spelling is part of the key, so <code>A&gt;&gt;B</code> and <code>A &gt;&gt; B</code> are two paths, and their prefixes <code>A</code>
 are one key. Profile YAML does not include these mappings.</p>
+<p>Each Termination Reference states a PortClass. The plugin knows a fixed set of PortClass values:
+<code>NIC</code>, <code>Switch Port</code>, <code>Port</code>, <code>Position Front</code>, <code>Fiber Pair Front</code>, <code>Punch-Down</code>, <code>Fiber Pair Back</code>,
+<code>Power Input Port</code> and <code>Power Output Port</code>. A trace that states another label, for example
+<code>802.11 Port</code> or <code>Undefined</code>, is invalid. The workspace lists each such label of the preview under
+<strong>PortClass labels</strong>, with the number of traces that state it. Select a fixed PortClass for the label,
+then select one of two buttons. <strong>Save to profile</strong> stores a PortClass Mapping on the Import Profile,
+and every later trace file uses it. <strong>Use for this preview</strong> maps every occurrence of the label in
+this file only. That mapping stays through a re-read, and it ends when you discard the preview or
+upload a file again. A mapping for this preview takes priority over the profile mapping. <strong>Clear</strong>
+removes the mapping in force. The plugin compares the label exactly as the file states it, after it
+trims the ends. A label from the fixed set cannot take a mapping. A mapping changes the identity of
+each trace that states the label, so the workspace reopens the trace from the same source block.
+Profile YAML, the REST API and GraphQL include the profile mappings as <code>port_class_mappings</code>.</p>
 <p>A Device's Location is its own Location. Only a Device with no Location of its own uses its Rack's
 Location.</p>
 <p>The Location you select on the import page also ranks candidates, after the source hints, and never
