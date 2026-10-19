@@ -406,6 +406,12 @@ def _unknown_port_class_error(
     return None
 
 
+def _termination_text(termination: TerminationReference) -> str:
+    """Return one termination in the endpoint-line form the source export writes."""
+    parts = [termination.device, termination.cards, f"{termination.port} ({termination.port_class})"]
+    return " > ".join(part for part in parts if part)
+
+
 def _linearity_error(
     block: _Block, summary: EndpointSummary, segments: Sequence[_ParsedSegment]
 ) -> SourceDiagnostic | None:
@@ -464,7 +470,9 @@ def _linearity_error(
             return _error(
                 block,
                 "trace.non_linear_path",
-                "Consecutive Segment Evidence rows do not share a device and cards label.",
+                "Consecutive Segment Evidence rows do not share a device and cards label: "
+                f"row {previous.row_number} ends at {_termination_text(previous.evidence.right)}, "
+                f"but row {following.row_number} starts at {_termination_text(following.evidence.left)}.",
                 following.row_number,
             )
     return None

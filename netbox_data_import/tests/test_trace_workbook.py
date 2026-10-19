@@ -786,6 +786,44 @@ class TraceWorkbookTaxonomyTest(SimpleTestCase):
         self.assertIn("branch", batch.diagnostics[0].message)
         self.assertEqual(len(batch.rows[0].segments), 3)
 
+    def test_a_break_after_a_dangling_row_names_both_ends(self):
+        """A dangling switch row then a reversed backbone breaks the path, and the message names both ends."""
+        endpoint_a = _termination("DEVICE-A", "Slot 13", "Eth 01", "NIC")
+        endpoint_b = _termination("DEVICE-B", "", "DCN-1", "NIC")
+        switch_port = _termination("SWITCH-1", "", "30", "Switch Port")
+        panel_c_front = _termination("PANEL-C", "", "04", "Position Front")
+        block = (
+            _endpoint_line(endpoint_a),
+            _endpoint_line(endpoint_b),
+            (
+                _segment(endpoint_a, "Cat 6a", _termination("PANEL-P", "", "01", "Position Front")),
+                _segment(
+                    _termination("PANEL-P", "", "R01", "Punch-Down"),
+                    "Backbone",
+                    _termination("PANEL-Q", "", "R01", "Punch-Down"),
+                ),
+                _segment(_termination("PANEL-Q", "", "01", "Position Front"), "Cat 6a", switch_port),
+                _segment(switch_port, "Cat 6a", panel_c_front),
+                _segment(panel_c_front, "Cat 6a", _termination("SWITCH-2", "", "SP 10", "Switch Port")),
+                _segment(
+                    _termination("PANEL-D", "CARD-D", "R04", "Punch-Down"),
+                    "Backbone",
+                    _termination("PANEL-C", "", "R04", "Punch-Down"),
+                ),
+                _segment(_termination("PANEL-D", "CARD-D", "04", "Position Front"), "Cat 6a", endpoint_b),
+            ),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.non_linear_path"])
+        self.assertEqual(batch.diagnostics[0].row_number, 11)
+        self.assertIn(
+            "row 10 ends at SWITCH-2 > SP 10 (Switch Port), but row 11 starts at PANEL-D > CARD-D > R04 (Punch-Down).",
+            batch.diagnostics[0].message,
+        )
+
 
 SERVER_1_INLET = _termination("SRV-1", "", "PowerIn 01", "Power Input Port")
 SERVER_2_INLET = _termination("SRV-2", "PSU-R", "PowerIn 01", "Power Input Port")
