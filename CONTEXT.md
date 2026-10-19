@@ -118,6 +118,12 @@ _Avoid_: Power path
 **CableClass**:
 The source label for one cable's kind. It maps to Cable Type and Cable Profile only through Import Profile policy.
 
+**PortClass**:
+The source label for one termination's kind. A fixed vocabulary of PortClass values decides which NetBox port kind a Termination Reference claims.
+
+**PortClass Mapping**:
+A decision that maps one source PortClass label outside the fixed vocabulary to one fixed PortClass. The Import Profile stores it for every later file, or one preview holds it until that preview ends. The preview's mapping takes priority over the profile's.
+
 **Cable Type**:
 The fixed NetBox Cable value that describes the physical medium or classification of one Cable segment.
 

@@ -457,6 +457,20 @@ later trace file reuses it for a path or prefix with the same name identity, as 
 separator spelling is part of the key, so `A>>B` and `A >> B` are two paths, and their prefixes `A`
 are one key. Profile YAML does not include these mappings.
 
+Each Termination Reference states a PortClass. The plugin knows a fixed set of PortClass values:
+`NIC`, `Switch Port`, `Port`, `Position Front`, `Fiber Pair Front`, `Punch-Down`, `Fiber Pair Back`,
+`Power Input Port` and `Power Output Port`. A trace that states another label, for example
+`802.11 Port` or `Undefined`, is invalid. The workspace lists each such label of the preview under
+**PortClass labels**, with the number of traces that state it. Select a fixed PortClass for the label,
+then select one of two buttons. **Save to profile** stores a PortClass Mapping on the Import Profile,
+and every later trace file uses it. **Use for this preview** maps every occurrence of the label in
+this file only. That mapping stays through a re-read, and it ends when you discard the preview or
+upload a file again. A mapping for this preview takes priority over the profile mapping. **Clear**
+removes the mapping in force. The plugin compares the label exactly as the file states it, after it
+trims the ends. A label from the fixed set cannot take a mapping. A mapping changes the identity of
+each trace that states the label, so the workspace reopens the trace from the same source block.
+Profile YAML, the REST API and GraphQL include the profile mappings as `port_class_mappings`.
+
 A Device's Location is its own Location. Only a Device with no Location of its own uses its Rack's
 Location.
 
