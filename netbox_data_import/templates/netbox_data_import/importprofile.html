@@ -145,6 +145,23 @@
     </div>
     {% endif %}
 
+    {# PortClass Mappings #}
+    {% if 'port_class_mappings' in applicable_policy_sections %}
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>PortClass Mappings</strong>
+        <a href="{% url 'plugins:netbox_data_import:portclassmapping_add' object.pk %}" class="btn btn-sm btn-primary">
+          <i class="mdi mdi-plus-thick"></i> Add
+        </a>
+      </div>
+      {% if port_class_table.rows %}
+        {% include 'inc/table.html' with table=port_class_table %}
+      {% else %}
+        <div class="card-body text-muted">No PortClass mappings configured.</div>
+      {% endif %}
+    </div>
+    {% endif %}
+
   </div>
 </div>
 {% endblock %}

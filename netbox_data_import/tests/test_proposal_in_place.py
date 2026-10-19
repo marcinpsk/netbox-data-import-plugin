@@ -443,6 +443,7 @@ class ProposalInPlaceTest(InPlacePreviewMixin, IsolatedRQQueueTestMixin, CableTo
         for route in (
             "preview_reread",
             "trace_cable_policy",
+            "trace_port_class",
             "trace_segment_policy",
             "trace_location_mapping",
             "trace_resolve_device",

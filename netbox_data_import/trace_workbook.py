@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from hashlib import sha256
 from io import BytesIO
 import itertools
@@ -27,6 +27,7 @@ from .source_trace import (
     EndpointSummary,
     IdentityKey,
     PassThroughClaim,
+    PortClassLabel,
     SegmentEvidence,
     SourceTrace,
     TerminationReference,
@@ -58,6 +59,13 @@ _PATH_HEADER = (
 )
 _LIST_HEADER = ("Location", "Rack", "UPos", "Device", "Cards", "Port", "PortClass", "Cable")
 _BLOCK_LINE_MARKERS = ("From", "To")
+
+
+@dataclass(frozen=True)
+class TraceWorkbookConfig:
+    """The detached trace-workbook configuration: each mapped PortClass label and its fixed PortClass."""
+
+    port_class_map: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -406,6 +414,57 @@ def _unknown_port_class_error(
     return None
 
 
+def _port_class_labels(
+    terminations: Iterable[TerminationReference], port_class_map: Mapping[str, str]
+) -> tuple[PortClassLabel, ...]:
+    """Return each stated label outside the fixed vocabulary, with the PortClass the map gives it."""
+    labels = {termination.port_class for termination in terminations if termination.port_class not in PORT_CLASSES}
+    return tuple(PortClassLabel(label, port_class_map.get(label, "")) for label in sorted(labels))
+
+
+def _mapped(termination: TerminationReference, port_class_map: Mapping[str, str]) -> TerminationReference:
+    """Return the termination with the fixed PortClass its source label maps to."""
+    port_class = port_class_map.get(termination.port_class)
+    return termination if port_class is None else replace(termination, port_class=port_class)
+
+
+def _mapped_segments(
+    segments: Iterable[_ParsedSegment], port_class_map: Mapping[str, str]
+) -> tuple[_ParsedSegment, ...]:
+    """Return Segment Evidence rows whose two ends carry their mapped PortClass."""
+    return tuple(
+        _ParsedSegment(
+            SegmentEvidence(
+                _mapped(parsed.evidence.left, port_class_map),
+                parsed.evidence.cable_class,
+                _mapped(parsed.evidence.right, port_class_map),
+            ),
+            parsed.row_number,
+        )
+        for parsed in segments
+    )
+
+
+def _mapped_visits(visits: Iterable[_ParsedVisit], port_class_map: Mapping[str, str]) -> tuple[_ParsedVisit, ...]:
+    """Return Trace List visits that carry their mapped PortClass."""
+    return tuple(_ParsedVisit(_mapped(visit.termination, port_class_map), visit.row_number) for visit in visits)
+
+
+def _mapped_summary(summary: EndpointSummary, port_class_map: Mapping[str, str]) -> EndpointSummary:
+    """Return the Endpoint Summary whose two terminations carry their mapped PortClass."""
+    return replace(
+        summary,
+        from_termination=_mapped(summary.from_termination, port_class_map),
+        to_termination=_mapped(summary.to_termination, port_class_map),
+    )
+
+
+def _termination_text(termination: TerminationReference) -> str:
+    """Return one termination in the endpoint-line form the source export writes."""
+    parts = [termination.device, termination.cards, f"{termination.port} ({termination.port_class})"]
+    return " > ".join(part for part in parts if part)
+
+
 def _linearity_error(
     block: _Block, summary: EndpointSummary, segments: Sequence[_ParsedSegment]
 ) -> SourceDiagnostic | None:
@@ -464,7 +523,9 @@ def _linearity_error(
             return _error(
                 block,
                 "trace.non_linear_path",
-                "Consecutive Segment Evidence rows do not share a device and cards label.",
+                "Consecutive Segment Evidence rows do not share a device and cards label: "
+                f"row {previous.row_number} ends at {_termination_text(previous.evidence.right)}, "
+                f"but row {following.row_number} starts at {_termination_text(following.evidence.left)}.",
                 following.row_number,
             )
     return None
@@ -673,7 +734,7 @@ def _deduplicate_errors(errors: Iterable[SourceDiagnostic]) -> tuple[SourceDiagn
 
 
 def _path_trace(
-    path_block: _Block, list_block: _Block | None
+    path_block: _Block, list_block: _Block | None, port_class_map: Mapping[str, str]
 ) -> tuple[SourceTrace | None, tuple[SourceDiagnostic, ...]]:
     """Return the Source Trace one path block states, with any block-level diagnostic."""
     summary, errors = _endpoint_summary(path_block)
@@ -686,6 +747,19 @@ def _path_trace(
     if list_block is not None:
         parsed_visits, visit_errors = _parse_visits(list_block)
         errors.extend(visit_errors)
+    port_class_labels = _port_class_labels(
+        (
+            summary.from_termination,
+            summary.to_termination,
+            *(end for parsed in parsed_segments for end in (parsed.evidence.left, parsed.evidence.right)),
+            *(visit.termination for visit in parsed_visits),
+        ),
+        port_class_map,
+    )
+    # Every identity key below reads the mapped PortClass, so the map applies before any of them.
+    summary = _mapped_summary(summary, port_class_map)
+    parsed_segments = _mapped_segments(parsed_segments, port_class_map)
+    parsed_visits = _mapped_visits(parsed_visits, port_class_map)
     endpoint_terms = (
         (summary.from_termination, path_block.row_start),
         (summary.to_termination, path_block.row_start + 1),
@@ -752,12 +826,15 @@ def _path_trace(
             ),
             provenance=tuple(provenance),
             errors=_deduplicate_errors(errors),
+            port_class_labels=port_class_labels,
         ),
         (),
     )
 
 
-def _fallback_trace(block: _Block) -> tuple[SourceTrace | None, tuple[SourceDiagnostic, ...]]:
+def _fallback_trace(
+    block: _Block, port_class_map: Mapping[str, str]
+) -> tuple[SourceTrace | None, tuple[SourceDiagnostic, ...]]:
     """Return the Endpoint Summary fallback an unpaired Trace List block states."""
     summary, errors = _endpoint_summary(block)
     errors.extend(_metadata_errors((block,)))
@@ -765,6 +842,12 @@ def _fallback_trace(block: _Block) -> tuple[SourceTrace | None, tuple[SourceDiag
     errors.extend(visit_errors)
     if summary is None or not visits:
         return None, tuple(errors)
+    port_class_labels = _port_class_labels(
+        (summary.from_termination, summary.to_termination, *(visit.termination for visit in visits)),
+        port_class_map,
+    )
+    summary = _mapped_summary(summary, port_class_map)
+    visits = _mapped_visits(visits, port_class_map)
     terms = (
         (summary.from_termination, block.row_start),
         (summary.to_termination, block.row_start + 1),
@@ -798,6 +881,7 @@ def _fallback_trace(block: _Block) -> tuple[SourceTrace | None, tuple[SourceDiag
             content_fingerprint=content_fingerprint(summary.from_termination, summary.to_termination, ()),
             provenance=(_provenance(block, summary),),
             errors=_deduplicate_errors(errors),
+            port_class_labels=port_class_labels,
         ),
         (),
     )
@@ -806,8 +890,10 @@ def _fallback_trace(block: _Block) -> tuple[SourceTrace | None, tuple[SourceDiag
 def _trace_selection_key(trace: SourceTrace) -> tuple[bool, bool, str]:
     """Rank Segment Evidence first, then canonical direction and serialized occurrence content."""
     summary = trace.endpoint_summary
-    # Provenance and errors carry the block position, which states where a trace was read, not what it says.
-    content = {key: value for key, value in asdict(trace).items() if key not in ("provenance", "errors")}
+    # Provenance and errors carry the block position, and collapse merges the labels of every occurrence.
+    content = {
+        key: value for key, value in asdict(trace).items() if key not in ("provenance", "errors", "port_class_labels")
+    }
     return (
         not bool(trace.segments),
         summary.from_termination.identity_key > summary.to_termination.identity_key,
@@ -838,7 +924,10 @@ def _collapse_duplicates(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ..
                     row_number=min(item.row_start for item in provenance),
                 )
             )
-        collapsed.append(replace(selected, provenance=provenance, errors=_deduplicate_errors(errors)))
+        labels = tuple(sorted({label for trace in ordered for label in trace.port_class_labels}))
+        collapsed.append(
+            replace(selected, provenance=provenance, errors=_deduplicate_errors(errors), port_class_labels=labels)
+        )
     return tuple(collapsed)
 
 
@@ -916,7 +1005,9 @@ def _cross_trace_conflicts(
     return tuple(checked)
 
 
-def interpret(content: bytes) -> tuple[tuple[SourceTrace, ...], tuple[SourceDiagnostic, ...]]:
+def interpret(
+    content: bytes, config: TraceWorkbookConfig
+) -> tuple[tuple[SourceTrace, ...], tuple[SourceDiagnostic, ...]]:
     """Return typed Source Traces and source diagnostics from workbook bytes."""
     try:
         book = openpyxl.load_workbook(BytesIO(content), data_only=True)
@@ -951,14 +1042,14 @@ def interpret(content: bytes) -> tuple[tuple[SourceTrace, ...], tuple[SourceDiag
         list_block = candidates.pop(0) if candidates else None
         if list_block is not None:
             paired_lists.add((list_block.sheet, list_block.ordinal))
-        trace, block_diagnostics = _path_trace(path_block, list_block)
+        trace, block_diagnostics = _path_trace(path_block, list_block, config.port_class_map)
         diagnostics.extend(block_diagnostics)
         if trace is not None:
             traces.append(trace)
     for block in list_blocks:
         if (block.sheet, block.ordinal) in paired_lists:
             continue
-        trace, block_diagnostics = _fallback_trace(block)
+        trace, block_diagnostics = _fallback_trace(block, config.port_class_map)
         diagnostics.extend(block_diagnostics)
         if trace is not None:
             traces.append(trace)
@@ -972,6 +1063,7 @@ __all__ = (
     "INTERFACE_PORT_CLASSES",
     "PORT_CLASSES",
     "REAR_PORT_CLASSES",
+    "TraceWorkbookConfig",
     "canonical_orientation",
     "canonical_trace_identity",
     "content_fingerprint",

@@ -29,7 +29,7 @@ class AdapterConfigProjectionTest(TestCase):
             group_2_target="u_position",
         )
 
-        config = interpreter_config_for(profile)
+        config = interpreter_config_for(profile, {})
 
         self.assertEqual(
             config,

@@ -52,6 +52,22 @@ urlpatterns = [
         views.CableClassMappingDeleteView.as_view(),
         name="cableclassmapping_delete",
     ),
+    # PortClass Mappings
+    path(
+        "profiles/<int:profile_pk>/port-classes/add/",
+        views.PortClassMappingAddView.as_view(),
+        name="portclassmapping_add",
+    ),
+    path(
+        "port-class-mappings/<int:pk>/edit/",
+        views.PortClassMappingEditView.as_view(),
+        name="portclassmapping_edit",
+    ),
+    path(
+        "port-class-mappings/<int:pk>/delete/",
+        views.PortClassMappingDeleteView.as_view(),
+        name="portclassmapping_delete",
+    ),
     # AI backends (Inference Backend, specification 8.2)
     path("ai-backends/", views.InferenceBackendListView.as_view(), name="inferencebackend_list"),
     path("ai-backends/add/", views.InferenceBackendEditView.as_view(), name="inferencebackend_add"),
@@ -191,6 +207,11 @@ urlpatterns = [
         "trace-workspace/cable-policy/",
         views.TraceCablePolicyView.as_view(),
         name="trace_cable_policy",
+    ),
+    path(
+        "trace-workspace/port-class/",
+        views.TracePortClassView.as_view(),
+        name="trace_port_class",
     ),
     path(
         "trace-workspace/segment-policy/",

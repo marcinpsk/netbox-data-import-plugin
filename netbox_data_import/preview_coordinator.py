@@ -29,6 +29,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from . import branching
+from .adapter_config import PREVIEW_PORT_CLASS_MAP
 from .import_engine import ImportEngine, StaleSourceDocument
 from .models import (
     ImportProfile,
@@ -230,8 +231,26 @@ def _expire(row: PreviewCoordinator) -> None:
     row.save()
 
 
-def _planning_context(context: Mapping) -> dict:
-    return {key: context.get(key) for key in PLANNING_KEYS}
+def planning_context_of(context: Mapping) -> dict:
+    """Return the planning context a preview with this context plans against."""
+    projected = {key: context.get(key) for key in PLANNING_KEYS}
+    # A preview without its own PortClass map keeps the planning context every earlier plan states.
+    if port_class_map := context.get(PREVIEW_PORT_CLASS_MAP):
+        projected[PREVIEW_PORT_CLASS_MAP] = dict(port_class_map)
+    return projected
+
+
+def with_preview_port_class(context: Mapping, label: str, port_class: str | None) -> dict:
+    """Return the preview context with one PortClass label mapped for this preview alone, or cleared."""
+    port_class_map = dict(context.get(PREVIEW_PORT_CLASS_MAP) or {})
+    if port_class is None:
+        port_class_map.pop(label, None)
+    else:
+        port_class_map[label] = port_class
+    updated = {key: value for key, value in context.items() if key != PREVIEW_PORT_CLASS_MAP}
+    if port_class_map:
+        updated[PREVIEW_PORT_CLASS_MAP] = dict(sorted(port_class_map.items()))
+    return updated
 
 
 def sync_hold_reason(statuses: Iterable[str]) -> str:
@@ -294,7 +313,7 @@ class PreviewSnapshot:
     @property
     def planning_context(self) -> dict:
         """Return the site, location and tenant the preview plans against."""
-        return _planning_context(self.context)
+        return planning_context_of(self.context)
 
     @cached_property
     def plan(self) -> ImportPlan:
@@ -376,7 +395,7 @@ class LockedPreview:
     @property
     def planning_context(self) -> dict:
         """Return the site, location and tenant the preview plans against."""
-        return _planning_context(self.context)
+        return planning_context_of(self.context)
 
     @property
     def reviewed_fingerprint(self) -> str:
@@ -397,6 +416,8 @@ class CommandOutcome:
     payload: Mapping[str, Any] = field(default_factory=dict)
     # A replacement the command already produced, inside its own savepoint.
     plan: ImportPlan | None = None
+    # The preview context the command leaves behind; a replacement plan must be planned against it.
+    context: Mapping[str, Any] | None = None
     # Commit what the command wrote durably, keep the preview unchanged, then raise this.
     refusal: Exception | None = None
     # The state and Job a queueing command leaves behind, and its after-commit compensation.
@@ -471,9 +492,14 @@ class PreviewCommand:
             if outcome.refusal is not None:
                 # atomic-exit-safe: durable-refusal-committed
                 return outcome
+            if outcome.context is not None:
+                row.context = dict(outcome.context)
+            planning_context = planning_context_of(row.context or {})
             replacement = outcome.plan
+            if replacement is not None and dict(replacement.planning_context) != planning_context:
+                raise RuntimeError("A preview command returned a plan made for another planning context.")
             if replacement is None and self.replans:
-                replacement = ImportEngine.plan(profile, document, request.user, preview.planning_context)
+                replacement = ImportEngine.plan(profile, document, request.user, planning_context)
             if replacement is not None:
                 _store_plan(row, replacement)
                 row.state = PreviewState.READY
@@ -521,7 +547,7 @@ def _stored_plan(row: PreviewCoordinator, actor, document) -> ImportPlan:
     if (
         plan.actor != str(actor.pk)
         or plan.source_fingerprint != document.content_fingerprint
-        or dict(plan.planning_context) != _planning_context(row.context or {})
+        or dict(plan.planning_context) != planning_context_of(row.context or {})
     ):
         logger.warning("Preview coordinator %s holds a plan made for another preview.", row.pk)
         raise StalePreview(UNREADABLE_PREVIEW)
@@ -629,7 +655,7 @@ class StartPreview(PreviewCommand):
             document = SourceDocument.store(
                 profile=profile, content=self.content, filename=self.filename, uploaded_by=request.user
             )
-            plan = ImportEngine.plan(profile, document, request.user, _planning_context(self.context))
+            plan = ImportEngine.plan(profile, document, request.user, planning_context_of(self.context))
             # A new generation: every claim on the old one is refused from here on.
             row.preview_token = _new_token()
             row.revision += 1
@@ -889,7 +915,9 @@ __all__ = (
     "StartPreview",
     "apply_preview_command",
     "expire_previews",
+    "planning_context_of",
     "read_preview",
     "setup_claim",
     "sync_hold_reason",
+    "with_preview_port_class",
 )

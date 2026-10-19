@@ -84,7 +84,7 @@ class UploadStoresPristineSourceTest(TestCase):
         fixture = os.path.join(os.path.dirname(__file__), "fixtures", "sample_workbook.xlsx")
         with open(fixture, "rb") as handle:
             original = handle.read()
-        batch = FlatWorkbookAdapter.interpret(original, interpreter_config_for(self.profile))
+        batch = FlatWorkbookAdapter.interpret(original, interpreter_config_for(self.profile, {}))
         first_source_id = str(batch.rows[0].get("source_id", ""))
         original_name = str(batch.rows[0].get("device_name", ""))
         self.assertTrue(first_source_id)

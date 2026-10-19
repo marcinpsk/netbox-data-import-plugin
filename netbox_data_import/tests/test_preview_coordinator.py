@@ -783,6 +783,8 @@ TRACE_COMMANDS = {
     "trace_sync_all": {},
     "trace_sync_cancel": {"job_id": "1"},
     "trace_cable_policy": {"cable_class": "Patch", "cable_type": "mmf-om4", "cable_profile": "single-1c1p"},
+    "trace_port_class": {"port_class_label": "Undefined", "port_class": "NIC", "scope": "preview"},
+    "trace_port_class:clear": {"port_class_label": "Undefined", "scope": "profile", "clear": "1"},
     "trace_segment_policy": {"segment": "0", "cable_type": "mmf-om4", "cable_profile": "single-1c1p"},
     "trace_segment_policy:clear": {"segment": "0", "clear": "1"},
     "trace_resolve_termination": {"field_key": "key", "object_type": "dcim.interface", "object_id": "1"},

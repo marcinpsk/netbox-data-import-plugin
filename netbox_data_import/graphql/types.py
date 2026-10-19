@@ -6,7 +6,7 @@
 import strawberry_django
 from netbox.graphql.types import BaseObjectType, NetBoxObjectType
 
-from netbox_data_import.models import CableClassMapping, ImportProfile
+from netbox_data_import.models import CableClassMapping, ImportProfile, PortClassMapping
 
 from .filters import ImportProfileFilter
 
@@ -39,4 +39,11 @@ class CableClassMappingType(BaseObjectType):
     profile: ImportProfileType
 
 
-__all__ = ("CableClassMappingType", "ImportProfileType")
+@strawberry_django.type(PortClassMapping, fields=["id", "profile", "source_label", "port_class"], pagination=True)
+class PortClassMappingType(BaseObjectType):
+    """One trace PortClass label mapping."""
+
+    profile: ImportProfileType
+
+
+__all__ = ("CableClassMappingType", "ImportProfileType", "PortClassMappingType")
