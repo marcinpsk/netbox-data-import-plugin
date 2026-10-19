@@ -69,6 +69,14 @@ class PassThroughClaim:
     exit_port: str
 
 
+@dataclass(frozen=True, order=True)
+class PortClassLabel:
+    """Name one source PortClass label outside the fixed vocabulary, and the PortClass a map gave it."""
+
+    label: str
+    port_class: str = ""
+
+
 @dataclass(frozen=True)
 class TraceProvenance:
     """Locate one Source Trace occurrence in its source document."""
@@ -96,6 +104,7 @@ class SourceTrace:
     content_fingerprint: str
     provenance: tuple[TraceProvenance, ...]
     errors: tuple[SourceDiagnostic, ...] = ()
+    port_class_labels: tuple[PortClassLabel, ...] = ()
 
     def __post_init__(self) -> None:
         """Reject a trace that states no source position, which every consumer reads."""
@@ -117,6 +126,7 @@ __all__ = (
     "EndpointSummary",
     "IdentityKey",
     "PassThroughClaim",
+    "PortClassLabel",
     "SegmentEvidence",
     "SourceTrace",
     "TerminationReference",

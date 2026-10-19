@@ -25,8 +25,8 @@ from netbox_data_import.tests.helpers import (
     trace_visit as _visit,
     trace_workbook_bytes as _workbook,
 )
-from netbox_data_import.source_trace import SegmentEvidence
-from netbox_data_import.trace_workbook import parse_endpoint_line
+from netbox_data_import.source_trace import PortClassLabel, SegmentEvidence
+from netbox_data_import.trace_workbook import TraceWorkbookConfig, parse_endpoint_line
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -54,9 +54,9 @@ def _two_traces_over_one_pair(first_class, second_class, *, shared_entry=False):
     return tuple(blocks)
 
 
-def _interpret(content):
-    """Run the public Source Adapter seam with its empty configuration."""
-    return TraceWorkbookAdapter.interpret(content, {})
+def _interpret(content, port_class_map=None):
+    """Run the public Source Adapter seam, with no PortClass map unless one is given."""
+    return TraceWorkbookAdapter.interpret(content, TraceWorkbookConfig(port_class_map=port_class_map or {}))
 
 
 def _codes(batch):
@@ -1310,3 +1310,104 @@ class TraceWorkbookCollapseAndPairingTest(SimpleTestCase):
         complete = next(trace for trace in batch.rows if trace.segments)
         self.assertTrue(complete.valid, [error.code for error in complete.errors])
         self.assertEqual(len(complete.segments), 2)
+
+
+class TraceWorkbookPortClassMapTest(SimpleTestCase):
+    """A PortClass map turns a label outside the fixed vocabulary into one fixed PortClass."""
+
+    wireless = _termination("DEVICE-A", "", "WLAN-1", "802.11 Port")
+    switch_port = _termination("SWITCH-1", "", "PORT-1", "Switch Port")
+
+    def _workbook_with(self, endpoint):
+        """Return a path block and its Trace List block, both stating *endpoint* with its own label."""
+        lines = (_endpoint_line(endpoint), _endpoint_line(self.switch_port))
+        path_block = (*lines, (_segment(endpoint, "Cable A", self.switch_port),))
+        list_block = (*lines, (_visit(endpoint), _visit(self.switch_port)))
+        return _workbook(path_blocks=(path_block,), list_blocks=(list_block,), include_list=True)
+
+    def test_an_unmapped_label_reports_every_unknown_label_the_trace_states(self):
+        """The workspace offers one row per label, so the adapter names all of them, not only the first."""
+        undefined = _termination("SWITCH-1", "", "PORT-1", "Undefined")
+        block = (
+            _endpoint_line(self.wireless),
+            _endpoint_line(undefined),
+            (_segment(self.wireless, "Cable A", undefined),),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertEqual(_codes(batch), ["trace.unknown_port_class"])
+        self.assertEqual(
+            batch.rows[0].port_class_labels,
+            (PortClassLabel("802.11 Port", ""), PortClassLabel("Undefined", "")),
+        )
+
+    def test_a_mapped_label_validates_the_endpoint_the_segment_and_the_visit(self):
+        """Every Termination Reference that states the label takes the mapped PortClass."""
+        batch = _interpret(self._workbook_with(self.wireless), {"802.11 Port": "NIC"})
+
+        trace = batch.rows[0]
+        self.assertTrue(trace.valid, _codes(batch))
+        endpoint = next(
+            item
+            for item in (trace.endpoint_summary.from_termination, trace.endpoint_summary.to_termination)
+            if item.device == "DEVICE-A"
+        )
+        segment_end = next(
+            item for item in (trace.segments[0].left, trace.segments[0].right) if item.device == "DEVICE-A"
+        )
+        visit = next(item for item in trace.corroboration if item.device == "DEVICE-A")
+        self.assertEqual((endpoint.port_class, segment_end.port_class, visit.port_class), ("NIC", "NIC", "NIC"))
+        self.assertEqual(trace.port_class_labels, (PortClassLabel("802.11 Port", "NIC"),))
+
+    def test_the_mapped_port_class_decides_the_trace_identity_and_fingerprint(self):
+        """A mapped label must plan exactly like a source that states the fixed PortClass itself."""
+        stated_nic = _termination("DEVICE-A", "", "WLAN-1", "NIC")
+
+        mapped = _interpret(self._workbook_with(self.wireless), {"802.11 Port": "NIC"}).rows[0]
+        direct = _interpret(self._workbook_with(stated_nic)).rows[0]
+        unmapped = _interpret(self._workbook_with(self.wireless)).rows[0]
+
+        self.assertEqual(mapped.identity, direct.identity)
+        self.assertEqual(mapped.content_fingerprint, direct.content_fingerprint)
+        self.assertNotEqual(mapped.identity, unmapped.identity)
+
+    def test_a_label_only_a_trace_list_visit_states_is_mapped(self):
+        """An endpoint-only fallback reads its PortClass from the Trace List rows too."""
+        lines = (_endpoint_line(self.switch_port), _endpoint_line(_termination("PANEL-B", "", "F1", "Position Front")))
+        list_block = (*lines, (_visit(self.switch_port), _visit(_termination("PANEL-B", "", "F1", "Undefined"))))
+        content = _workbook(path_blocks=(), list_blocks=(list_block,), include_list=True)
+
+        unmapped = _interpret(content)
+        mapped = _interpret(content, {"Undefined": "Position Front"})
+
+        self.assertEqual(_codes(unmapped), ["trace.unknown_port_class"])
+        self.assertEqual(unmapped.rows[0].port_class_labels, (PortClassLabel("Undefined", ""),))
+        self.assertTrue(mapped.rows[0].valid, _codes(mapped))
+        self.assertEqual(mapped.rows[0].port_class_labels, (PortClassLabel("Undefined", "Position Front"),))
+
+    def test_a_label_in_the_fixed_vocabulary_is_reported_as_no_label(self):
+        """Only a label outside the vocabulary can take a mapping, so a fixed PortClass never shows up."""
+        batch = _interpret(self._workbook_with(_termination("DEVICE-A", "", "PORT-A", "NIC")))
+
+        self.assertEqual(batch.rows[0].port_class_labels, ())
+
+    def test_duplicate_occurrences_keep_the_labels_of_every_occurrence(self):
+        """Collapse keeps one occurrence, but the operator must still see each label the file states."""
+        undefined_visit = _termination("SWITCH-1", "", "PORT-1", "Undefined")
+        lines = (_endpoint_line(self.wireless), _endpoint_line(self.switch_port))
+        first = (*lines, (_segment(self.wireless, "Cable A", self.switch_port),))
+        list_block = (*lines, (_visit(self.wireless), _visit(self.switch_port)))
+        reversed_list = (
+            _endpoint_line(self.switch_port),
+            _endpoint_line(self.wireless),
+            (_visit(undefined_visit), _visit(self.wireless)),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(first,), list_blocks=(list_block, reversed_list), include_list=True))
+
+        self.assertEqual(len(batch.rows), 1)
+        self.assertEqual(
+            batch.rows[0].port_class_labels,
+            (PortClassLabel("802.11 Port", ""), PortClassLabel("Undefined", "")),
+        )

@@ -4,6 +4,7 @@
 
 from .adapters import FlatWorkbookAdapter, TraceWorkbookAdapter, UnknownSourceAdapter
 from .flat_workbook import FlatWorkbookConfig, TransformRule
+from .trace_workbook import TraceWorkbookConfig
 
 
 def _flat_workbook_config(profile) -> FlatWorkbookConfig:
@@ -24,10 +25,10 @@ def _flat_workbook_config(profile) -> FlatWorkbookConfig:
     )
 
 
-def _trace_workbook_config(profile) -> dict:
-    """Return the empty configuration the trace-workbook adapter declares."""
+def _trace_workbook_config(profile) -> TraceWorkbookConfig:
+    """Return the trace-workbook configuration, which maps no PortClass label yet."""
     del profile
-    return {}
+    return TraceWorkbookConfig()
 
 
 _CONFIG_PROJECTORS = {
