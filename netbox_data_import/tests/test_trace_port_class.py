@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Map a PortClass label outside the fixed vocabulary, on the profile or for one preview."""
 
+from html.parser import HTMLParser
 from io import BytesIO
 
 from django.core.exceptions import ValidationError
@@ -24,6 +25,40 @@ WIRELESS = trace_termination("DEV-A", "", "eth0", "802.11 Port")
 LABEL = "802.11 Port"
 # A trace whose Devices NetBox does not hold, so it stays listed before the mapped one and never resolves.
 ELSEWHERE = direct_path(trace_termination("DEVICE-X", "", "p1", "NIC"), trace_termination("DEVICE-Y", "", "p2", "NIC"))
+
+
+class _SelectScrollParser(HTMLParser):
+    """Record, per workspace section, whether a select in it sits inside a `.table-responsive` box."""
+
+    VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "wbr"})
+
+    def __init__(self):
+        super().__init__()
+        self.stack: list[tuple[str, str | None, bool]] = []
+        self.sections: dict[str, bool] = {}
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.VOID:
+            return
+        names = dict(attrs)
+        section = next((name for name in names if name.startswith("data-trace-")), None)
+        scrolls = "table-responsive" in (names.get("class") or "").split()
+        self.stack.append((tag, section, scrolls))
+        if tag == "select":
+            owner = next((entry[1] for entry in reversed(self.stack) if entry[1]), "")
+            clipped = any(entry[2] for entry in self.stack)
+            self.sections[owner] = self.sections.get(owner, False) or clipped
+
+    def handle_endtag(self, tag):
+        while self.stack and self.stack.pop()[0] != tag:
+            pass
+
+
+def _select_sections(html):
+    """Return each section that holds a select, mapped to whether a scroll box clips one of them."""
+    parser = _SelectScrollParser()
+    parser.feed(html)
+    return parser.sections
 
 
 class _PortClassWorkspaceMixin:
@@ -85,6 +120,16 @@ class TraceWorkspacePortClassTest(_PortClassWorkspaceMixin, CableTopologyMixin, 
         (row,) = page.context["port_class_rows"]
         self.assertEqual((row["label"], row["port_class"], row["source"], row["trace_count"]), (LABEL, "", "", 1))
         self.assertContains(page, 'data-port-class-label="802.11 Port"')
+
+    def test_no_select_sits_in_a_scroll_box_that_clips_its_dropdown(self):
+        """A `.table-responsive` box clips the Tom Select dropdown of a select inside it."""
+        page = self.upload()
+
+        sections = _select_sections(page.content.decode())
+
+        self.assertIn("data-trace-port-classes", sections)
+        self.assertIn("data-trace-cable-policy", sections)
+        self.assertEqual([section for section, clipped in sections.items() if clipped], [])
 
     def test_a_profile_mapping_turns_the_trace_valid_and_reopens_the_same_trace(self):
         self.upload(ELSEWHERE, direct_path(WIRELESS, DEVICE_B))
