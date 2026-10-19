@@ -29,6 +29,7 @@ WIRELESS = trace_termination("DEV-A", "", "eth0", "802.11 Port")
 LABEL = "802.11 Port"
 # A trace whose Devices NetBox does not hold, so it stays listed before the mapped one and never resolves.
 ELSEWHERE = direct_path(trace_termination("DEVICE-X", "", "p1", "NIC"), trace_termination("DEVICE-Y", "", "p2", "NIC"))
+RADIO = "Radio Port"
 PADDED = "Remove the whitespace at the start and end of the source PortClass label."
 
 
@@ -259,6 +260,31 @@ class TraceWorkspacePortClassTest(_PortClassWorkspaceMixin, CableTopologyMixin, 
         (collapsed,) = [trace for trace in mapped.context["traces"] if "DEV-A" in trace.trace_identity]
         self.assertLess(collapsed.row_number, reviewed.row_number)
         self.assertEqual(mapped.context["selected_trace"].identity, collapsed.identity)
+
+    def test_a_second_preview_label_keeps_the_first_and_a_clear_keeps_the_other(self):
+        radio = direct_path(
+            trace_termination("DEVICE-X", "", "p1", RADIO), trace_termination("DEVICE-Y", "", "p2", "NIC")
+        )
+        self.upload(direct_path(WIRELESS, DEVICE_B), radio)
+
+        self.map_port_class("preview")
+        both = self.map_port_class("preview", label=RADIO, port_class="Switch Port")
+
+        self.assertEqual(
+            preview_coordinator(self.client).context["port_class_map"], {LABEL: "NIC", RADIO: "Switch Port"}
+        )
+        self.assertEqual(
+            [(row["label"], row["port_class"], row["source"]) for row in both.context["port_class_rows"]],
+            [(LABEL, "NIC", "preview"), (RADIO, "Switch Port", "preview")],
+        )
+
+        cleared = self.clear_port_class("preview")
+
+        self.assertEqual(preview_coordinator(self.client).context["port_class_map"], {RADIO: "Switch Port"})
+        self.assertEqual(
+            [(row["label"], row["port_class"], row["source"]) for row in cleared.context["port_class_rows"]],
+            [(LABEL, "", ""), (RADIO, "Switch Port", "preview")],
+        )
 
 
 class TraceWorkspacePortClassDisclosureTest(_PortClassWorkspaceMixin, CableTopologyMixin, TransactionTestCase):
