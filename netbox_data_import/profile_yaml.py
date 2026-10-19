@@ -15,6 +15,7 @@ from . import branching
 from .catalog import POLICY_SECTIONS, policy_section
 from .models import (
     CableClassMapping,
+    PortClassMapping,
     ClassRoleMapping,
     ColumnMapping,
     ColumnTransformRule,
@@ -116,6 +117,12 @@ _POLICY_DOCUMENT_SCHEMAS = (
             "cable_profile_resolved",
             "cable_profile",
         ),
+    ),
+    PolicyDocumentSchema(
+        model=PortClassMapping,
+        identity_fields=("source_label",),
+        required_fields=("source_label", "port_class"),
+        fields=("source_label", "port_class"),
     ),
 )
 

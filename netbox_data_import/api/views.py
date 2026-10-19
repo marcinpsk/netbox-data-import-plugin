@@ -23,6 +23,7 @@ from ..models import (
     SourceResolution,
     ImportExecution,
     InferenceBackend,
+    PortClassMapping,
     ResolutionProposal,
 )
 from ..object_permissions import (
@@ -42,6 +43,7 @@ from .serializers import (
     SourceResolutionSerializer,
     ImportExecutionSerializer,
     InferenceBackendSerializer,
+    PortClassMappingSerializer,
     ResolutionProposalHistorySerializer,
     ResolutionProposalSerializer,
 )
@@ -173,6 +175,13 @@ class CableClassMappingViewSet(_PluginModelViewSet):
 
     queryset = CableClassMapping.objects.select_related("profile")
     serializer_class = CableClassMappingSerializer
+
+
+class PortClassMappingViewSet(_PluginModelViewSet):
+    """CRUD viewset for PortClassMapping."""
+
+    queryset = PortClassMapping.objects.select_related("profile")
+    serializer_class = PortClassMappingSerializer
 
 
 class ClassRoleMappingViewSet(_PluginModelViewSet):

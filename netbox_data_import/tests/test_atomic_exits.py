@@ -56,6 +56,14 @@ AUDITED_EXITS = {
         "The scoped delete removed the one row it was allowed to, and the plan that follows it "
         "inside the lock only reads."
     ),
+    ("save_port_class_mapping_and_replan", "port-class-mapping-saved-and-replanned"): (
+        "The mapping cleared its hidden-row, fingerprint, form and permission checks, so it is "
+        "meant to commit. The plan that follows it inside the lock only reads."
+    ),
+    ("clear_port_class_mapping_and_replan", "port-class-mapping-cleared-and-replanned"): (
+        "The scoped delete removed the one row it was allowed to, and the plan that follows it "
+        "inside the lock only reads."
+    ),
     ("save_permission_scoped_object", "policy-write-committed"): (
         "The profile lock only serializes the write against an import execution, which the "
         "committed write is meant to survive."

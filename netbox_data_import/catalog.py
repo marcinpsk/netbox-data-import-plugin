@@ -268,6 +268,7 @@ POLICY_SECTIONS: tuple[PolicySection, ...] = (
     PolicySection("trace_location_resolutions", "Trace Location Resolutions", _TRACE_ONLY),
     PolicySection("termination_resolutions", "Termination Resolutions", _TRACE_ONLY),
     PolicySection("cable_class_mappings", "CableClass Mappings", _TRACE_ONLY),
+    PolicySection("port_class_mappings", "PortClass Mappings", _TRACE_ONLY),
     PolicySection("cable_segment_overrides", "Cable Segment Overrides", _TRACE_ONLY),
 )
 

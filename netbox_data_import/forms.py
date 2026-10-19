@@ -21,6 +21,7 @@ from .models import (
     DeviceTypeMapping,
     ColumnTransformRule,
     CableSegmentOverride,
+    PortClassMapping,
     _require_adapter_config_mapping,
     validate_registered_adapter,
 )
@@ -294,6 +295,14 @@ class CableClassMappingForm(forms.ModelForm):
         cleaned["cable_type"] = cable_type
         cleaned["cable_profile"] = cable_profile
         return cleaned
+
+
+class PortClassMappingForm(forms.ModelForm):
+    """Form for one source PortClass label and the fixed PortClass it maps to."""
+
+    class Meta:
+        model = PortClassMapping
+        fields = ["source_label", "port_class"]
 
 
 class CableSegmentOverrideForm(forms.ModelForm):

@@ -142,7 +142,7 @@ class ImportEngine:
             )
         source_batch = adapter.interpret(
             bytes(document.content),
-            adapter_config.interpreter_config_for(profile),
+            adapter_config.interpreter_config_for(profile, planning_context),
             collect_unused=True,
         )
         # The catalog already declares which output kinds the resolution policy applies to.

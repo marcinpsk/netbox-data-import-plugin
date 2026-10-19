@@ -2102,6 +2102,9 @@ class _CableBatch:
             },
             "segments": segments,
             "cable_policies": [self._cable_class_display(cable_class) for cable_class in cable_classes],
+            "port_classes": [
+                {"label": item.label, "port_class": item.port_class} for item in analysis.trace.port_class_labels
+            ],
             "logical_cable": self._logical_cable_display(analysis),
             "resolution_started": analysis.resolution_started,
             "topology_known": analysis.topology_read,

@@ -9,7 +9,7 @@ from strawberry.permission import BasePermission
 
 from netbox_data_import import branching
 
-from .types import CableClassMappingType, ImportProfileType
+from .types import CableClassMappingType, ImportProfileType, PortClassMappingType
 
 
 class MainOnly(BasePermission):
@@ -39,6 +39,14 @@ class CableClassMappingsQuery:
     cable_class_mapping_list: list[CableClassMappingType] = strawberry_django.field(permission_classes=[MainOnly])
 
 
-schema = [ImportProfilesQuery, CableClassMappingsQuery]
+@strawberry.type(name="Query")
+class PortClassMappingsQuery:
+    """Expose PortClass mapping detail and list queries."""
 
-__all__ = ("CableClassMappingsQuery", "ImportProfilesQuery", "schema")
+    port_class_mapping: PortClassMappingType = strawberry_django.field(permission_classes=[MainOnly])
+    port_class_mapping_list: list[PortClassMappingType] = strawberry_django.field(permission_classes=[MainOnly])
+
+
+schema = [ImportProfilesQuery, CableClassMappingsQuery, PortClassMappingsQuery]
+
+__all__ = ("CableClassMappingsQuery", "ImportProfilesQuery", "PortClassMappingsQuery", "schema")
