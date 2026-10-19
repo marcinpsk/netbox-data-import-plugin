@@ -72,8 +72,11 @@ def same_device_and_cards(first, second) -> bool:
 def port_class_mapping_errors(source_label: str, port_class: str) -> dict[str, str]:
     """Return why one source PortClass label cannot map to one PortClass, by field, or nothing when it can."""
     errors = {}
-    if not source_label:
+    if not source_label.strip():
         errors["source_label"] = "Enter the source PortClass label."
+    elif source_label != source_label.strip():
+        # The adapter trims each workbook label, so a padded label never matches one.
+        errors["source_label"] = "Remove the whitespace at the start and end of the source PortClass label."
     elif source_label in PORT_CLASSES:
         errors["source_label"] = f"'{source_label}' is a fixed PortClass, so it takes no mapping."
     if port_class not in PORT_CLASSES:

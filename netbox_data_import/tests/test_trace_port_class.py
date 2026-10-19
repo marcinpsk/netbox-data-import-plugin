@@ -25,6 +25,7 @@ WIRELESS = trace_termination("DEV-A", "", "eth0", "802.11 Port")
 LABEL = "802.11 Port"
 # A trace whose Devices NetBox does not hold, so it stays listed before the mapped one and never resolves.
 ELSEWHERE = direct_path(trace_termination("DEVICE-X", "", "p1", "NIC"), trace_termination("DEVICE-Y", "", "p2", "NIC"))
+PADDED = "Remove the whitespace at the start and end of the source PortClass label."
 
 
 class _SelectScrollParser(HTMLParser):
@@ -296,6 +297,18 @@ class PortClassMappingValidationTest(TestCase):
                 with self.assertRaises(ValidationError) as raised:
                     PortClassMapping(profile=self.profile, source_label=label, port_class=port_class).full_clean()
                 self.assertIn(field, raised.exception.message_dict)
+
+    def test_the_model_refuses_a_label_with_whitespace_at_either_end(self):
+        for label, message in (
+            (f" {LABEL} ", PADDED),
+            (" NIC ", PADDED),
+            (f"{LABEL}\t", PADDED),
+            ("   ", "Enter the source PortClass label."),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaises(ValidationError) as raised:
+                    PortClassMapping(profile=self.profile, source_label=label, port_class="NIC").full_clean()
+                self.assertEqual(raised.exception.message_dict["source_label"], [message])
 
     def test_the_form_refuses_a_fixed_label(self):
         from netbox_data_import.forms import PortClassMappingForm

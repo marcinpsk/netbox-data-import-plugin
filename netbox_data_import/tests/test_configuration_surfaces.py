@@ -258,6 +258,25 @@ class PortClassMappingAPITest(TestCase):
                 self.assertIn(field, response.json())
         self.assertFalse(PortClassMapping.objects.exists())
 
+    def test_create_trims_the_whitespace_around_a_label(self):
+        """The serializer CharField trims, so the stored label matches the trimmed workbook label."""
+        padded = self.client.post(
+            self.list_url,
+            data={"profile": self.trace_profile.pk, "source_label": " 802.11 Port ", "port_class": "NIC"},
+            content_type="application/json",
+        )
+        fixed = self.client.post(
+            self.list_url,
+            data={"profile": self.trace_profile.pk, "source_label": " NIC ", "port_class": "Port"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(padded.status_code, 201, padded.content)
+        self.assertEqual(padded.json()["source_label"], "802.11 Port")
+        self.assertEqual(fixed.status_code, 400, fixed.content)
+        self.assertIn("source_label", fixed.json())
+        self.assertEqual(list(PortClassMapping.objects.values_list("source_label", flat=True)), ["802.11 Port"])
+
 
 class SourceResolutionAPIPermissionTest(TestCase):
     """Apply object-permission scope to every Source Resolution write."""
@@ -1034,6 +1053,32 @@ class ProfileYamlSurfaceTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "is a fixed PortClass, so it takes no mapping.")
         self.assertFalse(ImportProfile.objects.filter(name="Fixed label trace profile").exists())
+
+    def test_import_refuses_a_portclass_label_with_whitespace_at_either_end(self):
+        """A padded label never matches the trimmed workbook label, and a padded fixed label escapes that check."""
+        for label in (" 802.11 Port ", " NIC "):
+            with self.subTest(label=label):
+                document = {
+                    "profile": {
+                        "name": "Padded label profile",
+                        "source_adapter": "trace_workbook",
+                        "adapter_config": {},
+                    },
+                    "port_class_mappings": [{"source_label": label, "port_class": "NIC"}],
+                }
+                upload = BytesIO(yaml.safe_dump(document).encode())
+                upload.name = "padded-label.yaml"
+
+                response = self.client.post(
+                    reverse("plugins:netbox_data_import:import_profile_yaml"), {"yaml_file": upload}
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(
+                    response, "Remove the whitespace at the start and end of the source PortClass label."
+                )
+                self.assertFalse(ImportProfile.objects.filter(name="Padded label profile").exists())
+                self.assertFalse(PortClassMapping.objects.exists())
 
     def test_import_rejects_policy_sections_the_adapter_does_not_support(self):
         cases = (
