@@ -35,7 +35,7 @@ LOCAL_EXAMPLE_PATH = Path(__file__).resolve().parents[3] / "libre" / "example.xl
 
 def _interpret(workbook, profile):
     """Interpret workbook bytes through the registered flat-workbook adapter."""
-    return list(FlatWorkbookAdapter.interpret(workbook.read(), interpreter_config_for(profile)).rows)
+    return list(FlatWorkbookAdapter.interpret(workbook.read(), interpreter_config_for(profile, {})).rows)
 
 
 class ContactMappingWorkbookTest(TestCase):

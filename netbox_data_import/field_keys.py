@@ -15,6 +15,7 @@ POWER_PORT_CLASSES = frozenset({"Power Input Port"})
 POWER_OUTLET_CLASSES = frozenset({"Power Output Port"})
 POWER_CLASSES = POWER_PORT_CLASSES | POWER_OUTLET_CLASSES
 PORT_CLASSES = INTERFACE_PORT_CLASSES | FRONT_PORT_CLASSES | REAR_PORT_CLASSES | POWER_CLASSES
+PORT_CLASS_CHOICES = tuple((port_class, port_class) for port_class in sorted(PORT_CLASSES))
 
 INTERFACE_KIND = "interface"
 FRONT_PORT_KIND = "front_port"
@@ -66,6 +67,21 @@ def same_device_and_cards(first, second) -> bool:
         identity_text(second.device),
         identity_text(second.cards),
     )
+
+
+def port_class_mapping_errors(source_label: str, port_class: str) -> dict[str, str]:
+    """Return why one source PortClass label cannot map to one PortClass, by field, or nothing when it can."""
+    errors = {}
+    if not source_label.strip():
+        errors["source_label"] = "Enter the source PortClass label."
+    elif source_label != source_label.strip():
+        # The adapter trims each workbook label, so a padded label never matches one.
+        errors["source_label"] = "Remove the whitespace at the start and end of the source PortClass label."
+    elif source_label in PORT_CLASSES:
+        errors["source_label"] = f"'{source_label}' is a fixed PortClass, so it takes no mapping."
+    if port_class not in PORT_CLASSES:
+        errors["port_class"] = f"'{port_class}' is not a fixed PortClass."
+    return errors
 
 
 def claimed_termination_kind(port_class: str) -> str:
@@ -127,6 +143,7 @@ __all__ = (
     "INTERFACE_PORT_CLASSES",
     "MAPPED_PEER_ROLE",
     "PORT_CLASSES",
+    "PORT_CLASS_CHOICES",
     "PORT_CLASS_CLAIMED_KINDS",
     "POWER_CLASSES",
     "POWER_OUTLET_CLASSES",
@@ -141,6 +158,7 @@ __all__ = (
     "TERMINATION_ROLES",
     "claimed_termination_kind",
     "parse_termination_field_key",
+    "port_class_mapping_errors",
     "same_device_and_cards",
     "termination_field_key",
 )

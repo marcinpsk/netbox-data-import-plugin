@@ -158,10 +158,10 @@ class TraceWorkbookAdapter(SourceAdapter):
 
     @classmethod
     def interpret(cls, content, adapter_config, *, collect_unused: bool = False) -> SourceBatch:
-        """Interpret workbook bytes under the fixed trace-workbook format."""
+        """Interpret workbook bytes under a `TraceWorkbookConfig`."""
         from . import trace_workbook
 
-        rows, diagnostics = trace_workbook.interpret(content)
+        rows, diagnostics = trace_workbook.interpret(content, adapter_config)
         return SourceBatch(output_kinds=cls.output_kinds, rows=rows, diagnostics=diagnostics)
 
 

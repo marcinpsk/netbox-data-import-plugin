@@ -12,6 +12,7 @@ from .models import (
     DeviceTypeMapping,
     ColumnTransformRule,
     ImportExecution,
+    PortClassMapping,
 )
 
 
@@ -151,6 +152,41 @@ class CableClassMappingTable(tables.Table):
     class Meta:
         model = CableClassMapping
         fields = ("cable_class", "cable_type", "cable_profile", "actions")
+
+
+class PortClassMappingTable(tables.Table):
+    """Display PortClass label mappings inline on the profile detail page."""
+
+    source_label = tables.Column(verbose_name="Source label")
+    port_class = tables.Column(verbose_name="PortClass")
+    actions = tables.TemplateColumn(
+        template_code=_CABLE_MAPPING_ACTIONS_TEMPLATE,
+        extra_context={
+            "edit_url": "plugins:netbox_data_import:portclassmapping_edit",
+            "delete_url": "plugins:netbox_data_import:portclassmapping_delete",
+        },
+        verbose_name="",
+        orderable=False,
+    )
+
+    def __init__(self, data, *, viewer):
+        rows = list(data)
+        self.visible_ids = set(
+            PortClassMapping.objects.restrict(viewer, "view")
+            .filter(pk__in=[row.pk for row in rows])
+            .values_list("pk", flat=True)
+        )
+        for row in rows:
+            row.policy_viewable = row.pk in self.visible_ids  # type: ignore[attr-defined]
+        super().__init__(rows)
+
+    def render_port_class(self, record):
+        """Render the decision only while this viewer may read its row."""
+        return record.port_class if record.pk in self.visible_ids else POLICY_HIDDEN
+
+    class Meta:
+        model = PortClassMapping
+        fields = ("source_label", "port_class", "actions")
 
 
 class DeviceTypeMappingTable(tables.Table):

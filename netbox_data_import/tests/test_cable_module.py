@@ -37,6 +37,7 @@ from django.urls import reverse
 from extras.models import Tag, TaggedItem
 
 from netbox_data_import.adapters import SourceBatch, TraceWorkbookAdapter
+from netbox_data_import.trace_workbook import TraceWorkbookConfig
 from netbox_data_import.cable_policy import (
     cable_type_choices,
     cable_type_label,
@@ -907,7 +908,9 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
 
     def test_an_invalid_trace_does_not_supply_device_evidence_to_a_valid_trace(self):
         """The Source Batch excludes invalid adapter evidence before Cable planning resolves it."""
-        parsed = TraceWorkbookAdapter.interpret(trace_workbook_bytes(path_blocks=(direct_path(),)), {})
+        parsed = TraceWorkbookAdapter.interpret(
+            trace_workbook_bytes(path_blocks=(direct_path(),)), TraceWorkbookConfig()
+        )
         trace = parsed.rows[0]
         summary = trace.endpoint_summary
         valid = replace(
@@ -942,7 +945,9 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
 
     def test_a_row_that_is_not_a_source_trace_is_reported_and_excluded(self):
         """SourceBatch states the Source Trace contract, so Cable planning never reads a foreign row."""
-        parsed = TraceWorkbookAdapter.interpret(trace_workbook_bytes(path_blocks=(direct_path(),)), {})
+        parsed = TraceWorkbookAdapter.interpret(
+            trace_workbook_bytes(path_blocks=(direct_path(),)), TraceWorkbookConfig()
+        )
         trace = parsed.rows[0]
         # SourceBatch.rows is typed dict | SourceTrace, so a dict is a legal argument here.
         batch = SourceBatch(output_kinds=parsed.output_kinds, rows=(trace, {"device": "DEV-A"}))
@@ -958,7 +963,9 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
 
     def test_an_excluded_row_names_its_type_and_keeps_its_source_location(self):
         """The batch-level diagnostic identifies the excluded row, so an operator can find it."""
-        parsed = TraceWorkbookAdapter.interpret(trace_workbook_bytes(path_blocks=(direct_path(),)), {})
+        parsed = TraceWorkbookAdapter.interpret(
+            trace_workbook_bytes(path_blocks=(direct_path(),)), TraceWorkbookConfig()
+        )
         trace = parsed.rows[0]
 
         trace_batch = SourceBatch(output_kinds=parsed.output_kinds, rows=({"_row_number": 7},))
@@ -2631,12 +2638,14 @@ class CableMediaFamilyTest(CableTopologyMixin, TestCase):
         """A shared Device name proves nothing, and here there is not even that."""
         other = self.make_device("DEV-E")
         far = Interface.objects.create(device=other, name="eth0", type="1000base-t")
-        first = TraceWorkbookAdapter.interpret(trace_workbook_bytes(path_blocks=(direct_path(),)), {}).rows[0]
+        first = TraceWorkbookAdapter.interpret(
+            trace_workbook_bytes(path_blocks=(direct_path(),)), TraceWorkbookConfig()
+        ).rows[0]
         second = TraceWorkbookAdapter.interpret(
             trace_workbook_bytes(
                 path_blocks=(direct_path(PANEL_1_FRONT, trace_termination("DEV-E", "", "eth0", "NIC")),)
             ),
-            {},
+            TraceWorkbookConfig(),
         ).rows[0]
         spliced = replace(first, segments=(*first.segments, *second.segments))
         self.force(

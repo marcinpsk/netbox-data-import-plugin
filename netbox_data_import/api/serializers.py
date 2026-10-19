@@ -23,6 +23,7 @@ from ..models import (
     SourceResolution,
     ImportExecution,
     InferenceBackend,
+    PortClassMapping,
     ResolutionProposal,
     validate_adapter_target_module,
     validate_contact_candidate_resolution,
@@ -175,6 +176,14 @@ class CableClassMappingSerializer(PolicySectionSerializer):
             "cable_profile_resolved",
             "cable_profile",
         ]
+
+
+class PortClassMappingSerializer(PolicySectionSerializer):
+    """Serializer for PortClassMapping policy decisions."""
+
+    class Meta:
+        model = PortClassMapping
+        fields = ["id", "url", "display", "profile", "source_label", "port_class"]
 
 
 class _RackTypeSlugField(serializers.SlugRelatedField):

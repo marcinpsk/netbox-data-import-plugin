@@ -27,6 +27,7 @@ from .models import (
     CableClassMapping,
     CableSegmentOverride,
     ImportProfile,
+    PortClassMapping,
     TerminationResolution,
     TraceDeviceResolution,
     TraceLocationResolution,
@@ -214,6 +215,58 @@ def save_cable_class_mapping_and_replan(
             },
         )
         # atomic-exit-safe: policy-saved-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+def save_port_class_mapping_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    source_label,
+    port_class,
+    reviewed_fingerprint,
+):
+    """Persist the fixed PortClass one source label maps to on the profile, then request a fresh Import Plan."""
+    from .forms import PortClassMappingForm
+
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        lookup = {"profile": locked_profile, "source_label": source_label}
+        stored = PortClassMapping.objects.filter(**lookup).first()
+        _refuse_blind_overwrite(actor, stored)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        form = PortClassMappingForm(
+            {"source_label": source_label, "port_class": port_class},
+            instance=stored or PortClassMapping(**lookup),
+        )
+        if not form.is_valid():
+            raise UnacceptablePolicyDecision(_form_messages(form))
+        save_permission_scoped_object(actor, PortClassMapping, lookup, {"port_class": form.instance.port_class})
+        # atomic-exit-safe: port-class-mapping-saved-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+def clear_port_class_mapping_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    source_label,
+    reviewed_fingerprint,
+):
+    """Drop the profile mapping of one source PortClass label, then request a fresh Import Plan."""
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        stored = PortClassMapping.objects.filter(profile=locked_profile, source_label=source_label).first()
+        _refuse_blind_overwrite(actor, stored)
+        refuse_moved_policy(locked_profile, reviewed_fingerprint)
+        if stored is None:
+            raise UnacceptablePolicyDecision([f"The profile maps no PortClass label '{source_label}'."])
+        delete_permission_scoped_objects(actor, PortClassMapping.objects.filter(pk=stored.pk))
+        # atomic-exit-safe: port-class-mapping-cleared-and-replanned
         return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
 
 
@@ -1135,6 +1188,7 @@ class TraceWorkspaceUnit:
     endpoints: dict[str, str]
     segments: list[dict[str, Any]]
     cable_policies: list[dict[str, Any]]
+    port_classes: list[dict[str, str]]
     logical_cable: dict[str, Any] | None
     deletes_logical_cable: bool
     resolution_started: bool
@@ -1190,6 +1244,7 @@ class TraceWorkspaceUnit:
             endpoints=dict(workspace.get("endpoints") or {}),
             segments=segments,
             cable_policies=_breakout_policies(workspace["cable_policies"], segments),
+            port_classes=[dict(item) for item in workspace.get("port_classes") or ()],
             logical_cable=workspace.get("logical_cable"),
             deletes_logical_cable=bool(workspace.get("deletes_logical_cable")),
             resolution_started=bool(workspace.get("resolution_started")),
@@ -1345,6 +1400,15 @@ class ReviewWorkspace:
                     trace = replace(trace, sync_members=self._sync_members(unit.identity, closure))
             traces.append(trace)
         return tuple(traces)
+
+    @cached_property
+    def port_class_labels(self) -> MappingProxyType:
+        """Return each PortClass label outside the fixed vocabulary the preview states, with its mapped PortClass."""
+        labels: dict[str, str] = {}
+        for trace in self.traces:
+            for item in trace.port_classes:
+                labels.setdefault(item["label"], item["port_class"])
+        return MappingProxyType(dict(sorted(labels.items())))
 
     @cached_property
     def termination_sources(self) -> MappingProxyType:

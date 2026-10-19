@@ -23,6 +23,7 @@ from netbox_data_import.models import (
     ColumnTransformRule,
     ImportProfile,
     InferenceBackend,
+    PortClassMapping,
     SourceResolution,
 )
 from netbox_data_import.tests.helpers import (
@@ -206,6 +207,75 @@ class CableClassMappingAPITest(TestCase):
 
         self.assertEqual(response.status_code, 403, response.content)
         self.assertTrue(CableClassMapping.objects.filter(pk=mapping.pk).exists())
+
+
+class PortClassMappingAPITest(TestCase):
+    """Manage PortClass label mappings through the registered REST resource."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_superuser("port-class-api", "port-class@example.invalid", "testpass")
+        cls.trace_profile = ImportProfile.objects.create(
+            name="PortClass API profile", source_adapter="trace_workbook", adapter_config={}
+        )
+        cls.flat_profile = ImportProfile.objects.create(name="Flat PortClass API profile", adapter_config={})
+
+    def setUp(self):
+        self.client.force_login(self.user)
+        self.list_url = reverse("plugins-api:netbox_data_import-api:portclassmapping-list")
+
+    def test_create_read_update_and_delete_mapping(self):
+        response = self.client.post(
+            self.list_url,
+            data={"profile": self.trace_profile.pk, "source_label": "802.11 Port", "port_class": "NIC"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        mapping = PortClassMapping.objects.get(profile=self.trace_profile, source_label="802.11 Port")
+        detail_url = reverse("plugins-api:netbox_data_import-api:portclassmapping-detail", args=[mapping.pk])
+        self.assertEqual(self.client.get(detail_url).json()["port_class"], "NIC")
+
+        response = self.client.patch(detail_url, data={"port_class": "Switch Port"}, content_type="application/json")
+
+        self.assertEqual(response.status_code, 200, response.content)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.port_class, "Switch Port")
+        self.assertEqual(self.client.delete(detail_url).status_code, 204)
+        self.assertFalse(PortClassMapping.objects.filter(pk=mapping.pk).exists())
+
+    def test_create_refuses_a_fixed_label_a_target_outside_the_vocabulary_and_a_flat_profile(self):
+        cases = (
+            ({"profile": self.trace_profile.pk, "source_label": "NIC", "port_class": "Port"}, "source_label"),
+            ({"profile": self.trace_profile.pk, "source_label": "Undefined", "port_class": "Radio"}, "port_class"),
+            ({"profile": self.flat_profile.pk, "source_label": "Undefined", "port_class": "NIC"}, "profile"),
+        )
+        for data, field in cases:
+            with self.subTest(field=field):
+                response = self.client.post(self.list_url, data=data, content_type="application/json")
+
+                self.assertEqual(response.status_code, 400, response.content)
+                self.assertIn(field, response.json())
+        self.assertFalse(PortClassMapping.objects.exists())
+
+    def test_create_trims_the_whitespace_around_a_label(self):
+        """The serializer CharField trims, so the stored label matches the trimmed workbook label."""
+        padded = self.client.post(
+            self.list_url,
+            data={"profile": self.trace_profile.pk, "source_label": " 802.11 Port ", "port_class": "NIC"},
+            content_type="application/json",
+        )
+        fixed = self.client.post(
+            self.list_url,
+            data={"profile": self.trace_profile.pk, "source_label": " NIC ", "port_class": "Port"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(padded.status_code, 201, padded.content)
+        self.assertEqual(padded.json()["source_label"], "802.11 Port")
+        self.assertEqual(fixed.status_code, 400, fixed.content)
+        self.assertIn("source_label", fixed.json())
+        self.assertEqual(list(PortClassMapping.objects.values_list("source_label", flat=True)), ["802.11 Port"])
 
 
 class SourceResolutionAPIPermissionTest(TestCase):
@@ -841,6 +911,63 @@ class CableClassMappingGraphQLTest(TestCase):
         )
 
 
+class PortClassMappingGraphQLTest(TestCase):
+    """Expose PortClass label mappings as profile configuration."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_superuser("graphql-port-class", "graphql-pc@example.invalid", "testpass")
+        cls.profile = ImportProfile.objects.create(
+            name="GraphQL PortClass profile", source_adapter="trace_workbook", adapter_config={}
+        )
+        cls.mapping = PortClassMapping.objects.create(profile=cls.profile, source_label="Undefined", port_class="NIC")
+
+    def setUp(self):
+        self.client.force_login(self.user)
+
+    def test_query_returns_portclass_configuration(self):
+        response = self.client.post(
+            "/graphql/",
+            data={"query": "{ port_class_mapping_list { id source_label port_class profile { id name } } }"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("errors", response.json(), response.json())
+        self.assertEqual(
+            response.json()["data"]["port_class_mapping_list"],
+            [
+                {
+                    "id": str(self.mapping.pk),
+                    "source_label": "Undefined",
+                    "port_class": "NIC",
+                    "profile": {"id": str(self.profile.pk), "name": "GraphQL PortClass profile"},
+                }
+            ],
+        )
+
+    def test_a_viewer_sees_only_the_mappings_their_object_permission_allows(self):
+        other = ImportProfile.objects.create(name="Hidden PortClass profile", source_adapter="trace_workbook")
+        PortClassMapping.objects.create(profile=other, source_label="Hidden label", port_class="Port")
+        viewer = user_with_object_permission(
+            "graphql-port-class-viewer",
+            [(PortClassMapping, ["view"], {"pk": self.mapping.pk}), (ImportProfile, ["view"], {})],
+        )
+        self.client.force_login(viewer)
+
+        response = self.client.post(
+            "/graphql/",
+            data={"query": "{ port_class_mapping_list { id source_label } }"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["data"]["port_class_mapping_list"],
+            [{"id": str(self.mapping.pk), "source_label": "Undefined"}],
+        )
+
+
 class ProfileYamlSurfaceTest(TestCase):
     """Round-trip adapter-specific profile policy through the YAML document interface."""
 
@@ -866,12 +993,13 @@ class ProfileYamlSurfaceTest(TestCase):
             cable_profile_resolved=True,
             cable_profile="single-1c1p",
         )
+        PortClassMapping.objects.create(profile=source, source_label="802.11 Port", port_class="NIC")
 
         response = self.client.get(reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": source.pk}))
 
         self.assertEqual(response.status_code, 200)
         document = yaml.safe_load(response.content)
-        self.assertEqual(set(document), {"profile", "cable_class_mappings"})
+        self.assertEqual(set(document), {"profile", "cable_class_mappings", "port_class_mappings"})
         self.assertFalse(self._keys_ending_in_id(document))
         original_pk = source.pk
         source.delete()
@@ -906,6 +1034,51 @@ class ProfileYamlSurfaceTest(TestCase):
                 }
             ],
         )
+        self.assertEqual(
+            list(imported.port_class_mappings.values("source_label", "port_class")),
+            [{"source_label": "802.11 Port", "port_class": "NIC"}],
+        )
+
+    def test_import_refuses_a_portclass_mapping_of_a_fixed_label(self):
+        """The YAML writer validates each row with the model, so a fixed PortClass label cannot be mapped."""
+        document = {
+            "profile": {"name": "Fixed label trace profile", "source_adapter": "trace_workbook", "adapter_config": {}},
+            "port_class_mappings": [{"source_label": "NIC", "port_class": "Port"}],
+        }
+        upload = BytesIO(yaml.safe_dump(document).encode())
+        upload.name = "fixed-label.yaml"
+
+        response = self.client.post(reverse("plugins:netbox_data_import:import_profile_yaml"), {"yaml_file": upload})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "is a fixed PortClass, so it takes no mapping.")
+        self.assertFalse(ImportProfile.objects.filter(name="Fixed label trace profile").exists())
+
+    def test_import_refuses_a_portclass_label_with_whitespace_at_either_end(self):
+        """A padded label never matches the trimmed workbook label, and a padded fixed label escapes that check."""
+        for label in (" 802.11 Port ", " NIC "):
+            with self.subTest(label=label):
+                document = {
+                    "profile": {
+                        "name": "Padded label profile",
+                        "source_adapter": "trace_workbook",
+                        "adapter_config": {},
+                    },
+                    "port_class_mappings": [{"source_label": label, "port_class": "NIC"}],
+                }
+                upload = BytesIO(yaml.safe_dump(document).encode())
+                upload.name = "padded-label.yaml"
+
+                response = self.client.post(
+                    reverse("plugins:netbox_data_import:import_profile_yaml"), {"yaml_file": upload}
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(
+                    response, "Remove the whitespace at the start and end of the source PortClass label."
+                )
+                self.assertFalse(ImportProfile.objects.filter(name="Padded label profile").exists())
+                self.assertFalse(PortClassMapping.objects.exists())
 
     def test_import_rejects_policy_sections_the_adapter_does_not_support(self):
         cases = (

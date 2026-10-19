@@ -17,6 +17,7 @@ from .views import (
     SourceResolutionViewSet,
     ImportExecutionViewSet,
     InferenceBackendViewSet,
+    PortClassMappingViewSet,
     ResolutionProposalHistoryViewSet,
     ResolutionProposalViewSet,
 )
@@ -24,6 +25,7 @@ from .views import (
 router = NetBoxRouter()
 router.register("profiles", ImportProfileViewSet)
 router.register("cable-class-mappings", CableClassMappingViewSet)
+router.register("port-class-mappings", PortClassMappingViewSet)
 router.register("cable-provenance", CableImportSourceViewSet)
 router.register("column-mappings", ColumnMappingViewSet)
 router.register("class-role-mappings", ClassRoleMappingViewSet)

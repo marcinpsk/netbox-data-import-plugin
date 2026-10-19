@@ -471,6 +471,8 @@ class RekeyNameIdentitiesMigrationTest(TransactionTestCase):
         proposal = self.answered(old_field_key(f"alias-{DOTLESS_I}", "absent"), device, page, outcome="candidate")
 
         MigrationExecutor(connection).migrate([(APP, REKEY)])
+        # The fingerprint reads every policy table, and a later migration adds one.
+        migrate_plugin_to_leaf()
 
         with self.assertRaises(ValidationError):
             accept_proposal(

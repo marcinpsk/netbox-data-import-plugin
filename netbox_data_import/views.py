@@ -37,7 +37,8 @@ from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
 from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS, OutputKind
 from .contact_resolution import PrimaryContactResolver, contact_identity, suggest_contact_roles
 from .device_field_review import DeviceFieldReviewer, sync_change_preview
-from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
+from .adapter_config import preview_port_class_map
+from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key, port_class_mapping_errors
 from .filters import ImportProfileFilterSet, InferenceBackendFilterSet
 from .forms import (
     CableClassMappingForm,
@@ -53,6 +54,7 @@ from .forms import (
     ImportSetupForm,
     InferenceBackendFilterForm,
     InferenceBackendForm,
+    PortClassMappingForm,
     cable_policy_form_initial,
 )
 from .identity import identity_in, identity_text
@@ -73,6 +75,7 @@ from .models import (
     ColumnTransformRule,
     DeviceExistingMatch,
     DeviceTypeMapping,
+    PortClassMapping,
     IgnoredFieldDifference,
     ImportExecution,
     ImportProfile,
@@ -114,10 +117,12 @@ from .preview_coordinator import (
     StalePreview,
     StartPreview,
     apply_preview_command,
+    planning_context_of,
     read_preview,
     setup_claim,
     sync_hold_reason,
     validate_preview_plan,
+    with_preview_port_class,
 )
 from .profile_yaml import (
     DuplicateYamlKeyError,
@@ -140,10 +145,12 @@ from .review_workspace import (
     ReviewWorkspace,
     UnacceptablePolicyDecision,
     clear_cable_segment_override_and_replan,
+    clear_port_class_mapping_and_replan,
     clear_trace_location_resolution_and_replan,
     held_sync,
     save_cable_class_mapping_and_replan,
     save_cable_segment_override_and_replan,
+    save_port_class_mapping_and_replan,
     save_termination_resolution_and_replan,
     save_trace_device_resolution_and_replan,
     save_trace_location_resolution_and_replan,
@@ -158,6 +165,7 @@ from .tables import (
     ImportExecutionTable,
     ImportProfileTable,
     InferenceBackendTable,
+    PortClassMappingTable,
 )
 from .trace_device_resolution import DeviceEvidence, eligible_trace_devices, source_device_key
 from .trace_location_resolution import (
@@ -537,6 +545,7 @@ class ImportProfileView(generic.ObjectView):
         "class_role_mappings",
         "device_type_mappings",
         "cable_class_mappings",
+        "port_class_mappings",
     )
 
     def get_extra_context(self, request, instance):
@@ -546,6 +555,7 @@ class ImportProfileView(generic.ObjectView):
         device_type_table = DeviceTypeMappingTable(instance.device_type_mappings.all())
         transform_table = ColumnTransformRuleTable(instance.column_transform_rules.all())
         cable_class_table = CableClassMappingTable(instance.cable_class_mappings.all(), viewer=request.user)
+        port_class_table = PortClassMappingTable(instance.port_class_mappings.all(), viewer=request.user)
         applicable_policy_sections = frozenset(
             section.key for section in POLICY_SECTIONS if section.applies_to(instance.output_kinds)
         )
@@ -555,6 +565,7 @@ class ImportProfileView(generic.ObjectView):
             "device_type_table": device_type_table,
             "transform_table": transform_table,
             "cable_class_table": cable_class_table,
+            "port_class_table": port_class_table,
             "applicable_policy_sections": applicable_policy_sections,
         }
 
@@ -695,7 +706,7 @@ class ImportProfileBulkImportView(generic.BulkImportView):
     * **Hierarchical YAML** - the format produced by the "Export YAML" button
       (top-level keys: ``profile``, ``column_mappings``, ``class_role_mappings``,
       ``device_type_mappings``, ``manufacturer_mappings``,
-      ``column_transform_rules``, ``cable_class_mappings``).  All nested
+      ``column_transform_rules``, ``cable_class_mappings``, ``port_class_mappings``).  All nested
       mappings are created/updated.
     * **Flat CSV/YAML** - one record per profile, plain metadata fields only
       (name, description, sheet_name, …).  Falls back to NetBox's standard
@@ -954,6 +965,45 @@ class CableClassMappingDeleteView(_ProfileChildDeleteView):
         """Refuse a delete page that would disclose the row it names."""
         obj = super().get_object(**kwargs)
         if not self.request.user.has_perm("netbox_data_import.view_cableclassmapping", obj):
+            raise PermissionDenied
+        return obj
+
+
+class PortClassMappingAddView(_ProfileChildEditView):
+    """Add a PortClass mapping to an existing ImportProfile."""
+
+    queryset = PortClassMapping.objects.all()
+    form = PortClassMappingForm
+    template_name = "netbox_data_import/portclassmapping_edit.html"
+    permission_required = "netbox_data_import.add_portclassmapping"
+
+
+class PortClassMappingEditView(_ProfileChildEditView):
+    """Edit an existing PortClass mapping."""
+
+    queryset = PortClassMapping.objects.all()
+    form = PortClassMappingForm
+    template_name = "netbox_data_import/portclassmapping_edit.html"
+    permission_required = "netbox_data_import.change_portclassmapping"
+
+    def get_object(self, **kwargs):
+        """Refuse an edit form that would disclose a row through its initial values."""
+        obj = super().get_object(**kwargs)
+        if obj.pk and not self.request.user.has_perm("netbox_data_import.view_portclassmapping", obj):
+            raise PermissionDenied
+        return obj
+
+
+class PortClassMappingDeleteView(_ProfileChildDeleteView):
+    """Delete a PortClass mapping."""
+
+    queryset = PortClassMapping.objects.all()
+    permission_required = "netbox_data_import.delete_portclassmapping"
+
+    def get_object(self, **kwargs):
+        """Refuse a delete page that would disclose the row it names."""
+        obj = super().get_object(**kwargs)
+        if not self.request.user.has_perm("netbox_data_import.view_portclassmapping", obj):
             raise PermissionDenied
         return obj
 
@@ -3505,6 +3555,67 @@ def _cable_policy_forms(profile, trace, viewer) -> list:
     return forms
 
 
+PORT_CLASS_FOR_PREVIEW = "preview"
+PORT_CLASS_FOR_PROFILE = "profile"
+PORT_CLASS_SAVE_PERMISSION_REFUSED = "You do not have permission to save this PortClass mapping."
+PORT_CLASS_CLEAR_PERMISSION_REFUSED = "You do not have permission to clear this PortClass mapping."
+
+
+def _port_class_rows(profile, workspace, planning_context, viewer) -> list:
+    """Return one row per PortClass label outside the fixed vocabulary, with its mapping and its controls."""
+    labels = workspace.port_class_labels
+    if not labels:
+        return []
+    preview_map = preview_port_class_map(planning_context)
+    stored = {
+        row.source_label: row for row in PortClassMapping.objects.filter(profile=profile, source_label__in=list(labels))
+    }
+    visible_ids = _visible_row_ids(PortClassMapping, viewer, list(stored.values()))
+    counts = Counter(item["label"] for trace in workspace.traces for item in trace.port_classes)
+    delete_permission = get_permission_for_model(PortClassMapping, "delete")
+    rows = []
+    for index, (label, port_class) in enumerate(labels.items()):
+        row = stored.get(label)
+        source = PORT_CLASS_FOR_PREVIEW if label in preview_map else PORT_CLASS_FOR_PROFILE if port_class else ""
+        assessment = assess_permission_scoped_save_option(
+            viewer,
+            PortClassMapping,
+            {"profile": profile, "source_label": label},
+            {"port_class": None},
+            unknown_fields={"port_class"},
+        )
+        hidden = row is not None and row.pk not in visible_ids
+        # A preview mapping is this preview's own decision, so only a profile mapping can be hidden.
+        redacted = hidden and source == PORT_CLASS_FOR_PROFILE
+        save_reason = (
+            POLICY_WRITE_REFUSED if hidden else "" if assessment.allowed else PORT_CLASS_SAVE_PERMISSION_REFUSED
+        )
+        clear_reason = ""
+        if source == PORT_CLASS_FOR_PROFILE:
+            clear_reason = (
+                POLICY_WRITE_REFUSED
+                if row is None or hidden
+                else ""
+                if viewer.has_perm(delete_permission, row)
+                else PORT_CLASS_CLEAR_PERMISSION_REFUSED
+            )
+        rows.append(
+            {
+                "label": label,
+                "port_class": POLICY_HIDDEN if redacted else port_class,
+                "source": source,
+                "trace_count": counts[label],
+                "save_reason": save_reason,
+                "clear_reason": clear_reason,
+                "form": PortClassMappingForm(
+                    initial={} if redacted else {"port_class": port_class},
+                    auto_id=f"id_%s_port_class_{index}",
+                ),
+            }
+        )
+    return rows
+
+
 RETAINED_SEGMENT_REASON = (
     "This plan keeps the Cable that already proves this segment, and an override cannot change it. "
     "Correct that Cable in NetBox, then re-read."
@@ -3877,6 +3988,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
                 terminations=terminations,
             )
         cable_policy_forms = _cable_policy_forms(profile, selected, request.user)
+        port_class_rows = _port_class_rows(profile, workspace, snapshot.planning_context, request.user)
         segment_policy_forms = _segment_policy_forms(profile, selected, request.user)
         attention, settled = group_terminations(selected.terminations if selected else [])
         selected_devices = _with_device_resolution_permissions(
@@ -3914,6 +4026,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
                 "attention_terminations": attention,
                 "settled_terminations": settled,
                 "cable_policy_forms": cable_policy_forms,
+                "port_class_rows": port_class_rows,
                 "segment_policy_forms": segment_policy_forms,
                 "topology_summary": _topology_summary(segment_policy_forms),
                 "summary": summary,
@@ -4420,6 +4533,102 @@ class TraceCablePolicyView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
         )
         result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
         return _command_response(request, result, self.refusal_url(request))
+
+
+def _replanned_trace(workspace, identity: str, plan) -> str:
+    """Return the unit that states the reviewed trace's source block in a replan, or "" when none does."""
+    trace = next((item for item in workspace.traces if item.identity == identity), None)
+    if trace is None:
+        return ""
+    position = {"sheet": trace.sheet, "row_number": trace.row_number}
+    for unit in plan.units:
+        display = unit.display
+        # Duplicate collapse keeps every occurrence, and the reviewed one need not be the first.
+        if display.get("trace") is not None and position in display["occurrences"]:
+            return unit.identity
+    return ""
+
+
+@dataclass(frozen=True)
+class _MapPortClass(PreviewCommand):
+    """Map one PortClass label the reviewed preview states, on the profile or for this preview alone."""
+
+    label: str
+    port_class: str
+    scope: str
+    clearing: bool
+    trace: str
+
+    def apply(self, preview):
+        """Refuse a label or PortClass this preview cannot map, then write the decision and replan."""
+        self._refuse_unmappable(preview)
+        context = None
+        if self.scope == PORT_CLASS_FOR_PREVIEW:
+            if self.clearing and self.label not in preview_port_class_map(preview.planning_context):
+                raise PreviewCommandRefused(f"This preview maps no PortClass label '{self.label}'.")
+            context = with_preview_port_class(preview.context, self.label, None if self.clearing else self.port_class)
+            # The coordinator stores this context with the plan, and it refuses a plan made for another one.
+            plan = ImportEngine.plan(preview.profile, preview.document, preview.actor, planning_context_of(context))
+        else:
+            plan = self._profile_decision(preview)
+        settled = "cleared for" if self.clearing else f"set to '{self.port_class}' for"
+        where = "this preview" if self.scope == PORT_CLASS_FOR_PREVIEW else "the profile"
+        return CommandOutcome(
+            message=f"PortClass {settled} label '{self.label}' in {where}.",
+            plan=plan,
+            context=context,
+            payload={"trace": _replanned_trace(preview.workspace, self.trace, plan)},
+        )
+
+    def _refuse_unmappable(self, preview):
+        """Refuse a fixed PortClass label, a label this preview does not state, or a target outside the vocabulary."""
+        errors = port_class_mapping_errors(self.label, self.port_class)
+        if "source_label" in errors:
+            raise PreviewCommandRefused(errors["source_label"])
+        # A review command answers a question this preview asked, never one the caller invented.
+        if self.label not in preview.workspace.port_class_labels:
+            raise PreviewCommandRefused("This preview states no such PortClass label.")
+        if not self.clearing and "port_class" in errors:
+            raise PreviewCommandRefused(errors["port_class"])
+
+    def _profile_decision(self, preview):
+        """Save or clear the profile mapping under the profile lock, and return its replan."""
+        arguments = {
+            "profile": preview.profile,
+            "source_document": preview.document,
+            "actor": preview.actor,
+            "planning_context": preview.planning_context,
+            "source_label": self.label,
+            "reviewed_fingerprint": preview.reviewed_fingerprint,
+        }
+        try:
+            if self.clearing:
+                return clear_port_class_mapping_and_replan(**arguments)
+            return save_port_class_mapping_and_replan(**arguments, port_class=self.port_class)
+        except UnacceptablePolicyDecision as exc:
+            raise PreviewCommandRefused("; ".join(exc.errors)) from exc
+
+
+class TracePortClassView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Map one PortClass label the reviewed preview states, or clear its mapping, then replan."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Run the save or the clear as one coordinated command, then reopen the same source block."""
+        scope = request.POST.get("scope", "")
+        if scope not in (PORT_CLASS_FOR_PREVIEW, PORT_CLASS_FOR_PROFILE):
+            raise PreviewCommandRefused("Choose whether the PortClass mapping is for the profile or for this preview.")
+        clearing = bool(request.POST.get("clear"))
+        command = _MapPortClass(
+            label=request.POST.get("port_class_label", "").strip(),
+            port_class="" if clearing else request.POST.get("port_class", "").strip(),
+            scope=scope,
+            clearing=clearing,
+            trace=request.POST.get("trace", ""),
+        )
+        result = apply_preview_command(request, PreviewClaim.posted(request.POST), command)
+        return _command_response(request, result, _trace_workspace_url(result.outcome.payload["trace"]))
 
 
 @dataclass(frozen=True)

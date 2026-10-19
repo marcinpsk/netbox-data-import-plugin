@@ -93,6 +93,16 @@ and counted on the page, so blocked and invalid traces never stop the others. Th
 drift and while another sync of the same source waits or runs, with the same checks as a per-trace
 sync. The final import still refuses while any unit is in error.
 
+Amended 2026-10-19: the coordinator holds one kind of decision for its preview alone: a PortClass
+Mapping that applies to this preview and not to the Import Profile. The coordinator keeps the
+label-to-PortClass map in its context, and the planning context carries the map whenever it is not
+empty. The plan stores the planning context, and the plan and unit fingerprints cover it. Every
+replan reads that planning context: a command, a re-read, the drift check on a page load, and the
+worker that executes an accepted plan. So each of them interprets the source with the same map, and
+the worker finds the unit the operator selected. The Source Adapter still never queries NetBox: the
+Import Engine gives it the profile map with the preview map over it. A re-read keeps the map, and a
+new setup or a discard ends it with the rest of the preview.
+
 ## Considered options
 
 - A lock around the session helpers: rejected. Response middleware saves the session after the lock

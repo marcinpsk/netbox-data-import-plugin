@@ -25,7 +25,12 @@ from .adapters import (
 from . import branching, plan
 from .cable_policy import cable_profile_label, cable_type_label, policy_choice_errors
 from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
-from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
+from .field_keys import (
+    PORT_CLASS_CHOICES,
+    SELECT_TERMINATION_TASK,
+    parse_termination_field_key,
+    port_class_mapping_errors,
+)
 from . import inference_settings as _inference_settings
 from .proposal_contract import OUTCOME_CANDIDATE, OUTCOME_CHOICES, OUTCOME_NO_MATCH
 from .trace_schema import TRACE_EXPORT_TIMESTAMP_MAX_LENGTH
@@ -623,6 +628,41 @@ class CableClassMapping(PolicySectionModel):
     def get_absolute_url(self):
         """Return the edit URL for this CableClass mapping."""
         return reverse("plugins:netbox_data_import:cableclassmapping_edit", args=[self.pk])
+
+
+class PortClassMapping(PolicySectionModel):
+    """Map one source PortClass label outside the fixed vocabulary to one fixed PortClass."""
+
+    POLICY_SECTION = "port_class_mappings"
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="port_class_mappings",
+    )
+    source_label = models.CharField(max_length=200, help_text="PortClass label as the source file states it")
+    port_class = models.CharField(max_length=50, choices=PORT_CLASS_CHOICES, verbose_name="PortClass")
+
+    class Meta:
+        ordering = ["profile", "source_label"]
+        constraints = [
+            models.UniqueConstraint(fields=["profile", "source_label"], name="ndi_portclassmapping_profile_label"),
+        ]
+        verbose_name = "PortClass Mapping"
+        verbose_name_plural = "PortClass Mappings"
+
+    def clean(self):
+        """Reject a fixed PortClass as the source label, and a target outside the fixed vocabulary."""
+        super().clean()
+        if errors := port_class_mapping_errors(self.source_label, self.port_class):
+            raise ValidationError(errors)
+
+    def __str__(self):
+        return f"{self.source_label} → {self.port_class}"
+
+    def get_absolute_url(self):
+        """Return the edit URL for this PortClass mapping."""
+        return reverse("plugins:netbox_data_import:portclassmapping_edit", args=[self.pk])
 
 
 class CableSegmentOverride(PolicySectionModel):
