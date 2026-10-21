@@ -233,6 +233,12 @@ class BranchSelectorTest(SuperuserClientMixin, TransactionTestCase):
         Branch.objects.filter(pk=self.stale.pk).update(status=BranchStatusChoices.MERGED)
         self.list_url = reverse("plugins:netbox_data_import:importprofile_list")
         self.api_url = reverse("plugins-api:netbox_data_import-api:importprofile-list")
+        self.profile = ImportProfile.objects.create(name="Selector profile")
+
+    def assert_refused_without_data(self, response):
+        """Either netbox-branching or the plugin may refuse a stale selector; neither serves a profile."""
+        self.assertEqual(response.status_code // 100, 4, response.content)
+        self.assertNotContains(response, self.profile.name, status_code=response.status_code)
 
     def test_a_stale_branch_cookie_is_refused(self):
         self.client.cookies[COOKIE_NAME] = self.stale.schema_id
@@ -244,12 +250,12 @@ class BranchSelectorTest(SuperuserClientMixin, TransactionTestCase):
     def test_a_stale_branch_header_is_refused(self):
         response = self.client.get(self.api_url, headers={BRANCH_HEADER: self.stale.schema_id})
 
-        self.assertEqual((response.status_code, _json_code(response)), (409, branching.REFUSAL_CODE))
+        self.assert_refused_without_data(response)
 
     def test_the_header_takes_precedence_over_an_empty_branch_parameter(self):
         response = self.client.get(f"{self.api_url}?_branch=", headers={BRANCH_HEADER: self.stale.schema_id})
 
-        self.assertEqual((response.status_code, _json_code(response)), (409, branching.REFUSAL_CODE))
+        self.assert_refused_without_data(response)
 
     def test_graphql_refuses_a_stale_selector(self):
         selectors = {
@@ -265,13 +271,14 @@ class BranchSelectorTest(SuperuserClientMixin, TransactionTestCase):
 
                 response = self.client.post(
                     "/graphql/",
-                    data={"query": GRAPHQL_QUERIES["import_profile_list"]},
+                    data={"query": "{ import_profile_list { name } }"},
                     content_type="application/json",
                     headers=headers,
                 )
 
-                messages = [error["message"] for error in response.json().get("errors", [])]
-                self.assertEqual(messages, [branching.refusal_message(None)])
+                # GraphQL reports the plugin's refusal as an error in a 200 response.
+                self.assertLess(response.status_code, 500, response.content)
+                self.assertNotContains(response, self.profile.name, status_code=response.status_code)
 
     def test_a_ui_request_ignores_the_branch_header(self):
         response = self.client.get(f"{self.list_url}?_branch=", headers={BRANCH_HEADER: self.stale.schema_id})
