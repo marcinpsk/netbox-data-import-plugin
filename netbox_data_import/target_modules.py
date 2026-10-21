@@ -12,7 +12,7 @@ module is the behaviour behind that declaration.
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import math
 import re
 from copy import copy
@@ -133,7 +133,7 @@ def _display_value(value):
         if not value.is_finite():
             return str(value)
         return int(value) if value == value.to_integral_value() else float(value)
-    if isinstance(value, (datetime.date, datetime.datetime, datetime.time)):
+    if isinstance(value, (dt.date, dt.datetime, dt.time)):
         return value.isoformat()
     if isinstance(value, dict):
         return {str(key): _display_value(item) for key, item in value.items()}
