@@ -2,6 +2,53 @@
 
 <!-- version list -->
 
+## v2.16.1 (2026-10-22)
+
+### Bug Fixes
+
+- **deps**: Bump the uv group across 1 directory with 2 updates
+  ([#240](https://github.com/marcinpsk/netbox-data-import-plugin/pull/240),
+  [`a58820d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a58820d48602fb3be878f5c8554deb4c1ee5baad))
+
+### Chores
+
+- **deps**: Bump the github-actions group with 3 updates
+  ([`30e7ebb`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/30e7ebb5901c368fc65e4dc11d6897cafc561605))
+
+- **deps-dev**: Bump @playwright/test from 1.63.0 to 1.64.0
+  ([`9f55591`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9f555911119b35b52eab8d2be0254f89de60dd7d))
+
+- **deps-dev**: Bump netboxlabs-netbox-branching from 1.2.1 to 1.2.2
+  ([`1eeac61`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1eeac612489ac3d51f7f52b23e66d5ca739d0863))
+
+- **deps-dev**: Bump pre-commit from 4.6.2 to 4.7.0
+  ([`4fc72cd`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4fc72cd04edb72e8dda6bccb8e098daab96719bb))
+
+- **deps-dev**: Bump ruff from 0.16.10 to 0.17.0
+  ([`39252c9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/39252c92007277eee92045faa163a389e34b6385))
+
+- **deps-dev**: Bump vitest from 5.0.3 to 5.0.4
+  ([`74da7b3`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/74da7b335a813ede065298c3a918ce61530f8909))
+
+### Code Style
+
+- Import datetime as dt for the ruff 0.17 import convention
+  ([`2384945`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2384945ea2c7403659388a13a637880e755a4412))
+
+### Continuous Integration
+
+- **pre-commit**: Run the ruff that uv.lock pins
+  ([`0592805`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/05928050eb97ef34ce6e8756be7d5af4c091dfe4))
+
+### Testing
+
+- **branching**: Assert that a stale selector serves no data, not which layer refuses it
+  ([`f695139`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f695139acb8b4869a5d32822b796c4f1dd84de25))
+
+- **branching**: Cover the plugin's branch-header check without the middleware
+  ([`75005fc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/75005fcee86cae4812beeef24240dacc848e3320))
+
+
 ## v2.16.0 (2026-10-19)
 
 ### Bug Fixes
