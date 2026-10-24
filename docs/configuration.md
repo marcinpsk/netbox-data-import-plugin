@@ -477,9 +477,10 @@ kind. NetBox can model a port as another kind. For example, a passive panel mode
 source states as `Port 18 (NIC)` as FrontPort `18`. The plugin never matches across kinds by itself.
 **Choose termination** and Ask AI offer every cable-capable port of the resolved Device: the ports of
 the stated kind come first, and each other port is marked "Differs from the source PortClass". When
-you save such a port, the trace resolves, and the trace states a warning that names both kinds. The
-Import Profile keeps the choice for later trace files that state the same port with the same
-PortClass.
+you search, a port whose name is an exact match for the search comes before all other ports, of any
+kind. When you save a port of another kind, the trace resolves, and the trace states a warning that
+names both kinds. The Import Profile keeps the choice for later trace files that state the same port
+with a PortClass that sets the same port kinds.
 
 A Device's Location is its own Location. Only a Device with no Location of its own uses its Rack's
 Location.

@@ -3124,6 +3124,24 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
                 )
                 self.assertEqual(result.total, 5)
 
+    def test_an_exact_search_match_outside_the_claim_ranks_before_the_claimed_models(self):
+        """The search's exact match ranks before the claim, so the operator finds the port the search names."""
+        Interface.objects.create(device=self.panel_1, name="F10", type="1000base-t")
+        field_key = termination_field_key(device="PANEL-1", cards="", port="absent", kind="interface")
+
+        result = eligible_terminations(field_key, self.reader(), profile=self.profile, search="F1")
+
+        self.assertEqual(
+            [
+                (candidate._meta.label_lower, candidate.name, result.outside_claim(candidate))
+                for candidate in result.candidates
+            ],
+            [
+                ("dcim.frontport", "F1", True),
+                ("dcim.interface", "F10", False),
+            ],
+        )
+
     def test_mapped_peer_candidates_follow_port_mappings_in_both_directions(self):
         """A mapped-peer question offers the opposite ports instead of the source port's kind."""
         _panel, fronts, rear = self.rebuild_panel("PANEL-1", fronts=2)
