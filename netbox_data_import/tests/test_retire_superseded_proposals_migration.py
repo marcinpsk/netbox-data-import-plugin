@@ -160,14 +160,15 @@ class RetirePromptVersion2MigrationTest(TransactionTestCase):
         profile = ImportProfile.objects.create(name="Proposal Profile", adapter_config={})
         device_type = ObjectType.objects.get(app_label="dcim", model="device")
         rows = (
-            ("queued-v2", "queued", 2, ""),
-            ("running-v2", "running", 2, ""),
-            ("queued-v3", "queued", 3, ""),
-            ("running-v3", "running", 3, ""),
-            ("failed-v2", "failed", 2, "timeout"),
-            ("cancelled-v2", "cancelled", 2, ""),
+            ("queued-v2", "queued", 2, 2, ""),
+            ("running-v2", "running", 2, 2, ""),
+            ("queued-v3", "queued", 3, 2, ""),
+            ("running-v3", "running", 3, 2, ""),
+            ("running-v3-schema-v1", "running", 3, 1, ""),
+            ("failed-v2", "failed", 2, 2, "timeout"),
+            ("cancelled-v2", "cancelled", 2, 2, ""),
         )
-        for key, status, prompt_version, failure_reason in rows:
+        for key, status, prompt_version, response_schema_version, failure_reason in rows:
             ResolutionProposal.objects.create(
                 profile=profile,
                 task_type="select_termination",
@@ -179,7 +180,7 @@ class RetirePromptVersion2MigrationTest(TransactionTestCase):
                 resolved_device_type=device_type,
                 resolved_device_id=1,
                 prompt_version=prompt_version,
-                response_schema_version=2,
+                response_schema_version=response_schema_version,
                 candidate_snapshot={},
             )
 
@@ -194,6 +195,7 @@ class RetirePromptVersion2MigrationTest(TransactionTestCase):
                 ("queued-v3", "queued", ""),
                 ("running-v2", "failed", "superseded_request"),
                 ("running-v3", "running", ""),
+                ("running-v3-schema-v1", "failed", "superseded_request"),
             ],
         )
 
