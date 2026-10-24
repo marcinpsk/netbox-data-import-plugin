@@ -134,10 +134,10 @@ two facts.
 ### Persisted identity
 
 The field key keeps the claimed kind. `TerminationResolution` already stores the concrete model and
-id, so a saved FrontPort choice under an `interface` key needs no schema change and no migration.
-A later workbook that states the same end with the same PortClass builds the same key and reuses
-the choice. A later workbook that changes the PortClass builds a new key and asks again. This is
-correct: the source end changed.
+id, so a saved FrontPort choice under an `interface` key needs no schema change and no schema migration.
+A later workbook that states the same end with a PortClass of the same claimed kind builds the
+same key and reuses the choice. A later workbook whose PortClass claims another kind builds a new
+key and asks again.
 
 ### Planning behaviour
 
@@ -318,3 +318,11 @@ One change delivers it, test first, end to end through the trace workspace views
 - `trace.pass_through_at_interface` stays. Reopen it only when a workbook shows a NIC-labelled
   pass-through. That would also reopen `docs/design/trace-cable-policy.md` row 1.
 - The name gap (`Port 18` against `18`) stays manual or Ask AI. No automatic number-only matching.
+
+## Implementation review
+
+Round 1 (gpt-6-astra, high, read-only) on the implementation: no runtime blocker. One should-fix:
+the spec and this record said any PortClass change asks again, but the key holds the claimed kind,
+so `NIC` to `Switch Port` reuses the choice. Fixed in both texts. The reviewer also noted that the
+prompt version 3 retirement migration (`0049`, required by the existing contract-retirement test)
+had no behavioural test; one is added.

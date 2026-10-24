@@ -844,8 +844,9 @@ power block's one segment plans like any other segment.
 The claim limits automatic matching only. An explicit selection, from the picker or from an accepted
 proposal, may name any Cable End Kind on the resolved Device, because NetBox can model a port with
 another kind than the source claims: a passive panel models a NIC-labelled port as a FrontPort. The
-field key keeps the claimed kind, so a later source document that states the same end with the same
-PortClass reuses the selection, and one that changes the PortClass asks again.
+field key keeps the claimed kind, not the PortClass. A later source document that states the same
+end with a PortClass of the same claimed kind reuses the selection, and one whose PortClass claims
+another kind asks again.
 
 A PortClass value outside this vocabulary is a source-structure error the Source Adapter reports as
 `trace.unknown_port_class`, so it never reaches planning. A resolved object whose real type is not a

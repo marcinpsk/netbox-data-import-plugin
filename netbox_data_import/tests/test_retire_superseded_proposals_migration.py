@@ -25,6 +25,8 @@ APP = "netbox_data_import"
 MIGRATIONS = pathlib.Path(__file__).resolve().parents[1] / "migrations"
 BEFORE = "0034_tracedeviceresolution"
 RETIRE_SUPERSEDED_PROPOSALS = "0035_retire_superseded_proposals"
+BEFORE_PROMPT_VERSION_3 = "0048_portclassmapping"
+RETIRE_PROMPT_VERSION_2 = "0049_retire_prompt_version_2_proposals"
 
 
 def _migration(step):
@@ -140,6 +142,67 @@ class RetireSupersededProposalsMigrationTest(TransactionTestCase):
         )
 
         self.assertEqual(Migrated.objects.filter(field_key="queued-v1", status="queued").count(), 1)
+
+
+class RetirePromptVersion2MigrationTest(TransactionTestCase):
+    """The prompt version 3 upgrade retires only the in-flight requests sent under version 2."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(restore_plugin_migrations)
+        _migrate(BEFORE_PROMPT_VERSION_3, fake=True)
+
+    def test_only_in_flight_rows_below_prompt_version_3_are_retired(self):
+        apps = MigrationExecutor(connection).loader.project_state([(APP, BEFORE_PROMPT_VERSION_3)]).apps
+        ImportProfile = apps.get_model(APP, "ImportProfile")
+        ResolutionProposal = apps.get_model(APP, "ResolutionProposal")
+        ObjectType = apps.get_model("core", "ObjectType")
+        profile = ImportProfile.objects.create(name="Proposal Profile", adapter_config={})
+        device_type = ObjectType.objects.get(app_label="dcim", model="device")
+        rows = (
+            ("queued-v2", "queued", 2, ""),
+            ("running-v2", "running", 2, ""),
+            ("queued-v3", "queued", 3, ""),
+            ("running-v3", "running", 3, ""),
+            ("failed-v2", "failed", 2, "timeout"),
+            ("cancelled-v2", "cancelled", 2, ""),
+        )
+        for key, status, prompt_version, failure_reason in rows:
+            ResolutionProposal.objects.create(
+                profile=profile,
+                task_type="select_termination",
+                field_key=key,
+                field_key_digest=key,
+                status=status,
+                failure_reason=failure_reason,
+                source_evidence={},
+                resolved_device_type=device_type,
+                resolved_device_id=1,
+                prompt_version=prompt_version,
+                response_schema_version=2,
+                candidate_snapshot={},
+            )
+
+        Migrated = _migrate(RETIRE_PROMPT_VERSION_2).get_model(APP, "ResolutionProposal")
+
+        self.assertEqual(
+            sorted(Migrated.objects.values_list("field_key", "status", "failure_reason")),
+            [
+                ("cancelled-v2", "cancelled", ""),
+                ("failed-v2", "failed", "timeout"),
+                ("queued-v2", "failed", "superseded_request"),
+                ("queued-v3", "queued", ""),
+                ("running-v2", "failed", "superseded_request"),
+                ("running-v3", "running", ""),
+            ],
+        )
+
+    def test_the_retirement_refuses_to_reverse(self):
+        operation = _migration(RETIRE_PROMPT_VERSION_2).operations[0]
+
+        self.assertIsInstance(operation, RunPython)
+        self.assertFalse(operation.reversible)
+        self.assertIn((APP, BEFORE_PROMPT_VERSION_3), _migration(RETIRE_PROMPT_VERSION_2).dependencies)
 
 
 CONTRACT_CONSTANTS = ("PROMPT_VERSION", "RESPONSE_SCHEMA_VERSION")
