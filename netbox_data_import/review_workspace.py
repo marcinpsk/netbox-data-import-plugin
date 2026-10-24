@@ -21,6 +21,7 @@ from .cable_disclosure import (
 )
 from .cable_policy import cable_media_family_label, cable_profile_label, cable_type_label
 from .cable_target import REUSE_SEGMENT, UNRESOLVED
+from .field_keys import TERMINATION_ROLE, is_outside_claim, parse_termination_field_key
 from .identity import identity_in, identity_text
 from .import_engine import ImportEngine
 from .models import (
@@ -62,6 +63,8 @@ from .public_refusal import PublicRefusal
 
 
 TERMINATION_UNRESOLVABLE = "That termination cannot be resolved here."
+# The mark a selection carries when its NetBox model is outside the source PortClass claim (section 10.2).
+OUTSIDE_CLAIM_MARK = "Differs from the source PortClass"
 
 
 class IneligibleDeviceSelection(Exception):
@@ -484,6 +487,20 @@ def _media_family_message(display) -> str:
     return f"Verified pass-throughs join these segments, and {'; '.join(statements)}. {remedy}"
 
 
+def _with_article(noun: str) -> str:
+    return f"{'an' if noun[:1] in 'aeiou' else 'a'} {noun}"
+
+
+def _kind_mismatch_message(display) -> str:
+    """Return the statement that the selected NetBox model differs from the kind the source PortClass claims."""
+    selected = _termination_model_name(display["selected_object_type"])
+    claimed = display["claimed_kind"].replace("_", " ")
+    return (
+        f"The selected NetBox port is {_with_article(selected)}, "
+        f"and the source PortClass '{display['port_class']}' claims {_with_article(claimed)}."
+    )
+
+
 def _channels(numbers) -> str:
     return ", ".join(str(number) for number in numbers)
 
@@ -611,9 +628,7 @@ _DIAGNOSTIC_MESSAGES: dict[str, str | Callable[[Mapping[str, Any]], str]] = {
         "This Interface is channelized, so an ordinary Cable on it reaches no channel. "
         "Choose the channel subinterface of this lane, so the import writes the breakout Cable on this Interface."
     ),
-    "cable.termination_kind_mismatch": (
-        "The stated PortClass does not admit the kind of port the saved selection names. Choose the termination again."
-    ),
+    "cable.termination_kind_mismatch": _kind_mismatch_message,
     "cable.termination_not_connectable": (
         "NetBox cannot cable this Interface because of its type. "
         "Choose another termination for this end, or correct the Interface type in NetBox."
@@ -1125,9 +1140,18 @@ def _presented_terminations(terminations, diagnostics) -> list[dict[str, Any]]:
             "incompatible": bool(item["incompatible"])
             and (item["field_key"] in field_keys or _source_key(item.get(DISCLOSURE_SOURCE) or {}) in sources),
             "selected_model": _termination_model_name(item["selected_type"]),
+            "outside_claim": OUTSIDE_CLAIM_MARK if _selection_outside_claim(item) else "",
         }
         for item in terminations
     ]
+
+
+def _selection_outside_claim(item) -> bool:
+    """Return whether one presented termination selected a model its source PortClass claim does not admit."""
+    if not item["selected_type"]:
+        return False
+    parsed = parse_termination_field_key(item["field_key"])
+    return parsed["role"] == TERMINATION_ROLE and is_outside_claim(parsed["kind"], item["selected_type"])
 
 
 def _presented_segments(segments, diagnostics) -> list[dict[str, Any]]:

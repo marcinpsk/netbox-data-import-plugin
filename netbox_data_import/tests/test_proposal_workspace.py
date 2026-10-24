@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from core.choices import JobStatusChoices
 from core.models import Job, ObjectType
-from dcim.models import Device, Interface, PowerPort, Site
+from dcim.models import Device, FrontPort, Interface, PowerPort, Site
 from django.db import connection
 from django.test import Client, RequestFactory, SimpleTestCase, TestCase, TransactionTestCase
 from django.urls import reverse
@@ -37,7 +37,7 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.preview_coordinator import CLAIM_INVALID, STALE_PREVIEW, SYNC_QUEUED
 from netbox_data_import.proposal_tasks import CandidateSnapshot
-from netbox_data_import.review_workspace import TERMINATION_UNRESOLVABLE
+from netbox_data_import.review_workspace import OUTSIDE_CLAIM_MARK, TERMINATION_UNRESOLVABLE
 from netbox_data_import.views import TARGET_GONE
 from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, complete_proposal, fail_proposal
 from netbox_data_import.tests.helpers import (
@@ -91,20 +91,19 @@ BACKEND = {"inference_backend": FALLBACK, "inference_backend_origin_allowlist": 
 class ProposalPreviewMixin:
     """Open one trace preview with an unresolved termination and drive the proposal endpoints."""
 
+    # The source end the preview leaves open, with an interface PortClass.
+    open_end = trace_termination("DEV-A", "", "absent-port", "Port")
+
     def setUp(self):
         super().setUp()
         # Ask AI refuses without an Inference Backend, so each test has one unless it removes it.
         self.enterContext(override_plugins_config(netbox_data_import=BACKEND))
         self.client.force_login(self.actor)
-        self.field_key = termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface")
+        device, cards, port, _port_class = self.open_end
+        self.field_key = termination_field_key(device=device, cards=cards, port=port, kind="interface")
         upload = BytesIO(
             trace_workbook_bytes(
-                path_blocks=[
-                    direct_path(
-                        from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
-                        to_end=trace_termination("DEV-B", "", "eth1", "Port"),
-                    )
-                ]
+                path_blocks=[direct_path(from_end=self.open_end, to_end=trace_termination("DEV-B", "", "eth1", "Port"))]
             )
         )
         upload.name = "traces.xlsx"
@@ -2275,3 +2274,71 @@ class ProposalWorkspaceTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, Cabl
             [(action["hidden"], action["reason"]) for action in data["actions"][2:]], [(True, ""), (True, "")]
         )
         self.assertEqual(data["decision_actions"], [])
+
+
+class CrossKindProposalTest(ProposalPreviewMixin, IsolatedRQQueueTestMixin, CableTopologyMixin, TestCase):
+    """Ask AI reads the picker's set, so a NIC end on a passive panel is offered the panel's FrontPorts."""
+
+    open_end = trace_termination("PASSIVE-1", "", "Port 18", "NIC")
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+        cls.passive, cls.passive_fronts, cls.passive_rear, _interfaces = cls.make_passive_panel("PASSIVE-1")
+
+    def picker_order(self):
+        """Return every unfiltered picker page of the open end, in the order the picker offers them."""
+        offered, offset = [], 0
+        while True:
+            payload = self.client.get(
+                reverse("plugins:netbox_data_import:trace_termination_candidates"),
+                {**preview_claim(self.client), "field_key": self.field_key, "offset": offset},
+                headers={"accept": "application/json"},
+            ).json()
+            offered.extend((item["object_type"], item["id"]) for item in payload["candidates"])
+            offset += payload["shown"]
+            if not payload["shown"] or offset >= payload["total"]:
+                return offered
+
+    def test_a_request_snapshot_holds_the_unfiltered_picker_set_in_its_order(self):
+        """The proposal and the picker read one candidate set, so their orders are equal."""
+        proposal = self.request_proposal()
+
+        snapshot = [(entry["object_type"], entry["object_id"]) for entry in proposal.candidate_snapshot["candidates"]]
+        self.assertEqual(snapshot, self.picker_order())
+        self.assertEqual(proposal.candidate_snapshot["total"], 52)
+        self.assertIn(("dcim.frontport", self.passive_fronts["18"].pk), snapshot)
+
+    def test_a_fresh_proposal_of_a_front_port_shows_the_mark_before_accept(self):
+        """The card marks a proposed FrontPort as outside the claim, and accepting it resolves the trace."""
+        front = self.passive_fronts["18"]
+        proposal = self.request_proposal()
+        entry = next(
+            item
+            for item in proposal.candidate_snapshot["candidates"]
+            if (item["object_type"], item["object_id"]) == ("dcim.frontport", front.pk)
+        )
+        self.assertTrue(claim_proposal(proposal.pk))
+        self.assertTrue(
+            complete_proposal(
+                proposal.pk,
+                outcome=ProposalOutcome.CANDIDATE,
+                explanation="Port 18 is FrontPort 18 on this passive panel.",
+                selected_candidate_id=entry["candidate_id"],
+                selected_object_type=ObjectType.objects.get_for_model(FrontPort),
+                selected_object_id=front.pk,
+            )
+        )
+
+        card = self.call("proposal", field_key=self.field_key)
+
+        self.assertEqual(
+            card.context["termination"]["proposal_read"]["presentation"]["outside_claim"], OUTSIDE_CLAIM_MARK
+        )
+        self.assertContains(card, f"data-outside-claim>{OUTSIDE_CLAIM_MARK}</span>", count=1)
+        accepted = self.call("accept_proposal", proposal_id=proposal.pk)
+        self.assertEqual(accepted.status_code, 200, accepted.content[:300])
+        stored = TerminationResolution.objects.get(profile=self.profile, field_key=self.field_key)
+        self.assertEqual((stored.selected_object_type.model, stored.selected_object_id), ("frontport", front.pk))
+        page = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertEqual(page.context["selected_trace"].disposition, "actionable")
