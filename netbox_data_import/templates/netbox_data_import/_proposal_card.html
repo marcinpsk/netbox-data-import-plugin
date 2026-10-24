@@ -14,7 +14,7 @@
          {% if not termination.proposal.page_status %}hidden{% endif %}>{{ termination.proposal.page_status }}</div>
   </div>
   {% if termination.proposal.candidate %}
-    <p class="fw-bold mt-2 mb-1" data-proposal-candidate>{{ termination.proposal.candidate }}</p>
+    <p class="fw-bold mt-2 mb-1" data-proposal-candidate>{{ termination.proposal.candidate }}{% if termination.proposal.outside_claim %} <span class="badge text-bg-warning fw-normal" data-outside-claim>{{ termination.proposal.outside_claim }}</span>{% endif %}</p>
   {% elif termination.proposal.no_match %}
     <p class="fw-bold mt-2 mb-1" data-proposal-candidate>No match found</p>
   {% endif %}

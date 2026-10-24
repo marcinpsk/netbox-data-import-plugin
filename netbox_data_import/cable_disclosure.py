@@ -42,7 +42,7 @@ class _DisplaySchema(NamedTuple):
     cable: frozenset = frozenset()
     policy: frozenset = frozenset()
     termination: frozenset = frozenset()
-    # The wording states facts of Interfaces, so the finding renders only when its WORDING_SOURCES are visible.
+    # The wording states facts of ports, so the finding renders only when its WORDING_SOURCES are visible.
     wording: bool = False
     # The finding carries WORDING_SOURCES only when a harness gives rise to it, and then follows the same rule.
     wording_optional: bool = False
@@ -120,7 +120,9 @@ _DIAGNOSTIC_DISCLOSURE_FIELDS = MappingProxyType(
         "cable.termination_channelized": _DisplaySchema(
             frozenset({"segment_index"}), termination=frozenset({"port"}), wording=True
         ),
-        "cable.termination_kind_mismatch": _DisplaySchema(_REFERENCE_FIELDS | {"claimed_kind", "selected_object_type"}),
+        "cable.termination_kind_mismatch": _DisplaySchema(
+            _REFERENCE_FIELDS | {"claimed_kind", "selected_object_type"}, wording=True
+        ),
         "cable.termination_not_connectable": _DisplaySchema(
             frozenset({"segment_index"}), termination=frozenset({"port", "interface_type", "parent"}), wording=True
         ),
@@ -149,7 +151,7 @@ POLICY_DIAGNOSTIC_DISCLOSURES = MappingProxyType(
     {code: fields.policy for code, fields in _DIAGNOSTIC_DISCLOSURE_FIELDS.items() if fields.policy}
 )
 
-# Every code whose wording states facts of Interfaces, so its display must carry WORDING_SOURCES.
+# Every code whose wording states facts of ports, so its display must carry WORDING_SOURCES.
 WORDING_CODES = frozenset(code for code, fields in _DIAGNOSTIC_DISCLOSURE_FIELDS.items() if fields.wording)
 
 TERMINATION_DIAGNOSTIC_DISCLOSURES = MappingProxyType(
@@ -268,7 +270,7 @@ def _validate_wording_sources(code: str, display: dict) -> None:
             for port, device in pairs
         )
     ):
-        raise ValueError(f"Diagnostic '{code}' states a fact of an Interface without its sources.")
+        raise ValueError(f"Diagnostic '{code}' states a fact of a port without its sources.")
     named = list(display.get(TERMINATION_SOURCES) or ())
     ports = {(port["kind"], port["pk"]) for port, _device in pairs}
     if any((source["kind"], source["pk"]) not in ports for source in named if _source_pk(source, DEVICE_ROW) is None):

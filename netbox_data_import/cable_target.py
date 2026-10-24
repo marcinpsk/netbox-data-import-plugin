@@ -40,12 +40,14 @@ from .catalog import OutputKind, TargetModuleKey
 from .field_keys import (
     ADMITTED_TERMINATION_MODELS,
     CABLE_END_KINDS,
+    CABLE_END_MODELS,
     FRONT_PORT_MODEL,
     MAPPED_PEER_ROLE,
     REAR_PORT_MODEL,
     SELECT_TERMINATION_TASK,
     TERMINATION_ROLE,
     claimed_termination_kind,
+    is_outside_claim,
     parse_termination_field_key,
     same_device_and_cards,
     termination_field_key,
@@ -92,6 +94,12 @@ class EligibleTerminations:
 
     candidates: tuple[Any, ...]
     total: int
+    # A mapped-peer read offers the opposite ports of a resolved base, so no claim applies to them.
+    claimed_kind: str | None = None
+
+    def outside_claim(self, candidate) -> bool:
+        """Return whether one offered candidate is a model the source PortClass claim does not admit."""
+        return self.claimed_kind is not None and is_outside_claim(self.claimed_kind, candidate._meta.label_lower)
 
 
 def _model_for_label(label: str):
@@ -499,13 +507,23 @@ def _exact_name_match(kind: str, identity: str, named_for) -> Any | None:
     return None
 
 
+def _base_termination(stored, kind: str, identity: str, device_id: int, netbox_reader, named_for) -> Any | None:
+    """Return the row one termination role resolves to, or None while it stays open.
+
+    A saved selection decides first, and an unavailable one never falls back to the exact-name rule.
+    """
+    if stored is None:
+        return _exact_name_match(kind, identity, named_for)
+    label = _stored_label(stored)
+    if label not in CABLE_END_KINDS:
+        return None
+    return netbox_reader.terminations(label).filter(pk=stored.selected_object_id, device_id=device_id).first()
+
+
 def _mapped_peer_sources(parsed: dict, device, netbox_reader, profile) -> tuple:
     """Return the opposite ports one resolved pass-through port maps to, as (label, rows) sources."""
     from .models import TerminationResolution, index_digest
 
-    base_label = ADMITTED_TERMINATION_MODELS[parsed["kind"]][0]
-    if base_label not in _PASS_THROUGH_PEERS:
-        return ()
     base_field_key = termination_field_key(
         device=parsed["device"],
         cards=parsed["cards"],
@@ -523,19 +541,18 @@ def _mapped_peer_sources(parsed: dict, device, netbox_reader, profile) -> tuple:
         .select_related("selected_object_type")
         .first()
     )
-    if stored is None:
-        identity = parsed["port"]
-        base = _exact_name_match(
-            parsed["kind"],
-            identity,
-            partial(_named_terminations, netbox_reader, device_id=device.pk, identities=(identity,)),
-        )
-    elif _stored_label(stored) == base_label:
-        base = netbox_reader.terminations(base_label).filter(pk=stored.selected_object_id, device_id=device.pk).first()
-    else:
-        base = None
-    if base is None:
+    identity = parsed["port"]
+    base = _base_termination(
+        stored,
+        parsed["kind"],
+        identity,
+        device.pk,
+        netbox_reader,
+        partial(_named_terminations, netbox_reader, device_id=device.pk, identities=(identity,)),
+    )
+    if base is None or base._meta.label_lower not in _PASS_THROUGH_PEERS:
         return ()
+    base_label = base._meta.label_lower
     mappings = netbox_reader.port_mappings()
     if base_label == FRONT_PORT_MODEL:
         peer_ids = mappings.filter(front_port_id=base.pk).values_list("rear_port_id", flat=True)
@@ -561,12 +578,12 @@ def eligible_terminations(
 ) -> EligibleTerminations:
     """Return one page of candidates for a canonical termination field key.
 
-    The termination role offers every model the claimed kind admits on the resolved Device, as one
-    set with one count, one bound, and one order (section 6.1). The mapped-peer role starts from the
-    profile's saved base resolution or the exact-name match, then offers its opposite ports. The
-    reader keeps both inside the actor's view scope. The picker and a proposal request share this
-    query. The models count and page in the database as one set, so no read holds more than *limit*
-    rows.
+    The termination role offers every Cable End Kind on the resolved Device, as one set with one
+    count, one bound, and one order, the claimed models first (section 6.1). The mapped-peer role
+    starts from the base rule, the profile's saved selection or else the exact-name match, then
+    offers its opposite ports. The reader keeps both inside the actor's view scope. The picker and a
+    proposal request share this query. The models count and page in the database as one set, so no
+    read holds more than *limit* rows.
     """
     parsed = parse_termination_field_key(field_key)
     device = (
@@ -574,14 +591,14 @@ def eligible_terminations(
         if _resolved_device is _RESOLVED_DEVICE_UNSET
         else _resolved_device
     )
+    claimed_kind = None if parsed["role"] == MAPPED_PEER_ROLE else parsed["kind"]
     if device is None:
-        return EligibleTerminations(candidates=(), total=0)
-    if parsed["role"] == MAPPED_PEER_ROLE:
+        return EligibleTerminations(candidates=(), total=0, claimed_kind=claimed_kind)
+    if claimed_kind is None:
         sources = _mapped_peer_sources(parsed, device, netbox_reader, profile)
     else:
         sources = tuple(
-            (label, netbox_reader.terminations(label).filter(device_id=device.pk))
-            for label in ADMITTED_TERMINATION_MODELS[parsed["kind"]]
+            (label, netbox_reader.terminations(label).filter(device_id=device.pk)) for label in CABLE_END_MODELS
         )
     wanted = identity_text(search)
     sources = tuple((label, matching_search(rows, search)) for label, rows in sources)
@@ -591,25 +608,31 @@ def eligible_terminations(
             tuple(rows.order_by("pk").select_for_update(of=("self",)).values_list("pk", flat=True))
     total = sum(rows.count() for _label, rows in sources)
     if offset >= total:
-        return EligibleTerminations(candidates=(), total=total)
-    ranked = [_ranked_keys(rows, wanted, order) for order, (_label, rows) in enumerate(sources)]
+        return EligibleTerminations(candidates=(), total=total, claimed_kind=claimed_kind)
+    ranked = [
+        _ranked_keys(rows, wanted, order, unclaimed=claimed_kind is not None and is_outside_claim(claimed_kind, label))
+        for order, (label, rows) in enumerate(sources)
+    ]
     combined = ranked[0].union(*ranked[1:], all=True) if len(ranked) > 1 else ranked[0]
-    page = combined.order_by("-_ndi_exact", "_ndi_name", "_ndi_order", "_ndi_pk")[offset : offset + limit]
+    page = combined.order_by("-_ndi_exact", "_ndi_unclaimed", "_ndi_name", "_ndi_order", "_ndi_pk")[
+        offset : offset + limit
+    ]
     wanted_ids: dict[int, list[int]] = {}
-    for _exact, _name, order, pk in page:
+    for _exact, _unclaimed, _name, order, pk in page:
         wanted_ids.setdefault(order, []).append(pk)
     loaded = {order: sources[order][1].in_bulk(ids) for order, ids in wanted_ids.items()}
     # A row deleted, moved, or renamed after the ranking query is no longer offered.
     return EligibleTerminations(
-        candidates=tuple(loaded[order][pk] for _exact, _name, order, pk in page if pk in loaded[order]),
+        candidates=tuple(loaded[order][pk] for _exact, _unclaimed, _name, order, pk in page if pk in loaded[order]),
         total=total,
+        claimed_kind=claimed_kind,
     )
 
 
-def _ranked_keys(rows, wanted: str, order: int):
+def _ranked_keys(rows, wanted: str, order: int, *, unclaimed: bool):
     """Return one model's order keys for the combined order, which the database pages as one set.
 
-    The bytewise collation orders names the same way across every admitted model.
+    The bytewise collation orders names the same way across every Cable End Kind.
     """
     from django.db.models import Case, F, IntegerField, Value, When
     from django.db.models.functions import Collate
@@ -623,11 +646,12 @@ def _ranked_keys(rows, wanted: str, order: int):
         rows.order_by()
         .annotate(
             _ndi_exact=exact,
+            _ndi_unclaimed=Value(int(unclaimed), output_field=IntegerField()),
             _ndi_name=Collate("name", "C"),
             _ndi_order=Value(order, output_field=IntegerField()),
             _ndi_pk=F("pk"),
         )
-        .values_list("_ndi_exact", "_ndi_name", "_ndi_order", "_ndi_pk")
+        .values_list("_ndi_exact", "_ndi_unclaimed", "_ndi_name", "_ndi_order", "_ndi_pk")
     )
 
 
@@ -802,23 +826,41 @@ class _CableBatch:
             return None
         device = resolution.device
         stored = self._stored.get(_field_key(reference))
-        if stored is not None:
-            termination = self._stored_termination(analysis, reference, device, stored)
-            state = UNRESOLVED if termination is None else MANUALLY_RESOLVED
-            self._record_resolution(analysis, reference, state, termination)
-            return termination
-        match = _exact_name_match(
-            claimed_termination_kind(reference.port_class),
+        if stored is not None and _stored_label(stored) not in CABLE_END_KINDS:
+            analysis.refuse(
+                "cable.unsupported_termination_kind",
+                {**_reference_display(reference), "selected_object_type": _stored_label(stored)},
+            )
+            self._record_resolution(analysis, reference, UNRESOLVED, None)
+            return None
+        claimed_kind = claimed_termination_kind(reference.port_class)
+        base = _base_termination(
+            stored,
+            claimed_kind,
             identity_text(reference.port),
+            device.pk,
+            self.reader,
             partial(self._named_for, device.pk),
         )
-        if match is None:
-            # A count would disclose hidden matches, so the finding states the source values alone.
+        if base is None:
+            # A count would disclose hidden matches, and a saved name may belong to a hidden port.
             analysis.block("cable.termination_unresolved", _reference_display(reference))
             self._record_resolution(analysis, reference, UNRESOLVED, None)
             return None
-        termination = self._termination(match)
-        self._record_resolution(analysis, reference, AUTOMATICALLY_RESOLVED, termination)
+        termination = self._termination(base)
+        if stored is not None and is_outside_claim(claimed_kind, termination.object_type):
+            analysis.warn(
+                "cable.termination_kind_mismatch",
+                {
+                    **_reference_display(reference),
+                    "claimed_kind": claimed_kind,
+                    "selected_object_type": termination.object_type,
+                    **wording_sources([(termination.key, termination.device_id)]),
+                },
+                identities=(termination.identity,),
+            )
+        state = AUTOMATICALLY_RESOLVED if stored is None else MANUALLY_RESOLVED
+        self._record_resolution(analysis, reference, state, termination)
         return termination
 
     @staticmethod
@@ -849,30 +891,6 @@ class _CableBatch:
         if termination is not None:
             record[DISCLOSURE_SOURCE] = disclosure_source(*termination.key)
         analysis.terminations.setdefault(key, record)
-
-    def _stored_termination(self, analysis: _TraceAnalysis, reference, device, stored) -> _Termination | None:
-        """Return the object one saved decision selected, rechecked against current target state."""
-        label = _stored_label(stored)
-        if label not in CABLE_END_KINDS:
-            analysis.refuse(
-                "cable.unsupported_termination_kind",
-                {**_reference_display(reference), "selected_object_type": label},
-            )
-            return None
-        claimed_kind = claimed_termination_kind(reference.port_class)
-        if label not in ADMITTED_TERMINATION_MODELS[claimed_kind]:
-            analysis.block(
-                "cable.termination_kind_mismatch",
-                {**_reference_display(reference), "claimed_kind": claimed_kind, "selected_object_type": label},
-            )
-            return None
-        # A saved selection that left the resolved Device no longer answers the question it was asked.
-        selected = self.reader.terminations(label).filter(pk=stored.selected_object_id, device_id=device.pk).first()
-        if selected is None:
-            # The saved name may belong to a port the actor cannot view, so the finding states source values alone.
-            analysis.block("cable.termination_unresolved", _reference_display(reference))
-            return None
-        return self._termination(selected)
 
     def _termination(self, component) -> _Termination:
         """Return the plan-side record of one resolved NetBox termination."""

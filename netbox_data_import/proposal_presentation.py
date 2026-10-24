@@ -11,7 +11,7 @@ from django.db.models.functions import RowNumber
 from django.urls import reverse
 from django.utils.timesince import timesince
 
-from .field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, parse_termination_field_key
+from .field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, is_outside_claim, parse_termination_field_key
 from .inference_backend import (
     NoActiveInferenceBackend,
     proposal_candidate_limit,
@@ -21,7 +21,7 @@ from .inference_backend import (
 from .inference_trust import InvalidInferenceConfiguration
 from .models import ImportProfile, ProposalDecision, ProposalOutcome, ProposalStatus, ResolutionProposal
 from .proposal_decisions import proposal_staleness
-from .review_workspace import TERMINATION_UNRESOLVABLE
+from .review_workspace import OUTSIDE_CLAIM_MARK, TERMINATION_UNRESOLVABLE
 from .resolution_proposals import page_exhausted
 from .proposal_tasks import CandidateSnapshot, proposal_task
 from .cable_target import AUTOMATICALLY_RESOLVED, MANUALLY_RESOLVED, UNRESOLVED
@@ -298,6 +298,11 @@ class ProposalPresentation:
             "state_style": STATE_STYLES[state],
             "badge": badge,
             "candidate": candidate,
+            # A proposal is requested for the termination role only, so its field key states the source claim.
+            "outside_claim": OUTSIDE_CLAIM_MARK
+            if selected_entry is not None
+            and is_outside_claim(parse_termination_field_key(field["field_key"])["kind"], selected_entry.object_type)
+            else "",
             "explanation": proposal.explanation if proposal is not None else "",
             "failure": proposal.get_failure_reason_display() if proposal is not None else "",
             "failure_code": proposal.failure_reason if proposal is not None else "",

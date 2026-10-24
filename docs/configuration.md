@@ -222,8 +222,8 @@ first, so an import or a trace sync that you queue after many proposals does not
 `manage.py rqworker` with no queue names serves all three queues. If you start a worker for named
 queues, include `low`, or no proposal runs.
 
-A Device with more than 1024 eligible ports of one kind is refused. That ceiling bounds the stored
-candidate set, not the prompt. Above it, narrow the eligible set instead.
+A Device with more than 1024 eligible ports, of all kinds together, is refused. That ceiling bounds
+the stored candidate set, not the prompt. Above it, narrow the eligible set instead.
 
 ## Native primary contacts
 
@@ -470,6 +470,16 @@ removes the mapping in force. The plugin compares the label exactly as the file 
 trims the ends. A label from the fixed set cannot take a mapping. A mapping changes the identity of
 each trace that states the label, so the workspace reopens the trace from the same source block.
 Profile YAML, the REST API and GraphQL include the profile mappings as `port_class_mappings`.
+
+The PortClass also sets which NetBox port kinds the plugin matches by name: `NIC`, `Switch Port` and
+`Port` match an Interface, or a console or power port, and the other PortClasses match their own
+kind. NetBox can model a port as another kind. For example, a passive panel models a port that the
+source states as `Port 18 (NIC)` as FrontPort `18`. The plugin never matches across kinds by itself.
+**Choose termination** and Ask AI offer every cable-capable port of the resolved Device: the ports of
+the stated kind come first, and each other port is marked "Differs from the source PortClass". When
+you save such a port, the trace resolves, and the trace states a warning that names both kinds. The
+Import Profile keeps the choice for later trace files that state the same port with the same
+PortClass.
 
 A Device's Location is its own Location. Only a Device with no Location of its own uses its Rack's
 Location.

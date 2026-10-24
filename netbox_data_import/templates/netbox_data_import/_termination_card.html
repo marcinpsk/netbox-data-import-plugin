@@ -11,6 +11,7 @@
     {% endif %}
     {% if termination.selected %}
       <span class="text-secondary">{{ termination.selected }}{% if termination.selected_model %} ({{ termination.selected_model }}){% endif %}</span>
+      {% if termination.outside_claim %}<span class="badge text-bg-warning" data-outside-claim>{{ termination.outside_claim }}</span>{% endif %}
     {% endif %}
   </div>
   {% if termination.proposal.has_proposal %}
