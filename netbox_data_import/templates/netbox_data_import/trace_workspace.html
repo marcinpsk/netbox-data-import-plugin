@@ -873,6 +873,7 @@
       <form id="traceTerminationForm" method="post" class="d-flex flex-column overflow-hidden"
             action="{% url 'plugins:netbox_data_import:trace_resolve_termination' %}"
             data-candidates-url="{% url 'plugins:netbox_data_import:trace_termination_candidates' %}"
+            data-outside-claim-mark="{{ outside_claim_mark }}"
             hx-post="{% url 'plugins:netbox_data_import:trace_resolve_termination' %}"
             hx-target="#page-content" hx-select="#page-content" hx-swap="outerHTML" hx-push-url="true">
         {% csrf_token %}

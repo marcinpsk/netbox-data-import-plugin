@@ -20,7 +20,8 @@ const fixture = `
   <div class="modal" id="traceTerminationPicker">
     <form id="traceTerminationForm" method="post"
           action="/plugins/data-import/trace-workspace/resolve-termination/"
-          data-candidates-url="/plugins/data-import/trace-workspace/candidates/">
+          data-candidates-url="/plugins/data-import/trace-workspace/candidates/"
+          data-outside-claim-mark="Differs from the source PortClass">
       ${claimInputs()}
       <input type="hidden" name="search" id="traceTerminationOfferedSearch">
       <input type="hidden" name="offset" id="traceTerminationOfferedOffset">
@@ -88,6 +89,28 @@ test("the picker states how many of the eligible terminations it shows", async (
   await expect(page.locator("#traceTerminationCount")).toHaveText("2 of 7 eligible");
   await expect(page.locator("#traceTerminationLabel")).toHaveText("DEV-A absent-port");
   await expect(page.locator("#traceTerminationCandidates button")).toHaveCount(2);
+});
+
+test("a candidate outside the source PortClass claim shows the mark, and a claimed one does not", async ({ page }) => {
+  await serveCandidates(page, {
+    ok: true,
+    candidates: [
+      { id: 1, object_type: "dcim.interface", model: "interface", name: "mgmt0", display: "mgmt0", outside_claim: false },
+      { id: 2, object_type: "dcim.frontport", model: "front port", name: "18", display: "18", outside_claim: true },
+    ],
+    shown: 2,
+    total: 2,
+  });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: pickerSource });
+
+  await page.locator("[data-trace-picker]").click();
+
+  const rows = page.locator("#traceTerminationCandidates button");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0).locator("[data-outside-claim]")).toHaveCount(0);
+  await expect(rows.nth(1).locator("[data-outside-claim]")).toHaveText("Differs from the source PortClass");
+  await expect(rows.nth(1).locator("[data-outside-claim]")).toBeVisible();
 });
 
 test("saving is refused until a candidate is chosen", async ({ page }) => {

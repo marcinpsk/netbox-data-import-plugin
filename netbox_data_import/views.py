@@ -132,6 +132,7 @@ from .profile_yaml import (
     serialize_profile,
 )
 from .review_workspace import (
+    OUTSIDE_CLAIM_MARK,
     PROFILE_POLICY_MOVED,
     TERMINATION_UNRESOLVABLE,
     IneligibleDeviceSelection,
@@ -4024,6 +4025,7 @@ class TraceReviewWorkspaceView(PermissionRequiredMixin, View):
                 "manual_devices": manual_devices,
                 "settled_devices": settled_devices,
                 "attention_terminations": attention,
+                "outside_claim_mark": OUTSIDE_CLAIM_MARK,
                 "settled_terminations": settled,
                 "cable_policy_forms": cable_policy_forms,
                 "port_class_rows": port_class_rows,
@@ -4239,6 +4241,7 @@ class TraceTerminationCandidatesView(PermissionRequiredMixin, View):
                         "model": str(candidate._meta.verbose_name),
                         "name": candidate.name,
                         "display": str(candidate),
+                        "outside_claim": found.outside_claim(candidate),
                     }
                     for candidate in found.candidates
                 ],
