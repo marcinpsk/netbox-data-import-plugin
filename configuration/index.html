@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -29,10 +29,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -935,8 +935,8 @@ waiting proposal would start, the proposal fails with the reason its job would r
 first, so an import or a trace sync that you queue after many proposals does not wait for them. A
 <code>manage.py rqworker</code> with no queue names serves all three queues. If you start a worker for named
 queues, include <code>low</code>, or no proposal runs.</p>
-<p>A Device with more than 1024 eligible ports of one kind is refused. That ceiling bounds the stored
-candidate set, not the prompt. Above it, narrow the eligible set instead.</p>
+<p>A Device with more than 1024 eligible ports, of all kinds together, is refused. That ceiling bounds
+the stored candidate set, not the prompt. Above it, narrow the eligible set instead.</p>
 <h2 id="native-primary-contacts">Native primary contacts</h2>
 <p>Map the source contact column to the <code>primary_contact</code> target field. Then configure these fields on the Import Profile:</p>
 <ul>
@@ -1129,6 +1129,16 @@ removes the mapping in force. The plugin compares the label exactly as the file 
 trims the ends. A label from the fixed set cannot take a mapping. A mapping changes the identity of
 each trace that states the label, so the workspace reopens the trace from the same source block.
 Profile YAML, the REST API and GraphQL include the profile mappings as <code>port_class_mappings</code>.</p>
+<p>The PortClass also sets which NetBox port kinds the plugin matches by name: <code>NIC</code>, <code>Switch Port</code> and
+<code>Port</code> match an Interface, or a console or power port, and the other PortClasses match their own
+kind. NetBox can model a port as another kind. For example, a passive panel models a port that the
+source states as <code>Port 18 (NIC)</code> as FrontPort <code>18</code>. The plugin never matches across kinds by itself.
+<strong>Choose termination</strong> and Ask AI offer every cable-capable port of the resolved Device: the ports of
+the stated kind come first, and each other port is marked "Differs from the source PortClass". When
+you search, a port whose name is an exact match for the search comes before all other ports, of any
+kind. When you save a port of another kind, the trace resolves, and the trace states a warning that
+names both kinds. The Import Profile keeps the choice for later trace files that state the same port
+with a PortClass that sets the same port kinds.</p>
 <p>A Device's Location is its own Location. Only a Device with no Location of its own uses its Rack's
 Location.</p>
 <p>The Location you select on the import page also ranks candidates, after the source hints, and never
@@ -1240,10 +1250,10 @@ each setting that you want to preserve in a hand-written or partial YAML file.</
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.sections"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.sections"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

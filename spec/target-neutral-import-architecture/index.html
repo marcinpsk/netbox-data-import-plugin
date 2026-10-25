@@ -17,7 +17,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -25,10 +25,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -2202,7 +2202,10 @@ source rows or Target Module ORM operations.</p>
 An incompatible active preview or queued job fails before writes and requires replanning. A plan whose
 diagnostic display holds a field its namespace's registered display vocabulary does not permit is
 incompatible too, because that field can hold a value no render rechecks. A namespace with no
-registered vocabulary is not checked. Historical Import Executions remain audit records. The runtime
+registered vocabulary is not checked. A change to the disclosure contract of a diagnostic is
+incompatible as well: schema version 8 gates the wording of <code>cable.termination_kind_mismatch</code> by its
+port and Device (section 6.6), so an older plan fails validation instead of rendering an ungated model
+name. Historical Import Executions remain audit records. The runtime
 never migrates an old executable plan and never keeps a compatibility executor.</p>
 <p>The Import Plan contract is storage-neutral. A background job receives the accepted serialized plan.
 The active preview plan lives in one database Preview Coordinator per browser session (section 10.2,
@@ -2581,7 +2584,7 @@ the Site is unavailable evidence: the workspace shows a neutral notice and keeps
 fall back to another exact-name match and does not show the saved display snapshot. A placement
 change inside the selected Site does not invalidate the choice.</p>
 <p>The adapter's fixed PortClass vocabulary claims the termination kind. Each claimed kind admits a
-fixed, ordered list of NetBox termination models:</p>
+fixed, ordered list of NetBox termination models to automatic matching:</p>
 <table>
 <thead>
 <tr>
@@ -2622,14 +2625,23 @@ fixed, ordered list of NetBox termination models:</p>
 console server port as NIC, Switch Port, or Port. It can record a power inlet or a PDU outlet the
 same way. The <code>interface</code> claim therefore admits the console and power component models. The two
 power claims admit only their own model, so an Interface with the name of a power port never answers
-a power PortClass. The admitted models of all five claims together are the Cable End Kinds. A
-PowerPort and a PowerOutlet are a pair NetBox can cable, so a power block's one segment plans like
-any other segment.</p>
+a power PortClass. The admitted models of all five claims together are the Cable End Kinds, in the
+deduplicated union order of the table: Interface, ConsolePort, ConsoleServerPort, PowerPort,
+PowerOutlet, FrontPort, RearPort. A PowerPort and a PowerOutlet are a pair NetBox can cable, so a
+power block's one segment plans like any other segment.</p>
+<p>The claim limits automatic matching only. An explicit selection, from the picker or from an accepted
+proposal, may name any Cable End Kind on the resolved Device, because NetBox can model a port with
+another kind than the source claims: a passive panel models a NIC-labelled port as a FrontPort. The
+field key keeps the claimed kind, not the PortClass. A later source document that states the same
+end with a PortClass of the same claimed kind reuses the selection, and one whose PortClass claims
+another kind asks again.</p>
 <p>A PortClass value outside this vocabulary is a source-structure error the Source Adapter reports as
 <code>trace.unknown_port_class</code>, so it never reaches planning. A resolved object whose real type is not a
 Cable End Kind is a target-state error the Cable Target Module reports as
 <code>cable.unsupported_termination_kind</code>.</p>
-<p>Candidates are all terminations of the admitted models on the resolved Device. A candidate's identity
+<p>Candidates are all terminations of every Cable End Kind on the resolved Device. Each candidate carries
+whether its model is outside the claim, that is, whether the claimed kind does not admit it. A
+candidate's identity
 is its concrete model and its id together, because two models can share one numeric id. The picker,
 the proposal snapshot, and every selection write carry that pair unchanged, and none of them derives
 the model from the claimed kind.</p>
@@ -2648,17 +2660,28 @@ terminations on the resolved Device. The actor must then be able to view the uni
 model. A hidden match, or several matches, leaves the field unresolved with the same diagnostic as a
 missing name, and never falls through to a later model. The diagnostic carries no hidden identity,
 label, or count. Without this rule two actors would resolve one source port to two different objects.
-A saved selection that no longer answers its question, because it left the Device, is hidden, or names
-a model the claimed kind does not admit, reports its diagnostic without the saved display name: that
-name can belong to a port the actor cannot view, and no later render can recheck it.</p>
+One base rule resolves the termination role, for planning and for the mapped-peer question
+(section 6.2): a saved selection decides first, and otherwise the exact-name rule above. A saved
+selection that no longer answers its question, because it left the Device or is hidden, never falls
+back to the exact-name rule. It reports <code>cable.termination_unresolved</code> without the saved display
+name: that name can belong to a port the actor cannot view, and no later render can recheck it. A
+saved selection whose model is not a Cable End Kind is refused with
+<code>cable.unsupported_termination_kind</code>. A saved selection whose model is outside the claim resolves the
+end. After the planner reads the selected object, it adds the <code>warning</code> diagnostic
+<code>cable.termination_kind_mismatch</code>, which names the claimed kind and the selected model and does not
+change the disposition. Its wording names the selected port's model, so it renders only while the
+viewer can view that port and its Device (section 6.6).</p>
 <p>The optional Resolution Proposal flow (section 7) assists the same selection. The cards label is
 identity, display, and context for the operator and the Inference Backend. Deterministic matching
 never uses it.</p>
-<p>Eligible-candidate retrieval treats the admitted models as one set. It has one combined count and one
+<p>Eligible-candidate retrieval treats every Cable End Kind as one set. It has one combined count and one
 combined bound: the picker's page size and the proposal's complete-set ceiling each apply to the
 whole set, never per model. The order is stable and total: a candidate whose name identity equals
-the identity of the search text first, then name, then match order of the model, then id. An
-exact-name search therefore always reaches its candidate, whatever the other models hold. A search
+the identity of the search text first, then the models the claim admits before the models outside
+it, then name, then the union order of the model, then id. An exact-name search therefore always
+reaches its candidate, whatever the other models hold, and a Device that holds only claimed models
+keeps the order it had when the claim limited the set. On a passive panel the claimed Interfaces come
+before the FrontPorts for an <code>interface</code> claim. A search
 admits each candidate whose name identity contains the identity of the search text, so a name that
 differs only in whitespace or case is never filtered out. Names compare bytewise. Each
 model is counted in the database. A page has an offset into the combined order: the database orders
@@ -2694,6 +2717,10 @@ distinct mapped peer, the planner substitutes automatically and records the subs
 With several mapped peers, the unit is blocked and manual selection offers exactly the mapped peers.
 The rule is symmetric for rear-to-front and front-to-rear, because both directions can fan out under
 PortMapping.</p>
+<p>The mapped-peer question starts from the base of the reference: the concrete model and row that the
+base rule of section 6.1 resolves, never a model derived from the claimed kind. A FrontPort selected
+under an <code>interface</code> claim therefore offers the RearPorts it maps to. While the base stays open, or
+resolves to a model that passes no path through, the question offers nothing.</p>
 <p>A mapped-peer choice is a second field-key role, distinct from resolving the Termination Reference
 itself. Its field key is the original termination field key plus the role marker <code>mapped_peer</code>. The
 default role marker for termination resolution is <code>termination</code>. Both roles write a
@@ -2892,8 +2919,9 @@ inside the transaction as the accepted plan's operator.</p>
 mapped peer. The leg's <code>cable.permission_denied</code> diagnostic names the view permission the actor
 lacks. The leg names its companions whatever Cable the parent holds, and no display field states the
 parent's channels, legs, missing channels or Cable Profile.</p>
-<p>One rule binds every finding whose wording states a fact of an Interface: every harness finding, and
-<code>cable.termination_channelized</code> and <code>cable.termination_not_connectable</code>. Such a finding carries
+<p>One rule binds every finding whose wording states a fact of a port: every harness finding, and
+<code>cable.termination_channelized</code>, <code>cable.termination_not_connectable</code> and
+<code>cable.termination_kind_mismatch</code>. Such a finding carries
 <code>wording_sources</code>, each port followed by its Device, and presentation replaces it with
 <code>cable.finding_hidden</code> when the viewer cannot view any one of them. That finding says only that the
 trace reaches a port the viewer cannot view, and it keeps the severity of the finding it replaces.
@@ -2987,11 +3015,6 @@ Device source.</p>
 <tr>
 <td>A segment whose two ends resolve to one termination</td>
 <td><code>cable.segment_self_connection</code></td>
-<td><code>blocked</code></td>
-</tr>
-<tr>
-<td>A stored termination selection whose model the stated PortClass does not admit</td>
-<td><code>cable.termination_kind_mismatch</code></td>
 <td><code>blocked</code></td>
 </tr>
 <tr>
@@ -3115,6 +3138,11 @@ Device source.</p>
 <td><code>warning</code> diagnostic, disposition unchanged</td>
 </tr>
 <tr>
+<td>A stored termination selection resolves to a model the stated PortClass does not admit to automatic matching</td>
+<td><code>cable.termination_kind_mismatch</code></td>
+<td><code>warning</code> diagnostic, disposition unchanged</td>
+</tr>
+<tr>
 <td>The channel facts and legs of one harness, on each of its leg units</td>
 <td><code>cable.harness_state</code></td>
 <td><code>info</code> diagnostic, disposition unchanged</td>
@@ -3131,8 +3159,9 @@ termination's device, cards, and port, plus the claimed kind plus the role marke
 those values, matching the trace identity rule in section 5.2:
 <code>{"cards":&lt;cards&gt;,"device":&lt;device&gt;,"kind":&lt;kind&gt;,"port":&lt;port&gt;,"role":"termination"}</code>, with members
 sorted by name (spec default for the member order). The stored key is this canonical JSON form. A
-pipe-separated string is a display form only and is never a key. The <code>kind</code> member is the claimed
-kind, not the selected model: an <code>interface</code> key can resolve to any model that claim admits.</p>
+pipe-separated string is a display form only and is never a key. The <code>kind</code> member is the source
+claim, not the selected model: an <code>interface</code> key can resolve to any Cable End Kind on the resolved
+Device, a FrontPort included (section 6.1). A selection outside the claim never changes the key.</p>
 <table>
 <thead>
 <tr>
@@ -3174,7 +3203,11 @@ is <code>completed</code> and whose <code>decision</code> is null is the only ro
 <p>Frozen at request time: the source evidence for the bound field, the resolved Device object type and
 id, the prompt version, the response schema version, the Candidate Snapshot, the requesting operator,
 and the timestamps. A Candidate Snapshot entry carries an opaque candidate id, the NetBox object type
-and id, and the display name at snapshot time.</p>
+and id, and the display name at snapshot time. The snapshot is the picker's eligible set for the same
+field key (section 6.1): every Cable End Kind on the resolved Device, in the picker's order, so an
+unfiltered picker and a request read one ordered set. The proposal's complete-set ceiling applies to
+that whole set and is unchanged. A dense Device that the wider set takes over the ceiling refuses a
+request with the too-many-candidates reason, and its picker still pages.</p>
 <p>The row is created when the request is made, so it is also the attempt record. It exists before any
 Inference Backend call and survives every outcome.</p>
 <p>Completion adds the outcome (<code>candidate</code> or <code>no_match</code>), the selected candidate reference, the
@@ -3226,6 +3259,9 @@ transaction. There are no change-signal listeners and no background sweeper.</p>
 </tr>
 </tbody>
 </table>
+<p>When the eligible set widened to every Cable End Kind (section 6.1), a proposal on a Device whose
+ordered set did not change stayed fresh, and a proposal on a Device that gained models outside the
+claim read as stale through the candidate comparison.</p>
 <h3 id="75-jobs-and-failures">7.5 Jobs and failures</h3>
 <p>The job receives the Resolution Proposal id alone. It never receives an Inference Backend key, a
 database id for a backend, or a secret. The worker resolves the active backend itself: the enabled
@@ -3334,6 +3370,10 @@ dismiss a suggestion made for it. Neither acceptance nor rejection changes the s
 <a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>            and to return one JSON object only
 <a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    user:   serialized JSON with schema_version, task, source_evidence, candidates
 </code></pre></div>
+<p>The system message also states that the <code>kind</code> in the source evidence is the termination kind the
+source PortClass claims, and that it is a hint only: NetBox can model the same port as another kind,
+so a candidate of another object type can be the right port. Changing that wording raised the prompt
+version to 3. A request queued under an earlier prompt version is retired by the upgrade migration.</p>
 <p>The response must be one JSON object:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="p">{</span><span class="nt">"schema_version"</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">"outcome"</span><span class="p">:</span><span class="w"> </span><span class="s2">"candidate"</span><span class="p">,</span><span class="w"> </span><span class="nt">"candidate_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"candidate-0001"</span><span class="p">,</span><span class="w"> </span><span class="nt">"candidate_display_name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Ethernet 1/1"</span><span class="p">,</span><span class="w"> </span><span class="nt">"explanation"</span><span class="p">:</span><span class="w"> </span><span class="s2">"..."</span><span class="p">}</span>
 </code></pre></div>
@@ -3867,8 +3907,10 @@ option.</p>
 resolved</code>, <code>proposed</code>, <code>accepted</code>, <code>stale</code>, <code>failed</code>. The <code>automatically resolved</code> state is distinct
 from <code>manually resolved</code>, so the operator can see which terminations the exact-name rule matched
 without help.</p>
-<p>The searchable picker is scoped to eligible candidates of the admitted models on the resolved Device,
-shows each candidate's model, and shows a visible "N of M eligible" count. The Device, termination,
+<p>The searchable picker is scoped to eligible candidates of every Cable End Kind on the resolved Device
+(section 6.1), shows each candidate's model, and shows a visible "N of M eligible" count. A
+candidate whose model is outside the source PortClass claim carries a "Differs from the source
+PortClass" mark, so the operator sees the difference before the save. The Device, termination,
 and Location pickers share one dialog: each pages through its whole candidate set with Previous and
 Next, and a later page states its range, such as "21–40 of 57 eligible". A Device or termination
 write rechecks the offer on the page, search, and offset that made it. A Location write rechecks that
@@ -3876,7 +3918,9 @@ the Location is still visible to the actor and inside the selected Site. A resol
 shows its selected object's own model, not the claimed kind. Each render rechecks view permission on
 every port and every resolved Device a cached plan names: a hidden or deleted port shows neither its
 name nor its model, and a hidden or deleted Device shows no name. A termination card links its
-resolved Device to the Device page in NetBox only while the viewer may view that Device.</p>
+resolved Device to the Device page in NetBox only while the viewer may view that Device. A card whose
+selection is outside the claim shows the same mark while its port is visible, and the trace states the
+<code>cable.termination_kind_mismatch</code> warning while its port and Device are visible.</p>
 <p>The workspace lists the source Location paths of the batch, at batch level and independent of the
 selected trace, as a tree of prefixes. Each node is a prefix key. A prefix key shows the spelling of
 the first batch path, in key order, that carries it, and siblings are ordered by key. A prefix with
@@ -3916,7 +3960,7 @@ never only the fact name.</p>
 <tbody>
 <tr>
 <td>Completed with a candidate</td>
-<td>A "Proposal - not applied" badge, the suggested candidate with its kind, the required explanation, and explicit Accept and Reject buttons</td>
+<td>A "Proposal - not applied" badge, the suggested candidate with its kind, the outside-claim mark when its model is outside the source PortClass claim, the required explanation, and explicit Accept and Reject buttons</td>
 </tr>
 <tr>
 <td>Completed and stale</td>
@@ -4590,8 +4634,13 @@ Until T10 lands, a trace profile is configurable through the UI only.</p>
   edited.</li>
 <li>An unresolved CableClass dimension, a stale mapping, and an incompatible Cable Profile each block
   the unit with their own diagnostic.</li>
-<li>Eligible-candidate retrieval returns only terminations of the models the claimed kind admits on the
-  resolved Device, scoped to the actor's view permission.</li>
+<li>Eligible-candidate retrieval returns the terminations of every Cable End Kind on the resolved
+  Device, the claimed models first, scoped to the actor's view permission.</li>
+<li>Automatic matching walks only the models the claimed kind admits: an exact-named FrontPort never
+  answers an <code>interface</code> claim, and a power claim never selects an Interface.</li>
+<li>A stored selection outside the claim resolves the end and adds the <code>cable.termination_kind_mismatch</code>
+  warning without changing the disposition. A FrontPort selected under an <code>interface</code> claim offers its
+  mapped RearPorts to a mapped-peer question.</li>
 <li>A precondition mismatch inside the transaction rolls back the complete selected transaction.</li>
 <li>Every created Cable gets one provenance row per contributing Source Trace; two traces sharing one
   identical segment create one Cable and two rows. The deleted Logical Cable appears only in the
@@ -4614,8 +4663,8 @@ variables.</p>
   reason. An action that the lifecycle state rules out is hidden (section 10.2).</li>
 <li>The proposed panel shows a per-segment status of create, reuse existing, delete Logical Cable, or
   conflict.</li>
-<li>The picker lists only eligible candidates of the models the claimed kind admits on the resolved
-  Device and shows the "N of M eligible" count.</li>
+<li>The picker lists the eligible candidates of every Cable End Kind on the resolved Device, the claimed
+  models first, marks each candidate outside the claim, and shows the "N of M eligible" count.</li>
 <li>A trace-only profile opens this workspace directly. An open source Device label offers a Device
   picker before its termination picker.</li>
 <li>Selecting a Device writes one profile-owned <code>TraceDeviceResolution</code> and replans. A later source
@@ -4948,10 +4997,10 @@ Confirm that no dual code path, commented-out code, or untracked "remove later" 
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

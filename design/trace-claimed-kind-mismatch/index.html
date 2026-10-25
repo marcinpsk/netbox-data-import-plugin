@@ -1,0 +1,1206 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://marcinpsk.github.io/netbox-data-import-plugin/design/trace-claimed-kind-mismatch/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+    
+    
+      
+        <title>Trace claimed kind mismatch - NetBox Data Import</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#trace-claimed-kind-that-disagrees-with-the-netbox-model" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="NetBox Data Import" class="md-header__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Data Import
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Trace claimed kind mismatch
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="NetBox Data Import" class="md-nav__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    NetBox Data Import
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#0-review-record" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0. Review record
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#problem-brief" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Problem brief
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Problem brief">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#decision" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decision
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#observed-case" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Observed case
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scale-on-the-live-preview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scale on the live preview
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#constraints-from-the-spec-and-existing-decisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Constraints (from the spec and existing decisions)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#observable-acceptance-conditions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Observable acceptance conditions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#evidence-pointers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Evidence pointers
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#candidate-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Candidate shapes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#independent-design-a-claude-opus-55-main-session" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Independent design A (Claude Opus 5.5, main session)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Independent design A (Claude Opus 5.5, main session)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shape
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ownership-and-seam" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ownership and seam
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#persisted-identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Persisted identity
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#planning-behaviour" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Planning behaviour
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failure-behaviour" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure behaviour
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#spec-changes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Spec changes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#validation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Validation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rejected" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rejected
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#independent-design-b-gpt-61-sol-high-effort-read-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Independent design B (gpt-6.1-sol, high effort, read-only)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#merge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Merge
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#merged-design-r1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Merged design r1
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#round-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Round 1
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#merged-design-r2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Merged design r2
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decision
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#first-increment-and-its-acceptance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        First increment and its acceptance
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#open-work" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Open work
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#implementation-review" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implementation review
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<!--
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
+-->
+
+<h1 id="trace-claimed-kind-that-disagrees-with-the-netbox-model">Trace claimed kind that disagrees with the NetBox model</h1>
+<h2 id="0-review-record">0. Review record</h2>
+<p>Round 1 (gpt-6-astra, high effort, read-only): <strong>RATIFY r1</strong>, scope "explicit cross-kind selection
+in source-valid traces, with acceptance condition 6 restated per resolved Device". No blockers.
+Four non-blocking findings, all accepted and verified, applied as r2 (editorial, no change to the
+ratified rules). No claim was refuted.</p>
+<h2 id="problem-brief">Problem brief</h2>
+<h3 id="decision">Decision</h3>
+<p>Decide how a Source Trace termination resolves when its source PortClass claims one termination
+kind, and NetBox models the real port with a model that kind does not admit.</p>
+<h3 id="observed-case">Observed case</h3>
+<p>A trace workbook states one end as <code>&lt;device&gt; &gt; Port 18 (NIC)</code>. The PortClass <code>NIC</code> claims the
+<code>interface</code> kind (spec section 6.1). In NetBox, the resolved Device is a passive optical device
+type: 48 LC FrontPorts named <code>14</code> to <code>61</code>, one RearPort, and 11 management Interfaces. FrontPort
+<code>18</code> is the port the cable lands on. A second end in the same workbook, <code>&lt;device&gt; &gt; Port 60 (NIC)</code>,
+has the same shape on a Device of the same type.</p>
+<p>The <code>interface</code> claim admits Interface, ConsolePort, ConsoleServerPort, PowerPort, and PowerOutlet
+(<code>field_keys.py</code>, <code>ADMITTED_TERMINATION_MODELS</code>). It never admits FrontPort. So:</p>
+<ul>
+<li>the exact-name rule cannot match (the name differs, and the model is not admitted);</li>
+<li>the manual picker never offers FrontPort <code>18</code>, because it reads the same eligible set
+  (<code>cable_target.py</code>, <code>eligible_terminations</code>);</li>
+<li>an Ask AI proposal gets the same set, and it correctly answers "no match";</li>
+<li>a PortClass mapping cannot help, because fixed PortClasses refuse a mapping
+  (<code>field_keys.py</code>, <code>port_class_mapping_errors</code>), and a mapping would apply to the whole preview or
+  profile, while the same source class <code>NIC</code> is correct for router ports in the same workbook.</li>
+</ul>
+<p>The operator therefore has no path in the plugin to cable this end.</p>
+<h3 id="scale-on-the-live-preview">Scale on the live preview</h3>
+<p>Of 32 unresolved <code>interface</code>-claimed ends in one production preview, 2 sit on a Device whose port
+with the same number is a FrontPort. The other 30 are ordinary naming differences on Devices with
+no FrontPorts, which the picker and Ask AI already handle. The class is rare per workbook but
+blocks the end completely when it happens.</p>
+<h3 id="constraints-from-the-spec-and-existing-decisions">Constraints (from the spec and existing decisions)</h3>
+<ol>
+<li>Spec section 6.1: the claimed kind fixes an ordered list of admitted models. Deterministic
+   matching stops at the first admitted model with any exact-name match. Precedence does not
+   depend on the actor's view scope.</li>
+<li>The two power claims admit only their own model, so an Interface with a power port's name never
+   answers a power PortClass. That rule exists for automatic matching.</li>
+<li>A candidate's identity is its concrete model and its id. The picker, the proposal snapshot, and
+   every selection write carry that pair and never derive the model from the claimed kind.</li>
+<li>A saved selection whose model the claimed kind does not admit reports
+   <code>cable.termination_kind_mismatch</code> (<code>cable_target.py</code>, <code>_stored_termination</code>).</li>
+<li>The field key holds <code>device</code>, <code>cards</code>, <code>port</code>, <code>kind</code>, and <code>role</code>. <code>TerminationResolution</code>,
+   <code>ResolutionProposal</code>, and the mapped-peer role all key on it.</li>
+<li>A resolved FrontPort or RearPort loads its PortMappings, and a pass-through port can raise a
+   mapped-peer question (<code>_mapped_peer_sources</code>, <code>_load_mappings</code>).</li>
+<li>Two resolved ends of one segment must be a pair NetBox can cable. NetBox's own compatibility
+   table decides this. Interface to FrontPort is compatible.</li>
+<li>Fixed PortClasses take no mapping; only labels outside the vocabulary can be mapped
+   (PR #232 decision).</li>
+<li>Global engineering rules: simplest shape that fully meets current requirements, no compatibility
+   layers, one source of truth, fail fast, no silent fallbacks.</li>
+</ol>
+<h3 id="observable-acceptance-conditions">Observable acceptance conditions</h3>
+<ol>
+<li>In the observed case, an operator can select FrontPort <code>18</code> for the end in the Trace Review
+   Workspace, and the trace becomes actionable.</li>
+<li>That choice persists for the profile and resolves the same end in a later workbook.</li>
+<li>The manual picker and an Ask AI proposal still read one shared candidate set.</li>
+<li>Automatic exact-name resolution of every existing workbook stays the same, unless the design
+   names the change and why it is safe.</li>
+<li>Any resolution whose model the source claim does not admit is visible to the operator in the
+   workspace before a sync.</li>
+<li>Two actors with different view scopes still resolve one source end to the same object or leave
+   it open.</li>
+<li>The per-segment NetBox cable compatibility check still runs on the selected pair.</li>
+<li>End-to-end tests through the real views, ORM rows, planning, and permission-scoped candidates
+   cover conditions 1, 2, 3, and 5.</li>
+</ol>
+<h3 id="evidence-pointers">Evidence pointers</h3>
+<ul>
+<li><code>docs/spec/target-neutral-import-architecture.md</code>, section 6.1 "Port resolution".</li>
+<li><code>netbox_data_import/field_keys.py</code>: <code>PORT_CLASS_CLAIMED_KINDS</code>, <code>ADMITTED_TERMINATION_MODELS</code>,
+  <code>port_class_mapping_errors</code>.</li>
+<li><code>netbox_data_import/cable_target.py</code>: <code>eligible_terminations</code>, <code>_exact_name_match</code>,
+  <code>_stored_termination</code>, <code>_mapped_peer_sources</code>, <code>_load_mappings</code>.</li>
+<li><code>netbox_data_import/termination_proposal.py</code>, <code>netbox_data_import/proposal_presentation.py</code>.</li>
+<li><code>docs/design/trace-cable-policy.md</code>, <code>docs/design/trace-device-resolution.md</code>.</li>
+</ul>
+<h2 id="candidate-shapes">Candidate shapes</h2>
+<ul>
+<li><strong>A. Wider manual set.</strong> The claimed kind still drives automatic matching. The picker and the
+  proposal set admit every Cable End Kind on the resolved Device, ranked with the claimed models
+  first. A saved cross-kind choice is valid and shows a "differs from the source claim" mark.</li>
+<li><strong>B. Device-type kind policy.</strong> A profile row says that a claim of kind X on a given NetBox
+  DeviceType resolves against model Y. Automatic matching and the picker both follow it.</li>
+<li><strong>C. Per-end kind override.</strong> The operator overrides the claimed kind of one source end. The
+  override becomes part of the end's identity, so its field key, saved choice, and proposal follow.</li>
+<li><strong>D. Model-led matching.</strong> The claim only ranks. Deterministic matching runs over every Cable End
+  Kind, claimed models first.</li>
+</ul>
+<h2 id="independent-design-a-claude-opus-55-main-session">Independent design A (Claude Opus 5.5, main session)</h2>
+<p>Written from the brief and the code, before design B was read.</p>
+<h3 id="shape">Shape</h3>
+<p>Split the one fact "admitted models" into two facts with two jobs:</p>
+<ul>
+<li><strong>Matched models</strong> (<code>MATCHED_TERMINATION_MODELS</code>, today's <code>ADMITTED_TERMINATION_MODELS</code>): the
+  ordered list per claimed kind that the exact-name rule walks. Unchanged.</li>
+<li><strong>Selectable models</strong>: every Cable End Kind, for every claimed kind. A manual choice and an
+  accepted proposal can select any of them. <code>CABLE_END_KINDS</code> already holds this set, so no new
+  constant is needed.</li>
+</ul>
+<p>The claim stays a fact about the source end. It decides automatic matching and candidate rank. It
+no longer limits what an operator may select.</p>
+<h3 id="ownership-and-seam">Ownership and seam</h3>
+<p><code>cable_target.py</code> owns both rules, behind the existing functions: <code>eligible_terminations</code> (the
+shared candidate set for the picker and proposals), <code>_exact_name_match</code> (automatic), and
+<code>_stored_termination</code> (saved choices). No caller changes its interface. <code>field_keys.py</code> keeps the
+two facts.</p>
+<h3 id="persisted-identity">Persisted identity</h3>
+<p>The field key keeps the claimed kind. <code>TerminationResolution</code> already stores the concrete model and
+id, so a saved FrontPort choice under an <code>interface</code> key needs no schema change and no schema migration.
+A later workbook that states the same end with a PortClass of the same claimed kind builds the
+same key and reuses the choice. A later workbook whose PortClass claims another kind builds a new
+key and asks again.</p>
+<h3 id="planning-behaviour">Planning behaviour</h3>
+<ol>
+<li>Automatic matching: unchanged, walks the matched models of the claim.</li>
+<li>Candidate set (<code>eligible_terminations</code>, termination role): every Cable End Kind model on the
+   resolved Device, as one set with one count and one bound. Order: exact search identity first,
+   then <strong>claimed before unclaimed</strong>, then name, then model order, then id. The claimed-first key
+   keeps today's first pages for every Device that has only claimed models, and keeps a dense
+   panel's FrontPorts behind its Interfaces for an <code>interface</code> claim.</li>
+<li>Saved choice: <code>_stored_termination</code> accepts any Cable End Kind on the resolved Device. A model
+   outside the claim's matched models adds a <code>warning</code> diagnostic,
+   <code>cable.termination_kind_differs</code>, with the claimed kind and the selected model. The disposition
+   does not change. The termination card shows a "NetBox model differs from the source claim" mark.
+   This replaces the blocking <code>cable.termination_kind_mismatch</code>, which no input can reach any more.</li>
+<li>Mapped-peer role: <code>_mapped_peer_sources</code> today takes the base model from
+   <code>ADMITTED_TERMINATION_MODELS[kind][0]</code>. It must take it from the saved base selection's model
+   when one exists, and from the exact-name match otherwise. Without this a FrontPort chosen under
+   an <code>interface</code> claim, in a path that passes through that port, offers no mapped peer.</li>
+<li>Ask AI: the snapshot is the shared candidate set, so FrontPort <code>18</code> is offered. The prompt states
+   the claimed kind as a hint and says NetBox can model the port with another kind. Bump
+   <code>PROMPT_VERSION</code>. Existing proposals read their candidate set as changed, which the staleness
+   check already reports.</li>
+<li>Cable compatibility: unchanged. It reads the resolved models, so Interface to FrontPort passes
+   and PowerPort to Interface still blocks.</li>
+</ol>
+<h3 id="failure-behaviour">Failure behaviour</h3>
+<p>Automatic precedence is unchanged, so view-scope independence holds as today. A saved cross-kind
+choice that is deleted, hidden, or leaves the Device reports <code>cable.termination_unresolved</code> without
+its display name, as every saved choice does. An unsupported model still refuses with
+<code>cable.unsupported_termination_kind</code>.</p>
+<h3 id="spec-changes">Spec changes</h3>
+<p>Section 6.1: rename the table column to "Matched NetBox terminations, in match order", and state
+that the candidate set for every claim is every Cable End Kind, claimed models ranked first. Replace
+the sentence that makes a saved selection outside the claim stale. Section 9 table: replace the
+<code>cable.termination_kind_mismatch</code> row with <code>cable.termination_kind_differs</code>, <code>warning</code>, disposition
+unchanged. Section 7: the prompt treats the claim as a hint.</p>
+<h3 id="validation">Validation</h3>
+<p>End-to-end through the trace workspace views, with a real Device that has FrontPorts and no
+matching Interface: the picker offers the FrontPort, the save makes the trace actionable, the card
+and the diagnostic show the difference, a re-upload of the same workbook reuses the choice, and the
+proposal request snapshot contains the FrontPort. Planning tests: automatic matching of an
+<code>interface</code> claim never selects a same-named FrontPort; a power claim never auto-selects an
+Interface; candidate order puts claimed models first; the mapped-peer question offers the RearPort
+of a FrontPort chosen under an <code>interface</code> claim.</p>
+<h3 id="rejected">Rejected</h3>
+<ul>
+<li><strong>B, device-type policy</strong>: a new policy model, CRUD, REST, and YAML surface for two ends per
+  workbook. It also needs a name rule (<code>Port 18</code> against <code>18</code>), so the operator still picks.</li>
+<li><strong>C, per-end kind override</strong>: changes the field key, so saved choices and proposals rekey, and
+  the operator still picks the port after the override. Two steps where one is enough.</li>
+<li><strong>D, model-led matching</strong>: changes automatic resolution of existing workbooks and reopens the
+  power-claim rule. Fails acceptance condition 4.</li>
+</ul>
+<h2 id="independent-design-b-gpt-61-sol-high-effort-read-only">Independent design B (gpt-6.1-sol, high effort, read-only)</h2>
+<p>Run with <code>codex exec -s read-only</code>. Its input was the problem brief above (sections "Decision"
+through "Evidence pointers") plus a section list, and nothing else: no candidate shapes and no
+design A. The full text is kept with the review packets. Summary:</p>
+<ul>
+<li>Automatic matching keeps the claim's admitted models. Explicit selection (picker and accepted
+  proposal) may choose every Cable End Kind on the resolved Device.</li>
+<li>No schema change and no key change. The field key's <code>kind</code> stays the source claim.</li>
+<li><code>cable.termination_kind_mismatch</code> becomes a <code>warning</code> with disposition unchanged, emitted after
+  the selected object is read. Its display needs the disclosure mechanism, because it names the
+  selected model.</li>
+<li>Candidate order: unchanged ordering keys, with model ties broken by the deduplicated union of the
+  admission table.</li>
+<li>The picker marks candidates outside the claim. A fresh proposal shows the mark before Accept.</li>
+<li><code>_mapped_peer_sources</code> and planning share one internal base-resolution rule: saved selection
+  first, else the unchanged exact-name rule.</li>
+<li>Bump the plan schema version, because a diagnostic's meaning and disclosure change.</li>
+<li>Remove the Source Adapter rule <code>trace.pass_through_at_interface</code>, so a NIC-labelled intermediate
+  continuation reaches target resolution.</li>
+<li>Open: acceptance condition 6 holds per port once both actors resolve the same Device; Device
+  resolution itself is scoped per actor today.</li>
+</ul>
+<h2 id="merge">Merge</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>A</th>
+<th>B</th>
+<th>Evidence</th>
+<th>Disposition</th>
+<th>Consequence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Core rule</td>
+<td>Claim matches, every Cable End Kind selectable</td>
+<td>Same</td>
+<td>Both read <code>_exact_name_match</code>, <code>eligible_terminations</code>, <code>_stored_termination</code></td>
+<td>Agreed. Convergence does not verify it; round 1 attacks it</td>
+<td></td>
+</tr>
+<tr>
+<td>Persisted identity</td>
+<td>Field key unchanged, no migration</td>
+<td>Same</td>
+<td><code>TerminationResolution</code> stores model and id (<code>models.py</code>)</td>
+<td>Agreed</td>
+<td></td>
+</tr>
+<tr>
+<td>Diagnostic</td>
+<td>New <code>cable.termination_kind_differs</code></td>
+<td>Reuse <code>cable.termination_kind_mismatch</code> as <code>warning</code></td>
+<td>The condition is the same fact; only severity changes</td>
+<td><strong>B</strong>. One code, no rename churn in the disclosure schema and the workspace wording</td>
+<td>Spec section 9 row changes severity only</td>
+</tr>
+<tr>
+<td>Candidate order</td>
+<td>Claimed models rank before others, then name</td>
+<td>Name first, model tie by union order</td>
+<td>Differs only on a Device holding both claimed and unclaimed models: on the observed Device, A offers the 11 Interfaces first, B offers FrontPorts <code>14</code>..<code>61</code> first</td>
+<td><strong>A</strong>, open to round 1. The claim is source evidence, and Device candidates already rank by source evidence</td>
+<td>One new ordering key in <code>eligible_terminations</code></td>
+</tr>
+<tr>
+<td>Outside-claim mark in picker and on a fresh proposal</td>
+<td>Card mark after save only</td>
+<td>Picker, proposal, and card</td>
+<td>Acceptance condition 5 asks for visibility before a sync; the operator decides at the picker</td>
+<td><strong>B</strong></td>
+<td>Picker JSON gains one flag per candidate</td>
+</tr>
+<tr>
+<td>Disclosure of the warning</td>
+<td>Not addressed</td>
+<td>Gate through <code>cable_disclosure.py</code></td>
+<td><code>cable_disclosure.py:123</code> registers the schema with <code>selected_object_type</code></td>
+<td><strong>B</strong>, verify in round 1</td>
+<td></td>
+</tr>
+<tr>
+<td>Plan schema bump</td>
+<td>Not addressed</td>
+<td>Bump</td>
+<td>Spec section 4.8</td>
+<td><strong>B</strong>, verify in round 1</td>
+<td>Old previews rebuild</td>
+</tr>
+<tr>
+<td>Mapped-peer base</td>
+<td>Saved model, else exact match</td>
+<td>Same, as one shared internal rule</td>
+<td><code>cable_target.py:506</code> derives the base from the claim</td>
+<td><strong>B</strong> shape</td>
+<td></td>
+</tr>
+<tr>
+<td><code>trace.pass_through_at_interface</code></td>
+<td>Out of scope</td>
+<td>Remove</td>
+<td><code>docs/design/trace-cable-policy.md</code> row 1 settled media severity twice on the premise that this rule exists</td>
+<td><strong>Excluded from this design.</strong> No acceptance condition needs it; the observed ends are trace endpoints. Removing it reopens a ratified decision</td>
+<td>A follow-up only when a workbook shows a NIC-labelled pass-through</td>
+</tr>
+<tr>
+<td>Proposal eligible-set ceiling</td>
+<td>Not addressed</td>
+<td>Keep the refusal</td>
+<td><code>proposal_tasks.py:189</code>, ceiling <code>PROPOSAL_CANDIDATE_LIMIT_MAX = 1024</code></td>
+<td><strong>B</strong>. A wider set can push a dense Device over the ceiling; the picker still pages</td>
+<td>Note in spec section 7</td>
+</tr>
+<tr>
+<td>Acceptance condition 6</td>
+<td>Implicit</td>
+<td>Holds per port after one Device resolution</td>
+<td><code>trace_device_resolution.py:212</code> scopes Devices per actor</td>
+<td><strong>B</strong>. Condition 6 is restated per port</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2 id="merged-design-r1">Merged design r1</h2>
+<ol>
+<li><code>field_keys.py</code> keeps <code>ADMITTED_TERMINATION_MODELS</code> as the automatic-match table. The selectable
+   set for every claim is <code>CABLE_END_KINDS</code>, in the deduplicated union order of that table.</li>
+<li><code>eligible_terminations</code> (termination role) returns every Cable End Kind on the resolved Device:
+   one set, one count, one bound. Order: exact search identity, claimed before unclaimed, name,
+   union model order, id. Each candidate carries <code>outside_claim</code>.</li>
+<li><code>_exact_name_match</code> is unchanged.</li>
+<li><code>_stored_termination</code> accepts any Cable End Kind on the resolved Device. A model outside the
+   claim emits <code>cable.termination_kind_mismatch</code> as a <code>warning</code> after the object is read, with its
+   display gated by <code>cable_disclosure.py</code>. <code>cable.unsupported_termination_kind</code> is unchanged.</li>
+<li>One internal base-resolution rule (saved selection, else exact name) serves planning and
+   <code>_mapped_peer_sources</code>. The mapped-peer base model is the concrete resolved model.</li>
+<li>Ask AI reads the same set. The prompt states the claim as a hint that NetBox can model
+   differently. <code>PROMPT_VERSION</code> and the plan schema version are bumped.</li>
+<li>Picker, fresh proposal, and termination card show the outside-claim mark.</li>
+<li>Cable compatibility, view-scope precedence, stale handling, and the proposal ceiling are
+   unchanged.</li>
+<li>Out of scope: <code>trace.pass_through_at_interface</code>, Device resolution precedence, automatic
+   cross-kind matching.</li>
+</ol>
+<p>Acceptance condition 6 now reads: once two actors resolve the same Device, they resolve one source
+end to the same object or leave it open.</p>
+<h2 id="round-1">Round 1</h2>
+<p>Verdict: <strong>RATIFY r1</strong> (gpt-6-astra, high, read-only). The reviewer read every use of
+<code>ADMITTED_TERMINATION_MODELS</code>, <code>claimed_termination_kind</code>, <code>PORT_CLASS_CLAIMED_KINDS</code>, and the
+field-key <code>kind</code>, and found no other path that refuses a cross-kind selection: model <code>clean()</code>,
+forms, REST, GraphQL, the picker save, proposal acceptance, templates, and JS carry the concrete
+model and id. It agreed with every merge disposition, including claimed-first order and the
+exclusion of <code>trace.pass_through_at_interface</code>.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Finding</th>
+<th>Check</th>
+<th>State</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>The reused code's wording still says "Choose the termination again"</td>
+<td><code>review_workspace.py:614</code> holds that text</td>
+<td>CLOSED in r2</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Not every existing proposal goes stale: a Device with only claimed models keeps one ordered set, so its proposal stays fresh; a queued proposal on the old prompt fails the version check</td>
+<td><code>proposal_tasks.py</code> compares ordered entries; <code>proposal_jobs.py</code> checks <code>PROMPT_VERSION</code></td>
+<td>CLOSED in r2</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Section 4.8 asks to reject incompatible executable plans; the reason for the bump is the new disclosure contract, not the severity</td>
+<td>Spec section 4.8</td>
+<td>CLOSED in r2</td>
+</tr>
+<tr>
+<td>4</td>
+<td>The diagnostics table is section 6.7, not 9; sections 6.1, 7.1, 10.2 also change</td>
+<td>Spec line 1174 sits under "6.7 Planning diagnostics"</td>
+<td>CLOSED in r2</td>
+</tr>
+</tbody>
+</table>
+<h2 id="merged-design-r2">Merged design r2</h2>
+<p>r1 with these changes:</p>
+<ul>
+<li>The <code>cable.termination_kind_mismatch</code> wording becomes a statement, not an instruction: the
+  selected NetBox port is a <code>&lt;model&gt;</code>, and the source PortClass claims <code>&lt;kind&gt;</code>.</li>
+<li>Existing proposals: a Device whose ordered candidate set does not change keeps its proposal
+  fresh. A Device that gains unclaimed models marks its proposal stale. A queued proposal on the old
+  prompt version fails the worker's version check.</li>
+<li>The plan schema bump exists because the warning's disclosure contract changes. Old plans then
+  fail section 4.8 validation instead of rendering an ungated model name.</li>
+<li>Spec amendments: section 6.1 (candidate set, order, saved selection), 6.2 (mapped-peer base),
+  6.7 (severity and wording), 7.1 (<code>kind</code> is the source claim), 7, 7.3, 7.4 (shared set, ceiling),
+  10.2 (picker mark). The T5 and T6 criteria follow the new candidate set.</li>
+</ul>
+<h2 id="decision_1">Decision</h2>
+<p>Ratified at r1; r2 applies the round-1 findings only. Scope: explicit cross-kind selection for
+trace ends in source-valid traces.</p>
+<h2 id="first-increment-and-its-acceptance">First increment and its acceptance</h2>
+<p>One change delivers it, test first, end to end through the trace workspace views:</p>
+<ol>
+<li>A workbook end <code>Port 18 (NIC)</code> on a Device with FrontPorts and no matching Interface: the picker
+   offers FrontPort <code>18</code> with the outside-claim mark; saving it makes the trace actionable; the card
+   shows the warning.</li>
+<li>A second upload under the same profile reuses the choice with no new selection.</li>
+<li>A proposal request snapshot holds the same ordered set as the unfiltered picker.</li>
+<li>Automatic matching stays: an exact-named FrontPort never answers an <code>interface</code> claim, and a
+   power claim never auto-selects an Interface.</li>
+<li>A FrontPort chosen under an <code>interface</code> claim in a path that passes through it offers its
+   mapped RearPort.</li>
+<li>The warning is suppressed when the actor cannot view the selected port or its Device.</li>
+<li>Interface to FrontPort syncs; an incompatible pair still blocks with
+   <code>cable.incompatible_terminations</code>.</li>
+</ol>
+<h2 id="open-work">Open work</h2>
+<ul>
+<li><code>trace.pass_through_at_interface</code> stays. Reopen it only when a workbook shows a NIC-labelled
+  pass-through. That would also reopen <code>docs/design/trace-cable-policy.md</code> row 1.</li>
+<li>The name gap (<code>Port 18</code> against <code>18</code>) stays manual or Ask AI. No automatic number-only matching.</li>
+</ul>
+<h2 id="implementation-review">Implementation review</h2>
+<p>Round 1 (gpt-6-astra, high, read-only) on the implementation: no runtime blocker. One should-fix:
+the spec and this record said any PortClass change asks again, but the key holds the claimed kind,
+so <code>NIC</code> to <code>Switch Port</code> reuses the choice. Fixed in both texts. The reviewer also noted that the
+prompt version 3 retirement migration (<code>0049</code>, required by the existing contract-retirement test)
+had no behavioural test; one is added.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      
+    
+  </body>
+</html>
