@@ -376,6 +376,26 @@ describe("trace termination picker", () => {
     expect(candidates.map(item => item.textContent)).toEqual(["con0 console port"]);
   });
 
+  it("marks each candidate outside the source PortClass claim with the mark the page states", async () => {
+    node("traceTerminationForm").dataset.outsideClaimMark = "Differs from the source PortClass";
+    serve({
+      candidates: [
+        { id: 5, object_type: "dcim.interface", model: "interface", display: "mgmt0", outside_claim: false },
+        { id: 6, object_type: "dcim.frontport", model: "front port", display: "18", outside_claim: true },
+      ],
+      shown: 2,
+      total: 2,
+    });
+
+    const candidates = await open("openTermination", "traceTermination");
+
+    expect(candidates.map(item => item.textContent)).toEqual([
+      "mgmt0 interface",
+      "18 front port Differs from the source PortClass",
+    ]);
+    expect(candidates.map(item => item.querySelectorAll("[data-outside-claim]").length)).toEqual([0, 1]);
+  });
+
   it("refuses to submit a candidate the server sent without an object type", async () => {
     serve({ candidates: [{ id: 4, display: "untyped" }], shown: 1, total: 1 });
     const candidates = await open("openTermination", "traceTermination");

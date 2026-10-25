@@ -294,6 +294,13 @@
           model.textContent = candidate.model;
           item.append(' ', model);
         }
+        if (candidate.outside_claim) {
+          var mark = document.createElement('span');
+          mark.className = 'badge text-bg-warning ms-2';
+          mark.dataset.outsideClaim = '';
+          mark.textContent = node('traceTerminationForm').dataset.outsideClaimMark;
+          item.append(' ', mark);
+        }
       },
       submits: {
         ObjectId: function (candidate) { return candidate.id; },

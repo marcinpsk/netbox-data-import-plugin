@@ -48,7 +48,9 @@ ADMITTED_TERMINATION_MODELS = {
     POWER_PORT_KIND: ("dcim.powerport",),
     POWER_OUTLET_KIND: ("dcim.poweroutlet",),
 }
-CABLE_END_KINDS = frozenset(model for models in ADMITTED_TERMINATION_MODELS.values() for model in models)
+#: Every model an explicit selection may name, in the deduplicated union order of the admission table.
+CABLE_END_MODELS = tuple(dict.fromkeys(model for models in ADMITTED_TERMINATION_MODELS.values() for model in models))
+CABLE_END_KINDS = frozenset(CABLE_END_MODELS)
 
 TERMINATION_ROLE = "termination"
 MAPPED_PEER_ROLE = "mapped_peer"
@@ -90,6 +92,11 @@ def claimed_termination_kind(port_class: str) -> str:
         return PORT_CLASS_CLAIMED_KINDS[port_class]
     except KeyError as exc:
         raise ValueError(f"Unknown PortClass '{port_class}'.") from exc
+
+
+def is_outside_claim(kind: str, model_label: str) -> bool:
+    """Return whether a selected NetBox model is one the claimed kind does not admit to automatic matching."""
+    return model_label not in ADMITTED_TERMINATION_MODELS[kind]
 
 
 def termination_field_key(*, device, cards, port, kind: str, role: str = TERMINATION_ROLE) -> str:
@@ -136,6 +143,7 @@ def parse_termination_field_key(value: str) -> dict[str, str]:
 __all__ = (
     "ADMITTED_TERMINATION_MODELS",
     "CABLE_END_KINDS",
+    "CABLE_END_MODELS",
     "FRONT_PORT_CLASSES",
     "FRONT_PORT_KIND",
     "FRONT_PORT_MODEL",
@@ -157,6 +165,7 @@ __all__ = (
     "TERMINATION_ROLE",
     "TERMINATION_ROLES",
     "claimed_termination_kind",
+    "is_outside_claim",
     "parse_termination_field_key",
     "port_class_mapping_errors",
     "same_device_and_cards",
