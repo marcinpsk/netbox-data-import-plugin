@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v2.17.0 (2026-10-25)
+
+### Features
+
+- **trace**: Select a port outside the source PortClass claim
+  ([`da4c180`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/da4c1809b8e466562e5a5b86b185f9eedfb3f3f1))
+
+
 ## v2.16.1 (2026-10-22)
 
 ### Bug Fixes

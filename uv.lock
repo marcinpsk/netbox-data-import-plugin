@@ -1195,7 +1195,7 @@ wheels = [
 
 [[package]]
 name = "netbox-data-import"
-version = "2.16.1"
+version = "2.17.0"
 source = { editable = "." }
 dependencies = [
     { name = "defusedxml" },
