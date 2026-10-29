@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netbox-data-import"
-version = "2.14.0"
+version = "2.17.0"
 description = "NetBox plugin for importing data from external DCIM systems"
 readme = "README.md"
 requires-python = ">=3.12.0"
@@ -68,7 +68,7 @@ dev = [
     "cryptography>=42",
 ]
 # The CI job that runs the plugin beside netbox-branching installs this group next to `test`.
-branching = ["netboxlabs-netbox-branching==1.2.1"]
+branching = ["netboxlabs-netbox-branching==1.2.2"]
 docs = [
     "mkdocs>=1,<2",
     "mkdocs-material>=9,<10",

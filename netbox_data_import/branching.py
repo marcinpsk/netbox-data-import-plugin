@@ -39,7 +39,7 @@ def active_branch():
     from netbox_branching.models import Branch
 
     branch = branch_context.get()
-    # A header naming a branch that is not ready puts netbox-branching's 400 response in the context.
+    # Before netbox-branching 1.2.2, a header naming a branch that is not ready put its 400 response in the context.
     return branch if isinstance(branch, Branch) else None
 
 

@@ -26,13 +26,19 @@ repos:
     hooks:
       - id: zizmor
 
-  # Python code quality
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.4
+  # Python code quality. The hooks run the ruff that uv.lock pins, the same one CI runs.
+  - repo: local
     hooks:
       - id: ruff
-        args: [--fix, --exit-non-zero-on-fix]
+        name: ruff
+        entry: uv run --no-sync --system-certs ruff check --force-exclude --fix --exit-non-zero-on-fix
+        language: system
+        types_or: [python, pyi]
       - id: ruff-format
+        name: ruff format
+        entry: uv run --no-sync --system-certs ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
 
   # Conventional commit message validation
   - repo: https://github.com/compilerla/conventional-pre-commit
