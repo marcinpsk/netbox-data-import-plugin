@@ -98,6 +98,9 @@ See [`docs/agents/domain.md`](docs/agents/domain.md).
   A class backed by plain `django.db.models.Model`, including `PolicySectionModel` subclasses, does
   not use a base that requires NetBox model features such as custom fields, tags, changelog data, or
   `last_updated`.
+- `docs/configuration.md` restates some rules of `docs/spec/` for operators. A change to a normative
+  spec sentence changes the matching sentence in `docs/configuration.md` in the same commit.
+  Reviewers report a sentence there that disagrees with the spec or the code.
 - Commits follow Conventional Commits format (enforced by a pre-commit hook).
 - Never add a `Co-authored-by` trailer to commit messages.
 - Schema migrations are generated artifacts. Change a model, then run
