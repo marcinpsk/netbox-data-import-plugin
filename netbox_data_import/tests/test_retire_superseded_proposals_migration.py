@@ -12,6 +12,7 @@ import ast
 import pathlib
 
 from importlib import import_module
+from itertools import pairwise
 
 from django.db import connection
 from django.db.migrations import RunPython
@@ -78,6 +79,8 @@ def _rows(contract):
         ("prompt-below", "queued", prompt - 1, schema, ""),
         ("schema-below", "running", prompt, schema - 1, ""),
         ("both-below", "queued", prompt - 1, schema - 1, ""),
+        ("prompt-above", "queued", prompt + 1, schema, ""),
+        ("schema-above", "running", prompt, schema + 1, ""),
         ("failed-below", "failed", prompt - 1, schema - 1, "timeout"),
         ("cancelled-below", "cancelled", prompt - 1, schema - 1, ""),
     )
@@ -98,6 +101,7 @@ class RetirementStructureTest(SimpleTestCase):
     """Each retirement migration follows one plugin migration and refuses a lossy rollback."""
 
     def test_every_retirement_is_one_irreversible_run_python(self):
+        """Each retirement migration holds one RunPython with no reverse, after one plugin migration."""
         self.assertTrue(RETIREMENTS, "no migration retires superseded proposals")
         for step, _contract in RETIREMENTS:
             with self.subTest(step=step):
@@ -111,13 +115,14 @@ class RetirementStructureTest(SimpleTestCase):
 
 
 class RetirementMigrationTest(TransactionTestCase):
-    """Each upgrade retires only the in-flight requests below the contract it declares."""
+    """Each upgrade retires only the in-flight requests off the exact contract it declares."""
 
     def setUp(self):
         super().setUp()
         self.addCleanup(restore_plugin_migrations)
 
-    def test_each_retirement_fails_only_in_flight_rows_below_either_contract_part(self):
+    def test_each_retirement_fails_only_in_flight_rows_off_the_contract(self):
+        """Seed every row shape before each retirement step, then compare the stored state after it."""
         for step, contract in RETIREMENTS:
             with self.subTest(step=step, contract=contract):
                 previous = _previous_step(step)
@@ -184,10 +189,17 @@ class RetirementMigrationTest(TransactionTestCase):
 class ProposalContractRetirementTest(SimpleTestCase):
     """Every shipped contract version has a migration that retires the requests below it."""
 
-    def test_the_retirement_migrations_reach_the_current_contract(self):
+    def test_the_latest_retirement_migration_declares_the_current_contract(self):
         self.assertTrue(RETIREMENTS, "no migration retires superseded proposals")
         self.assertEqual(
-            max(contract for _step, contract in RETIREMENTS),
+            RETIREMENTS[-1][1],
             (PROMPT_VERSION, RESPONSE_SCHEMA_VERSION),
             "a contract bump needs a migration retiring the proposals queued under the previous contract",
         )
+
+    def test_no_retirement_migration_declares_an_older_contract_than_the_one_before_it(self):
+        """A later migration with an older pair would retire the requests queued under the newer one."""
+        for (earlier, earlier_pair), (later, later_pair) in pairwise(RETIREMENTS):
+            for part, earlier_version, later_version in zip(CONTRACT_CONSTANTS, earlier_pair, later_pair, strict=True):
+                with self.subTest(earlier=earlier, later=later, part=part):
+                    self.assertLessEqual(earlier_version, later_version)

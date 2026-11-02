@@ -253,7 +253,7 @@ class BranchSelectorTest(SuperuserClientMixin, TransactionTestCase):
         self.assert_refused_without_data(response)
 
     def test_the_plugin_refuses_a_stale_branch_header_by_itself(self):
-        # netbox-branching 1.2.2 answers this request first; earlier 1.2 releases pass it on to the plugin.
+        # netbox-branching 1.2.2 and later answer this request first, so call the plugin check directly.
         request = RequestFactory().get(self.api_url, headers={BRANCH_HEADER: self.stale.schema_id})
         request.user = self.user
 
