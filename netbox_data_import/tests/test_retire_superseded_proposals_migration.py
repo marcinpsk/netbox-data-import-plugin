@@ -101,6 +101,7 @@ class RetirementStructureTest(SimpleTestCase):
     """Each retirement migration follows one plugin migration and refuses a lossy rollback."""
 
     def test_every_retirement_is_one_irreversible_run_python(self):
+        """Each retirement migration holds one RunPython with no reverse, after one plugin migration."""
         self.assertTrue(RETIREMENTS, "no migration retires superseded proposals")
         for step, _contract in RETIREMENTS:
             with self.subTest(step=step):
@@ -121,6 +122,7 @@ class RetirementMigrationTest(TransactionTestCase):
         self.addCleanup(restore_plugin_migrations)
 
     def test_each_retirement_fails_only_in_flight_rows_off_the_contract(self):
+        """Seed every row shape before each retirement step, then compare the stored state after it."""
         for step, contract in RETIREMENTS:
             with self.subTest(step=step, contract=contract):
                 previous = _previous_step(step)

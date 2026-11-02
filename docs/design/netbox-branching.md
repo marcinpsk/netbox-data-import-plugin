@@ -170,8 +170,9 @@ branch that predates it. R2-1, R2-2 and R2-N1 close with D8.
 
 ### Contract
 
-This contract covers NetBox 4.7 with netbox-branching 1.2.1, the combination that section 0 ratifies
-and the CI job runs. netbox-branching 1.1.x on NetBox 4.6 is outside it: no job tests that combination.
+This contract covers NetBox 4.7 with the netbox-branching 1.2 release that the `branching` dependency
+group pins and the CI job runs. Section 0 ratified it by source inspection of 1.2.1. netbox-branching
+1.1.x on NetBox 4.6 is outside it: no job tests that combination.
 
 The plugin operates on main only. With netbox-branching installed and a branch active:
 
@@ -267,9 +268,9 @@ merged or discarded before the upgrade. A branch provisioned after it copies the
 
 ### CI
 
-A new `test.yaml` job: NetBox 4.7.0, netbox-branching 1.2.1, `DynamicSchemaDict`,
-`BranchAwareRouter`, both plugins. It runs the branching test module, which other jobs skip through
-`pytest.importorskip("netbox_branching")`. The tests provision a real branch, so they use
+A new `test.yaml` job: the NetBox 4.7 release of the test matrix, the netbox-branching release that
+the `branching` dependency group pins, `DynamicSchemaDict`, `BranchAwareRouter`, both plugins. It
+runs the branching test module, which other jobs skip through `pytest.importorskip("netbox_branching")`. The tests provision a real branch, so they use
 `TransactionTestCase`. They cover:
 
 - the refusal of each entry point;
