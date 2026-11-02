@@ -5,7 +5,7 @@
 
 import json
 
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from utilities.testing import APIViewTestCases, ViewTestCases
 
@@ -16,6 +16,9 @@ from netbox_data_import.tests.plugins_config import override_plugins_config
 
 BASE_URL = "plugins:netbox_data_import:importprofile_{}"
 INFERENCE_BASE_URL = "plugins:netbox_data_import:inferencebackend_{}"
+
+# NetBox 4.7.4 sets this on its TestCase; pinning it gives older versions the same query-count baseline.
+SIGNED_COOKIE_SESSIONS = override_settings(SESSION_ENGINE="django.contrib.sessions.backends.signed_cookies")
 
 # `clean()` validates `api_root` against this setting, so the contract needs it for every request.
 INFERENCE_ALLOWLIST = ("https://backend.example.invalid:443",)
@@ -47,6 +50,7 @@ class InferenceBackendFormHelpTest(TestCase):
         self.assertContains(response, "vault")
 
 
+@SIGNED_COOKIE_SESSIONS
 class ImportProfileViewTestCase(ViewTestCases.PrimaryObjectViewTestCase):
     """Exercise standard detail, list, CRUD, changelog, and bulk profile views."""
 
@@ -142,6 +146,7 @@ class ImportProfileAPIViewTestCase(APIViewTestCases.APIViewTestCase):
         cls.bulk_update_invalid_data = {"source_adapter": "no_such_adapter"}
 
 
+@SIGNED_COOKIE_SESSIONS
 @override_plugins_config(netbox_data_import={"inference_backend_origin_allowlist": list(INFERENCE_ALLOWLIST)})
 class InferenceBackendViewTestCase(
     ViewTestCases.GetObjectViewTestCase,

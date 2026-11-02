@@ -640,7 +640,7 @@ class PolicySerializerNetBoxBaseTest(BaseAPITestCase):
         from netbox_data_import.api.serializers import ColumnMappingSerializer
 
         row = ColumnMapping.objects.create(profile=self.profile, source_column="Nested", target_field="device_name")
-        self.assertIs(ColumnMappingSerializer(nested=True).validate(row), row)
+        self.assertEqual(ColumnMappingSerializer(nested=True).run_validation(row.pk), row)
 
 
 class RegisteredAPIQuerySetTest(TestCase):

@@ -56,7 +56,7 @@ class PolicySectionSerializer(PolicySectionApplicabilityMixin, ValidatedModelSer
 
     def validate(self, attrs):
         """Run the policy checks, then the NetBox model validation."""
-        # A nested serializer is handed a resolved instance, so no field mapping exists to check.
+        # NetBox before 4.7.4 calls validate() with the resolved instance of a nested serializer.
         if getattr(self, "nested", False):
             return super().validate(attrs)
         # Ahead of super(), whose full_clean() reports the same rules as non-field errors.
