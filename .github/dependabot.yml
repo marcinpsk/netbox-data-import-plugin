@@ -33,6 +33,21 @@ updates:
     cooldown:
       default-days: 7
 
+  # The rev of each remote hook repository in .pre-commit-config.yaml; local hooks have no rev.
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      pre-commit:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    cooldown:
+      default-days: 7
+
   - package-ecosystem: "devcontainers" # See documentation for possible values
     directory: "/.devcontainer" # Location of devcontainer.json
     schedule:
