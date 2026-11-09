@@ -4,6 +4,7 @@
 
 import json
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import timedelta
 from threading import Event, Thread
@@ -21,6 +22,7 @@ from django_pg_utils import advisory_lock
 from django_rq import get_queue
 from netbox.constants import RQ_QUEUE_LOW
 from rq.executions import Execution
+from rq.job import Job as RQJob
 from rq.job import JobStatus
 
 from netbox_data_import.forms import InferenceBackendForm
@@ -179,26 +181,6 @@ class ProposalDispatchTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTo
                 self.assertEqual(proposal_jobs().count(), started)
         self.assertEqual(len(seen), 3)
 
-    def test_a_cancelled_proposal_keeps_its_slot_until_its_running_job_ends(self):
-        """The worker of a cancelled row can still be inside its backend call, which still occupies the server."""
-        first, second, _third = self.ask_all()
-        job = self.start(first)
-        cancelled = self.post("trace_cancel_proposal", proposal_id=first.pk)
-        self.assertEqual(cancelled.status_code, 200, cancelled.content[:500])
-
-        with worker_owning(job):
-            self.poll(second.field_key)
-
-        self.assertIsNone(ResolutionProposal.objects.get(pk=second.pk).job_id)
-        with self.answering_backend() as seen:
-            self.run_job(first)
-        self.assertEqual(seen, [])
-        rows = self.rows()
-        self.assertEqual(rows[0].status, ProposalStatus.CANCELLED)
-        # A cancelled row is not abandoned, so its Job ends quietly.
-        self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_COMPLETED)
-        self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
-
     def test_a_cancelled_waiting_proposal_is_never_dispatched(self):
         first, second, _third = self.ask_all()
 
@@ -217,6 +199,12 @@ class ProposalDispatchTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTo
         job.start()
         self.assertTrue(claim_proposal(proposal.pk))
         return job
+
+    def requeue(self, job):
+        """Reset the Job as NetBox's Requeue does before it pushes the task of an ended run again."""
+        Job.objects.filter(pk=job.pk).update(
+            status=JobStatusChoices.STATUS_PENDING, started=None, completed=None, error="", data=None, log_entries=[]
+        )
 
     def test_a_worker_that_owns_its_job_keeps_the_slot_when_the_queue_loses_its_task(self):
         """A Redis restart can drop the task record while the worker is still inside its backend call."""
@@ -291,6 +279,7 @@ class ProposalDispatchTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTo
         """An operator requeues the task of a worker that died after its claim; the field must not stay running."""
         first, _second, _third = self.ask_all()
         job = self.start(first)
+        self.requeue(job)
 
         with self.answering_backend() as seen:
             self.run_job(first)
@@ -301,6 +290,23 @@ class ProposalDispatchTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTo
             (rows[0].status, rows[0].failure_reason), (ProposalStatus.FAILED, ProposalFailureReason.QUEUE_UNAVAILABLE)
         )
         self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_FAILED)
+        self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
+
+    def test_a_redelivered_job_of_a_cancelled_proposal_ends_quietly(self):
+        """A row cancelled after its dead delivery claimed it is not abandoned, so the requeued Job completes."""
+        first, _second, _third = self.ask_all()
+        job = self.start(first)
+        cancelled = self.post("trace_cancel_proposal", proposal_id=first.pk)
+        self.assertEqual(cancelled.status_code, 200, cancelled.content[:500])
+        self.requeue(job)
+
+        with self.answering_backend() as seen:
+            self.run_job(first)
+
+        self.assertEqual(seen, [])
+        rows = self.rows()
+        self.assertEqual(rows[0].status, ProposalStatus.CANCELLED)
+        self.assertEqual(Job.objects.get(pk=job.pk).status, JobStatusChoices.STATUS_COMPLETED)
         self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
 
     def test_a_pending_job_releases_its_slot_only_once_its_task_is_lost(self):
@@ -405,9 +411,10 @@ class OwnedDeliveryTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTopol
         self.build_topology()
         super().setUp()
 
-    def test_a_poll_during_a_real_delivery_leaves_the_running_job_its_slot(self) -> None:
-        first, second, _third = self.ask_all()
-        task = get_queue(RQ_QUEUE_LOW).fetch_job(str(Job.objects.get(pk=first.job_id).job_id))
+    @contextmanager
+    def delivery_paused_after_its_claim(self, proposal) -> Iterator[RQJob]:
+        """Deliver the proposal's task on a worker thread, and hold it after its claim until the block ends."""
+        task = get_queue(RQ_QUEUE_LOW).fetch_job(str(Job.objects.get(pk=proposal.job_id).job_id))
         arguments = task.kwargs
         claimed, release = Event(), Event()
         errors: list[BaseException] = []
@@ -429,29 +436,52 @@ class OwnedDeliveryTest(_DispatchViewMixin, IsolatedRQQueueTestMixin, CableTopol
             finally:
                 connection.close()
 
-        with self.answering_backend() as seen:
-            worker = Thread(target=deliver, daemon=True)
-            worker.start()
-            try:
-                self.assertTrue(claimed.wait(20), "the worker never claimed its proposal")
-                task.delete()
-                response = self.client.get(
-                    reverse("plugins:netbox_data_import:trace_proposal"),
-                    {**self.claim(), "field_key": second.field_key},
-                    headers=HTMX,
-                )
-                rows_while_running = self.rows()
-            finally:
-                release.set()
-                worker.join(30)
-
+        worker = Thread(target=deliver, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(claimed.wait(20), "the worker never claimed its proposal")
+            yield task
+        finally:
+            release.set()
+            worker.join(30)
+        self.assertFalse(worker.is_alive(), "the worker did not end its delivery")
         self.assertEqual(errors, [])
+
+    def test_a_poll_during_a_real_delivery_leaves_the_running_job_its_slot(self) -> None:
+        first, second, _third = self.ask_all()
+
+        with self.answering_backend() as seen, self.delivery_paused_after_its_claim(first) as task:
+            task.delete()
+            response = self.client.get(
+                reverse("plugins:netbox_data_import:trace_proposal"),
+                {**self.claim(), "field_key": second.field_key},
+                headers=HTMX,
+            )
+            rows_while_running = self.rows()
+
         self.assertEqual(response.status_code, 200, response.content[:500])
         self.assertEqual((rows_while_running[0].status, rows_while_running[0].failure_reason), ("running", ""))
         self.assertEqual([row.job_id is not None for row in rows_while_running], [True, False, False])
         self.assertEqual(len(seen), 1)
         rows = self.rows()
         self.assertEqual(rows[0].status, ProposalStatus.COMPLETED)
+        self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
+
+    def test_a_cancelled_proposal_keeps_its_slot_until_its_running_job_ends(self) -> None:
+        """The worker of a cancelled row can still be inside its delivery, which still occupies the server."""
+        first, second, _third = self.ask_all()
+
+        with self.answering_backend() as seen, self.delivery_paused_after_its_claim(first):
+            cancelled = self.post("trace_cancel_proposal", proposal_id=first.pk)
+            self.assertEqual(cancelled.status_code, 200, cancelled.content[:500])
+            self.poll(second.field_key)
+            self.assertIsNone(ResolutionProposal.objects.get(pk=second.pk).job_id)
+
+        self.assertEqual(seen, [])
+        rows = self.rows()
+        self.assertEqual(rows[0].status, ProposalStatus.CANCELLED)
+        # A cancelled row is not abandoned, so its Job ends quietly.
+        self.assertEqual(Job.objects.get(pk=first.job_id).status, JobStatusChoices.STATUS_COMPLETED)
         self.assertEqual([row.job_id is not None for row in rows], [True, True, False])
 
 
