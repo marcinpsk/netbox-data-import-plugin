@@ -22,7 +22,7 @@ repos:
 
   # GitHub Actions security audit. The lint workflow runs this same hook.
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
-    rev: v1.31.1
+    rev: v1.32.0
     hooks:
       - id: zizmor
 
